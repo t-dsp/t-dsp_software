@@ -1,6 +1,6 @@
 # T-DSP TAC5212 Audio Shield Adaptor
 
-![T-DSP TAC5212 Audio Shield Adaptor stack](docs/board.jpg)
+![T-DSP TAC5212 Audio Shield Adaptor stack](docs/tac5212-audio-shield-stack.jpg)
 
 Firmware for the T-DSP TAC5212 Audio Shield Adaptor — a Teensy 4.1 paired with the TAC5212 Pro Audio Module via the audio shield adaptor PCB.
 
