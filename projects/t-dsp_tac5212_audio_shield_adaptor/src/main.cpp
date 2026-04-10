@@ -172,11 +172,12 @@ void setup() {
     Serial.println("  PDM mic / line in → USB capture");
     Serial.println("  USB host volume → DAC volume");
     Serial.println("\nCommands:");
-    Serial.println("  m       - toggle PDM mic monitor");
-    Serial.println("  l       - toggle line input monitor");
-    Serial.println("  u<0-100>- USB playback volume");
-    Serial.println("  p<0-100>- PDM mic volume");
-    Serial.println("  s       - status");
+    Serial.println("  m        - toggle PDM mic monitor on/off");
+    Serial.println("  l        - toggle line input monitor on/off");
+    Serial.println("  u<0-100> - USB playback volume");
+    Serial.println("  p<0-100> - PDM mic volume (also enables monitor)");
+    Serial.println("  i<0-100> - line input volume (also enables monitor)");
+    Serial.println("  s        - status");
 }
 
 bool micOn = false;
@@ -226,11 +227,20 @@ void loop() {
             }
             case 'p': case 'P': {
                 int v = Serial.parseInt();
-                float g = constrain(v, 0, 100) / 50.0f;
+                float g = constrain(v, 0, 100) / 50.0f;  // 100% = 2x gain
                 mixL.gain(1, g);
                 mixR.gain(1, g);
                 micOn = (v > 0);
-                Serial.print("Mic: "); Serial.print(v); Serial.println("%");
+                Serial.print("Mic vol: "); Serial.print(v); Serial.println("%");
+                break;
+            }
+            case 'i': case 'I': {
+                int v = Serial.parseInt();
+                float g = constrain(v, 0, 100) / 50.0f;  // 100% = 2x gain
+                mixL.gain(2, g);
+                mixR.gain(2, g);
+                lineOn = (v > 0);
+                Serial.print("Line vol: "); Serial.print(v); Serial.println("%");
                 break;
             }
             case 's': case 'S':
