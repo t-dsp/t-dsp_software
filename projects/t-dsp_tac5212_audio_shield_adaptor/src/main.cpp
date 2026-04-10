@@ -1,8 +1,9 @@
 #include <Arduino.h>
 #include <Audio.h>
 #include <Wire.h>
+#include "tac5212_regs.h"
 
-#define TAC5212_ADDR  0x51
+// Teensy pin that drives EN_HELD_HIGH on the TAC5212 module → enables LDO
 const int TAC5212_EN_PIN = 35;
 
 // --- Audio Objects ---
@@ -18,6 +19,10 @@ AudioMixer4          mixR;
 // PDM mic combiners (32-bit PDM split across two 16-bit TDM channels)
 AudioMixer4          pdmMixL;
 AudioMixer4          pdmMixR;
+
+// Capture mixers — combine line in + PDM mic for USB recording stream
+AudioMixer4          captureL;
+AudioMixer4          captureR;
 
 // USB audio → mixer input 0
 AudioConnection      pc1(usbIn, 0, mixL, 0);
@@ -39,88 +44,121 @@ AudioConnection      pc12(tdmIn, 2, mixR, 2);      // ADC IN2
 AudioConnection      pc9(mixL, 0, tdmOut, 0);
 AudioConnection      pc10(mixR, 0, tdmOut, 2);
 
-// Line input → USB out for recording on the computer
-AudioConnection      pc13(tdmIn, 0, usbOut, 0);
-AudioConnection      pc14(tdmIn, 2, usbOut, 1);
+// USB capture stream: line input + PDM mic mixed into the host recording input
+AudioConnection      pc13(tdmIn, 0, captureL, 0);    // line L
+AudioConnection      pc14(tdmIn, 2, captureR, 0);    // line R
+AudioConnection      pc15(pdmMixL, 0, captureL, 1);  // PDM L
+AudioConnection      pc16(pdmMixR, 0, captureR, 1);  // PDM R
+AudioConnection      pc17(captureL, 0, usbOut, 0);
+AudioConnection      pc18(captureR, 0, usbOut, 1);
 
-// --- Codec helpers ---
+// --- Codec I2C helpers ---
+
 static void writeReg(uint8_t reg, uint8_t val) {
-    Wire.beginTransmission(TAC5212_ADDR);
+    Wire.beginTransmission(TAC5212_I2C_ADDR);
     Wire.write(reg);
     Wire.write(val);
     Wire.endTransmission();
 }
 
 static uint8_t readReg(uint8_t reg) {
-    Wire.beginTransmission(TAC5212_ADDR);
+    Wire.beginTransmission(TAC5212_I2C_ADDR);
     Wire.write(reg);
     Wire.endTransmission(false);
-    Wire.requestFrom(TAC5212_ADDR, (uint8_t)1);
+    Wire.requestFrom(TAC5212_I2C_ADDR, (uint8_t)1);
     return Wire.available() ? Wire.read() : 0xFF;
+}
+
+// --- Codec setup, split into discrete configuration steps ---
+
+// 1. Software reset, then wake the device.
+static void codecResetAndWake() {
+    writeReg(REG_SW_RESET, 0x01);
+    delay(100);
+    writeReg(REG_SLEEP_CFG, SLEEP_CFG_WAKE);
+    delay(100);
+}
+
+// 2. Configure the audio serial interface: TDM, 32-bit, BCLK inverted, target mode.
+static void codecConfigureSerialInterface() {
+    writeReg(REG_PASI_CFG0, PASI_CFG0_TDM_32_BCLK_INV);
+    writeReg(REG_INTF_CFG1, INTF_CFG1_DOUT_PASI);
+    writeReg(REG_INTF_CFG2, INTF_CFG2_DIN_ENABLE);
+    writeReg(REG_PASI_RX_CFG0, PASI_OFFSET_1);
+    writeReg(REG_PASI_TX_CFG2, PASI_OFFSET_1);
+}
+
+// 3. Map TDM slots to DAC inputs (RX, host → codec) and ADC outputs (TX, codec → host).
+//    DAC: slot 0 → OUT1 (left ear), slot 1 → OUT2 (right ear)
+//    ADC: slot 0 → ADC ch1 (left), slot 1 → ADC ch2 (right)
+static void codecConfigureSlotMappings() {
+    writeReg(REG_RX_CH1_SLOT, slot(0));  // DAC L1 ← slot 0
+    writeReg(REG_RX_CH2_SLOT, slot(1));  // DAC L2 ← slot 1
+
+    writeReg(REG_TX_CH1_SLOT, slot(0));  // ADC ch1 → slot 0
+    writeReg(REG_TX_CH2_SLOT, slot(1));  // ADC ch2 → slot 1
+}
+
+// 4. Configure the onboard PDM microphone:
+//    - GPIO1 generates the PDM clock
+//    - GPI1 reads the PDM data line, routed to virtual PDM channels 3+4
+//    - TX channels 3+4 transmit those to TDM slots 2+3
+static void codecConfigurePdmMic() {
+    writeReg(REG_GPIO1_CFG, GPIO1_PDM_CLK);
+    writeReg(REG_GPI1_CFG,  GPI1_INPUT);
+    writeReg(REG_INTF_CFG4, INTF_CFG4_GPI1_PDM_3_4);
+    writeReg(REG_TX_CH3_SLOT, slot(2));  // PDM ch3 → slot 2
+    writeReg(REG_TX_CH4_SLOT, slot(3));  // PDM ch4 → slot 3
+}
+
+// 5. Set both ADC inputs to single-ended mode reading INxP only.
+//    This board ties IN1- to IN2+ to support balanced-mic mode, so we must
+//    ignore INxM for line input — otherwise differential mode would cancel
+//    a mono signal.
+static void codecConfigureAdcInputs() {
+    writeReg(REG_ADC_CH1_CFG0, ADC_CFG0_SE_INP_ONLY);
+    writeReg(REG_ADC_CH2_CFG0, ADC_CFG0_SE_INP_ONLY);
+}
+
+// 6. Configure DAC outputs as differential, line-driver level.
+static void codecConfigureDacOutputs() {
+    writeReg(REG_OUT1_CFG0, OUT_CFG0_DAC_DIFF);
+    writeReg(REG_OUT1_CFG1, OUT_DRV_LINE_0DB);
+    writeReg(REG_OUT1_CFG2, OUT_DRV_LINE_0DB);
+    writeReg(REG_OUT2_CFG0, OUT_CFG0_DAC_DIFF);
+    writeReg(REG_OUT2_CFG1, OUT_DRV_LINE_0DB);
+    writeReg(REG_OUT2_CFG2, OUT_DRV_LINE_0DB);
+}
+
+// 7. Set all four DAC digital volumes to 0 dB. (USB host volume tracking
+//    in loop() overrides this once playback starts.)
+static void codecSetDefaultDacVolume() {
+    writeReg(REG_DAC_L1_VOL, DAC_VOL_0DB);
+    writeReg(REG_DAC_R1_VOL, DAC_VOL_0DB);
+    writeReg(REG_DAC_L2_VOL, DAC_VOL_0DB);
+    writeReg(REG_DAC_R2_VOL, DAC_VOL_0DB);
+}
+
+// 8. Enable all input/output channels and power up ADC + DAC + MICBIAS.
+static void codecPowerUp() {
+    writeReg(REG_CH_EN,   CH_EN_ALL);
+    writeReg(REG_PWR_CFG, PWR_CFG_ADC_DAC_MICBIAS);
+    delay(100);
 }
 
 void setupCodec() {
     Serial.println("Initializing TAC5212...");
 
-    // Reset + wake
-    writeReg(0x01, 0x01); delay(100);
-    writeReg(0x02, 0x09); delay(100);
+    codecResetAndWake();
+    codecConfigureSerialInterface();
+    codecConfigureSlotMappings();
+    codecConfigurePdmMic();
+    codecConfigureAdcInputs();
+    codecConfigureDacOutputs();
+    codecSetDefaultDacVolume();
+    codecPowerUp();
 
-    // TDM format, 32-bit, BCLK inverted, bus error recovery
-    writeReg(0x1A, 0x35);
-
-    // Target/slave mode
-    writeReg(0x55, 0x00);
-
-    // DOUT config + DIN enabled
-    writeReg(0x10, 0x52);
-    writeReg(0x11, 0x80);
-
-    // RX config: offset=1
-    writeReg(0x26, 0x01);
-
-    // DAC slot assignments (verified working stereo)
-    writeReg(0x28, 0x20);  // RX CH1 ← slot 0 → OUT1 (left)
-    writeReg(0x29, 0x21);  // RX CH2 ← slot 1 → OUT2 (right)
-
-    // TX slot assignments (ADC → Teensy)
-    writeReg(0x1E, 0x20);  // TX CH1 → slot 0
-    writeReg(0x1F, 0x21);  // TX CH2 → slot 1
-    writeReg(0x1D, 0x01);  // TX offset
-
-    // PDM mic
-    writeReg(0x0A, 0x41);  // GPIO1 → PDM clock
-    writeReg(0x0D, 0x02);  // GPI1 → input
-    writeReg(0x13, 0x03);  // GPI1 → PDM channels 3+4
-    writeReg(0x20, 0x22);  // TX CH3 → PDM ch3, slot 2
-    writeReg(0x21, 0x23);  // TX CH4 → PDM ch4, slot 3
-
-    // ADC input config: SE on INxP only (IN1- is tied to IN2+ on this board)
-    writeReg(0x50, 0x80);
-    writeReg(0x55, 0x80);
-
-    // Output config: DAC source, differential (verified working stereo)
-    writeReg(0x64, 0x20);
-    writeReg(0x65, 0x20);
-    writeReg(0x66, 0x20);
-    writeReg(0x6B, 0x20);
-    writeReg(0x6C, 0x20);
-    writeReg(0x6D, 0x20);
-
-    // DAC volumes (overridden by USB volume tracking)
-    writeReg(0x67, 200);
-    writeReg(0x69, 200);
-    writeReg(0x6E, 200);
-    writeReg(0x70, 200);
-
-    // Enable all channels
-    writeReg(0x76, 0xFF);
-
-    // Power up ADC + DAC + MICBIAS
-    writeReg(0x78, 0xE0);
-
-    delay(100);
-    Serial.print("DEV_STS0: 0x"); Serial.println(readReg(0x79), HEX);
+    Serial.print("DEV_STS0: 0x"); Serial.println(readReg(REG_DEV_STS0), HEX);
     Serial.println("Codec ready: TDM + PDM + ADC");
 }
 
@@ -143,7 +181,7 @@ void setup() {
     delay(100);
     Wire.begin();
 
-    Wire.beginTransmission(TAC5212_ADDR);
+    Wire.beginTransmission(TAC5212_I2C_ADDR);
     if (Wire.endTransmission() != 0) {
         Serial.println("TAC5212 not found!");
         while (1) { delay(100); }
@@ -166,6 +204,12 @@ void setup() {
     pdmMixL.gain(1, pdmGain / 65536);
     pdmMixR.gain(0, pdmGain);
     pdmMixR.gain(1, pdmGain / 65536);
+
+    // Capture mixers — both line and PDM go to USB recording at unity by default
+    captureL.gain(0, 1.0);   // line L
+    captureR.gain(0, 1.0);   // line R
+    captureL.gain(1, 1.0);   // PDM L
+    captureR.gain(1, 1.0);   // PDM R
 
     Serial.println("\nReady!");
     Serial.println("  USB audio → DAC (stereo)");
@@ -273,21 +317,24 @@ void bumpActive(int delta) {
 }
 
 void loop() {
-    // Track USB host volume → DAC volume
+    // Track USB host volume slider → TAC5212 DAC digital volume.
+    // The host sends the playback volume via the USB Audio Class feature unit.
+    // We map 0.0..1.0 onto a -40 dB..0 dB range on the codec's DAC volume regs.
     float vol = usbIn.volume();
     if (vol != lastUsbVolume) {
         lastUsbVolume = vol;
         uint8_t regVal;
         if (vol < 0.01f) {
-            regVal = 0;
+            regVal = 0;  // mute
         } else {
-            // Map 0.0-1.0 → -40dB to 0dB (register 121 to 201)
+            // DAC volume: register 201 = 0 dB, step is 0.5 dB.
+            // 121 = -40 dB, 201 = 0 dB.
             regVal = (uint8_t)(121 + vol * 80);
         }
-        writeReg(0x67, regVal);
-        writeReg(0x69, regVal);
-        writeReg(0x6E, regVal);
-        writeReg(0x70, regVal);
+        writeReg(REG_DAC_L1_VOL, regVal);
+        writeReg(REG_DAC_R1_VOL, regVal);
+        writeReg(REG_DAC_L2_VOL, regVal);
+        writeReg(REG_DAC_R2_VOL, regVal);
     }
 
     while (Serial.available()) {
@@ -340,7 +387,7 @@ void loop() {
                 Serial.print("USB="); Serial.print(usbVol);
                 Serial.print("%  MIC="); Serial.print(micVol);
                 Serial.print("%  LINE="); Serial.print(lineVol); Serial.println("%");
-                Serial.print("DEV_STS0: 0x"); Serial.println(readReg(0x79), HEX);
+                Serial.print("DEV_STS0: 0x"); Serial.println(readReg(REG_DEV_STS0), HEX);
                 Serial.println("--------------\n");
                 break;
         }

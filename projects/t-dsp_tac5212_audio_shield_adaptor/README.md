@@ -85,7 +85,7 @@ s           → show status
 
 ```
                        ┌─────────────────────────────────┐
-                       │            Mixers                │
+                       │       Monitor mixers             │
 USB In  (host)   ──L──▶│ mixL[0]                          │
                   ─R──▶│ mixR[0]                          │
                        │                                  │
@@ -94,12 +94,17 @@ PDM Mic (codec)  ────▶ │ mixL[1] / mixR[1]    ──▶ TDM Out │ 
 Line In (codec)  ────▶ │ mixL[2] / mixR[2]                │
                        └─────────────────────────────────┘
 
-Line In (codec) ─────▶ USB Out (host capture / recording)
+                       ┌─────────────────────────────────┐
+                       │       Capture mixers             │
+PDM Mic (codec)  ────▶ │ captureL[1] / captureR[1]        │
+                       │                            ──▶ USB Out (host recording)
+Line In (codec)  ────▶ │ captureL[0] / captureR[0]        │
+                       └─────────────────────────────────┘
 ```
 
 - **USB In** is at gain `1.0` by default (host volume controls DAC level)
-- **PDM mic** and **line in** start at gain `0.0` — toggle/set them with `m`, `l`, `p`, `i`
-- **Line In** also flows to **USB Out** unconditionally so the host can record it
+- **PDM mic** and **line in** start at monitor gain `0.0` — toggle/set them with `m`, `l`, `p`, `i`
+- **Capture mixers** are independent of monitor mixers — both line in and PDM mic are always streamed to the host recording input at unity gain. Switch your computer's recording app between sources by simply (un)plugging the line in or staying quiet.
 
 ## Codec Configuration
 
