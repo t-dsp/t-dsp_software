@@ -172,17 +172,105 @@ void setup() {
     Serial.println("  PDM mic / line in → USB capture");
     Serial.println("  USB host volume → DAC volume");
     Serial.println("\nCommands:");
-    Serial.println("  m        - toggle PDM mic monitor on/off");
-    Serial.println("  l        - toggle line input monitor on/off");
-    Serial.println("  u<0-100> - USB playback volume");
-    Serial.println("  p<0-100> - PDM mic volume (also enables monitor)");
-    Serial.println("  i<0-100> - line input volume (also enables monitor)");
-    Serial.println("  s        - status");
+    Serial.println("  m              - toggle PDM mic monitor on/off");
+    Serial.println("  l              - toggle line input monitor on/off");
+    Serial.println("  u / p / i      - select active channel (USB/PDM/line)");
+    Serial.println("  u50, p75, etc. - set active channel directly to a value");
+    Serial.println("  + / -          - increase/decrease active channel by 5%");
+    Serial.println("  Up/Down arrows - same as + / -");
+    Serial.println("  s              - status");
 }
 
 bool micOn = false;
 bool lineOn = false;
 float lastUsbVolume = -1.0;
+
+// Active channel for +/- adjustments
+enum ActiveCh { CH_NONE, CH_USB, CH_MIC, CH_LINE };
+ActiveCh activeCh = CH_NONE;
+
+// Current volume levels (0-100)
+int usbVol = 100;
+int micVol = 0;
+int lineVol = 0;
+
+// Escape sequence state for arrow keys
+int escState = 0;  // 0=normal, 1=got ESC, 2=got ESC[
+
+const char* chName(ActiveCh c) {
+    switch (c) {
+        case CH_USB:  return "USB";
+        case CH_MIC:  return "MIC";
+        case CH_LINE: return "LINE";
+        default:      return "(none)";
+    }
+}
+
+void applyChannel(ActiveCh ch, int vol) {
+    vol = constrain(vol, 0, 100);
+    float g;
+    switch (ch) {
+        case CH_USB:
+            usbVol = vol;
+            g = vol / 100.0f;
+            mixL.gain(0, g);
+            mixR.gain(0, g);
+            break;
+        case CH_MIC:
+            micVol = vol;
+            g = vol / 50.0f;  // 100% = 2x
+            mixL.gain(1, g);
+            mixR.gain(1, g);
+            micOn = (vol > 0);
+            break;
+        case CH_LINE:
+            lineVol = vol;
+            g = vol / 50.0f;
+            mixL.gain(2, g);
+            mixR.gain(2, g);
+            lineOn = (vol > 0);
+            break;
+        default:
+            return;
+    }
+    Serial.print(chName(ch));
+    Serial.print(" = ");
+    Serial.print(vol);
+    Serial.println("%");
+}
+
+int currentVol(ActiveCh ch) {
+    switch (ch) {
+        case CH_USB:  return usbVol;
+        case CH_MIC:  return micVol;
+        case CH_LINE: return lineVol;
+        default:      return 0;
+    }
+}
+
+void selectOrSet(ActiveCh ch) {
+    activeCh = ch;
+    // Peek for a number after the letter
+    delay(2);
+    if (Serial.available() && isDigit(Serial.peek())) {
+        int v = Serial.parseInt();
+        applyChannel(ch, v);
+    } else {
+        Serial.print("Active channel: ");
+        Serial.print(chName(ch));
+        Serial.print(" (");
+        Serial.print(currentVol(ch));
+        Serial.println("%)");
+    }
+}
+
+void bumpActive(int delta) {
+    if (activeCh == CH_NONE) {
+        Serial.println("No active channel — press u, p, or i first.");
+        return;
+    }
+    applyChannel(activeCh, currentVol(activeCh) + delta);
+}
 
 void loop() {
     // Track USB host volume → DAC volume
@@ -202,47 +290,45 @@ void loop() {
         writeReg(0x70, regVal);
     }
 
-    if (Serial.available()) {
+    while (Serial.available()) {
         char cmd = Serial.read();
+
+        // Arrow key escape sequence handling: ESC [ A/B/C/D
+        if (escState == 1) {
+            if (cmd == '[') { escState = 2; continue; }
+            escState = 0;
+        } else if (escState == 2) {
+            escState = 0;
+            if (cmd == 'A') { bumpActive(+5); continue; }   // Up
+            if (cmd == 'B') { bumpActive(-5); continue; }   // Down
+            continue;  // ignore other CSI codes
+        }
+        if (cmd == 0x1B) { escState = 1; continue; }
+
         switch (cmd) {
             case 'm': case 'M':
                 micOn = !micOn;
-                mixL.gain(1, micOn ? 1.0 : 0.0);
-                mixR.gain(1, micOn ? 1.0 : 0.0);
+                mixL.gain(1, micOn ? (micVol > 0 ? micVol / 50.0f : 1.0f) : 0.0f);
+                mixR.gain(1, micOn ? (micVol > 0 ? micVol / 50.0f : 1.0f) : 0.0f);
+                if (micOn && micVol == 0) micVol = 50;
                 Serial.print("Mic: "); Serial.println(micOn ? "ON" : "OFF");
                 break;
             case 'l': case 'L':
                 lineOn = !lineOn;
-                mixL.gain(2, lineOn ? 1.0 : 0.0);
-                mixR.gain(2, lineOn ? 1.0 : 0.0);
+                mixL.gain(2, lineOn ? (lineVol > 0 ? lineVol / 50.0f : 1.0f) : 0.0f);
+                mixR.gain(2, lineOn ? (lineVol > 0 ? lineVol / 50.0f : 1.0f) : 0.0f);
+                if (lineOn && lineVol == 0) lineVol = 50;
                 Serial.print("Line monitor: "); Serial.println(lineOn ? "ON" : "OFF");
                 break;
-            case 'u': case 'U': {
-                int v = Serial.parseInt();
-                float g = constrain(v, 0, 100) / 100.0f;
-                mixL.gain(0, g);
-                mixR.gain(0, g);
-                Serial.print("USB: "); Serial.print(v); Serial.println("%");
+            case 'u': case 'U': selectOrSet(CH_USB); break;
+            case 'p': case 'P': selectOrSet(CH_MIC); break;
+            case 'i': case 'I': selectOrSet(CH_LINE); break;
+            case '+': case '=':
+                bumpActive(+5);
                 break;
-            }
-            case 'p': case 'P': {
-                int v = Serial.parseInt();
-                float g = constrain(v, 0, 100) / 50.0f;  // 100% = 2x gain
-                mixL.gain(1, g);
-                mixR.gain(1, g);
-                micOn = (v > 0);
-                Serial.print("Mic vol: "); Serial.print(v); Serial.println("%");
+            case '-': case '_':
+                bumpActive(-5);
                 break;
-            }
-            case 'i': case 'I': {
-                int v = Serial.parseInt();
-                float g = constrain(v, 0, 100) / 50.0f;  // 100% = 2x gain
-                mixL.gain(2, g);
-                mixR.gain(2, g);
-                lineOn = (v > 0);
-                Serial.print("Line vol: "); Serial.print(v); Serial.println("%");
-                break;
-            }
             case 's': case 'S':
                 Serial.println("\n--- Status ---");
                 Serial.print("Audio Mem: ");
@@ -250,6 +336,10 @@ void loop() {
                 Serial.print("/"); Serial.println(AudioMemoryUsageMax());
                 Serial.print("CPU: "); Serial.print(AudioProcessorUsage(), 2); Serial.println("%");
                 Serial.print("USB host vol: "); Serial.println(lastUsbVolume, 3);
+                Serial.print("Active ch: "); Serial.println(chName(activeCh));
+                Serial.print("USB="); Serial.print(usbVol);
+                Serial.print("%  MIC="); Serial.print(micVol);
+                Serial.print("%  LINE="); Serial.print(lineVol); Serial.println("%");
                 Serial.print("DEV_STS0: 0x"); Serial.println(readReg(0x79), HEX);
                 Serial.println("--------------\n");
                 break;

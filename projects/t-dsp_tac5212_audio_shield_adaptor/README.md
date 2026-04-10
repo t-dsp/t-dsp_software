@@ -42,18 +42,44 @@ The monitor runs at **115200 baud**.
 
 ## Keyboard Commands
 
-Once the serial monitor is open, send these single-character commands (followed by a number where shown):
+Once the serial monitor is open, send these single-character commands.
 
-| Command   | Description |
-|-----------|-------------|
-| `m`       | Toggle PDM mic monitoring on/off (route mic to DAC headphones) |
-| `l`       | Toggle line input monitoring on/off (route line in to DAC headphones) |
-| `u<0-100>` | Set USB playback volume (e.g. `u50` = 50%) |
-| `p<0-100>` | Set PDM mic volume (also enables mic monitor; e.g. `p75`) |
-| `i<0-100>` | Set line input volume (also enables line monitor; e.g. `i80`) |
-| `s`       | Print status: audio buffer usage, CPU, USB volume, codec status |
+### Toggles & status
 
-> The host's USB audio volume slider also controls the TAC5212 DAC digital volume directly — you don't need `u` for normal playback.
+| Command | Description |
+|---------|-------------|
+| `m` | Toggle PDM mic monitoring on/off |
+| `l` | Toggle line input monitoring on/off |
+| `s` | Print status: buffer usage, CPU, current volumes, codec status |
+
+### Volume control
+
+The volume system has three independent channels: **USB** (host playback), **PDM mic**, and **LINE** input. You select an "active channel" and then adjust it with `+`/`-` or arrow keys.
+
+| Command | Description |
+|---------|-------------|
+| `u` / `p` / `i` | Select **USB** / **PDM mic** / **LINE** as the active channel |
+| `u50`, `p75`, `i80` | Set the channel directly to a value (0–100) |
+| `+` or `=` | Increase active channel by 5% |
+| `-` or `_` | Decrease active channel by 5% |
+| Up arrow ↑ | Same as `+` |
+| Down arrow ↓ | Same as `-` |
+
+You can hold `+` or `-` for terminal auto-repeat, mash them, or use the arrow keys for the same effect.
+
+**Examples:**
+
+```
+p           → mic is now the active channel
+++++++      → ramp mic up 30%
+↑↑↑↑        → another 20%
+i75         → set line input directly to 75% (and switch active channel to LINE)
+↓↓          → drop line input by 10%
+m           → toggle mic monitor off
+s           → show status
+```
+
+> The host's USB audio volume slider also controls the TAC5212 DAC digital volume directly — you don't need `u` for normal playback. The `u` channel here is a Teensy-side mixer gain *on top of* the host volume.
 
 ## Audio Routing
 
