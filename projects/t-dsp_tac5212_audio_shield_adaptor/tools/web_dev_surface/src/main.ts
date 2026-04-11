@@ -44,6 +44,7 @@ let readLoopAborted = false;
 const LOG_BLOCKED_ADDRESSES = new Set<string>([
   '/meters/input',
   '/meters/output',
+  '/meters/host',
   '/meters/gr',
   // /main/st/hostvol/value can also fire frequently when the user drags
   // the Windows volume slider; allow it through for now but add here if
