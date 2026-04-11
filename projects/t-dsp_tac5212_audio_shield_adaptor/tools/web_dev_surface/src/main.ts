@@ -15,7 +15,7 @@ import { Dispatcher } from './dispatcher';
 import { tac5212Panel } from './codec-panel-config';
 
 import { connectButton } from './ui/connect';
-import { channelStrip } from './ui/channel-strip';
+import { channelPair } from './ui/channel-pair';
 import { mainBus } from './ui/main-bus';
 import { hostStrip } from './ui/host-strip';
 import { codecPanel } from './ui/codec-panel';
@@ -170,13 +170,12 @@ header.appendChild(connectButton(state.connected, connect, disconnect));
 
 const mixerRow = document.createElement('section');
 mixerRow.className = 'mixer-row';
-state.channels.forEach((ch, i) => {
-  // Even channels (idx 1,3,5 == ch 2,4,6) are "slaves" whose disabled
-  // state depends on the odd neighbor's link flag. Pass that neighbor's
-  // link signal so the strip can subscribe to it.
-  const partnerLink = (i & 1) === 1 ? state.channels[i - 1].link : undefined;
-  mixerRow.appendChild(channelStrip(i, ch, dispatcher, partnerLink));
-});
+// Render 3 stereo pairs (1/2, 3/4, 5/6), then MAIN, then HOST.
+// Each wrapper uses the shared 7-row layout so buttons/sliders align
+// horizontally across all strips.
+for (let oddIdx = 0; oddIdx < CHANNEL_COUNT; oddIdx += 2) {
+  mixerRow.appendChild(channelPair(oddIdx, state, dispatcher));
+}
 mixerRow.appendChild(mainBus(state.main, dispatcher));
 mixerRow.appendChild(hostStrip(state.main, dispatcher));
 

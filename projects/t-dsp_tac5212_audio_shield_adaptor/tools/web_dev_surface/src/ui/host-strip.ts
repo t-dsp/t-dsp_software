@@ -1,61 +1,76 @@
-// HOST strip: visualizes the Windows volume slider and exposes its
-// bypass toggle. The fader is read-only (always `disabled`) because the
-// value is owned by usbIn.volume() on the firmware side — changing it
-// from here wouldn't push back to Windows. The ENABLE button is the
-// only control: when off, the hostvol stage bypasses (gain=1.0) so the
-// main fader is the only attenuator. No meter — this strip is strictly
-// a gain-stage monitor, and the "real" level is on the MAIN strip's
-// pre-hostvol meters.
+// HOST strip: Windows volume monitor. Built with the same 7-row
+// structure as channel pairs and main, so every row (name/meter/fader/
+// fader-value/mute/solo/link) lines up horizontally.
+//
+//   row 1: HOST VOL label
+//   row 2: meter spacer (no meter — this is a gain-stage monitor)
+//   row 3: fader (disabled; reflects usbIn.volume() echoes)
+//   row 4: fader value (dB)
+//   row 5: mute spacer
+//   row 6: solo spacer
+//   row 7: ENABLE button (bypass toggle) — sits where pair LINK lives
+//
+// The enable button in the link-row slot is the only control on this
+// strip: toggling it off bypasses the hostvol stage so the main fader
+// is the sole attenuator.
 
 import { BusState } from '../state';
 import { Dispatcher } from '../dispatcher';
-import { formatFaderDb } from './util';
+import {
+  makeRow,
+  makeStaticName,
+  makeMeterSpacer,
+  makeDisabledFader,
+  makeFaderValue,
+  makeCellSpacer,
+} from './cells';
 
 export function hostStrip(bus: BusState, dispatcher: Dispatcher): HTMLElement {
   const root = document.createElement('div');
-  root.className = 'strip host-strip';
+  root.className = 'strip-wrapper host-wrapper';
 
-  const name = document.createElement('div');
-  name.className = 'strip-name';
-  name.textContent = 'HOST VOL';
+  // Row 1: name
+  const rowName = makeRow('row-name');
+  rowName.append(makeStaticName('HOST VOL'));
 
-  // Spacer that reserves the same vertical room as a meter-wrap so the
-  // slider thumb lines up with the other strips' sliders.
-  const meterSpacer = document.createElement('div');
-  meterSpacer.className = 'meter-wrap meter-spacer';
+  // Row 2: meter spacer (no signal tap here)
+  const rowMeter = makeRow('row-meter');
+  rowMeter.append(makeMeterSpacer());
 
-  const fader = document.createElement('input');
-  fader.type = 'range';
-  fader.className = 'fader';
-  fader.min = '0';
-  fader.max = '1';
-  fader.step = '0.001';
-  fader.disabled = true;  // read-only reflection of usbIn.volume()
-  bus.hostvolValue.subscribe((v) => (fader.value = String(v)));
+  // Row 3: fader (disabled, read-only reflection of usbIn.volume())
+  const rowFader = makeRow('row-fader');
+  const fader = makeDisabledFader(bus.hostvolValue);
+  rowFader.append(fader);
 
-  const fv = document.createElement('div');
-  fv.className = 'fader-value';
-  bus.hostvolValue.subscribe((v) => (fv.textContent = formatFaderDb(v)));
+  // Row 4: fader value
+  const rowFv = makeRow('row-fv');
+  rowFv.append(makeFaderValue(bus.hostvolValue));
 
-  // The fader visually dims when bypassed to emphasize that the value
-  // is ignored by the audio path.
-  bus.hostvolEnable.subscribe((on) => {
-    root.classList.toggle('bypassed', !on);
-  });
+  // Row 5: mute spacer
+  const rowMute = makeRow('row-mute');
+  rowMute.append(makeCellSpacer('mute'));
 
+  // Row 6: solo spacer
+  const rowSolo = makeRow('row-solo');
+  rowSolo.append(makeCellSpacer('solo'));
+
+  // Row 7: ENABLE button (sits in the link row slot for visual alignment)
+  const rowLink = makeRow('row-link');
   const enBtn = document.createElement('button');
-  enBtn.className = 'enable-btn';
+  enBtn.className = 'enable-btn cell';
   bus.hostvolEnable.subscribe((on) => {
     enBtn.classList.toggle('active', on);
     enBtn.textContent = on ? 'ON' : 'BYP';
     enBtn.title = on
       ? 'Windows volume attenuates main output — click to bypass'
       : 'Windows volume bypassed — click to enable';
+    root.classList.toggle('bypassed', !on);
   });
   enBtn.addEventListener('click', () =>
     dispatcher.setMainHostvolEnable(!bus.hostvolEnable.get()),
   );
+  rowLink.append(enBtn);
 
-  root.append(name, meterSpacer, fader, fv, enBtn);
+  root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink);
   return root;
 }

@@ -1,117 +1,83 @@
-// Stereo main bus strip: two faders (L, R) with per-side meters,
-// stereo link toggle, and shared mute. When link=true the R slider is
-// visually disabled and follows L (the firmware propagates writes).
+// Main bus: stereo L/R laid out as the same 7-row structure as a
+// channel pair so the rows line up horizontally across the mixer.
 //
-// The meter taps are post-fader / pre-hostvol (see main.cpp), so these
-// bars track the fader moves but are unaffected by the Windows volume
-// slider. Windows volume lives in the separate HOST strip.
+//   row 1: MAIN label (spans both sides via a single name cell)
+//   row 2: two meters (post-fader / pre-hostvol)
+//   row 3: two faders
+//   row 4: two fader values
+//   row 5: one shared mute button (main has a single mute, not per-side)
+//   row 6: solo spacer (main has no solo — keeps row alignment)
+//   row 7: LINK button (stereo link toggle)
+//
+// When linked, the R side dims and its fader is disabled; the firmware
+// propagates writes so dragging L moves R via echo.
 
 import { BusState } from '../state';
 import { Dispatcher } from '../dispatcher';
-import { Signal } from '../state';
-import { formatFaderDb } from './util';
+import {
+  makeRow,
+  makeStaticName,
+  makeMeter,
+  makeFader,
+  makeFaderValue,
+  makeCellSpacer,
+} from './cells';
 
 export function mainBus(bus: BusState, dispatcher: Dispatcher): HTMLElement {
   const root = document.createElement('div');
-  root.className = 'strip main-strip';
+  root.className = 'strip-wrapper main-wrapper';
 
-  const name = document.createElement('div');
-  name.className = 'strip-name';
-  name.textContent = 'MAIN';
+  // Row 1: name — "MAIN" centered, spans both sides (single wide cell).
+  const rowName = makeRow('row-name');
+  const nameCell = makeStaticName('MAIN');
+  nameCell.classList.add('span-2');
+  rowName.append(nameCell);
 
-  // Build one side (L or R) as a meter + fader + dB label column.
-  // `isMaster` means this side always tracks its own signal; the slave
-  // side gets visually disabled when `bus.link` is true.
-  const buildSide = (
-    label: string,
-    peakSig: Signal<number>,
-    rmsSig: Signal<number>,
-    faderSig: Signal<number>,
-    onInput: (v: number) => void,
-    isMaster: boolean,
-  ): HTMLElement => {
-    const col = document.createElement('div');
-    col.className = 'main-side';
+  // Row 2: L + R meters
+  const rowMeter = makeRow('row-meter');
+  rowMeter.append(makeMeter(bus.peakL, bus.rmsL), makeMeter(bus.peakR, bus.rmsR));
 
-    const sideLabel = document.createElement('div');
-    sideLabel.className = 'side-label';
-    sideLabel.textContent = label;
+  // Row 3: L + R faders
+  const rowFader = makeRow('row-fader');
+  const faderL = makeFader(bus.faderL, (v) => dispatcher.setMainFaderL(v));
+  const faderR = makeFader(bus.faderR, (v) => dispatcher.setMainFaderR(v));
+  rowFader.append(faderL, faderR);
 
-    const meterWrap = document.createElement('div');
-    meterWrap.className = 'meter-wrap';
-    const peakFill = document.createElement('div');
-    peakFill.className = 'meter-fill peak';
-    const rmsFill = document.createElement('div');
-    rmsFill.className = 'meter-fill rms';
-    meterWrap.append(rmsFill, peakFill);
-    peakSig.subscribe((p) => {
-      peakFill.style.height = `${Math.min(100, Math.max(0, p * 100))}%`;
-    });
-    rmsSig.subscribe((r) => {
-      rmsFill.style.height = `${Math.min(100, Math.max(0, r * 100))}%`;
-    });
+  // Row 4: L + R fader values
+  const rowFv = makeRow('row-fv');
+  rowFv.append(makeFaderValue(bus.faderL), makeFaderValue(bus.faderR));
 
-    const fader = document.createElement('input');
-    fader.type = 'range';
-    fader.className = 'fader';
-    fader.min = '0';
-    fader.max = '1';
-    fader.step = '0.001';
-    faderSig.subscribe((v) => (fader.value = String(v)));
-    fader.addEventListener('input', () => onInput(parseFloat(fader.value)));
+  // Row 5: shared mute (single button, spans both sides)
+  const rowMute = makeRow('row-mute');
+  const muteBtn = document.createElement('button');
+  muteBtn.className = 'mute wide cell';
+  muteBtn.textContent = 'M';
+  muteBtn.title = 'Main mute (shared L/R)';
+  bus.on.subscribe((on) => muteBtn.classList.toggle('active', !on));
+  muteBtn.addEventListener('click', () => dispatcher.setMainOn(!bus.on.get()));
+  rowMute.append(muteBtn);
 
-    const fv = document.createElement('div');
-    fv.className = 'fader-value';
-    faderSig.subscribe((v) => (fv.textContent = formatFaderDb(v)));
+  // Row 6: solo spacer — main has no solo, but the row still exists so
+  // the link row below it lines up with channel pairs' link rows.
+  const rowSolo = makeRow('row-solo');
+  rowSolo.append(makeCellSpacer('solo'));
 
-    // Slave-disable: when link is on, the R side goes disabled/greyed.
-    // The L side is always interactive.
-    if (!isMaster) {
-      bus.link.subscribe((linked) => {
-        fader.disabled = linked;
-        col.classList.toggle('linked-slave', linked);
-      });
-    }
-
-    col.append(sideLabel, meterWrap, fader, fv);
-    return col;
-  };
-
-  const sides = document.createElement('div');
-  sides.className = 'main-sides';
-  sides.append(
-    buildSide(
-      'L',
-      bus.peakL,
-      bus.rmsL,
-      bus.faderL,
-      (v) => dispatcher.setMainFaderL(v),
-      true,
-    ),
-    buildSide(
-      'R',
-      bus.peakR,
-      bus.rmsR,
-      bus.faderR,
-      (v) => dispatcher.setMainFaderR(v),
-      false,
-    ),
-  );
-
+  // Row 7: LINK (stereo link)
+  const rowLink = makeRow('row-link');
   const linkBtn = document.createElement('button');
-  linkBtn.className = 'link-btn';
+  linkBtn.className = 'link-btn wide cell';
   linkBtn.textContent = 'LINK';
   linkBtn.title = 'Stereo link L/R (X32: writes propagate to both sides)';
-  bus.link.subscribe((linked) => linkBtn.classList.toggle('active', linked));
+  bus.link.subscribe((linked) => {
+    linkBtn.classList.toggle('active', linked);
+    faderR.disabled = linked;
+    rowMeter.children[1]?.classList.toggle('linked-slave', linked);
+    rowFader.children[1]?.classList.toggle('linked-slave', linked);
+    rowFv.children[1]?.classList.toggle('linked-slave', linked);
+  });
   linkBtn.addEventListener('click', () => dispatcher.setMainLink(!bus.link.get()));
+  rowLink.append(linkBtn);
 
-  const mute = document.createElement('button');
-  mute.className = 'mute';
-  mute.textContent = 'M';
-  mute.title = 'Main mute (shared L/R)';
-  bus.on.subscribe((on) => mute.classList.toggle('active', !on));
-  mute.addEventListener('click', () => dispatcher.setMainOn(!bus.on.get()));
-
-  root.append(name, sides, linkBtn, mute);
+  root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink);
   return root;
 }
