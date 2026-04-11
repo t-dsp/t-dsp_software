@@ -49,12 +49,18 @@ struct Channel {
 };
 
 struct Main {
-    float   fader      = 0.75f;      // 0 dB per X32's log map of fader
+    // Stereo main faders. `link` ganged by default — writes to either
+    // side propagate to the other. Unlink to run L/R independently (e.g.,
+    // for balance trim or mono-sum debugging).
+    float   faderL     = 0.75f;
+    float   faderR     = 0.75f;
+    bool    link       = true;
     bool    on         = true;
     // hostvol: pre-main attenuator fed by usbIn.volume() via USB Audio
-    // Class feature unit. When enabled, effective main gain = fader *
-    // hostvolValue. When disabled, hostvol is read and echoed but not
-    // applied.
+    // Class feature unit. Lives AFTER the main fader stage in the audio
+    // graph (so the master meters show the post-fader / pre-hostvol
+    // level). When enabled, gain multiplier = hostvolValue. When
+    // disabled, gain multiplier = 1.0 (bypass).
     bool    hostvolEnable = true;
     float   hostvolValue  = 1.0f;    // last observed usbIn.volume() scaled
 };
@@ -93,7 +99,11 @@ public:
     bool setChannelName(int n, const char *name);
     bool setChannelLink(int n, bool linked);
 
-    bool setMainFader(float value);
+    // Writes to either L or R propagate to the other when link=true.
+    // Each returns true if the model changed.
+    bool setMainFaderL(float value);
+    bool setMainFaderR(float value);
+    bool setMainLink(bool linked);
     bool setMainOn(bool on);
     bool setMainHostvolEnable(bool enable);
     bool setMainHostvolValue(float value);
@@ -109,11 +119,18 @@ public:
     // This is the value the binding pushes into the audio object.
     float effectiveChannelGain(int n) const;
 
-    // Compute the *effective* main gain, taking into account:
-    //   - main.fader
-    //   - main.on (muted if false)
-    //   - main.hostvolEnable/hostvolValue (pre-main attenuator)
-    float effectiveMainGain() const;
+    // Effective gain for the L main fader stage (pre-hostvol). This is
+    // what SignalGraphBinding pushes to the L main amplifier.
+    //   on ? faderL : 0
+    float effectiveMainFaderGainL() const;
+
+    // Effective gain for the R main fader stage (pre-hostvol).
+    float effectiveMainFaderGainR() const;
+
+    // Effective gain for the hostvol attenuator stage, independent of
+    // L/R (stereo-linked). Pushed to BOTH hostvol amplifiers.
+    //   hostvolEnable ? hostvolValue : 1.0f
+    float effectiveHostvolGain() const;
 
 private:
     Channel _channels[kChannelCount + 1];  // 1-indexed; [0] is a sentinel

@@ -11,8 +11,10 @@
 //   /ch/NN/preamp/hpf/on i — per-channel HPF enable
 //   /ch/NN/preamp/hpf/f f  — per-channel HPF cutoff (Hz)
 //   /ch/NN/config/link i   — stereo link (odd channel only)
-//   /main/st/mix/fader f   — main fader
-//   /main/st/mix/on i      — main mute
+//   /main/st/mix/faderL f  — main L fader (propagates to R when linked)
+//   /main/st/mix/faderR f  — main R fader (propagates to L when linked)
+//   /main/st/mix/link i    — main stereo link (default on)
+//   /main/st/mix/on i      — main mute (shared L/R)
 //   /main/st/hostvol/enable i — Windows slider pre-main attenuator toggle
 //   /main/st/hostvol/value f  — read-only; firmware echoes from usbIn.volume()
 //   /meters/input b        — blob stream, subscription-managed
@@ -60,7 +62,9 @@ public:
     // Broadcast helpers — called when the model changes from a non-OSC
     // source (e.g., Windows volume slider moved) so subscribed clients
     // see the update without being the originator.
-    void broadcastMainFader(OSCBundle &reply);
+    void broadcastMainFaderL(OSCBundle &reply);
+    void broadcastMainFaderR(OSCBundle &reply);
+    void broadcastMainLink(OSCBundle &reply);
     void broadcastMainOn(OSCBundle &reply);
     void broadcastMainHostvolValue(OSCBundle &reply);
     void broadcastChannelFader(int n, OSCBundle &reply);
@@ -87,7 +91,9 @@ private:
     void handleChannelLink(int n, OSCMessage &msg, OSCBundle &reply);
     void handleChannelHpfOn(int n, OSCMessage &msg, OSCBundle &reply);
     void handleChannelHpfFreq(int n, OSCMessage &msg, OSCBundle &reply);
-    void handleMainFader(OSCMessage &msg, OSCBundle &reply);
+    void handleMainFaderL(OSCMessage &msg, OSCBundle &reply);
+    void handleMainFaderR(OSCMessage &msg, OSCBundle &reply);
+    void handleMainLink(OSCMessage &msg, OSCBundle &reply);
     void handleMainOn(OSCMessage &msg, OSCBundle &reply);
     void handleMainHostvolEnable(OSCMessage &msg, OSCBundle &reply);
     void handleSub(OSCMessage &msg, OSCBundle &reply);

@@ -42,7 +42,9 @@ void MixerModel::reset() {
         strncpy(ch.name, kDefaultNames[n], kChannelNameMax - 1);
         ch.name[kChannelNameMax - 1] = '\0';
     }
-    _main.fader          = 0.75f;
+    _main.faderL         = 0.75f;
+    _main.faderR         = 0.75f;
+    _main.link           = true;
     _main.on             = true;
     _main.hostvolEnable  = true;
     _main.hostvolValue   = 1.0f;
@@ -173,11 +175,39 @@ bool MixerModel::setChannelLink(int n, bool linked) {
     return changed;
 }
 
-bool MixerModel::setMainFader(float value) {
+bool MixerModel::setMainFaderL(float value) {
     if (value < 0.0f) value = 0.0f;
     if (value > 1.0f) value = 1.0f;
-    bool changed = (_main.fader != value);
-    _main.fader = value;
+    bool changed = (_main.faderL != value);
+    _main.faderL = value;
+    if (_main.link && _main.faderR != value) {
+        _main.faderR = value;
+        changed = true;
+    }
+    return changed;
+}
+
+bool MixerModel::setMainFaderR(float value) {
+    if (value < 0.0f) value = 0.0f;
+    if (value > 1.0f) value = 1.0f;
+    bool changed = (_main.faderR != value);
+    _main.faderR = value;
+    if (_main.link && _main.faderL != value) {
+        _main.faderL = value;
+        changed = true;
+    }
+    return changed;
+}
+
+bool MixerModel::setMainLink(bool linked) {
+    bool changed = (_main.link != linked);
+    _main.link = linked;
+    // When link is turned ON, snap R to L so both sides start in sync.
+    // (X32 convention: odd/L side is canonical when linking.)
+    if (linked && _main.faderR != _main.faderL) {
+        _main.faderR = _main.faderL;
+        changed = true;
+    }
     return changed;
 }
 
@@ -218,11 +248,18 @@ float MixerModel::effectiveChannelGain(int n) const {
     return ch.fader;
 }
 
-float MixerModel::effectiveMainGain() const {
+float MixerModel::effectiveMainFaderGainL() const {
     if (!_main.on) return 0.0f;
-    float gain = _main.fader;
-    if (_main.hostvolEnable) gain *= _main.hostvolValue;
-    return gain;
+    return _main.faderL;
+}
+
+float MixerModel::effectiveMainFaderGainR() const {
+    if (!_main.on) return 0.0f;
+    return _main.faderR;
+}
+
+float MixerModel::effectiveHostvolGain() const {
+    return _main.hostvolEnable ? _main.hostvolValue : 1.0f;
 }
 
 }  // namespace tdsp

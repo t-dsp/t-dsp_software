@@ -105,8 +105,16 @@ void OscDispatcher::route(OSCMessage &msg, OSCBundle &reply) {
     }
 
     // -- /main/st/... --
-    if (strcmp(address, "/main/st/mix/fader") == 0) {
-        handleMainFader(msg, reply);
+    if (strcmp(address, "/main/st/mix/faderL") == 0) {
+        handleMainFaderL(msg, reply);
+        return;
+    }
+    if (strcmp(address, "/main/st/mix/faderR") == 0) {
+        handleMainFaderR(msg, reply);
+        return;
+    }
+    if (strcmp(address, "/main/st/mix/link") == 0) {
+        handleMainLink(msg, reply);
         return;
     }
     if (strcmp(address, "/main/st/mix/on") == 0) {
@@ -245,14 +253,49 @@ void OscDispatcher::handleChannelHpfFreq(int n, OSCMessage &msg, OSCBundle &repl
     reply.add(echo);
 }
 
-void OscDispatcher::handleMainFader(OSCMessage &msg, OSCBundle &reply) {
+void OscDispatcher::handleMainFaderL(OSCMessage &msg, OSCBundle &reply) {
     if (!msg.isFloat(0)) return;
     float v = msg.getFloat(0);
-    _model->setMainFader(v);
+    _model->setMainFaderL(v);
     if (_binding) _binding->applyMain();
-    OSCMessage echo("/main/st/mix/fader");
-    echo.add(_model->main().fader);
+    // Always echo both sides — if linked, R also changed, and if not,
+    // the client still wants confirmation. Cheap, idempotent.
+    OSCMessage echoL("/main/st/mix/faderL");
+    echoL.add(_model->main().faderL);
+    reply.add(echoL);
+    OSCMessage echoR("/main/st/mix/faderR");
+    echoR.add(_model->main().faderR);
+    reply.add(echoR);
+}
+
+void OscDispatcher::handleMainFaderR(OSCMessage &msg, OSCBundle &reply) {
+    if (!msg.isFloat(0)) return;
+    float v = msg.getFloat(0);
+    _model->setMainFaderR(v);
+    if (_binding) _binding->applyMain();
+    OSCMessage echoL("/main/st/mix/faderL");
+    echoL.add(_model->main().faderL);
+    reply.add(echoL);
+    OSCMessage echoR("/main/st/mix/faderR");
+    echoR.add(_model->main().faderR);
+    reply.add(echoR);
+}
+
+void OscDispatcher::handleMainLink(OSCMessage &msg, OSCBundle &reply) {
+    if (!msg.isInt(0)) return;
+    bool linked = (msg.getInt(0) != 0);
+    _model->setMainLink(linked);
+    if (_binding) _binding->applyMain();  // snap-to-L on relink may move R
+    OSCMessage echo("/main/st/mix/link");
+    echo.add((int32_t)(_model->main().link ? 1 : 0));
     reply.add(echo);
+    // Echo fader state too so client R catches up when linked.
+    OSCMessage echoL("/main/st/mix/faderL");
+    echoL.add(_model->main().faderL);
+    reply.add(echoL);
+    OSCMessage echoR("/main/st/mix/faderR");
+    echoR.add(_model->main().faderR);
+    reply.add(echoR);
 }
 
 void OscDispatcher::handleMainOn(OSCMessage &msg, OSCBundle &reply) {
@@ -322,10 +365,24 @@ void OscDispatcher::handleInfo(OSCMessage &msg, OSCBundle &reply) {
 
 // ----- Broadcast helpers (non-OSC-originated state changes) -----
 
-void OscDispatcher::broadcastMainFader(OSCBundle &reply) {
+void OscDispatcher::broadcastMainFaderL(OSCBundle &reply) {
     if (!_model) return;
-    OSCMessage echo("/main/st/mix/fader");
-    echo.add(_model->main().fader);
+    OSCMessage echo("/main/st/mix/faderL");
+    echo.add(_model->main().faderL);
+    reply.add(echo);
+}
+
+void OscDispatcher::broadcastMainFaderR(OSCBundle &reply) {
+    if (!_model) return;
+    OSCMessage echo("/main/st/mix/faderR");
+    echo.add(_model->main().faderR);
+    reply.add(echo);
+}
+
+void OscDispatcher::broadcastMainLink(OSCBundle &reply) {
+    if (!_model) return;
+    OSCMessage echo("/main/st/mix/link");
+    echo.add((int32_t)(_model->main().link ? 1 : 0));
     reply.add(echo);
 }
 

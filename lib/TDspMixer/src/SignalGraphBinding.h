@@ -47,9 +47,17 @@ public:
                     AudioFilterBiquad *hpf,
                     float sampleRateHz = 44100.0f);
 
-    // Register the main bus amplifier stages (one per L/R side). These
-    // receive the final main gain (fader * on * hostvol).
+    // Register the main bus FADER amplifier stages (one per L/R). These
+    // receive `on ? faderL/faderR : 0`. The meter taps in the project
+    // audio graph sit on these amplifiers' outputs, so meters read post-
+    // fader / pre-hostvol (what you'd see on an X32 main LR meter).
     void setMain(AudioAmplifier *ampL, AudioAmplifier *ampR);
+
+    // Register the main bus HOSTVOL amplifier stages (one per L/R).
+    // These sit DOWNSTREAM of the fader amps in the audio graph and
+    // receive `hostvolEnable ? hostvolValue : 1.0f`. The DAC output
+    // and capture taps come from these amplifiers' outputs.
+    void setMainHostvol(AudioAmplifier *hostvolL, AudioAmplifier *hostvolR);
 
     // Push all model state into the registered audio objects. Call this
     // after a batch of model changes or once during setup() to initialize
@@ -83,8 +91,10 @@ private:
     };
     ChannelBinding _channels[kChannelCount + 1];  // 1-indexed; [0] unused
 
-    AudioAmplifier *_mainAmpL = nullptr;
-    AudioAmplifier *_mainAmpR = nullptr;
+    AudioAmplifier *_mainAmpL    = nullptr;
+    AudioAmplifier *_mainAmpR    = nullptr;
+    AudioAmplifier *_hostvolAmpL = nullptr;
+    AudioAmplifier *_hostvolAmpR = nullptr;
 };
 
 }  // namespace tdsp

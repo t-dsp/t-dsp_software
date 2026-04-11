@@ -62,8 +62,11 @@ AudioAnalyzeRMS      rmsCh4;
 AudioAnalyzeRMS      rmsCh5;
 AudioAnalyzeRMS      rmsCh6;
 
-// Main bus stereo meter taps (post main amplifier, so the meter reads
-// reflect the effective output level including main fader + hostvol).
+// Main bus stereo meter taps — post-main-fader, PRE-hostvol. This is
+// the X32-style "main LR meter" reading: reflects the engineer's fader
+// moves but NOT the Windows volume slider attenuation. Pre-hostvol is
+// the correct tap because the Windows slider is an end-user output
+// trim, not a mix-engine change.
 AudioAnalyzePeak     peakMainL;
 AudioAnalyzePeak     peakMainR;
 AudioAnalyzeRMS      rmsMainL;
@@ -83,11 +86,15 @@ AudioMixer4          pdmMixR;
 AudioMixer4          mixL;
 AudioMixer4          mixR;
 
-// Main amplifiers after the mixers carry the effective main gain
-// (fader × on × optional hostvol) so the main fader is a real knob
-// independent of channel slot gains.
+// Two-stage main bus chain:
+//   mixL → mainAmpL (faderL × on) → hostvolAmpL (hostvol bypass) → DAC
+// The meter taps sit at the output of mainAmpL/R, so they see the
+// post-fader / pre-hostvol signal. SignalGraphBinding drives both
+// stages from MixerModel via applyMain().
 AudioAmplifier       mainAmpL;
 AudioAmplifier       mainAmpR;
+AudioAmplifier       hostvolAmpL;
+AudioAmplifier       hostvolAmpR;
 
 // Capture mixers — line + PDM → USB out. USB in intentionally excluded
 // to prevent self-monitoring.
@@ -135,14 +142,16 @@ AudioConnection      c_micR_cap    (pdmMixR, 0, captureR, 1);
 AudioConnection      c_micR_peak   (pdmMixR, 0, peakCh6, 0);
 AudioConnection      c_micR_rms    (pdmMixR, 0, rmsCh6, 0);
 
-// Main mixers → main amplifiers → DAC (TDM out slots 0 and 2)
+// Main mixers → main fader amps → hostvol amps → DAC (TDM out slots 0, 2)
 AudioConnection      c_mainL_amp   (mixL, 0, mainAmpL, 0);
 AudioConnection      c_mainR_amp   (mixR, 0, mainAmpR, 0);
-AudioConnection      c_mainL_dac   (mainAmpL, 0, tdmOut, 0);
-AudioConnection      c_mainR_dac   (mainAmpR, 0, tdmOut, 2);
+AudioConnection      c_mainL_hv    (mainAmpL, 0, hostvolAmpL, 0);
+AudioConnection      c_mainR_hv    (mainAmpR, 0, hostvolAmpR, 0);
+AudioConnection      c_mainL_dac   (hostvolAmpL, 0, tdmOut, 0);
+AudioConnection      c_mainR_dac   (hostvolAmpR, 0, tdmOut, 2);
 
-// Main bus meter taps — post-main-amplifier so the reading reflects
-// what actually hits the DAC (including fader + hostvol attenuation).
+// Main bus meter taps — on the FADER amp output, pre-hostvol. So the
+// meter tracks the main fader but is unaffected by Windows volume.
 AudioConnection      c_mainL_peak  (mainAmpL, 0, peakMainL, 0);
 AudioConnection      c_mainL_rms   (mainAmpL, 0, rmsMainL, 0);
 AudioConnection      c_mainR_peak  (mainAmpR, 0, peakMainR, 0);
@@ -311,8 +320,12 @@ static void onCliLine(char *line, int length, void *userData) {
             Serial.print("  solo=");
             Serial.println(g_model.channel(n).solo ? 1 : 0);
         }
-        Serial.print("Main  fader=");
-        Serial.print(g_model.main().fader, 3);
+        Serial.print("Main  faderL=");
+        Serial.print(g_model.main().faderL, 3);
+        Serial.print("  faderR=");
+        Serial.print(g_model.main().faderR, 3);
+        Serial.print("  link=");
+        Serial.print(g_model.main().link ? 1 : 0);
         Serial.print("  on=");
         Serial.print(g_model.main().on ? 1 : 0);
         Serial.print("  hostvol.enable=");
@@ -394,6 +407,7 @@ void setup() {
     g_binding.setChannel(5, &mixL, 1, nullptr);  // Mic L
     g_binding.setChannel(6, &mixR, 1, nullptr);  // Mic R
     g_binding.setMain(&mainAmpL, &mainAmpR);
+    g_binding.setMainHostvol(&hostvolAmpL, &hostvolAmpR);
     g_binding.applyAll();  // push initial model defaults into audio objects
 
     g_dispatcher.setModel(&g_model);

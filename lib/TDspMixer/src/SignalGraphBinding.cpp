@@ -27,6 +27,11 @@ void SignalGraphBinding::setMain(AudioAmplifier *ampL, AudioAmplifier *ampR) {
     _mainAmpR = ampR;
 }
 
+void SignalGraphBinding::setMainHostvol(AudioAmplifier *hostvolL, AudioAmplifier *hostvolR) {
+    _hostvolAmpL = hostvolL;
+    _hostvolAmpR = hostvolR;
+}
+
 void SignalGraphBinding::applyAll() {
     if (!_model) return;
     for (int n = 1; n <= kChannelCount; ++n) {
@@ -58,9 +63,13 @@ void SignalGraphBinding::applyAllChannelGains() {
 
 void SignalGraphBinding::applyMain() {
     if (!_model) return;
-    const float gain = _model->effectiveMainGain();
-    if (_mainAmpL) _mainAmpL->gain(gain);
-    if (_mainAmpR) _mainAmpR->gain(gain);
+    // Fader stage: per-side gain, killed by mute.
+    if (_mainAmpL) _mainAmpL->gain(_model->effectiveMainFaderGainL());
+    if (_mainAmpR) _mainAmpR->gain(_model->effectiveMainFaderGainR());
+    // Hostvol stage: shared L/R, bypass when disabled.
+    const float hv = _model->effectiveHostvolGain();
+    if (_hostvolAmpL) _hostvolAmpL->gain(hv);
+    if (_hostvolAmpR) _hostvolAmpR->gain(hv);
 }
 
 void SignalGraphBinding::applyChannelHpf(int n) {
