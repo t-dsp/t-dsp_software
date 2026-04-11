@@ -1,0 +1,92 @@
+getOSCMessage	KEYWORD2
+fill	KEYWORD2
+send	KEYWORD2
+dispatch	KEYWORD2
+route	KEYWORD2
+setTimetag	KEYWORD2
+getTimetag	KEYWORD2
+hasError	KEYWORD2
+add	KEYWORD2
+set	KEYWORD2
+match	KEYWORD2
+fullMatch	KEYWORD2
+getInt	KEYWORD2
+getFloat	KEYWORD2
+getBoolean	KEYWORD2
+getTime	KEYWORD2
+getDouble	KEYWORD2
+getBlob	KEYWORD2
+getString	KEYWORD2
+getAddress	KEYWORD2
+getDataLength	KEYWORD2
+getBlobLength	KEYWORD2
+getType	KEYWORD2
+isInt	KEYWORD2
+isFloat	KEYWORD2
+isBlob	KEYWORD2
+isString	KEYWORD2
+isBoolean	KEYWORD2
+isDouble	KEYWORD2
+isTime	KEYWORD2
+size	KEYWORD2
+bytes	KEYWORD2
+empty	KEYWORD2
+OSCBundle	KEYWORD1
+OSCMessage	KEYWORD1
+OSCMatch	KEYWORD1
+OSCData	KEYWORD1
+endTransmission	KEYWORD1
+endofTransmission	KEYWORD1
+SLIPEncodedSerial	KEYWORD3
+SLIPEncodedUSBSerial	KEYWORD3
+SLIPEncodedSPISerial	KEYWORD3
+SLIPEncodedTCP	KEYWORD3
+oscTime	KEYWORD1
+adcRead	KEYWORD1
+capacitanceRead	KEYWORD1
+inputRead	KEYWORD1
+#######################################
+# Syntax Coloring Map SPI
+#######################################
+#######################################
+# Class
+#######################################
+StreamSPI0	KEYWORD3
+
+#######################################
+# Datatypes	(KEYWORD1)
+#######################################
+
+SPI	KEYWORD1
+StreamSPI	KEYWORD1
+
+#######################################
+# Methods and Functions (KEYWORD2)
+#######################################
+begin	KEYWORD2
+end	KEYWORD2
+transfer	KEYWORD2
+setBitOrder	KEYWORD2
+setDataMode	KEYWORD2
+setClockDivider	KEYWORD2
+
+
+#######################################
+# Constants	(LITERAL1)
+#######################################
+SPI_CLOCK_DIV4	LITERAL1
+SPI_CLOCK_DIV16	LITERAL1
+SPI_CLOCK_DIV64	LITERAL1
+SPI_CLOCK_DIV128	LITERAL1
+SPI_CLOCK_DIV2	LITERAL1
+SPI_CLOCK_DIV8	LITERAL1
+SPI_CLOCK_DIV32	LITERAL1
+SPI_CLOCK_DIV64	LITERAL1
+SPI_MODE0	LITERAL1
+SPI_MODE1	LITERAL1
+SPI_MODE2	LITERAL1
+SPI_MODE3	LITERAL1
+
+
+
+
