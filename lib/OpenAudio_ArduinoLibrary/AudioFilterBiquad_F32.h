@@ -204,6 +204,24 @@ class AudioFilterBiquad_F32 : public AudioStream_F32
         setCoefficients(stage, coeff);
         }
 
+    // Peaking (parametric) EQ — RBJ Audio EQ Cookbook formulas.
+    // At gain = 0 dB this reduces to H(z) = 1 at all frequencies.
+    void setPeakingEq(uint32_t stage, float frequency, float gain, float q) {
+        double coeff[5];
+        double a = pow(10.0, gain/40.0);                    // A = sqrt(linear gain)
+        double w0 = frequency * (2 * 3.141592654 / sampleRate_Hz);
+        double sinW0 = sin(w0);
+        double cosW0 = cos(w0);
+        double alpha = sinW0 / ((double)q * 2.0);
+        double scale = 1.0 / (1.0 + alpha/a);               // 1 / a0
+        /* b0 */ coeff[0] = (1.0 + alpha*a) * scale;
+        /* b1 */ coeff[1] = (-2.0 * cosW0)  * scale;
+        /* b2 */ coeff[2] = (1.0 - alpha*a) * scale;
+        /* a1 */ coeff[3] = -(-2.0 * cosW0) * scale;        // CMSIS sign convention
+        /* a2 */ coeff[4] = -(1.0 - alpha/a) * scale;       // CMSIS sign convention
+        setCoefficients(stage, coeff);
+        }
+
     void setLowShelf(uint32_t stage, float frequency, float gain, float slope) {
         double coeff[5];
         double a = pow(10.0, gain/40.0);
