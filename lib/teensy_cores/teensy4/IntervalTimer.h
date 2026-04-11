@@ -33,6 +33,7 @@
 #define __INTERVALTIMER_H__
 
 #include <stddef.h>
+#include <type_traits>  // T-DSP local patch: needed for std::is_arithmetic_v, std::is_integral_v, std::is_floating_point_v used below. Upstream omits this and only compiles when something else transitively pulls type_traits in. Should be PR'd to PaulStoffregen/cores. Tracked in vendored.json localPatches.
 #include "imxrt.h"
 #if TEENSYDUINO >= 159
 #include "inplace_function.h"

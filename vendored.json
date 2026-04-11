@@ -1,0 +1,88 @@
+{
+  "$schema": "./tools/vendored.schema.json",
+  "_doc": "Manifest of vendored external libraries. See planning/osc-mixer-foundation/05-vendoring-strategy.md for the workflow. Updated by tools/vendor.py.",
+  "vendoredLibraries": {
+    "OSCAudio": {
+      "prefix": "lib/OSCAudio",
+      "remote": "https://github.com/h4yn0nnym0u5e/OSCAudio.git",
+      "branch": "trunk",
+      "pinnedCommit": "dd072b1ceb963d877cefd0653fdb7036ac815f19",
+      "addedDate": "2026-04-11",
+      "license": "MIT",
+      "purpose": "OSC dispatch helpers (OSCUtils, isMine/isTarget), OSC<Class> Audio Library wrappers, OSCSubscribe machinery, /teensy*/audio/ debug surface",
+      "localPatches": [],
+      "upstreamFork": null,
+      "contributionTargets": [
+        "F32 wrapper extensions for OpenAudio classes",
+        "SLIP-over-USB-CDC + multiplexed-debug-text example"
+      ]
+    },
+    "OpenAudio_ArduinoLibrary": {
+      "prefix": "lib/OpenAudio_ArduinoLibrary",
+      "remote": "https://github.com/chipaudette/OpenAudio_ArduinoLibrary.git",
+      "branch": "master",
+      "pinnedCommit": "388a15596b19b71900dca4f2ce389ca25c7fa0bd",
+      "addedDate": "2026-04-11",
+      "license": "MIT",
+      "purpose": "F32 (32-bit float) audio path for the entire mixer signal graph; provides AudioMixer4_F32, AudioFilterBiquad_F32, AudioInputUSB_F32, AudioOutputUSB_F32, etc.",
+      "localPatches": [
+        {
+          "description": "Add setPeakingEq(stage, frequency, gain, q) to AudioFilterBiquad_F32.h. Completes the RBJ cookbook convenience set by adding peaking (parametric) EQ — the most common EQ type in professional channel strips and the missing piece alongside setLowpass / setHighpass / setBandpass / setNotch / setLowShelf / setHighShelf. Needed for TDspMixer's /ch/NN/eq/B/type 'peq' value so SignalGraphBinding can configure the band with one call instead of hand-computing coefficients and using setCoefficients() directly. Math verified against musicdsp.org/files/Audio-EQ-Cookbook.txt peakingEQ section; unity case (gain=0 dB) reduces to H(z)=1 at all frequencies.",
+          "appliedDate": "2026-04-11"
+        }
+      ],
+      "upstreamFork": null,
+      "contributionTargets": [
+        "Add top-level LICENSE file (MIT terms currently in source headers only)",
+        "Upstream PR for setPeakingEq (applied locally; needs fork remote + PR before upstreamFork can be set)"
+      ]
+    },
+    "Audio": {
+      "prefix": "lib/Audio",
+      "remote": "https://github.com/PaulStoffregen/Audio.git",
+      "branch": "master",
+      "pinnedCommit": "bd7de878a802841857a762e855e55fcc9da37fa2",
+      "addedDate": "2026-04-11",
+      "license": "MIT",
+      "purpose": "Stock Teensy Audio Library; vendored to allow pinning to specific commits and applying uncommitted PRs (notably multi-channel USB extensions). Used via lib_ignore=Audio in platformio.ini so PlatformIO uses our copy instead of the framework-bundled one.",
+      "localPatches": [],
+      "upstreamFork": null,
+      "contributionTargets": [
+        "Multi-channel USB audio extensions to AudioInputUSB / AudioOutputUSB (after Spike 2)"
+      ]
+    },
+    "CNMAT_OSC": {
+      "prefix": "lib/CNMAT_OSC",
+      "remote": "https://github.com/CNMAT/OSC.git",
+      "branch": "master",
+      "pinnedCommit": "6cea10833c1c0caa3afc419002533b50c5f613c5",
+      "addedDate": "2026-04-11",
+      "license": "Custom (see LICENSE)",
+      "purpose": "Upstream CNMAT/OSC. Vendored because the framework-bundled Teensyduino fork is older than OSCAudio expects (missing 2-arg getString, getBlobLength, etc.). Library directory name is 'OSC' per library.properties; PlatformIO references it as such. Used via lib_ignore=OSC in platformio.ini so PlatformIO uses our copy.",
+      "localPatches": [],
+      "upstreamFork": null,
+      "contributionTargets": []
+    },
+    "teensy_cores": {
+      "prefix": "lib/teensy_cores",
+      "remote": "https://github.com/PaulStoffregen/cores.git",
+      "branch": "master",
+      "pinnedCommit": "7659e4122861b29888341ad6628f7e16c3a08b65",
+      "addedDate": "2026-04-11",
+      "license": "MIT",
+      "purpose": "Teensy 4.x core source. Vendored to enable modifications to USB descriptors (multi-channel USB) and USB audio buffers/feature units (Windows recording slider). Overlaid onto PlatformIO framework cache via tools/cores_overlay.py before each compile.",
+      "localPatches": [
+        {
+          "description": "Add #include <type_traits> to cores/teensy4/IntervalTimer.h. The upstream file uses std::is_arithmetic_v, std::is_integral_v, std::is_floating_point_v, and `if constexpr` (all C++17 features) but does not include the <type_traits> header that declares them. The file only compiles when something else in the include chain transitively pulls type_traits in first. PlatformIO's standalone compile of IntervalTimer.cpp does not get that lucky transitive include and fails to find the symbols. The patch is a minimal one-line include addition. Should be PR'd to PaulStoffregen/cores as an upstream completeness fix unrelated to T-DSP's specific use case.",
+          "appliedDate": "2026-04-11"
+        }
+      ],
+      "upstreamFork": null,
+      "contributionTargets": [
+        "PR upstream the IntervalTimer.h <type_traits> include (real upstream completeness bug)",
+        "Multi-channel USB audio support (Spike 2 outcome)",
+        "USB Audio Class feature unit on input terminal for Windows recording slider (Spike 3 outcome)"
+      ]
+    }
+  }
+}

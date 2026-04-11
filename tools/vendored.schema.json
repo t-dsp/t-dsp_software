@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://t-dsp.local/vendored.schema.json",
+  "title": "T-DSP vendored libraries manifest",
+  "description": "Schema for vendored.json — tracks git-subtree-vendored external libraries",
+  "type": "object",
+  "required": ["vendoredLibraries"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "_doc": { "type": "string" },
+    "vendoredLibraries": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["prefix", "remote", "branch", "pinnedCommit", "addedDate", "license", "purpose"],
+        "properties": {
+          "prefix": {
+            "type": "string",
+            "description": "Path under the repo root where the subtree lives, e.g. lib/OSCAudio"
+          },
+          "remote": {
+            "type": "string",
+            "format": "uri",
+            "description": "Upstream git remote URL"
+          },
+          "branch": {
+            "type": "string",
+            "description": "Upstream branch tracked (e.g. master, main, trunk)"
+          },
+          "pinnedCommit": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$",
+            "description": "Full upstream commit hash currently in the subtree"
+          },
+          "addedDate": {
+            "type": "string",
+            "format": "date",
+            "description": "ISO date the library was first vendored"
+          },
+          "license": {
+            "type": "string",
+            "description": "SPDX-style license identifier"
+          },
+          "purpose": {
+            "type": "string",
+            "description": "What this library is used for in T-DSP"
+          },
+          "localPatches": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["description"],
+              "properties": {
+                "description": { "type": "string" },
+                "appliedDate": { "type": "string", "format": "date" },
+                "patchFile": { "type": "string" },
+                "upstreamPr": { "type": "string", "format": "uri" }
+              }
+            },
+            "description": "Local modifications applied on top of pinnedCommit"
+          },
+          "upstreamFork": {
+            "type": ["string", "null"],
+            "description": "URL of our fork remote for sending PRs back upstream"
+          },
+          "contributionTargets": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Planned contributions back to upstream"
+          }
+        }
+      }
+    }
+  }
+}
