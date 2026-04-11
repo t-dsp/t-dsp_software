@@ -35,13 +35,29 @@ let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
 let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 let readLoopAborted = false;
 
+// Addresses whose traffic is high-frequency and should NOT be logged to
+// the serial console pane. Meter blobs stream at 30 Hz and the channel
+// strips display them visually — logging every one saturates the main
+// thread and fills the scrollback with noise. Dispatcher still handles
+// them; we just don't write them to the log.
+const LOG_BLOCKED_ADDRESSES = new Set<string>([
+  '/meters/input',
+  '/meters/output',
+  '/meters/gr',
+  // /main/st/hostvol/value can also fire frequently when the user drags
+  // the Windows volume slider; allow it through for now but add here if
+  // it becomes a problem.
+]);
+
 const demuxer = new StreamDemuxer(
   (frame) => {
     try {
       const messages = decodePacket(frame);
       for (const m of messages) {
         dispatcher.handleIncoming(m);
-        log(`< ${m.address}${m.types ? ' ' + m.types : ''} ${m.args.map(formatArg).join(' ')}`);
+        if (!LOG_BLOCKED_ADDRESSES.has(m.address)) {
+          log(`< ${m.address}${m.types ? ' ' + m.types : ''} ${m.args.map(formatArg).join(' ')}`);
+        }
       }
     } catch (e) {
       log(`! decode error: ${(e as Error).message}`);
