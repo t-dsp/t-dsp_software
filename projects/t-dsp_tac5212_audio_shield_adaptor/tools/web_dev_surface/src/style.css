@@ -172,13 +172,26 @@ select, input[type="text"] {
   overflow: hidden;
 }
 
+/* Meter fill: sized to the full meter height and shrunk via
+ * transform: scaleY(0..1) from cells.ts. Transform-origin: bottom
+ * means scaleY(0) collapses the bar to the bottom edge.
+ *
+ * Why transform and not height: `height` is a layout property —
+ * every write triggers a forced reflow. `transform` is a compositor
+ * property — writes never touch layout/paint, the GPU handles them.
+ * At 30 Hz × 20 meters this is ~600 saved layouts/sec on the main
+ * thread. No CSS transition: 30 Hz updates are already smooth, and
+ * an overlapping transition would cause the compositor to never
+ * reach idle. */
 .meter-fill {
   position: absolute;
   bottom: 0;
   left: 0;
   right: 0;
-  height: 0;
-  transition: height 60ms linear;
+  height: 100%;
+  transform: scaleY(0);
+  transform-origin: bottom;
+  will-change: transform;
 }
 
 .meter-fill.peak {

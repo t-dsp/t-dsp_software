@@ -45,12 +45,16 @@ export function makeStaticName(text: string): HTMLElement {
 // near-invisible 1% you'd get from a linear 0..1 map.
 const METER_FLOOR_DB = -60;
 
-function levelToPercent(v: number): number {
+// Returns 0..1 (NOT 0..100) — used as the scaleY factor on the
+// transform-based meter fill. The fill div is sized to the full
+// meter height and `scaleY(n)` shrinks it from the bottom (set
+// transform-origin: bottom in CSS).
+function levelToScale(v: number): number {
   if (v <= 0) return 0;
   const db = 20 * Math.log10(v);
   if (db <= METER_FLOOR_DB) return 0;
-  if (db >= 0) return 100;
-  return ((db - METER_FLOOR_DB) / -METER_FLOOR_DB) * 100;
+  if (db >= 0) return 1;
+  return (db - METER_FLOOR_DB) / -METER_FLOOR_DB;
 }
 
 export function makeMeter(peak: Signal<number>, rms: Signal<number>): HTMLElement {
@@ -61,11 +65,15 @@ export function makeMeter(peak: Signal<number>, rms: Signal<number>): HTMLElemen
   const rmsFill = document.createElement('div');
   rmsFill.className = 'meter-fill rms';
   wrap.append(rmsFill, peakFill);
+  // Use transform: scaleY instead of height — transforms are
+  // compositor-only (no layout, no paint, no style recalc on the
+  // meter subtree). At 30 Hz × 20 meters this saves ~600 forced
+  // layouts/sec. transform-origin is set to `bottom` in style.css.
   peak.subscribe((p) => {
-    peakFill.style.height = `${levelToPercent(p)}%`;
+    peakFill.style.transform = `scaleY(${levelToScale(p)})`;
   });
   rms.subscribe((r) => {
-    rmsFill.style.height = `${levelToPercent(r)}%`;
+    rmsFill.style.transform = `scaleY(${levelToScale(r)})`;
   });
   return wrap;
 }
