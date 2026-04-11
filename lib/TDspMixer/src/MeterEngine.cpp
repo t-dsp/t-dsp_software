@@ -21,6 +21,7 @@ void MeterEngine::setChannel(int n, AudioAnalyzePeak *peak, AudioAnalyzeRMS *rms
 }
 
 bool MeterEngine::tick(OSCBundle &reply) {
+    if (!_enabled) return false;
     const uint32_t now = millis();
     if (now - _lastPollMs < _pollIntervalMs) return false;
     _lastPollMs = now;

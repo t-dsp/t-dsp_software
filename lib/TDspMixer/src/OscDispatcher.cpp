@@ -3,6 +3,7 @@
 #include "MixerModel.h"
 #include "SignalGraphBinding.h"
 #include "CodecPanel.h"
+#include "MeterEngine.h"
 
 #include <OSCMessage.h>
 #include <OSCBundle.h>
@@ -275,11 +276,39 @@ void OscDispatcher::handleMainHostvolEnable(OSCMessage &msg, OSCBundle &reply) {
 }
 
 void OscDispatcher::handleSub(OSCMessage &msg, OSCBundle &reply) {
-    // For MVP, /sub is accepted (so clients don't error) but meters always
-    // stream at 30 Hz regardless of subscription state. Proper subscription
-    // lifecycle is a post-MVP addition (SubscriptionMgr / lifetime timers).
-    (void)msg;
+    // Pattern the web_dev_surface client sends (see dispatcher.ts):
+    //   /sub sis "addSub"      interval_ms   "/meters/input"
+    //   /sub ss  "unsubscribe"               "/meters/input"
+    //
+    // For MVP we only care about meter subscriptions — one global enable
+    // bit on MeterEngine. First string arg is the verb; the last string
+    // arg is the target address pattern. Anything that isn't addSub or
+    // unsubscribe is silently dropped.
     (void)reply;
+    if (msg.size() < 1 || !msg.isString(0)) return;
+
+    char verb[16];
+    int verbLen = msg.getString(0, verb, sizeof(verb));
+    verb[(verbLen < (int)sizeof(verb)) ? verbLen : (int)sizeof(verb) - 1] = '\0';
+
+    // Find the last string arg (the target pattern). For addSub it's at
+    // index 2 (after the int interval); for unsubscribe it's at index 1.
+    const int lastArg = msg.size() - 1;
+    if (lastArg < 1 || !msg.isString(lastArg)) return;
+
+    char target[64];
+    int targetLen = msg.getString(lastArg, target, sizeof(target));
+    target[(targetLen < (int)sizeof(target)) ? targetLen : (int)sizeof(target) - 1] = '\0';
+
+    const bool isMeterTarget = (strncmp(target, "/meters/", 8) == 0);
+
+    if (isMeterTarget && _meterEngine) {
+        if (strcmp(verb, "addSub") == 0) {
+            _meterEngine->setEnabled(true);
+        } else if (strcmp(verb, "unsubscribe") == 0) {
+            _meterEngine->setEnabled(false);
+        }
+    }
 }
 
 void OscDispatcher::handleInfo(OSCMessage &msg, OSCBundle &reply) {

@@ -384,6 +384,7 @@ void setup() {
 
     g_dispatcher.setModel(&g_model);
     g_dispatcher.setBinding(&g_binding);
+    g_dispatcher.setMeterEngine(&g_meters);
     g_dispatcher.registerCodecPanel(&g_codecPanel);
 
     g_transport.begin(115200);

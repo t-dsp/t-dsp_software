@@ -41,6 +41,7 @@ namespace tdsp {
 class MixerModel;
 class SignalGraphBinding;
 class CodecPanel;
+class MeterEngine;
 
 class OscDispatcher {
 public:
@@ -48,6 +49,7 @@ public:
 
     void setModel(MixerModel *model)               { _model = model; }
     void setBinding(SignalGraphBinding *binding)   { _binding = binding; }
+    void setMeterEngine(MeterEngine *engine)       { _meterEngine = engine; }
     void registerCodecPanel(CodecPanel *panel)     { _codecPanel = panel; }
 
     // Route an incoming OSCMessage. Called from SlipOscTransport's OSC
@@ -69,9 +71,10 @@ public:
                               const float *peakRmsPairs, int pairCount);
 
 private:
-    MixerModel         *_model      = nullptr;
-    SignalGraphBinding *_binding    = nullptr;
-    CodecPanel         *_codecPanel = nullptr;
+    MixerModel         *_model       = nullptr;
+    SignalGraphBinding *_binding     = nullptr;
+    CodecPanel         *_codecPanel  = nullptr;
+    MeterEngine        *_meterEngine = nullptr;
 
     // Per-leaf handlers. Called from route() after matching the address.
     // Each mutates the model, calls binding, and appends echo to reply.

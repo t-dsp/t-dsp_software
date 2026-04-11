@@ -4,10 +4,13 @@
 // wires into the audio graph, packs peak+RMS pairs into a float array in
 // channel order, and hands the buffer to OscDispatcher for blob emission.
 //
-// MVP v1 simplification: meters always stream at ~30 Hz regardless of
-// subscription state. Clients can ignore /meters/input if they don't want
-// to display them. A future SubscriptionMgr milestone will add proper
-// subscribe/unsubscribe lifecycle to gate the stream.
+// Streaming is gated by a single enable bit (setEnabled / isEnabled).
+// Clients toggle the stream by sending /sub addSub … /meters/input and
+// /sub unsubscribe /meters/input — handled by OscDispatcher::handleSub
+// which flips this engine's enable flag. Default: disabled. A future
+// SubscriptionMgr milestone will add per-client lifetime tracking so
+// multiple clients can subscribe independently; for MVP a single global
+// flag is enough.
 
 #pragma once
 
@@ -38,6 +41,14 @@ public:
     // Poll interval in milliseconds (default 33 ms ≈ 30 Hz).
     void setPollIntervalMs(uint32_t ms) { _pollIntervalMs = ms; }
 
+    // Enable/disable meter blob streaming. Off by default; the client
+    // turns it on by sending /sub addSub … /meters/input (handled by
+    // OscDispatcher::handleSub which calls this method), and turns it
+    // off with /sub unsubscribe /meters/input. When disabled, tick()
+    // returns false immediately and no blob is emitted.
+    void setEnabled(bool enabled) { _enabled = enabled; }
+    bool isEnabled() const        { return _enabled; }
+
     // Call from loop() every iteration. If the poll interval has elapsed,
     // samples all analyzers and emits a /meters/input blob via the
     // dispatcher's broadcast helper. The caller must flush the resulting
@@ -48,6 +59,7 @@ public:
 
 private:
     OscDispatcher    *_dispatcher     = nullptr;
+    bool              _enabled        = false;
     uint32_t          _pollIntervalMs = 33;
     uint32_t          _lastPollMs     = 0;
 
