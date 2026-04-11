@@ -125,7 +125,7 @@ export class Dispatcher {
 
     // /meters/input b — blob of float32 pairs (peak, rms) per channel,
     // big-endian, in declared channel order. See 02-osc-protocol.md "Meters
-    // are blobs, not individual messages." Layout will be locked at M8.
+    // are blobs, not individual messages."
     if (a === '/meters/input' && msg.types === 'b') {
       const blob = msg.args[0] as Uint8Array;
       const dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
@@ -133,6 +133,20 @@ export class Dispatcher {
       for (let i = 0; i < pairCount; i++) {
         this.state.channels[i].peak.set(dv.getFloat32(i * 8, false));
         this.state.channels[i].rms.set(dv.getFloat32(i * 8 + 4, false));
+      }
+      return;
+    }
+
+    // /meters/output b — blob of 2 float32 pairs for the stereo main
+    // bus: [L peak, L rms, R peak, R rms], big-endian, 16 bytes total.
+    if (a === '/meters/output' && msg.types === 'b') {
+      const blob = msg.args[0] as Uint8Array;
+      if (blob.length >= 16) {
+        const dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+        this.state.main.peakL.set(dv.getFloat32(0,  false));
+        this.state.main.rmsL.set( dv.getFloat32(4,  false));
+        this.state.main.peakR.set(dv.getFloat32(8,  false));
+        this.state.main.rmsR.set( dv.getFloat32(12, false));
       }
       return;
     }

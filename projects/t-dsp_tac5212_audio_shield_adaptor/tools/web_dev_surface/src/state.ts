@@ -43,6 +43,12 @@ export interface ChannelState {
 export interface BusState {
   fader: Signal<number>;
   on: Signal<boolean>;
+  // Stereo meters for the main bus — populated from /meters/output
+  // blobs (2 pairs: L peak/rms, R peak/rms).
+  peakL: Signal<number>;
+  rmsL: Signal<number>;
+  peakR: Signal<number>;
+  rmsR: Signal<number>;
 }
 
 export interface MixerState {
@@ -86,6 +92,10 @@ export function createMixerState(channelCount: number): MixerState {
     main: {
       fader: new Signal(0.75),
       on: new Signal(true),
+      peakL: new Signal(0),
+      rmsL: new Signal(0),
+      peakR: new Signal(0),
+      rmsR: new Signal(0),
     },
     connected: new Signal(false),
     metersOn: new Signal(false),

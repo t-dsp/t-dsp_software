@@ -162,6 +162,11 @@ select, input[type="text"] {
   border-color: #4a4a4a;
 }
 
+.meter-pair {
+  display: flex;
+  gap: 2px;
+}
+
 /* ---------- codec panel ---------- */
 
 .codec-section {
