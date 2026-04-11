@@ -120,18 +120,33 @@ static void codecConfigureAdcInputs() {
     writeReg(REG_ADC_CH2_CFG0, ADC_CFG0_SE_INP_ONLY);
 }
 
-// 6. Configure DAC outputs as differential, line-driver level.
+// 6. Configure DAC outputs for stereo headphone use on this board:
+//    OUT1P = TRS tip (left channel), OUT2P = TRS ring (right channel),
+//    sleeve = GND, OUTxM pins unused. Each output runs in "mono SE at OUTxP"
+//    routing mode and uses the 16Ω headphone driver.
+//
+//    NOTE: writing 0x60 (HP drive + 0 dB level_ctrl) is correct ONLY because
+//    the other bits of CFG1/CFG2 are at their POR reset values at this point
+//    in setup. A runtime setter that changes driver mode later must use
+//    read-modify-write to preserve those bits.
 static void codecConfigureDacOutputs() {
-    writeReg(REG_OUT1_CFG0, OUT_CFG0_DAC_DIFF);
-    writeReg(REG_OUT1_CFG1, OUT_DRV_LINE_0DB);
-    writeReg(REG_OUT1_CFG2, OUT_DRV_LINE_0DB);
-    writeReg(REG_OUT2_CFG0, OUT_CFG0_DAC_DIFF);
-    writeReg(REG_OUT2_CFG1, OUT_DRV_LINE_0DB);
-    writeReg(REG_OUT2_CFG2, OUT_DRV_LINE_0DB);
+    writeReg(REG_OUT1_CFG0, OUT_SRC_DAC | OUT_ROUTE_MONO_SE_P);  // 0x28
+    writeReg(REG_OUT1_CFG1, OUT_CFG1_HP_0DB);                    // 0x60
+    writeReg(REG_OUT1_CFG2, OUT_CFG1_HP_0DB);                    // OUT1M unused, safe
+    writeReg(REG_OUT2_CFG0, OUT_SRC_DAC | OUT_ROUTE_MONO_SE_P);  // 0x28
+    writeReg(REG_OUT2_CFG1, OUT_CFG1_HP_0DB);                    // 0x60
+    writeReg(REG_OUT2_CFG2, OUT_CFG1_HP_0DB);                    // OUT2M unused, safe
 }
 
-// 7. Set all four DAC digital volumes to 0 dB. (USB host volume tracking
-//    in loop() overrides this once playback starts.)
+// 7. Set all four DAC digital volumes to 0 dB (unity).
+//    Windows does its own software attenuation before streaming audio to the
+//    USB endpoint, so the user's host volume slider already affects what
+//    arrives at the codec. The DAC just passes it through at unity. The HP
+//    driver (16 Ω mode) handles the final voltage / current delivery.
+//
+//    Note: 0 dB (register 201 = 0xC9) is the TAC5212 POR default for all
+//    four DAC channels, so this is explicit documentation more than a
+//    functional write.
 static void codecSetDefaultDacVolume() {
     writeReg(REG_DAC_L1_VOL, DAC_VOL_0DB);
     writeReg(REG_DAC_R1_VOL, DAC_VOL_0DB);
@@ -227,7 +242,25 @@ void setup() {
 
 bool micOn = false;
 bool lineOn = false;
-float lastUsbVolume = -1.0;
+
+// Host volume scaling.
+//
+// Teensy's USB Audio Class descriptor declares the playback volume feature
+// unit as unsigned 0..0xFFF, while UAC 1.0 expects signed Q8.8 dB. Windows
+// interprets this mismatch by squeezing its linear-amplitude slider into a
+// tiny corner of the 0..1 float range that `usbIn.volume()` returns — on
+// this machine, slider 100% reads as ~0.062 and slider 50% as ~0.028.
+//
+// USB_VOL_SCALE un-squeezes that by multiplying the observed value by
+// 1/0.062 ≈ 16.13 and clamping to [0, 1], giving us a usable linear-
+// amplitude gain 0..1 that tracks the host slider.
+//
+// The scale factor is empirical; if you see `USB host vol (raw)` in the
+// `s` status dump max out at a different value on a different machine,
+// update this constant.
+constexpr float USB_VOL_SCALE = 16.13f;  // 1 / 0.062
+float hostVolGain  = 1.0f;  // current scaled host gain, updated from loop()
+float lastUsbVolRaw = -1.0f;  // last raw usbIn.volume() value we processed
 
 // Active channel for +/- adjustments
 enum ActiveCh { CH_NONE, CH_USB, CH_MIC, CH_LINE };
@@ -256,7 +289,9 @@ void applyChannel(ActiveCh ch, int vol) {
     switch (ch) {
         case CH_USB:
             usbVol = vol;
-            g = vol / 100.0f;
+            // USB channel is the product of CLI usbVol and the Windows host
+            // slider (hostVolGain). Either one can attenuate independently.
+            g = (vol / 100.0f) * hostVolGain;
             mixL.gain(0, g);
             mixR.gain(0, g);
             break;
@@ -317,24 +352,18 @@ void bumpActive(int delta) {
 }
 
 void loop() {
-    // Track USB host volume slider → TAC5212 DAC digital volume.
-    // The host sends the playback volume via the USB Audio Class feature unit.
-    // We map 0.0..1.0 onto a -40 dB..0 dB range on the codec's DAC volume regs.
-    float vol = usbIn.volume();
-    if (vol != lastUsbVolume) {
-        lastUsbVolume = vol;
-        uint8_t regVal;
-        if (vol < 0.01f) {
-            regVal = 0;  // mute
-        } else {
-            // DAC volume: register 201 = 0 dB, step is 0.5 dB.
-            // 121 = -40 dB, 201 = 0 dB.
-            regVal = (uint8_t)(121 + vol * 80);
-        }
-        writeReg(REG_DAC_L1_VOL, regVal);
-        writeReg(REG_DAC_R1_VOL, regVal);
-        writeReg(REG_DAC_L2_VOL, regVal);
-        writeReg(REG_DAC_R2_VOL, regVal);
+    // Track the Windows host volume slider via usbIn.volume() and apply it
+    // to the USB channel's mixer gain. DAC stays at unity; all host-side
+    // volume happens in the software mixer.
+    float raw = usbIn.volume();
+    if (raw != lastUsbVolRaw) {
+        lastUsbVolRaw = raw;
+        float scaled = raw * USB_VOL_SCALE;
+        if (scaled > 1.0f) scaled = 1.0f;
+        hostVolGain = scaled;
+        float g = (usbVol / 100.0f) * hostVolGain;
+        mixL.gain(0, g);
+        mixR.gain(0, g);
     }
 
     while (Serial.available()) {
@@ -382,7 +411,8 @@ void loop() {
                 Serial.print(AudioMemoryUsage());
                 Serial.print("/"); Serial.println(AudioMemoryUsageMax());
                 Serial.print("CPU: "); Serial.print(AudioProcessorUsage(), 2); Serial.println("%");
-                Serial.print("USB host vol: "); Serial.println(lastUsbVolume, 3);
+                Serial.print("USB host vol raw: "); Serial.print(usbIn.volume(), 4);
+                Serial.print("  scaled: "); Serial.println(hostVolGain, 3);
                 Serial.print("Active ch: "); Serial.println(chName(activeCh));
                 Serial.print("USB="); Serial.print(usbVol);
                 Serial.print("%  MIC="); Serial.print(micVol);

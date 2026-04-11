@@ -122,5 +122,5 @@ Line In (codec)  ────▶ │ captureL[0] / captureR[0]        │
 ## Files
 
 - [src/main.cpp](src/main.cpp) — main firmware
-- [lib/TAC5112/](lib/TAC5112/) — Houston's TAC5112 control library (register-compatible with TAC5212)
+- [src/tac5212_regs.h](src/tac5212_regs.h) — TAC5212 register addresses and bitfield constants
 - [platformio.ini](platformio.ini) — build config (uses `USB_MIDI_AUDIO_SERIAL` USB type)

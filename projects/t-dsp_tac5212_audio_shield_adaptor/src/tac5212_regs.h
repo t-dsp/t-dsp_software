@@ -92,17 +92,51 @@ constexpr uint8_t INTF_CFG4_GPI1_PDM_3_4 = 0x03;
 // ignore INxM in differential mode would cancel a mono line input.
 constexpr uint8_t ADC_CFG0_SE_INP_ONLY = 0x80;
 
-// OUTx_CFG0: DAC source, differential output
-constexpr uint8_t OUT_CFG0_DAC_DIFF = 0x20;
-// OUTxP/OUTxM driver: line output, 0 dB level
-constexpr uint8_t OUT_DRV_LINE_0DB  = 0x20;
+// --- OUTx_CFG0 / OUTx_CFG1 / OUTx_CFG2 bitfield constants ---
+//
+// Values verified against TAC5212 datasheet SLASF23A §8.1.1.86 (OUTx_CFG0)
+// and §8.1.1.87 (OUTx_CFG1). Re-verify if extending the bit layout.
+//
+// OUTx_CFG0 layout:
+//   bits[7:5] OUTx_SRC   — 001b = DAC chain (POR default)
+//   bits[4:2] OUTx_CFG   — routing mode (diff / stereo-SE / mono-SE-P / ...)
+//   bit [1]   OUTx_VCOM  — 0 = 0.6×VREF, 1 = AVDD/2
+//   bit [0]   reserved
+//
+// OUTx_CFG1/CFG2 layout (per-driver for OUTxP and OUTxM respectively):
+//   bits[7:6] OUTxP_DRIVE     — 00 = line 300Ω, 01 = HP 16Ω, 10 = 4Ω, 11 = FD recv
+//   bits[5:3] OUTxP_LVL_CTRL  — 100b = 0 dB; MUST stay at 100b outside analog
+//                               bypass mode, other values are "Reserved; Don't use"
+//   bits[2:0] misc (bypass impedance / bypass cfg / DAC BW mode)
+
+// Source select (bits[7:5] of OUTx_CFG0)
+constexpr uint8_t OUT_SRC_DAC         = 0x20;  // 001 << 5 — DAC chain
+
+// Routing mode (bits[4:2] of OUTx_CFG0)
+constexpr uint8_t OUT_ROUTE_DIFF      = 0x00;  // 000 << 2
+constexpr uint8_t OUT_ROUTE_STEREO_SE = 0x04;  // 001 << 2
+constexpr uint8_t OUT_ROUTE_MONO_SE_P = 0x08;  // 010 << 2 — DAC1A+DAC1B summed to OUTxP
+constexpr uint8_t OUT_ROUTE_MONO_SE_M = 0x0C;  // 011 << 2
+
+// Driver type (bits[7:6] of OUTx_CFG1/CFG2)
+constexpr uint8_t OUT_DRV_LINE        = 0x00;  // 00 — 300Ω line driver
+constexpr uint8_t OUT_DRV_HP          = 0x40;  // 01 — 16Ω headphone driver
+constexpr uint8_t OUT_DRV_4OHM        = 0x80;  // 10 — 4Ω speaker driver
+constexpr uint8_t OUT_DRV_RECEIVER    = 0xC0;  // 11 — FD receiver driver
+
+// Level control (bits[5:3] of OUTx_CFG1/CFG2) — MUST preserve for DAC playback.
+constexpr uint8_t OUT_LVL_CTRL_0DB    = 0x20;  // 100 << 3 — POR default, safe value
+
+// Convenience: full byte value for "headphone driver, 0 dB level, other bits = POR".
+constexpr uint8_t OUT_CFG1_HP_0DB     = OUT_DRV_HP | OUT_LVL_CTRL_0DB;  // = 0x60
 
 // DAC digital volume register encoding (per datasheet):
 //   0   = mute
 //   201 = 0 dB (default unity)
 //   255 = +27 dB
 // Step is 0.5 dB per LSB. Formula: reg = 201 + dB*2.
-constexpr uint8_t DAC_VOL_0DB = 201;
+constexpr uint8_t DAC_VOL_0DB        = 201;
+constexpr uint8_t DAC_VOL_MINUS_20DB = 161;  // safe cold-boot level into 16Ω HP
 
 // CH_EN: enable IN1..4 + OUT1..4 (top 4 bits = inputs, low 4 bits = outputs)
 constexpr uint8_t CH_EN_ALL = 0xFF;
