@@ -62,6 +62,13 @@ export class Dispatcher {
     this.sendMsg('/sub', 'ss', ['unsubscribe', '/meters/input']);
     this.sendMsg('/sub', 'ss', ['unsubscribe', '/meters/output']);
     this.state.metersOn.set(false);
+    // Reset all meter displays to 0 so the bars don't look frozen at
+    // whatever the last sampled value was. The firmware has stopped
+    // streaming so no more blobs will arrive to clear them.
+    for (const ch of this.state.channels) {
+      ch.peak.set(0);
+      ch.rms.set(0);
+    }
   }
 
   // Used by the raw OSC input field. Bypasses the typed setters above.
