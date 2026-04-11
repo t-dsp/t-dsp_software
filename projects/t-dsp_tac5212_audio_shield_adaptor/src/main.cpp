@@ -327,6 +327,17 @@ static void onCliLine(char *line, int length, void *userData) {
         Serial.print(usbIn.volume(), 4);
         Serial.print("  scaled: ");
         Serial.println(g_model.main().hostvolValue, 3);
+        // Capture-side feature unit (USB FU 0x30) — driven by the Windows
+        // recording-device slider. Added by the teensy4 core patch on
+        // branch teensy4-usb-audio-capture-feature-unit. If this prints
+        // 0.5000 / mute=0 right after enumeration, the descriptor is
+        // accepted; if it changes when you drag the slider in Windows
+        // Sound -> Recording -> Properties -> Levels, the SET_CUR
+        // dispatch is routing to the right entity ID.
+        Serial.print("USB capture vol raw: ");
+        Serial.print(usbOut.volume(), 4);
+        Serial.print("  mute: ");
+        Serial.println(usbOut.mute() ? 1 : 0);
         for (int n = 1; n <= tdsp::kChannelCount; ++n) {
             Serial.print("  ");
             Serial.print(g_model.channel(n).name);
