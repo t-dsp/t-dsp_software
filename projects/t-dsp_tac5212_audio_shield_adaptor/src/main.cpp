@@ -62,6 +62,13 @@ AudioAnalyzeRMS      rmsCh4;
 AudioAnalyzeRMS      rmsCh5;
 AudioAnalyzeRMS      rmsCh6;
 
+// Main bus stereo meter taps (post main amplifier, so the meter reads
+// reflect the effective output level including main fader + hostvol).
+AudioAnalyzePeak     peakMainL;
+AudioAnalyzePeak     peakMainR;
+AudioAnalyzeRMS      rmsMainL;
+AudioAnalyzeRMS      rmsMainR;
+
 // PDM mic combiners — 32-bit PDM split across two 16-bit TDM slots, so
 // each PDM mic (L, R) needs a 2-input mixer that re-combines the high
 // and low halves with correct scaling.
@@ -133,6 +140,13 @@ AudioConnection      c_mainL_amp   (mixL, 0, mainAmpL, 0);
 AudioConnection      c_mainR_amp   (mixR, 0, mainAmpR, 0);
 AudioConnection      c_mainL_dac   (mainAmpL, 0, tdmOut, 0);
 AudioConnection      c_mainR_dac   (mainAmpR, 0, tdmOut, 2);
+
+// Main bus meter taps — post-main-amplifier so the reading reflects
+// what actually hits the DAC (including fader + hostvol attenuation).
+AudioConnection      c_mainL_peak  (mainAmpL, 0, peakMainL, 0);
+AudioConnection      c_mainL_rms   (mainAmpL, 0, rmsMainL, 0);
+AudioConnection      c_mainR_peak  (mainAmpR, 0, peakMainR, 0);
+AudioConnection      c_mainR_rms   (mainAmpR, 0, rmsMainR, 0);
 
 // Capture mixers → USB out (host recording)
 AudioConnection      c_capL_usb    (captureL, 0, usbOut, 0);
@@ -398,6 +412,7 @@ void setup() {
     g_meters.setChannel(4, &peakCh4, &rmsCh4);
     g_meters.setChannel(5, &peakCh5, &rmsCh5);
     g_meters.setChannel(6, &peakCh6, &rmsCh6);
+    g_meters.setMain(&peakMainL, &rmsMainL, &peakMainR, &rmsMainR);
 
     Serial.println("\nReady!");
     Serial.println("  6 input channels: USB L/R, Line L/R, Mic L/R");

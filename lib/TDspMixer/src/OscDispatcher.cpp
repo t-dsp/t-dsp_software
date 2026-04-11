@@ -379,9 +379,11 @@ void OscDispatcher::broadcastChannelName(int n, OSCBundle &reply) {
     reply.add(echo);
 }
 
-void OscDispatcher::broadcastMetersInput(OSCBundle &reply,
-                                         const float *peakRmsPairs,
-                                         int pairCount) {
+// Pack peak/RMS float pairs into a big-endian float32 blob and add it
+// to the reply bundle under `address`. Shared by broadcastMetersInput
+// and broadcastMetersOutput so the packing logic lives in one place.
+static void packMeterBlob(OSCBundle &reply, const char *address,
+                          const float *peakRmsPairs, int pairCount) {
     if (!peakRmsPairs || pairCount <= 0) return;
     // Pack floats as big-endian float32 (X32 convention). CNMAT/OSC
     // handles endianness for float args but NOT for blob payloads — we
@@ -390,8 +392,6 @@ void OscDispatcher::broadcastMetersInput(OSCBundle &reply,
     int byteCount = pairCount * 8;
     if (byteCount > (int)sizeof(blob)) byteCount = sizeof(blob);
     for (int i = 0; i < pairCount && i * 8 + 8 <= (int)sizeof(blob); ++i) {
-        // Reinterpret each float as its 4-byte IEEE representation and
-        // byte-swap to big-endian.
         uint32_t peakBits, rmsBits;
         memcpy(&peakBits, &peakRmsPairs[i * 2 + 0], 4);
         memcpy(&rmsBits, &peakRmsPairs[i * 2 + 1], 4);
@@ -404,9 +404,21 @@ void OscDispatcher::broadcastMetersInput(OSCBundle &reply,
         blob[i * 8 + 6] = (uint8_t)(rmsBits >> 8);
         blob[i * 8 + 7] = (uint8_t)(rmsBits);
     }
-    OSCMessage meters("/meters/input");
+    OSCMessage meters(address);
     meters.add(blob, byteCount);
     reply.add(meters);
+}
+
+void OscDispatcher::broadcastMetersInput(OSCBundle &reply,
+                                         const float *peakRmsPairs,
+                                         int pairCount) {
+    packMeterBlob(reply, "/meters/input", peakRmsPairs, pairCount);
+}
+
+void OscDispatcher::broadcastMetersOutput(OSCBundle &reply,
+                                          const float *peakRmsPairs,
+                                          int pairCount) {
+    packMeterBlob(reply, "/meters/output", peakRmsPairs, pairCount);
 }
 
 }  // namespace tdsp

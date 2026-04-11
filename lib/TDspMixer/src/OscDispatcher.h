@@ -69,6 +69,8 @@ public:
     void broadcastChannelName(int n, OSCBundle &reply);
     void broadcastMetersInput(OSCBundle &reply,
                               const float *peakRmsPairs, int pairCount);
+    void broadcastMetersOutput(OSCBundle &reply,
+                               const float *peakRmsPairs, int pairCount);
 
 private:
     MixerModel         *_model       = nullptr;

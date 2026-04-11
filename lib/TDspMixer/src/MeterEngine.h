@@ -35,6 +35,12 @@ public:
     // channel's pair will report 0).
     void setChannel(int n, AudioAnalyzePeak *peak, AudioAnalyzeRMS *rms);
 
+    // Register main (master bus) L/R analyzers. Emitted as /meters/output
+    // at the same cadence as /meters/input, two pairs (L peak/rms, R
+    // peak/rms). Any nullptr is reported as 0.
+    void setMain(AudioAnalyzePeak *peakL, AudioAnalyzeRMS *rmsL,
+                 AudioAnalyzePeak *peakR, AudioAnalyzeRMS *rmsR);
+
     // Register the dispatcher used to broadcast meter blobs.
     void setDispatcher(OscDispatcher *dispatcher) { _dispatcher = dispatcher; }
 
@@ -66,8 +72,16 @@ private:
     AudioAnalyzePeak *_peaks[kChannelCount + 1] = {0};
     AudioAnalyzeRMS  *_rmses[kChannelCount + 1] = {0};
 
+    // Main (master) L/R analyzers.
+    AudioAnalyzePeak *_mainPeakL = nullptr;
+    AudioAnalyzeRMS  *_mainRmsL  = nullptr;
+    AudioAnalyzePeak *_mainPeakR = nullptr;
+    AudioAnalyzeRMS  *_mainRmsR  = nullptr;
+
     // Scratch buffer: peak, rms pairs per channel.
     float _pairs[kChannelCount * 2] = {0};
+    // Scratch buffer: main L/R peak+rms, 2 pairs.
+    float _mainPairs[4] = {0};
 };
 
 }  // namespace tdsp

@@ -20,12 +20,21 @@ void MeterEngine::setChannel(int n, AudioAnalyzePeak *peak, AudioAnalyzeRMS *rms
     _rmses[n] = rms;
 }
 
+void MeterEngine::setMain(AudioAnalyzePeak *peakL, AudioAnalyzeRMS *rmsL,
+                          AudioAnalyzePeak *peakR, AudioAnalyzeRMS *rmsR) {
+    _mainPeakL = peakL;
+    _mainRmsL  = rmsL;
+    _mainPeakR = peakR;
+    _mainRmsR  = rmsR;
+}
+
 bool MeterEngine::tick(OSCBundle &reply) {
     if (!_enabled) return false;
     const uint32_t now = millis();
     if (now - _lastPollMs < _pollIntervalMs) return false;
     _lastPollMs = now;
 
+    // Per-channel input meters.
     for (int n = 1; n <= kChannelCount; ++n) {
         float peak = 0.0f;
         float rms  = 0.0f;
@@ -38,8 +47,23 @@ bool MeterEngine::tick(OSCBundle &reply) {
         _pairs[(n - 1) * 2 + 1] = rms;
     }
 
+    // Main (master) L/R meters — packed as 2 pairs in declared order
+    // [peakL, rmsL, peakR, rmsR] for a total of 4 float32s = 16 bytes.
+    {
+        float peakL = 0.0f, rmsL = 0.0f, peakR = 0.0f, rmsR = 0.0f;
+        if (_mainPeakL && _mainPeakL->available()) peakL = _mainPeakL->read();
+        if (_mainRmsL  && _mainRmsL->available())  rmsL  = _mainRmsL->read();
+        if (_mainPeakR && _mainPeakR->available()) peakR = _mainPeakR->read();
+        if (_mainRmsR  && _mainRmsR->available())  rmsR  = _mainRmsR->read();
+        _mainPairs[0] = peakL;
+        _mainPairs[1] = rmsL;
+        _mainPairs[2] = peakR;
+        _mainPairs[3] = rmsR;
+    }
+
     if (_dispatcher) {
         _dispatcher->broadcastMetersInput(reply, _pairs, kChannelCount);
+        _dispatcher->broadcastMetersOutput(reply, _mainPairs, 2);
     }
     return true;
 }
