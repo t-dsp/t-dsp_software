@@ -2,13 +2,20 @@
 // (boot banners, Serial.println debug output) plus our own outbound/inbound
 // OSC echo logging.
 //
-// Performance note: the earlier implementation rebuilt the entire text via
-// `view.textContent = lines.join('\n')` on every append. At 30 Hz meter
-// traffic that's 15k+ string ops/sec plus a forced layout reflow on every
-// append, which pegged the main thread under screen recording. The current
-// implementation appends one DOM node per line and removes the oldest when
-// exceeding MAX_LINES — constant-time per append, no string concatenation,
-// no full-pane re-render.
+// Performance evolution:
+//
+// - v1: textContent = lines.join('\n') on every append. ~15k string
+//   ops/sec under meter traffic. Killed it.
+// - v2 (commit d0c3ba90): one DOM div per line, ring-buffer trim at
+//   MAX_LINES. Constant-time per append.
+// - v3 (this version): RAF-batched. append() pushes the line into a
+//   pending queue and schedules a single rAF flush. Per frame we
+//   build a DocumentFragment, append all queued lines at once, trim
+//   to MAX_LINES, and write scrollTop ONCE. Worst case: one forced
+//   layout per frame (~60/sec) regardless of input rate.
+//
+// At sustained high log rates this drops the main-thread cost from
+// O(N reflows) to O(1 reflow) per frame.
 //
 // See main.ts LOG_BLOCKED_ADDRESSES for which OSC addresses are filtered
 // OUT of the log to keep the pane readable.
@@ -61,28 +68,60 @@ export function serialConsole(): SerialConsole {
     stickToBottom = nearBottom;
   });
 
-  function append(line: string): void {
-    const row = document.createElement('div');
-    row.className = 'log-line';
-    row.textContent = line;
-    view.appendChild(row);
+  // Pending lines awaiting the next rAF flush. append() just pushes;
+  // the flush builds a DocumentFragment, appends in one shot, trims,
+  // and reads scrollTop once.
+  const pending: string[] = [];
+  let flushScheduled = false;
 
-    // Trim from the front if over the limit. childNodes indexing is
-    // cheap on a small list; at MAX_LINES=500 this is always just
-    // removing one node.
+  function flush(): void {
+    flushScheduled = false;
+    if (pending.length === 0) return;
+
+    // Build all queued line divs into a fragment first so the DOM
+    // gets ONE appendChild call regardless of how many lines arrived.
+    const frag = document.createDocumentFragment();
+    for (const line of pending) {
+      const row = document.createElement('div');
+      row.className = 'log-line';
+      row.textContent = line;
+      frag.appendChild(row);
+    }
+    pending.length = 0;
+    view.appendChild(frag);
+
+    // Trim oldest lines past the cap. Done after the append so the
+    // total node count is always correct.
     while (view.childNodes.length > MAX_LINES) {
       view.removeChild(view.firstChild!);
     }
 
+    // Single scrollTop write per frame. Reading scrollHeight here
+    // forces one layout — but only one, no matter how many lines
+    // were appended this frame.
     if (stickToBottom) {
-      // Use scrollTop on the container; the last child being in-flow
-      // means scrollHeight is already up-to-date after appendChild.
       view.scrollTop = view.scrollHeight;
     }
   }
 
+  function append(line: string): void {
+    pending.push(line);
+    // Cap the pending queue too, so a sustained flood doesn't grow
+    // unbounded between frames. If we somehow get more than MAX_LINES
+    // queued in a single frame, drop the oldest — they'd be trimmed
+    // in flush() anyway.
+    if (pending.length > MAX_LINES) {
+      pending.splice(0, pending.length - MAX_LINES);
+    }
+    if (!flushScheduled) {
+      flushScheduled = true;
+      requestAnimationFrame(flush);
+    }
+  }
+
   function clear(): void {
-    // Remove all children. Fast for up to ~500 nodes.
+    // Drop any pending lines too.
+    pending.length = 0;
     while (view.firstChild) view.removeChild(view.firstChild);
     stickToBottom = true;
   }
