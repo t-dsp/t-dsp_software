@@ -17,6 +17,7 @@
 // every wrapper is exactly 7 rows tall at the same heights.
 
 import { Signal } from '../state';
+import { rafBatch } from '../raf-batch';
 import { formatFaderDb } from './util';
 
 export function makeRow(kind: string): HTMLDivElement {
@@ -67,13 +68,27 @@ export function makeMeter(peak: Signal<number>, rms: Signal<number>): HTMLElemen
   wrap.append(rmsFill, peakFill);
   // Use transform: scaleY instead of height — transforms are
   // compositor-only (no layout, no paint, no style recalc on the
-  // meter subtree). At 30 Hz × 20 meters this saves ~600 forced
-  // layouts/sec. transform-origin is set to `bottom` in style.css.
+  // meter subtree). transform-origin is set to `bottom` in style.css.
+  //
+  // RAF-batched: rapid Signal updates (e.g. multiple meter blobs in
+  // one task) collapse to one DOM write per frame, keyed by the fill
+  // element so each meter writes independently. Caps DOM throughput
+  // at ~60 writes/sec/meter regardless of how often the firmware
+  // streams blobs. Stores the latest value in a closure variable so
+  // the deferred updater always uses the freshest reading.
+  let pendingPeak = 0;
+  let pendingRms = 0;
   peak.subscribe((p) => {
-    peakFill.style.transform = `scaleY(${levelToScale(p)})`;
+    pendingPeak = p;
+    rafBatch(peakFill, () => {
+      peakFill.style.transform = `scaleY(${levelToScale(pendingPeak)})`;
+    });
   });
   rms.subscribe((r) => {
-    rmsFill.style.transform = `scaleY(${levelToScale(r)})`;
+    pendingRms = r;
+    rafBatch(rmsFill, () => {
+      rmsFill.style.transform = `scaleY(${levelToScale(pendingRms)})`;
+    });
   });
   return wrap;
 }
