@@ -2,6 +2,24 @@
 #include <Audio.h>
 #include <Wire.h>
 #include "tac5212_regs.h"
+#include <TAC5212.h>
+
+// Compile-time / link-time verification that lib/TAC5212/ builds into this
+// project. The new library exists but main.cpp still uses the old
+// hand-rolled setupCodec() path — migration to the library is a separate
+// commit. Marking this function __attribute__((used)) prevents dead-code
+// elimination from dropping it, so the linker pulls in TAC5212.cpp and
+// we'd see any compile error at build time instead of at migration time.
+__attribute__((used)) static void _tac5212_library_link_check() {
+    tac5212::TAC5212 codec;
+    (void)codec.errorCount();
+    (void)codec.info();
+    (void)codec.adc(1).setMode(tac5212::AdcMode::SingleEndedInp);
+    (void)codec.out(1).setMode(tac5212::OutMode::HpDriver);
+    (void)codec.setMicbiasLevel(tac5212::MicbiasLevel::SameAsVref);
+    (void)codec.setVrefFscale(tac5212::VrefFscale::V2p75);
+    (void)codec.setAdcHpf(true);
+}
 
 // Teensy pin that drives EN_HELD_HIGH on the TAC5212 module → enables LDO
 const int TAC5212_EN_PIN = 35;
