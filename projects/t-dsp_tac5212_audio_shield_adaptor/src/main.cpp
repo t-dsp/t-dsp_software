@@ -1,99 +1,166 @@
+// T-DSP TAC5212 Audio Shield Adaptor — small mixer MVP v1.
+//
+// This is the "thin wiring" main.cpp per the roadmap M12 plan, scoped
+// to MVP v1 per ~/.claude/memory/decisions_mvp_v1_scope.md. It instantiates
+// the TDspMixer framework, wires the existing stock I16 audio graph
+// (USB in + line in + stereo PDM mic → main mixer → DAC + USB capture),
+// registers a Tac5212Panel for the /codec/tac5212/... OSC subtree, and
+// runs the framework in loop().
+//
+// 6 input channels, mapped 1:1 to the small mixer hardware:
+//   /ch/01 — USB L           (host USB input, left)
+//   /ch/02 — USB R           (host USB input, right)
+//   /ch/03 — Line L          (TAC5212 ADC CH1)
+//   /ch/04 — Line R          (TAC5212 ADC CH2)
+//   /ch/05 — Mic L           (onboard PDM mic, left channel)
+//   /ch/06 — Mic R           (onboard PDM mic, right channel)
+//
+// Main output goes to the headphone DAC (TAC5212 OUT1/OUT2 in HP driver
+// mode, locked in during Phase 1) AND to USB capture so the host can
+// record the mix. USB inputs are EXCLUDED from the capture path to
+// prevent self-monitoring.
+//
+// Codec initialization still uses the hand-rolled setupCodec() flow from
+// Phase 1. Migrating to lib/TAC5212's typed API is a follow-on refactor
+// (M11 Part A). The Tac5212Panel uses lib/TAC5212 at runtime for OSC-
+// driven changes, so the two coexist on the same I2C bus.
+
 #include <Arduino.h>
 #include <Audio.h>
 #include <Wire.h>
+
+#include <OSCMessage.h>
+#include <OSCBundle.h>
+
 #include "tac5212_regs.h"
 #include <TAC5212.h>
 #include <TDspMixer.h>
 
-// Compile-time / link-time verification that lib/TAC5212/ and lib/TDspMixer/
-// build into this project. Both libraries are linked but main.cpp still
-// uses the hand-rolled Phase 1 setupCodec() + AudioMixer4 path during the
-// MVP v1 push; migration to TDspMixer is happening incrementally. The
-// __attribute__((used)) marker prevents dead-code elimination from dropping
-// the references, so the linker pulls in the libraries and any compile
-// errors surface at build time instead of at migration time.
-__attribute__((used)) static void _tdsp_library_link_check() {
-    // lib/TAC5212 references
-    tac5212::TAC5212 codec;
-    (void)codec.errorCount();
-    (void)codec.info();
-    (void)codec.adc(1).setMode(tac5212::AdcMode::SingleEndedInp);
-    (void)codec.out(1).setMode(tac5212::OutMode::HpDriver);
-    (void)codec.setMicbiasLevel(tac5212::MicbiasLevel::SameAsVref);
-    (void)codec.setVrefFscale(tac5212::VrefFscale::V2p75);
-    (void)codec.setAdcHpf(true);
+#include "Tac5212Panel.h"
 
-    // lib/TDspMixer references
-    tdsp::MixerModel model;
-    (void)model.setChannelFader(1, 0.5f);
-    (void)model.setMainFader(0.75f);
-    (void)model.effectiveChannelGain(1);
-
-    tdsp::SignalGraphBinding binding;
-    binding.setModel(&model);
-    binding.applyAll();
-
-    tdsp::OscDispatcher dispatcher;
-    dispatcher.setModel(&model);
-    dispatcher.setBinding(&binding);
-
-    tdsp::SlipOscTransport transport;
-    transport.setOscMessageHandler(nullptr, nullptr);
-
-    tdsp::MeterEngine meters;
-    meters.setDispatcher(&dispatcher);
-}
-
-// Teensy pin that drives EN_HELD_HIGH on the TAC5212 module → enables LDO
+// Teensy pin driving EN_HELD_HIGH on the TAC5212 module → enables the LDO
 const int TAC5212_EN_PIN = 35;
 
-// --- Audio Objects ---
+// ============================================================================
+// Stock I16 Audio Library objects — the signal graph
+// ============================================================================
+
 AudioInputUSB        usbIn;
-AudioOutputUSB       usbOut;
 AudioInputTDM        tdmIn;
-AudioOutputTDM       tdmOut;
 
-// Mixers to combine USB + PDM mic + line in for DAC output
-AudioMixer4          mixL;
-AudioMixer4          mixR;
+// Per-channel peak/RMS taps for meters. 6 channels, 2 analyzers each.
+AudioAnalyzePeak     peakCh1;  // USB L
+AudioAnalyzePeak     peakCh2;  // USB R
+AudioAnalyzePeak     peakCh3;  // Line L
+AudioAnalyzePeak     peakCh4;  // Line R
+AudioAnalyzePeak     peakCh5;  // Mic L
+AudioAnalyzePeak     peakCh6;  // Mic R
+AudioAnalyzeRMS      rmsCh1;
+AudioAnalyzeRMS      rmsCh2;
+AudioAnalyzeRMS      rmsCh3;
+AudioAnalyzeRMS      rmsCh4;
+AudioAnalyzeRMS      rmsCh5;
+AudioAnalyzeRMS      rmsCh6;
 
-// PDM mic combiners (32-bit PDM split across two 16-bit TDM channels)
+// PDM mic combiners — 32-bit PDM split across two 16-bit TDM slots, so
+// each PDM mic (L, R) needs a 2-input mixer that re-combines the high
+// and low halves with correct scaling.
 AudioMixer4          pdmMixL;
 AudioMixer4          pdmMixR;
 
-// Capture mixers — combine line in + PDM mic for USB recording stream
+// Main stereo mixer. Slot assignments:
+//   mixL[0] = ch/01 USB L    mixR[0] = ch/02 USB R
+//   mixL[1] = ch/05 Mic L    mixR[1] = ch/06 Mic R
+//   mixL[2] = ch/03 Line L   mixR[2] = ch/04 Line R
+//   slot 3 unused
+AudioMixer4          mixL;
+AudioMixer4          mixR;
+
+// Main amplifiers after the mixers carry the effective main gain
+// (fader × on × optional hostvol) so the main fader is a real knob
+// independent of channel slot gains.
+AudioAmplifier       mainAmpL;
+AudioAmplifier       mainAmpR;
+
+// Capture mixers — line + PDM → USB out. USB in intentionally excluded
+// to prevent self-monitoring.
 AudioMixer4          captureL;
 AudioMixer4          captureR;
 
-// USB audio → mixer input 0
-AudioConnection      pc1(usbIn, 0, mixL, 0);
-AudioConnection      pc2(usbIn, 1, mixR, 0);
+AudioOutputTDM       tdmOut;
+AudioOutputUSB       usbOut;
 
-// PDM mic (TDM slots 2+3 = Teensy ch 4,5,6,7) → PDM mixers → mixer input 1
-AudioConnection      pc3(tdmIn, 4, pdmMixL, 0);
-AudioConnection      pc4(tdmIn, 5, pdmMixL, 1);
-AudioConnection      pc5(tdmIn, 6, pdmMixR, 0);
-AudioConnection      pc6(tdmIn, 7, pdmMixR, 1);
-AudioConnection      pc7(pdmMixL, 0, mixL, 1);
-AudioConnection      pc8(pdmMixR, 0, mixR, 1);
+// ============================================================================
+// AudioConnections — wire the graph
+// ============================================================================
 
-// Line input (ADC) → mixer input 2
-AudioConnection      pc11(tdmIn, 0, mixL, 2);      // ADC IN1
-AudioConnection      pc12(tdmIn, 2, mixR, 2);      // ADC IN2
+// USB input → main mixer slot 0 + peak/RMS taps
+AudioConnection      c_usbL_mix    (usbIn, 0, mixL, 0);
+AudioConnection      c_usbL_peak   (usbIn, 0, peakCh1, 0);
+AudioConnection      c_usbL_rms    (usbIn, 0, rmsCh1, 0);
+AudioConnection      c_usbR_mix    (usbIn, 1, mixR, 0);
+AudioConnection      c_usbR_peak   (usbIn, 1, peakCh2, 0);
+AudioConnection      c_usbR_rms    (usbIn, 1, rmsCh2, 0);
 
-// Mixer → TDM out (slot 0 = left, slot 1 = right)
-AudioConnection      pc9(mixL, 0, tdmOut, 0);
-AudioConnection      pc10(mixR, 0, tdmOut, 2);
+// Line input (ADC) → main mixer slot 2 + capture + peak/RMS taps
+AudioConnection      c_lineL_mix   (tdmIn, 0, mixL, 2);
+AudioConnection      c_lineL_cap   (tdmIn, 0, captureL, 0);
+AudioConnection      c_lineL_peak  (tdmIn, 0, peakCh3, 0);
+AudioConnection      c_lineL_rms   (tdmIn, 0, rmsCh3, 0);
+AudioConnection      c_lineR_mix   (tdmIn, 2, mixR, 2);
+AudioConnection      c_lineR_cap   (tdmIn, 2, captureR, 0);
+AudioConnection      c_lineR_peak  (tdmIn, 2, peakCh4, 0);
+AudioConnection      c_lineR_rms   (tdmIn, 2, rmsCh4, 0);
 
-// USB capture stream: line input + PDM mic mixed into the host recording input
-AudioConnection      pc13(tdmIn, 0, captureL, 0);    // line L
-AudioConnection      pc14(tdmIn, 2, captureR, 0);    // line R
-AudioConnection      pc15(pdmMixL, 0, captureL, 1);  // PDM L
-AudioConnection      pc16(pdmMixR, 0, captureR, 1);  // PDM R
-AudioConnection      pc17(captureL, 0, usbOut, 0);
-AudioConnection      pc18(captureR, 0, usbOut, 1);
+// PDM mic: split across TDM slots 2+3 = Teensy ch 4,5,6,7, then combined
+AudioConnection      c_pdmL0       (tdmIn, 4, pdmMixL, 0);
+AudioConnection      c_pdmL1       (tdmIn, 5, pdmMixL, 1);
+AudioConnection      c_pdmR0       (tdmIn, 6, pdmMixR, 0);
+AudioConnection      c_pdmR1       (tdmIn, 7, pdmMixR, 1);
 
-// --- Codec I2C helpers ---
+// PDM combiners → main mixer slot 1 + capture + peak/RMS taps
+AudioConnection      c_micL_mix    (pdmMixL, 0, mixL, 1);
+AudioConnection      c_micL_cap    (pdmMixL, 0, captureL, 1);
+AudioConnection      c_micL_peak   (pdmMixL, 0, peakCh5, 0);
+AudioConnection      c_micL_rms    (pdmMixL, 0, rmsCh5, 0);
+AudioConnection      c_micR_mix    (pdmMixR, 0, mixR, 1);
+AudioConnection      c_micR_cap    (pdmMixR, 0, captureR, 1);
+AudioConnection      c_micR_peak   (pdmMixR, 0, peakCh6, 0);
+AudioConnection      c_micR_rms    (pdmMixR, 0, rmsCh6, 0);
+
+// Main mixers → main amplifiers → DAC (TDM out slots 0 and 2)
+AudioConnection      c_mainL_amp   (mixL, 0, mainAmpL, 0);
+AudioConnection      c_mainR_amp   (mixR, 0, mainAmpR, 0);
+AudioConnection      c_mainL_dac   (mainAmpL, 0, tdmOut, 0);
+AudioConnection      c_mainR_dac   (mainAmpR, 0, tdmOut, 2);
+
+// Capture mixers → USB out (host recording)
+AudioConnection      c_capL_usb    (captureL, 0, usbOut, 0);
+AudioConnection      c_capR_usb    (captureR, 0, usbOut, 1);
+
+// ============================================================================
+// TDspMixer framework objects
+// ============================================================================
+
+tdsp::MixerModel          g_model;
+tdsp::SignalGraphBinding  g_binding;
+tdsp::OscDispatcher       g_dispatcher;
+tdsp::SlipOscTransport    g_transport;
+tdsp::MeterEngine         g_meters;
+
+// lib/TAC5212 codec instance used by Tac5212Panel for runtime register
+// access. The chip is physically initialized by setupCodecHandRolled()
+// below; g_codec is NOT .begin()-ed because that would re-reset the
+// chip and wipe the hand-rolled init state. Both APIs touch the same
+// I2C address, which is safe as long as we don't interleave writes
+// to the same register from both sides.
+tac5212::TAC5212          g_codec(Wire);
+
+Tac5212Panel              g_codecPanel(g_codec);
+
+// ============================================================================
+// Hand-rolled codec init (Phase 1 path, preserved as the working audio config)
+// ============================================================================
 
 static void writeReg(uint8_t reg, uint8_t val) {
     Wire.beginTransmission(TAC5212_I2C_ADDR);
@@ -110,9 +177,6 @@ static uint8_t readReg(uint8_t reg) {
     return Wire.available() ? Wire.read() : 0xFF;
 }
 
-// --- Codec setup, split into discrete configuration steps ---
-
-// 1. Software reset, then wake the device.
 static void codecResetAndWake() {
     writeReg(REG_SW_RESET, 0x01);
     delay(100);
@@ -120,7 +184,6 @@ static void codecResetAndWake() {
     delay(100);
 }
 
-// 2. Configure the audio serial interface: TDM, 32-bit, BCLK inverted, target mode.
 static void codecConfigureSerialInterface() {
     writeReg(REG_PASI_CFG0, PASI_CFG0_TDM_32_BCLK_INV);
     writeReg(REG_INTF_CFG1, INTF_CFG1_DOUT_PASI);
@@ -129,65 +192,35 @@ static void codecConfigureSerialInterface() {
     writeReg(REG_PASI_TX_CFG2, PASI_OFFSET_1);
 }
 
-// 3. Map TDM slots to DAC inputs (RX, host → codec) and ADC outputs (TX, codec → host).
-//    DAC: slot 0 → OUT1 (left ear), slot 1 → OUT2 (right ear)
-//    ADC: slot 0 → ADC ch1 (left), slot 1 → ADC ch2 (right)
 static void codecConfigureSlotMappings() {
-    writeReg(REG_RX_CH1_SLOT, slot(0));  // DAC L1 ← slot 0
-    writeReg(REG_RX_CH2_SLOT, slot(1));  // DAC L2 ← slot 1
-
-    writeReg(REG_TX_CH1_SLOT, slot(0));  // ADC ch1 → slot 0
-    writeReg(REG_TX_CH2_SLOT, slot(1));  // ADC ch2 → slot 1
+    writeReg(REG_RX_CH1_SLOT, slot(0));
+    writeReg(REG_RX_CH2_SLOT, slot(1));
+    writeReg(REG_TX_CH1_SLOT, slot(0));
+    writeReg(REG_TX_CH2_SLOT, slot(1));
 }
 
-// 4. Configure the onboard PDM microphone:
-//    - GPIO1 generates the PDM clock
-//    - GPI1 reads the PDM data line, routed to virtual PDM channels 3+4
-//    - TX channels 3+4 transmit those to TDM slots 2+3
 static void codecConfigurePdmMic() {
     writeReg(REG_GPIO1_CFG, GPIO1_PDM_CLK);
     writeReg(REG_GPI1_CFG,  GPI1_INPUT);
     writeReg(REG_INTF_CFG4, INTF_CFG4_GPI1_PDM_3_4);
-    writeReg(REG_TX_CH3_SLOT, slot(2));  // PDM ch3 → slot 2
-    writeReg(REG_TX_CH4_SLOT, slot(3));  // PDM ch4 → slot 3
+    writeReg(REG_TX_CH3_SLOT, slot(2));
+    writeReg(REG_TX_CH4_SLOT, slot(3));
 }
 
-// 5. Set both ADC inputs to single-ended mode reading INxP only.
-//    This board ties IN1- to IN2+ to support balanced-mic mode, so we must
-//    ignore INxM for line input — otherwise differential mode would cancel
-//    a mono signal.
 static void codecConfigureAdcInputs() {
     writeReg(REG_ADC_CH1_CFG0, ADC_CFG0_SE_INP_ONLY);
     writeReg(REG_ADC_CH2_CFG0, ADC_CFG0_SE_INP_ONLY);
 }
 
-// 6. Configure DAC outputs for stereo headphone use on this board:
-//    OUT1P = TRS tip (left channel), OUT2P = TRS ring (right channel),
-//    sleeve = GND, OUTxM pins unused. Each output runs in "mono SE at OUTxP"
-//    routing mode and uses the 16Ω headphone driver.
-//
-//    NOTE: writing 0x60 (HP drive + 0 dB level_ctrl) is correct ONLY because
-//    the other bits of CFG1/CFG2 are at their POR reset values at this point
-//    in setup. A runtime setter that changes driver mode later must use
-//    read-modify-write to preserve those bits.
 static void codecConfigureDacOutputs() {
-    writeReg(REG_OUT1_CFG0, OUT_SRC_DAC | OUT_ROUTE_MONO_SE_P);  // 0x28
-    writeReg(REG_OUT1_CFG1, OUT_CFG1_HP_0DB);                    // 0x60
-    writeReg(REG_OUT1_CFG2, OUT_CFG1_HP_0DB);                    // OUT1M unused, safe
-    writeReg(REG_OUT2_CFG0, OUT_SRC_DAC | OUT_ROUTE_MONO_SE_P);  // 0x28
-    writeReg(REG_OUT2_CFG1, OUT_CFG1_HP_0DB);                    // 0x60
-    writeReg(REG_OUT2_CFG2, OUT_CFG1_HP_0DB);                    // OUT2M unused, safe
+    writeReg(REG_OUT1_CFG0, OUT_SRC_DAC | OUT_ROUTE_MONO_SE_P);
+    writeReg(REG_OUT1_CFG1, OUT_CFG1_HP_0DB);
+    writeReg(REG_OUT1_CFG2, OUT_CFG1_HP_0DB);
+    writeReg(REG_OUT2_CFG0, OUT_SRC_DAC | OUT_ROUTE_MONO_SE_P);
+    writeReg(REG_OUT2_CFG1, OUT_CFG1_HP_0DB);
+    writeReg(REG_OUT2_CFG2, OUT_CFG1_HP_0DB);
 }
 
-// 7. Set all four DAC digital volumes to 0 dB (unity).
-//    Windows does its own software attenuation before streaming audio to the
-//    USB endpoint, so the user's host volume slider already affects what
-//    arrives at the codec. The DAC just passes it through at unity. The HP
-//    driver (16 Ω mode) handles the final voltage / current delivery.
-//
-//    Note: 0 dB (register 201 = 0xC9) is the TAC5212 POR default for all
-//    four DAC channels, so this is explicit documentation more than a
-//    functional write.
 static void codecSetDefaultDacVolume() {
     writeReg(REG_DAC_L1_VOL, DAC_VOL_0DB);
     writeReg(REG_DAC_R1_VOL, DAC_VOL_0DB);
@@ -195,16 +228,14 @@ static void codecSetDefaultDacVolume() {
     writeReg(REG_DAC_R2_VOL, DAC_VOL_0DB);
 }
 
-// 8. Enable all input/output channels and power up ADC + DAC + MICBIAS.
 static void codecPowerUp() {
     writeReg(REG_CH_EN,   CH_EN_ALL);
     writeReg(REG_PWR_CFG, PWR_CFG_ADC_DAC_MICBIAS);
     delay(100);
 }
 
-void setupCodec() {
-    Serial.println("Initializing TAC5212...");
-
+static void setupCodecHandRolled() {
+    Serial.println("Initializing TAC5212 (Phase 1 hand-rolled path)...");
     codecResetAndWake();
     codecConfigureSerialInterface();
     codecConfigureSlotMappings();
@@ -213,10 +244,77 @@ void setupCodec() {
     codecConfigureDacOutputs();
     codecSetDefaultDacVolume();
     codecPowerUp();
-
-    Serial.print("DEV_STS0: 0x"); Serial.println(readReg(REG_DEV_STS0), HEX);
+    Serial.print("DEV_STS0: 0x");
+    Serial.println(readReg(REG_DEV_STS0), HEX);
     Serial.println("Codec ready: TDM + PDM + ADC");
 }
+
+// ============================================================================
+// TDspMixer integration callbacks
+// ============================================================================
+
+// OSC frame arrived from the transport. Build a reply bundle, route into
+// the dispatcher (which handles /ch/..., /main/..., /sub, /info, and
+// forwards /codec/tac5212/* to Tac5212Panel), and flush the reply back
+// via SLIP if anything was added.
+static void onOscMessage(OSCMessage &msg, void *userData) {
+    (void)userData;
+    OSCBundle reply;
+    g_dispatcher.route(msg, reply);
+    if (reply.size() > 0) {
+        g_transport.sendBundle(reply);
+    }
+}
+
+// CLI line arrived (plain ASCII). For MVP v1 we only recognize one
+// command: "s" for status dump. The legacy Phase 1 CLI (u/p/i/m/l/+/-/
+// arrow keys) has been removed — volume control moves to OSC via the
+// web_dev_surface client or raw OSC.
+static void onCliLine(char *line, int length, void *userData) {
+    (void)userData;
+    (void)length;
+    if (!line) return;
+    if (line[0] == 's' || line[0] == 'S') {
+        Serial.println("\n--- Status ---");
+        Serial.print("Audio Mem: ");
+        Serial.print(AudioMemoryUsage());
+        Serial.print("/");
+        Serial.println(AudioMemoryUsageMax());
+        Serial.print("CPU: ");
+        Serial.print(AudioProcessorUsage(), 2);
+        Serial.println("%");
+        Serial.print("USB host vol raw: ");
+        Serial.print(usbIn.volume(), 4);
+        Serial.print("  scaled: ");
+        Serial.println(g_model.main().hostvolValue, 3);
+        for (int n = 1; n <= tdsp::kChannelCount; ++n) {
+            Serial.print("  ");
+            Serial.print(g_model.channel(n).name);
+            Serial.print("  fader=");
+            Serial.print(g_model.channel(n).fader, 3);
+            Serial.print("  on=");
+            Serial.print(g_model.channel(n).on ? 1 : 0);
+            Serial.print("  solo=");
+            Serial.println(g_model.channel(n).solo ? 1 : 0);
+        }
+        Serial.print("Main  fader=");
+        Serial.print(g_model.main().fader, 3);
+        Serial.print("  on=");
+        Serial.print(g_model.main().on ? 1 : 0);
+        Serial.print("  hostvol.enable=");
+        Serial.print(g_model.main().hostvolEnable ? 1 : 0);
+        Serial.print("  hostvol.value=");
+        Serial.println(g_model.main().hostvolValue, 3);
+        Serial.print("DEV_STS0: 0x");
+        Serial.println(readReg(REG_DEV_STS0), HEX);
+        Serial.println("--------------\n");
+    }
+    // Unknown CLI input is silently ignored for MVP.
+}
+
+// ============================================================================
+// setup()
+// ============================================================================
 
 void setup() {
     pinMode(TAC5212_EN_PIN, OUTPUT);
@@ -232,6 +330,7 @@ void setup() {
 
     Serial.println("================================");
     Serial.println("  T-DSP TAC5212 Audio Shield");
+    Serial.println("  MVP v1 (TDspMixer + WebSerial)");
     Serial.println("================================");
 
     delay(100);
@@ -243,219 +342,110 @@ void setup() {
         while (1) { delay(100); }
     }
 
-    setupCodec();
+    // Codec init via the Phase 1 hand-rolled path. After this, g_codec
+    // (lib/TAC5212) is ALSO valid for runtime register access through
+    // Tac5212Panel without a re-init. Never call g_codec.begin() — that
+    // would SW-reset the chip and wipe the hand-rolled init.
+    setupCodecHandRolled();
+
     AudioMemory(64);
 
-    // Mixer gains
-    mixL.gain(0, 1.0);   // USB
-    mixR.gain(0, 1.0);
-    mixL.gain(1, 0.0);   // PDM mic off initially
-    mixR.gain(1, 0.0);
-    mixL.gain(2, 0.0);   // Line in monitoring off initially
-    mixR.gain(2, 0.0);
+    // PDM mic amplitude trim: 32-bit PDM split across two 16-bit slots
+    // — high 16 bits need a 16x boost, low 16 bits need a 1/65536
+    // scaling so they add up to the full 32-bit value.
+    const float kPdmGain = 16.0f;
+    pdmMixL.gain(0, kPdmGain);
+    pdmMixL.gain(1, kPdmGain / 65536.0f);
+    pdmMixR.gain(0, kPdmGain);
+    pdmMixR.gain(1, kPdmGain / 65536.0f);
 
-    // PDM mic boost
-    float pdmGain = 16.0;
-    pdmMixL.gain(0, pdmGain);
-    pdmMixL.gain(1, pdmGain / 65536);
-    pdmMixR.gain(0, pdmGain);
-    pdmMixR.gain(1, pdmGain / 65536);
+    // Capture mixers at unity by default.
+    captureL.gain(0, 1.0f);
+    captureL.gain(1, 1.0f);
+    captureR.gain(0, 1.0f);
+    captureR.gain(1, 1.0f);
 
-    // Capture mixers — both line and PDM go to USB recording at unity by default
-    captureL.gain(0, 1.0);   // line L
-    captureR.gain(0, 1.0);   // line R
-    captureL.gain(1, 1.0);   // PDM L
-    captureR.gain(1, 1.0);   // PDM R
+    // --- Wire TDspMixer to the audio graph ---
+
+    g_binding.setModel(&g_model);
+
+    // Register each channel with its main-mixer slot. Per-channel HPF
+    // objects are nullptr for MVP — the model tracks HPF state but the
+    // audio path doesn't have biquads wired in yet. Follow-on commit
+    // adds the biquad chain once everything else is green.
+    g_binding.setChannel(1, &mixL, 0, nullptr);  // USB L
+    g_binding.setChannel(2, &mixR, 0, nullptr);  // USB R
+    g_binding.setChannel(3, &mixL, 2, nullptr);  // Line L
+    g_binding.setChannel(4, &mixR, 2, nullptr);  // Line R
+    g_binding.setChannel(5, &mixL, 1, nullptr);  // Mic L
+    g_binding.setChannel(6, &mixR, 1, nullptr);  // Mic R
+    g_binding.setMain(&mainAmpL, &mainAmpR);
+    g_binding.applyAll();  // push initial model defaults into audio objects
+
+    g_dispatcher.setModel(&g_model);
+    g_dispatcher.setBinding(&g_binding);
+    g_dispatcher.registerCodecPanel(&g_codecPanel);
+
+    g_transport.begin(115200);
+    g_transport.setOscMessageHandler(&onOscMessage, nullptr);
+    g_transport.setCliLineHandler(&onCliLine, nullptr);
+
+    g_meters.setDispatcher(&g_dispatcher);
+    g_meters.setChannel(1, &peakCh1, &rmsCh1);
+    g_meters.setChannel(2, &peakCh2, &rmsCh2);
+    g_meters.setChannel(3, &peakCh3, &rmsCh3);
+    g_meters.setChannel(4, &peakCh4, &rmsCh4);
+    g_meters.setChannel(5, &peakCh5, &rmsCh5);
+    g_meters.setChannel(6, &peakCh6, &rmsCh6);
 
     Serial.println("\nReady!");
-    Serial.println("  USB audio → DAC (stereo)");
-    Serial.println("  PDM mic / line in → USB capture");
-    Serial.println("  USB host volume → DAC volume");
-    Serial.println("\nCommands:");
-    Serial.println("  m              - toggle PDM mic monitor on/off");
-    Serial.println("  l              - toggle line input monitor on/off");
-    Serial.println("  u / p / i      - select active channel (USB/PDM/line)");
-    Serial.println("  u50, p75, etc. - set active channel directly to a value");
-    Serial.println("  + / -          - increase/decrease active channel by 5%");
-    Serial.println("  Up/Down arrows - same as + / -");
-    Serial.println("  s              - status");
+    Serial.println("  6 input channels: USB L/R, Line L/R, Mic L/R");
+    Serial.println("  Main stereo -> DAC + USB capture");
+    Serial.println("  Connect with the WebSerial app in tools/web_dev_surface/");
+    Serial.println("  or type 's' in the serial monitor for status.");
 }
 
-bool micOn = false;
-bool lineOn = false;
+// ============================================================================
+// Host volume tracking (square-law taper preserved from Phase 1)
+// ============================================================================
 
-// Host volume curve.
-//
-// usbIn.volume() returns a linear 0..1 multiplier driven by the Windows
-// volume slider (USB Audio Class feature unit, raw 0..255 / 255 — Windows
-// sends the full range across the slider, contrary to a now-deleted
-// comment that claimed otherwise). Multiplying audio samples by a linear
-// 0..1 gain is perceptually wrong: 50% slider gives -6 dB, almost no
-// audible change, and the perceptual range piles up at the bottom of the
-// slider. Square the value as a cheap audio taper so 50% slider ≈ -12 dB,
-// 25% ≈ -24 dB — close to a real log-taper volume pot.
-float hostVolGain  = 1.0f;   // current curved host gain, updated from loop()
-float lastUsbVolRaw = -1.0f; // last raw usbIn.volume() value we processed
+static float s_lastUsbVolRaw = -1.0f;
 
-// Active channel for +/- adjustments
-enum ActiveCh { CH_NONE, CH_USB, CH_MIC, CH_LINE };
-ActiveCh activeCh = CH_NONE;
+static void pollHostVolume() {
+    const float raw = usbIn.volume();
+    if (raw == s_lastUsbVolRaw) return;
+    s_lastUsbVolRaw = raw;
 
-// Current volume levels (0-100)
-int usbVol = 100;
-int micVol = 0;
-int lineVol = 0;
+    // Square-law taper: 50% slider → -12 dB, 25% → -24 dB. Phase 1
+    // experimentation settled on this as "close enough to a real log-
+    // taper pot" without the cost of an actual logf() per poll.
+    float scaled = raw * raw;
+    if (scaled > 1.0f) scaled = 1.0f;
 
-// Escape sequence state for arrow keys
-int escState = 0;  // 0=normal, 1=got ESC, 2=got ESC[
-
-const char* chName(ActiveCh c) {
-    switch (c) {
-        case CH_USB:  return "USB";
-        case CH_MIC:  return "MIC";
-        case CH_LINE: return "LINE";
-        default:      return "(none)";
+    if (g_model.setMainHostvolValue(scaled)) {
+        g_binding.applyMain();
+        // Echo /main/st/hostvol/value to any subscribed clients.
+        OSCBundle reply;
+        g_dispatcher.broadcastMainHostvolValue(reply);
+        if (reply.size() > 0) g_transport.sendBundle(reply);
     }
 }
 
-void applyChannel(ActiveCh ch, int vol) {
-    vol = constrain(vol, 0, 100);
-    float g;
-    switch (ch) {
-        case CH_USB:
-            usbVol = vol;
-            // USB channel is the product of CLI usbVol and the Windows host
-            // slider (hostVolGain). Either one can attenuate independently.
-            g = (vol / 100.0f) * hostVolGain;
-            mixL.gain(0, g);
-            mixR.gain(0, g);
-            break;
-        case CH_MIC:
-            micVol = vol;
-            g = vol / 50.0f;  // 100% = 2x
-            mixL.gain(1, g);
-            mixR.gain(1, g);
-            micOn = (vol > 0);
-            break;
-        case CH_LINE:
-            lineVol = vol;
-            g = vol / 50.0f;
-            mixL.gain(2, g);
-            mixR.gain(2, g);
-            lineOn = (vol > 0);
-            break;
-        default:
-            return;
-    }
-    Serial.print(chName(ch));
-    Serial.print(" = ");
-    Serial.print(vol);
-    Serial.println("%");
-}
-
-int currentVol(ActiveCh ch) {
-    switch (ch) {
-        case CH_USB:  return usbVol;
-        case CH_MIC:  return micVol;
-        case CH_LINE: return lineVol;
-        default:      return 0;
-    }
-}
-
-void selectOrSet(ActiveCh ch) {
-    activeCh = ch;
-    // Peek for a number after the letter
-    delay(2);
-    if (Serial.available() && isDigit(Serial.peek())) {
-        int v = Serial.parseInt();
-        applyChannel(ch, v);
-    } else {
-        Serial.print("Active channel: ");
-        Serial.print(chName(ch));
-        Serial.print(" (");
-        Serial.print(currentVol(ch));
-        Serial.println("%)");
-    }
-}
-
-void bumpActive(int delta) {
-    if (activeCh == CH_NONE) {
-        Serial.println("No active channel — press u, p, or i first.");
-        return;
-    }
-    applyChannel(activeCh, currentVol(activeCh) + delta);
-}
+// ============================================================================
+// loop()
+// ============================================================================
 
 void loop() {
-    // Track the Windows host volume slider via usbIn.volume() and apply it
-    // to the USB channel's mixer gain. DAC stays at unity; all host-side
-    // volume happens in the software mixer.
-    float raw = usbIn.volume();
-    if (raw != lastUsbVolRaw) {
-        lastUsbVolRaw = raw;
-        hostVolGain = raw * raw;  // square-law audio taper
-        float g = (usbVol / 100.0f) * hostVolGain;
-        mixL.gain(0, g);
-        mixR.gain(0, g);
+    pollHostVolume();
+
+    g_transport.poll();
+
+    OSCBundle meterReply;
+    if (g_meters.tick(meterReply) && meterReply.size() > 0) {
+        g_transport.sendBundle(meterReply);
     }
 
-    while (Serial.available()) {
-        char cmd = Serial.read();
-
-        // Arrow key escape sequence handling: ESC [ A/B/C/D
-        if (escState == 1) {
-            if (cmd == '[') { escState = 2; continue; }
-            escState = 0;
-        } else if (escState == 2) {
-            escState = 0;
-            if (cmd == 'A') { bumpActive(+5); continue; }   // Up
-            if (cmd == 'B') { bumpActive(-5); continue; }   // Down
-            continue;  // ignore other CSI codes
-        }
-        if (cmd == 0x1B) { escState = 1; continue; }
-
-        switch (cmd) {
-            case 'm': case 'M':
-                micOn = !micOn;
-                mixL.gain(1, micOn ? (micVol > 0 ? micVol / 50.0f : 1.0f) : 0.0f);
-                mixR.gain(1, micOn ? (micVol > 0 ? micVol / 50.0f : 1.0f) : 0.0f);
-                if (micOn && micVol == 0) micVol = 50;
-                Serial.print("Mic: "); Serial.println(micOn ? "ON" : "OFF");
-                break;
-            case 'l': case 'L':
-                lineOn = !lineOn;
-                mixL.gain(2, lineOn ? (lineVol > 0 ? lineVol / 50.0f : 1.0f) : 0.0f);
-                mixR.gain(2, lineOn ? (lineVol > 0 ? lineVol / 50.0f : 1.0f) : 0.0f);
-                if (lineOn && lineVol == 0) lineVol = 50;
-                Serial.print("Line monitor: "); Serial.println(lineOn ? "ON" : "OFF");
-                break;
-            case 'u': case 'U': selectOrSet(CH_USB); break;
-            case 'p': case 'P': selectOrSet(CH_MIC); break;
-            case 'i': case 'I': selectOrSet(CH_LINE); break;
-            case '+': case '=':
-                bumpActive(+5);
-                break;
-            case '-': case '_':
-                bumpActive(-5);
-                break;
-            case 's': case 'S':
-                Serial.println("\n--- Status ---");
-                Serial.print("Audio Mem: ");
-                Serial.print(AudioMemoryUsage());
-                Serial.print("/"); Serial.println(AudioMemoryUsageMax());
-                Serial.print("CPU: "); Serial.print(AudioProcessorUsage(), 2); Serial.println("%");
-                Serial.print("USB host vol raw: "); Serial.print(usbIn.volume(), 4);
-                Serial.print("  scaled: "); Serial.println(hostVolGain, 3);
-                Serial.print("Active ch: "); Serial.println(chName(activeCh));
-                Serial.print("USB="); Serial.print(usbVol);
-                Serial.print("%  MIC="); Serial.print(micVol);
-                Serial.print("%  LINE="); Serial.print(lineVol); Serial.println("%");
-                Serial.print("DEV_STS0: 0x"); Serial.println(readReg(REG_DEV_STS0), HEX);
-                Serial.println("--------------\n");
-                break;
-        }
-    }
-
+    // Heartbeat LED — proves the main loop is running and not wedged.
     static unsigned long lastBlink = 0;
     if (millis() - lastBlink >= 500) {
         lastBlink = millis();
