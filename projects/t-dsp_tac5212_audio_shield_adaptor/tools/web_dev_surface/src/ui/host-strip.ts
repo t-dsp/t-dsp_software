@@ -19,7 +19,7 @@ import { Dispatcher } from '../dispatcher';
 import {
   makeRow,
   makeStaticName,
-  makeMeterSpacer,
+  makeMeter,
   makeDisabledFader,
   makeFaderValue,
   makeCellSpacer,
@@ -33,9 +33,13 @@ export function hostStrip(bus: BusState, dispatcher: Dispatcher): HTMLElement {
   const rowName = makeRow('row-name');
   rowName.append(makeStaticName('HOST VOL'));
 
-  // Row 2: meter spacer (no signal tap here)
+  // Row 2: stereo meter — post-hostvol (what the DAC actually sees).
+  // Driven by /meters/host from the firmware.
   const rowMeter = makeRow('row-meter');
-  rowMeter.append(makeMeterSpacer());
+  rowMeter.append(
+    makeMeter(bus.hostPeakL, bus.hostRmsL),
+    makeMeter(bus.hostPeakR, bus.hostRmsR),
+  );
 
   // Row 3: fader (disabled, read-only reflection of usbIn.volume())
   const rowFader = makeRow('row-fader');

@@ -68,6 +68,13 @@ export interface BusState {
   rmsL: Signal<number>;
   peakR: Signal<number>;
   rmsR: Signal<number>;
+  // Host-volume (post-hostvol) meters — populated from /meters/host.
+  // Taps are post-hostvol, showing the actual DAC-bound level. Compare
+  // against peakL/R above to see Windows volume attenuation.
+  hostPeakL: Signal<number>;
+  hostRmsL: Signal<number>;
+  hostPeakR: Signal<number>;
+  hostRmsR: Signal<number>;
 }
 
 export interface MixerState {
@@ -124,6 +131,10 @@ export function createMixerState(channelCount: number): MixerState {
       rmsL: new Signal(0),
       peakR: new Signal(0),
       rmsR: new Signal(0),
+      hostPeakL: new Signal(0),
+      hostRmsL: new Signal(0),
+      hostPeakR: new Signal(0),
+      hostRmsR: new Signal(0),
     },
     connected: new Signal(false),
     metersOn: new Signal(false),

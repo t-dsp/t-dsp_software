@@ -62,21 +62,18 @@ export function mainBus(bus: BusState, dispatcher: Dispatcher): HTMLElement {
   const rowSolo = makeRow('row-solo');
   rowSolo.append(makeCellSpacer('solo'));
 
-  // Row 7: LINK (stereo link)
+  // Row 7: LINK (stereo link). Both L and R faders remain draggable
+  // when linked — the dispatcher propagates writes to the partner
+  // optimistically and the firmware echoes both sides for convergence.
   const rowLink = makeRow('row-link');
   const linkBtn = document.createElement('button');
   linkBtn.className = 'link-btn wide cell';
   linkBtn.textContent = 'LINK';
-  linkBtn.title = 'Stereo link L/R (X32: writes propagate to both sides)';
-  bus.link.subscribe((linked) => {
-    linkBtn.classList.toggle('active', linked);
-    faderR.disabled = linked;
-    rowMeter.children[1]?.classList.toggle('linked-slave', linked);
-    rowFader.children[1]?.classList.toggle('linked-slave', linked);
-    rowFv.children[1]?.classList.toggle('linked-slave', linked);
-  });
+  linkBtn.title = 'Stereo link L/R — writes to either side move both';
+  bus.link.subscribe((linked) => linkBtn.classList.toggle('active', linked));
   linkBtn.addEventListener('click', () => dispatcher.setMainLink(!bus.link.get()));
   rowLink.append(linkBtn);
+  void faderR;  // intentionally live in both unlinked and linked modes
 
   root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink);
   return root;

@@ -23,18 +23,41 @@ export class Dispatcher {
 
   // ---------- outbound (UI -> firmware) ----------
 
+  // Returns the 0-based partner index for `idx` if the pair is linked,
+  // else -1. Only the ODD 1-based channel (idx 0, 2, 4) carries the
+  // link flag in the model, so we check the odd side regardless of
+  // which end the user touched.
+  private linkedPartner(idx: number): number {
+    const channels = this.state.channels;
+    if ((idx & 1) === 0) {
+      // 0-based even == 1-based odd: partner is idx+1 if OUR link is on.
+      if (idx + 1 < channels.length && channels[idx].link.get()) return idx + 1;
+      return -1;
+    } else {
+      // 0-based odd == 1-based even: partner is idx-1 if THEIR link is on.
+      if (idx - 1 >= 0 && channels[idx - 1].link.get()) return idx - 1;
+      return -1;
+    }
+  }
+
   setChannelFader(idx: number, v: number): void {
     this.state.channels[idx].fader.set(v);
+    const p = this.linkedPartner(idx);
+    if (p >= 0) this.state.channels[p].fader.set(v);
     this.sendMsg(`/ch/${pad2(idx + 1)}/mix/fader`, 'f', [v]);
   }
 
   setChannelOn(idx: number, on: boolean): void {
     this.state.channels[idx].on.set(on);
+    const p = this.linkedPartner(idx);
+    if (p >= 0) this.state.channels[p].on.set(on);
     this.sendMsg(`/ch/${pad2(idx + 1)}/mix/on`, 'i', [on ? 1 : 0]);
   }
 
   setChannelSolo(idx: number, solo: boolean): void {
     this.state.channels[idx].solo.set(solo);
+    const p = this.linkedPartner(idx);
+    if (p >= 0) this.state.channels[p].solo.set(solo);
     this.sendMsg(`/ch/${pad2(idx + 1)}/mix/solo`, 'i', [solo ? 1 : 0]);
   }
 
@@ -211,6 +234,20 @@ export class Dispatcher {
         this.state.main.rmsL.set( dv.getFloat32(4,  false));
         this.state.main.peakR.set(dv.getFloat32(8,  false));
         this.state.main.rmsR.set( dv.getFloat32(12, false));
+      }
+      return;
+    }
+
+    // /meters/host b — 2 float32 pairs for the post-hostvol stereo
+    // output (what the DAC actually receives after Windows volume).
+    if (a === '/meters/host' && msg.types === 'b') {
+      const blob = msg.args[0] as Uint8Array;
+      if (blob.length >= 16) {
+        const dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+        this.state.main.hostPeakL.set(dv.getFloat32(0,  false));
+        this.state.main.hostRmsL.set( dv.getFloat32(4,  false));
+        this.state.main.hostPeakR.set(dv.getFloat32(8,  false));
+        this.state.main.hostRmsR.set( dv.getFloat32(12, false));
       }
       return;
     }

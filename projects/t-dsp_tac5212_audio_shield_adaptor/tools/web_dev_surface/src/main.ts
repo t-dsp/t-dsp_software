@@ -170,14 +170,16 @@ header.appendChild(connectButton(state.connected, connect, disconnect));
 
 const mixerRow = document.createElement('section');
 mixerRow.className = 'mixer-row';
-// Render 3 stereo pairs (1/2, 3/4, 5/6), then MAIN, then HOST.
-// Each wrapper uses the shared 7-row layout so buttons/sliders align
-// horizontally across all strips.
+// 3 stereo pairs (1/2, 3/4, 5/6) on the left, then MAIN + HOST docked
+// to the right edge via `margin-left: auto`. Every wrapper uses the
+// shared 7-row layout so buttons and sliders align across the mixer.
 for (let oddIdx = 0; oddIdx < CHANNEL_COUNT; oddIdx += 2) {
   mixerRow.appendChild(channelPair(oddIdx, state, dispatcher));
 }
-mixerRow.appendChild(mainBus(state.main, dispatcher));
-mixerRow.appendChild(hostStrip(state.main, dispatcher));
+const outputDock = document.createElement('div');
+outputDock.className = 'output-dock';
+outputDock.append(mainBus(state.main, dispatcher), hostStrip(state.main, dispatcher));
+mixerRow.appendChild(outputDock);
 
 const codecSection = document.createElement('section');
 codecSection.className = 'codec-section';

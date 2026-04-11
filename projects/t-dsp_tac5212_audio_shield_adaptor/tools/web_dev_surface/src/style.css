@@ -104,6 +104,14 @@ select, input[type="text"] {
   align-items: flex-start;
 }
 
+/* Main + host wrapper, docked to the right edge of the mixer row so
+ * the output section stays visually separated from the input strips. */
+.output-dock {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
 .strip-wrapper {
   display: flex;
   flex-direction: column;

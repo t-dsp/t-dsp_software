@@ -39,6 +39,20 @@ export function makeStaticName(text: string): HTMLElement {
   return el;
 }
 
+// Meter-floor (dB) for the visual scale. Anything at or below this
+// reads as 0% fill; 0 dBFS reads as 100%. A 60 dB range gives mic-
+// level signals (~-40 dBFS) a visible ~33% bar instead of the
+// near-invisible 1% you'd get from a linear 0..1 map.
+const METER_FLOOR_DB = -60;
+
+function levelToPercent(v: number): number {
+  if (v <= 0) return 0;
+  const db = 20 * Math.log10(v);
+  if (db <= METER_FLOOR_DB) return 0;
+  if (db >= 0) return 100;
+  return ((db - METER_FLOOR_DB) / -METER_FLOOR_DB) * 100;
+}
+
 export function makeMeter(peak: Signal<number>, rms: Signal<number>): HTMLElement {
   const wrap = document.createElement('div');
   wrap.className = 'meter-wrap cell';
@@ -48,10 +62,10 @@ export function makeMeter(peak: Signal<number>, rms: Signal<number>): HTMLElemen
   rmsFill.className = 'meter-fill rms';
   wrap.append(rmsFill, peakFill);
   peak.subscribe((p) => {
-    peakFill.style.height = `${Math.min(100, Math.max(0, p * 100))}%`;
+    peakFill.style.height = `${levelToPercent(p)}%`;
   });
   rms.subscribe((r) => {
-    rmsFill.style.height = `${Math.min(100, Math.max(0, r * 100))}%`;
+    rmsFill.style.height = `${levelToPercent(r)}%`;
   });
   return wrap;
 }

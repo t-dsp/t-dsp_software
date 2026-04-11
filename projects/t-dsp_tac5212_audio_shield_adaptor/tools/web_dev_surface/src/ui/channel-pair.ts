@@ -68,29 +68,24 @@ export function channelPair(
   const soloR = makeSolo(chR.solo, () => dispatcher.setChannelSolo(oddIdx + 1, !chR.solo.get()));
   rowSolo.append(soloL, soloR);
 
-  // Row 7: pair-wide LINK button
+  // Row 7: pair-wide LINK button. Both sides remain fully interactive
+  // when linked — dispatcher propagates writes optimistically and the
+  // firmware echoes both back for convergence. The LINK button's active
+  // state is the only visual indicator of the link status.
   const rowLink = makeRow('row-link');
   const linkBtn = document.createElement('button');
   linkBtn.className = 'link-btn wide cell';
   linkBtn.textContent = 'LINK';
-  linkBtn.title = 'Stereo link — even channel follows odd';
-  chL.link.subscribe((linked) => {
-    linkBtn.classList.toggle('active', linked);
-    // Slave the R column: disable inputs and dim visually.
-    faderR.disabled = linked;
-    muteR.disabled = linked;
-    soloR.disabled = linked;
-    rowName.children[1]?.classList.toggle('linked-slave', linked);
-    rowMeter.children[1]?.classList.toggle('linked-slave', linked);
-    rowFader.children[1]?.classList.toggle('linked-slave', linked);
-    rowFv.children[1]?.classList.toggle('linked-slave', linked);
-    rowMute.children[1]?.classList.toggle('linked-slave', linked);
-    rowSolo.children[1]?.classList.toggle('linked-slave', linked);
-  });
+  linkBtn.title = 'Stereo link — writes to either side move both';
+  chL.link.subscribe((linked) => linkBtn.classList.toggle('active', linked));
   linkBtn.addEventListener('click', () =>
     dispatcher.setChannelLink(oddIdx, !chL.link.get()),
   );
   rowLink.append(linkBtn);
+  // faderR / muteR / soloR are declared above but the linker-dim code
+  // is gone; reference them once to keep linters happy and to document
+  // they're intentionally live in both unlinked AND linked modes.
+  void faderR; void muteR; void soloR;
 
   root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink);
   return root;
