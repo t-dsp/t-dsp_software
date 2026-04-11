@@ -52,17 +52,32 @@ export interface MixerState {
   metersOn: Signal<boolean>;
 }
 
+// Default channel names must match the small-mixer firmware's defaults in
+// lib/TDspMixer/src/MixerModel.cpp — these are what the client shows before
+// the firmware echoes back /ch/NN/config/name values during its initial
+// state dump.
+const DEFAULT_CHANNEL_NAMES = [
+  'USB L',
+  'USB R',
+  'Line L',
+  'Line R',
+  'Mic L',
+  'Mic R',
+];
+
 export function createMixerState(channelCount: number): MixerState {
   const channels: ChannelState[] = [];
   for (let i = 0; i < channelCount; i++) {
+    const defaultName =
+      DEFAULT_CHANNEL_NAMES[i] ?? `Ch ${String(i + 1).padStart(2, '0')}`;
     channels.push({
-      fader: new Signal(0),
+      fader: new Signal(1.0),  // matches firmware default (MixerModel::reset)
       on: new Signal(true),
       solo: new Signal(false),
       pan: new Signal(0.5),
       peak: new Signal(0),
       rms: new Signal(0),
-      name: new Signal(`Ch ${String(i + 1).padStart(2, '0')}`),
+      name: new Signal(defaultName),
     });
   }
 

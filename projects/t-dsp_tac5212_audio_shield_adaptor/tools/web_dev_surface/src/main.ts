@@ -21,8 +21,10 @@ import { codecPanel } from './ui/codec-panel';
 import { serialConsole } from './ui/serial-console';
 import { rawOsc } from './ui/raw-osc';
 
-// Channel count for the small mixer v1 — see planning/osc-mixer-foundation/06-mixer-model-v1.md
-const CHANNEL_COUNT = 5;
+// Channel count for the small mixer v1 — 6 channels (USB L/R, Line L/R,
+// Mic L/R) matching tdsp::kChannelCount in lib/TDspMixer/src/MixerModel.h.
+// Stereo-linked pairs by default: (1,2), (3,4), (5,6).
+const CHANNEL_COUNT = 6;
 
 const state = createMixerState(CHANNEL_COUNT);
 const console_ = serialConsole();
