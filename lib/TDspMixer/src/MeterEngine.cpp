@@ -28,6 +28,14 @@ void MeterEngine::setMain(AudioAnalyzePeak *peakL, AudioAnalyzeRMS *rmsL,
     _mainRmsR  = rmsR;
 }
 
+void MeterEngine::setHost(AudioAnalyzePeak *peakL, AudioAnalyzeRMS *rmsL,
+                          AudioAnalyzePeak *peakR, AudioAnalyzeRMS *rmsR) {
+    _hostPeakL = peakL;
+    _hostRmsL  = rmsL;
+    _hostPeakR = peakR;
+    _hostRmsR  = rmsR;
+}
+
 bool MeterEngine::tick(OSCBundle &reply) {
     if (!_enabled) return false;
     const uint32_t now = millis();
@@ -61,9 +69,23 @@ bool MeterEngine::tick(OSCBundle &reply) {
         _mainPairs[3] = rmsR;
     }
 
+    // Host (post-hostvol) L/R meters — same layout as main.
+    {
+        float peakL = 0.0f, rmsL = 0.0f, peakR = 0.0f, rmsR = 0.0f;
+        if (_hostPeakL && _hostPeakL->available()) peakL = _hostPeakL->read();
+        if (_hostRmsL  && _hostRmsL->available())  rmsL  = _hostRmsL->read();
+        if (_hostPeakR && _hostPeakR->available()) peakR = _hostPeakR->read();
+        if (_hostRmsR  && _hostRmsR->available())  rmsR  = _hostRmsR->read();
+        _hostPairs[0] = peakL;
+        _hostPairs[1] = rmsL;
+        _hostPairs[2] = peakR;
+        _hostPairs[3] = rmsR;
+    }
+
     if (_dispatcher) {
         _dispatcher->broadcastMetersInput(reply, _pairs, kChannelCount);
         _dispatcher->broadcastMetersOutput(reply, _mainPairs, 2);
+        _dispatcher->broadcastMetersHost(reply, _hostPairs, 2);
     }
     return true;
 }

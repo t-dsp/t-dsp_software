@@ -75,6 +75,8 @@ public:
                               const float *peakRmsPairs, int pairCount);
     void broadcastMetersOutput(OSCBundle &reply,
                                const float *peakRmsPairs, int pairCount);
+    void broadcastMetersHost(OSCBundle &reply,
+                             const float *peakRmsPairs, int pairCount);
 
 private:
     MixerModel         *_model       = nullptr;

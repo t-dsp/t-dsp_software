@@ -72,6 +72,15 @@ AudioAnalyzePeak     peakMainR;
 AudioAnalyzeRMS      rmsMainL;
 AudioAnalyzeRMS      rmsMainR;
 
+// Host (Windows-volume) meter taps — post-hostvol, so they show the
+// actual level headed to the DAC (main fader × hostvol × hostvolEnable).
+// The engineer can compare these against the main-bus meters to see
+// how much Windows volume is attenuating things.
+AudioAnalyzePeak     peakHostL;
+AudioAnalyzePeak     peakHostR;
+AudioAnalyzeRMS      rmsHostL;
+AudioAnalyzeRMS      rmsHostR;
+
 // PDM mic combiners — 32-bit PDM split across two 16-bit TDM slots, so
 // each PDM mic (L, R) needs a 2-input mixer that re-combines the high
 // and low halves with correct scaling.
@@ -156,6 +165,14 @@ AudioConnection      c_mainL_peak  (mainAmpL, 0, peakMainL, 0);
 AudioConnection      c_mainL_rms   (mainAmpL, 0, rmsMainL, 0);
 AudioConnection      c_mainR_peak  (mainAmpR, 0, peakMainR, 0);
 AudioConnection      c_mainR_rms   (mainAmpR, 0, rmsMainR, 0);
+
+// Host meter taps — on the hostvol amp output, POST-hostvol. So the
+// meter shows what the DAC actually receives, including Windows volume
+// attenuation. Compare vs the main meters to see hostvol in action.
+AudioConnection      c_hostL_peak  (hostvolAmpL, 0, peakHostL, 0);
+AudioConnection      c_hostL_rms   (hostvolAmpL, 0, rmsHostL, 0);
+AudioConnection      c_hostR_peak  (hostvolAmpR, 0, peakHostR, 0);
+AudioConnection      c_hostR_rms   (hostvolAmpR, 0, rmsHostR, 0);
 
 // Capture mixers → USB out (host recording)
 AudioConnection      c_capL_usb    (captureL, 0, usbOut, 0);
@@ -427,6 +444,7 @@ void setup() {
     g_meters.setChannel(5, &peakCh5, &rmsCh5);
     g_meters.setChannel(6, &peakCh6, &rmsCh6);
     g_meters.setMain(&peakMainL, &rmsMainL, &peakMainR, &rmsMainR);
+    g_meters.setHost(&peakHostL, &rmsHostL, &peakHostR, &rmsHostR);
 
     Serial.println("\nReady!");
     Serial.println("  6 input channels: USB L/R, Line L/R, Mic L/R");

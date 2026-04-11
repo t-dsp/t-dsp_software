@@ -41,6 +41,11 @@ public:
     void setMain(AudioAnalyzePeak *peakL, AudioAnalyzeRMS *rmsL,
                  AudioAnalyzePeak *peakR, AudioAnalyzeRMS *rmsR);
 
+    // Register host-volume (post-hostvol, pre-DAC) L/R analyzers.
+    // Emitted as /meters/host at the same cadence.
+    void setHost(AudioAnalyzePeak *peakL, AudioAnalyzeRMS *rmsL,
+                 AudioAnalyzePeak *peakR, AudioAnalyzeRMS *rmsR);
+
     // Register the dispatcher used to broadcast meter blobs.
     void setDispatcher(OscDispatcher *dispatcher) { _dispatcher = dispatcher; }
 
@@ -78,10 +83,17 @@ private:
     AudioAnalyzePeak *_mainPeakR = nullptr;
     AudioAnalyzeRMS  *_mainRmsR  = nullptr;
 
+    // Host (post-hostvol, pre-DAC) L/R analyzers.
+    AudioAnalyzePeak *_hostPeakL = nullptr;
+    AudioAnalyzeRMS  *_hostRmsL  = nullptr;
+    AudioAnalyzePeak *_hostPeakR = nullptr;
+    AudioAnalyzeRMS  *_hostRmsR  = nullptr;
+
     // Scratch buffer: peak, rms pairs per channel.
     float _pairs[kChannelCount * 2] = {0};
-    // Scratch buffer: main L/R peak+rms, 2 pairs.
+    // Scratch buffers: 2 pairs each (L peak/rms, R peak/rms).
     float _mainPairs[4] = {0};
+    float _hostPairs[4] = {0};
 };
 
 }  // namespace tdsp

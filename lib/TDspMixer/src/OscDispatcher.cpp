@@ -478,4 +478,10 @@ void OscDispatcher::broadcastMetersOutput(OSCBundle &reply,
     packMeterBlob(reply, "/meters/output", peakRmsPairs, pairCount);
 }
 
+void OscDispatcher::broadcastMetersHost(OSCBundle &reply,
+                                        const float *peakRmsPairs,
+                                        int pairCount) {
+    packMeterBlob(reply, "/meters/host", peakRmsPairs, pairCount);
+}
+
 }  // namespace tdsp
