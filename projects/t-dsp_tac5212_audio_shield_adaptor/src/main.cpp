@@ -232,7 +232,6 @@ void setup() {
 
     Serial.println("================================");
     Serial.println("  T-DSP TAC5212 Audio Shield");
-    Serial.println("  [USB VOL DEBUG BUILD]");
     Serial.println("================================");
 
     delay(100);
@@ -398,17 +397,6 @@ void loop() {
         float g = (usbVol / 100.0f) * hostVolGain;
         mixL.gain(0, g);
         mixR.gain(0, g);
-        // TEMP instrumentation — kept until square-law fix is verified on
-        // hardware, then removed. Prints raw USB value, curved host gain,
-        // and final composed mixer gain on every change.
-        Serial.print("[VOL] features.volume=");
-        Serial.print(AudioInputUSB::features.volume);
-        Serial.print("  raw=");
-        Serial.print(raw, 4);
-        Serial.print("  hostVolGain=");
-        Serial.print(hostVolGain, 4);
-        Serial.print("  g=");
-        Serial.println(g, 4);
     }
 
     while (Serial.available()) {
