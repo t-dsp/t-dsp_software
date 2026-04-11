@@ -1,0 +1,18 @@
+language: c
+before_install:
+  - sudo apt-get install arduino-core
+  - sudo apt-get install arduino-mk
+  - sudo apt-get install binutils-arm-none-eabi gcc-arm-none-eabi
+  - sudo mkdir /usr/local/share/arduino/hardware/teensy/
+  - pushd /usr/local/share/arduino/hardware/teensy/
+  - sudo git clone https://github.com/PaulStoffregen/cores
+  - popd
+install:
+  - ln -s $PWD /usr/local/share/arduino/libraries/OpenAudio_ArduinoLibrary
+  - arduino --install-library "Audio"
+script:
+  - arduino --verify --board teensy:avr:teensy36:usb=serialmidiaudio $PWD/examples/Tympan_TLV320AIC3206.ino
+notifications:
+  email:
+    on_success: change
+    on_failure: change
