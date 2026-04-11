@@ -12,7 +12,7 @@ If this project builds, uploads, and prints to the serial monitor, you're ready 
 ## What you need
 
 - A **Teensy 4.1** board
-- A **USB-C** cable (data, not just power)
+- A **micro-USB** cable (data, not just power)
 - A computer running **Windows**, **macOS**, or **Linux**
 - About 15 minutes for first-time setup
 
@@ -75,7 +75,7 @@ cd t-dsp_software/projects/hello-world
 
 ## 6. Plug in your Teensy
 
-Connect the Teensy 4.1 to your computer with a USB-C cable. The orange power LED on the Teensy should light up.
+Connect the Teensy 4.1 to your computer with a micro-USB cable. The orange power LED on the Teensy should light up.
 
 ## 7. Build and upload
 
