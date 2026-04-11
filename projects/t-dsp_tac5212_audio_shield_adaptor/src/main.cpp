@@ -3,14 +3,17 @@
 #include <Wire.h>
 #include "tac5212_regs.h"
 #include <TAC5212.h>
+#include <TDspMixer.h>
 
-// Compile-time / link-time verification that lib/TAC5212/ builds into this
-// project. The new library exists but main.cpp still uses the old
-// hand-rolled setupCodec() path — migration to the library is a separate
-// commit. Marking this function __attribute__((used)) prevents dead-code
-// elimination from dropping it, so the linker pulls in TAC5212.cpp and
-// we'd see any compile error at build time instead of at migration time.
-__attribute__((used)) static void _tac5212_library_link_check() {
+// Compile-time / link-time verification that lib/TAC5212/ and lib/TDspMixer/
+// build into this project. Both libraries are linked but main.cpp still
+// uses the hand-rolled Phase 1 setupCodec() + AudioMixer4 path during the
+// MVP v1 push; migration to TDspMixer is happening incrementally. The
+// __attribute__((used)) marker prevents dead-code elimination from dropping
+// the references, so the linker pulls in the libraries and any compile
+// errors surface at build time instead of at migration time.
+__attribute__((used)) static void _tdsp_library_link_check() {
+    // lib/TAC5212 references
     tac5212::TAC5212 codec;
     (void)codec.errorCount();
     (void)codec.info();
@@ -19,6 +22,26 @@ __attribute__((used)) static void _tac5212_library_link_check() {
     (void)codec.setMicbiasLevel(tac5212::MicbiasLevel::SameAsVref);
     (void)codec.setVrefFscale(tac5212::VrefFscale::V2p75);
     (void)codec.setAdcHpf(true);
+
+    // lib/TDspMixer references
+    tdsp::MixerModel model;
+    (void)model.setChannelFader(1, 0.5f);
+    (void)model.setMainFader(0.75f);
+    (void)model.effectiveChannelGain(1);
+
+    tdsp::SignalGraphBinding binding;
+    binding.setModel(&model);
+    binding.applyAll();
+
+    tdsp::OscDispatcher dispatcher;
+    dispatcher.setModel(&model);
+    dispatcher.setBinding(&binding);
+
+    tdsp::SlipOscTransport transport;
+    transport.setOscMessageHandler(nullptr, nullptr);
+
+    tdsp::MeterEngine meters;
+    meters.setDispatcher(&dispatcher);
 }
 
 // Teensy pin that drives EN_HELD_HIGH on the TAC5212 module → enables LDO
@@ -209,6 +232,7 @@ void setup() {
 
     Serial.println("================================");
     Serial.println("  T-DSP TAC5212 Audio Shield");
+    Serial.println("  [USB VOL DEBUG BUILD]");
     Serial.println("================================");
 
     delay(100);
@@ -261,24 +285,18 @@ void setup() {
 bool micOn = false;
 bool lineOn = false;
 
-// Host volume scaling.
+// Host volume curve.
 //
-// Teensy's USB Audio Class descriptor declares the playback volume feature
-// unit as unsigned 0..0xFFF, while UAC 1.0 expects signed Q8.8 dB. Windows
-// interprets this mismatch by squeezing its linear-amplitude slider into a
-// tiny corner of the 0..1 float range that `usbIn.volume()` returns — on
-// this machine, slider 100% reads as ~0.062 and slider 50% as ~0.028.
-//
-// USB_VOL_SCALE un-squeezes that by multiplying the observed value by
-// 1/0.062 ≈ 16.13 and clamping to [0, 1], giving us a usable linear-
-// amplitude gain 0..1 that tracks the host slider.
-//
-// The scale factor is empirical; if you see `USB host vol (raw)` in the
-// `s` status dump max out at a different value on a different machine,
-// update this constant.
-constexpr float USB_VOL_SCALE = 16.13f;  // 1 / 0.062
-float hostVolGain  = 1.0f;  // current scaled host gain, updated from loop()
-float lastUsbVolRaw = -1.0f;  // last raw usbIn.volume() value we processed
+// usbIn.volume() returns a linear 0..1 multiplier driven by the Windows
+// volume slider (USB Audio Class feature unit, raw 0..255 / 255 — Windows
+// sends the full range across the slider, contrary to a now-deleted
+// comment that claimed otherwise). Multiplying audio samples by a linear
+// 0..1 gain is perceptually wrong: 50% slider gives -6 dB, almost no
+// audible change, and the perceptual range piles up at the bottom of the
+// slider. Square the value as a cheap audio taper so 50% slider ≈ -12 dB,
+// 25% ≈ -24 dB — close to a real log-taper volume pot.
+float hostVolGain  = 1.0f;   // current curved host gain, updated from loop()
+float lastUsbVolRaw = -1.0f; // last raw usbIn.volume() value we processed
 
 // Active channel for +/- adjustments
 enum ActiveCh { CH_NONE, CH_USB, CH_MIC, CH_LINE };
@@ -376,12 +394,21 @@ void loop() {
     float raw = usbIn.volume();
     if (raw != lastUsbVolRaw) {
         lastUsbVolRaw = raw;
-        float scaled = raw * USB_VOL_SCALE;
-        if (scaled > 1.0f) scaled = 1.0f;
-        hostVolGain = scaled;
+        hostVolGain = raw * raw;  // square-law audio taper
         float g = (usbVol / 100.0f) * hostVolGain;
         mixL.gain(0, g);
         mixR.gain(0, g);
+        // TEMP instrumentation — kept until square-law fix is verified on
+        // hardware, then removed. Prints raw USB value, curved host gain,
+        // and final composed mixer gain on every change.
+        Serial.print("[VOL] features.volume=");
+        Serial.print(AudioInputUSB::features.volume);
+        Serial.print("  raw=");
+        Serial.print(raw, 4);
+        Serial.print("  hostVolGain=");
+        Serial.print(hostVolGain, 4);
+        Serial.print("  g=");
+        Serial.println(g, 4);
     }
 
     while (Serial.available()) {
