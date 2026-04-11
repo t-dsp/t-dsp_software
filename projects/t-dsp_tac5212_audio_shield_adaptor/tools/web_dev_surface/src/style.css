@@ -160,11 +160,84 @@ select, input[type="text"] {
 .main-strip {
   background: #2c2c2c;
   border-color: #4a4a4a;
+  width: auto;        /* stereo sides need more room */
+  min-width: 110px;
 }
 
-.meter-pair {
+.main-sides {
   display: flex;
-  gap: 2px;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.main-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.side-label {
+  font-size: 10px;
+  color: #888;
+  font-family: monospace;
+  letter-spacing: 1px;
+}
+
+.link-btn {
+  width: 100%;
+  font-size: 10px;
+  padding: 3px 0;
+  color: #aaa;
+}
+
+.link-btn.active {
+  background: #2d5a6a;
+  border-color: #3d7a8a;
+  color: #fff;
+}
+
+.strip.linked-slave,
+.main-side.linked-slave {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.main-side.linked-slave .fader {
+  pointer-events: none;
+}
+
+/* ---------- host (Windows volume) strip ---------- */
+
+.host-strip {
+  background: #1e1e28;
+  border-color: #3a3a4a;
+}
+
+.meter-spacer {
+  background: transparent;
+  border-color: transparent;
+}
+
+.host-strip .strip-name {
+  color: #9aa;
+}
+
+.host-strip.bypassed .fader,
+.host-strip.bypassed .fader-value {
+  opacity: 0.35;
+}
+
+.enable-btn {
+  width: 100%;
+  font-size: 10px;
+  padding: 4px 0;
+}
+
+.enable-btn.active {
+  background: #2d6a3a;
+  border-color: #3d8a4a;
+  color: #fff;
 }
 
 /* ---------- codec panel ---------- */

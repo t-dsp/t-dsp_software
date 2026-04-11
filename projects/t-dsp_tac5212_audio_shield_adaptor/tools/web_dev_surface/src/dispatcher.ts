@@ -38,14 +38,50 @@ export class Dispatcher {
     this.sendMsg(`/ch/${pad2(idx + 1)}/mix/solo`, 'i', [solo ? 1 : 0]);
   }
 
-  setMainFader(v: number): void {
-    this.state.main.fader.set(v);
-    this.sendMsg('/main/st/mix/fader', 'f', [v]);
+  // Toggle stereo link on a channel pair. The address only accepts an
+  // odd channel (1, 3, 5) — the even side's link flag is implicit.
+  setChannelLink(oddIdx: number, linked: boolean): void {
+    this.state.channels[oddIdx].link.set(linked);
+    // Propagate optimistically to the even partner so its UI
+    // disabled-state updates immediately.
+    const partner = this.state.channels[oddIdx + 1];
+    if (partner && linked) {
+      partner.fader.set(this.state.channels[oddIdx].fader.get());
+      partner.on.set(this.state.channels[oddIdx].on.get());
+      partner.solo.set(this.state.channels[oddIdx].solo.get());
+    }
+    this.sendMsg(`/ch/${pad2(oddIdx + 1)}/config/link`, 'i', [linked ? 1 : 0]);
+  }
+
+  setMainFaderL(v: number): void {
+    this.state.main.faderL.set(v);
+    if (this.state.main.link.get()) this.state.main.faderR.set(v);
+    this.sendMsg('/main/st/mix/faderL', 'f', [v]);
+  }
+
+  setMainFaderR(v: number): void {
+    this.state.main.faderR.set(v);
+    if (this.state.main.link.get()) this.state.main.faderL.set(v);
+    this.sendMsg('/main/st/mix/faderR', 'f', [v]);
+  }
+
+  setMainLink(linked: boolean): void {
+    this.state.main.link.set(linked);
+    if (linked) {
+      // Snap R to L for visual consistency ahead of the echo.
+      this.state.main.faderR.set(this.state.main.faderL.get());
+    }
+    this.sendMsg('/main/st/mix/link', 'i', [linked ? 1 : 0]);
   }
 
   setMainOn(on: boolean): void {
     this.state.main.on.set(on);
     this.sendMsg('/main/st/mix/on', 'i', [on ? 1 : 0]);
+  }
+
+  setMainHostvolEnable(enable: boolean): void {
+    this.state.main.hostvolEnable.set(enable);
+    this.sendMsg('/main/st/hostvol/enable', 'i', [enable ? 1 : 0]);
   }
 
   // /sub addSub i i s — interval ms, lifetime ms, address pattern
@@ -113,13 +149,41 @@ export class Dispatcher {
       return;
     }
 
-    if (a === '/main/st/mix/fader' && msg.types === 'f') {
-      this.state.main.fader.set(msg.args[0] as number);
+    m = a.match(/^\/ch\/(\d+)\/config\/link$/);
+    if (m && msg.types === 'i') {
+      const idx = parseInt(m[1], 10) - 1;
+      const ch = this.state.channels[idx];
+      if (ch) ch.link.set((msg.args[0] as number) !== 0);
+      return;
+    }
+
+    if (a === '/main/st/mix/faderL' && msg.types === 'f') {
+      this.state.main.faderL.set(msg.args[0] as number);
+      return;
+    }
+
+    if (a === '/main/st/mix/faderR' && msg.types === 'f') {
+      this.state.main.faderR.set(msg.args[0] as number);
+      return;
+    }
+
+    if (a === '/main/st/mix/link' && msg.types === 'i') {
+      this.state.main.link.set((msg.args[0] as number) !== 0);
       return;
     }
 
     if (a === '/main/st/mix/on' && msg.types === 'i') {
       this.state.main.on.set((msg.args[0] as number) !== 0);
+      return;
+    }
+
+    if (a === '/main/st/hostvol/enable' && msg.types === 'i') {
+      this.state.main.hostvolEnable.set((msg.args[0] as number) !== 0);
+      return;
+    }
+
+    if (a === '/main/st/hostvol/value' && msg.types === 'f') {
+      this.state.main.hostvolValue.set(msg.args[0] as number);
       return;
     }
 

@@ -1,14 +1,29 @@
-import { ChannelState } from '../state';
+import { ChannelState, Signal } from '../state';
 import { Dispatcher } from '../dispatcher';
 import { formatFaderDb } from './util';
 
+// Render one channel strip. `idx` is the 0-based channel index.
+//
+// Stereo linking:
+//   - Odd channels (idx 0, 2, 4 == ch 1, 3, 5) carry the link flag
+//     and show a LINK toggle button.
+//   - Even channels (idx 1, 3, 5 == ch 2, 4, 6) become visually
+//     "slaves" when their odd neighbor has link=true: fader/mute/solo
+//     get disabled and the whole strip dims. The firmware propagates
+//     writes so the slave's values still update via echo.
+//
+// `partnerLink` is the link signal of the odd neighbor (or undefined
+// if this IS the odd channel). It's used only by even channels.
 export function channelStrip(
   idx: number,
   ch: ChannelState,
   dispatcher: Dispatcher,
+  partnerLink: Signal<boolean> | undefined,
 ): HTMLElement {
   const root = document.createElement('div');
   root.className = 'strip';
+
+  const isOdd = (idx & 1) === 0;  // idx 0 == ch 1 == odd in 1-based
 
   const name = document.createElement('div');
   name.className = 'strip-name';
@@ -57,6 +72,33 @@ export function channelStrip(
   ch.solo.subscribe((s) => solo.classList.toggle('active', s));
   solo.addEventListener('click', () => dispatcher.setChannelSolo(idx, !ch.solo.get()));
 
-  root.append(name, meterWrap, fader, fv, mute, solo);
+  // Link button: only on odd channels. Toggling updates the model;
+  // the even partner's strip subscribes to the same link signal and
+  // re-renders as disabled/slave.
+  let linkBtn: HTMLElement | undefined;
+  if (isOdd && idx + 1 < 6) {
+    const btn = document.createElement('button');
+    btn.className = 'link-btn';
+    btn.textContent = 'L';
+    btn.title = 'Stereo link with next channel';
+    ch.link.subscribe((linked) => btn.classList.toggle('active', linked));
+    btn.addEventListener('click', () => dispatcher.setChannelLink(idx, !ch.link.get()));
+    linkBtn = btn;
+  }
+
+  // Slave-disable: when this is an even channel AND the odd partner's
+  // link flag is true, dim everything and disable the controls.
+  if (!isOdd && partnerLink) {
+    partnerLink.subscribe((linked) => {
+      fader.disabled = linked;
+      mute.disabled = linked;
+      solo.disabled = linked;
+      root.classList.toggle('linked-slave', linked);
+    });
+  }
+
+  const children: HTMLElement[] = [name, meterWrap, fader, fv, mute, solo];
+  if (linkBtn) children.push(linkBtn);
+  root.append(...children);
   return root;
 }
