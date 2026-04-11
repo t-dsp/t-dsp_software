@@ -1,0 +1,165 @@
+# t-dsp web dev surface — TAC5212
+
+A small browser-based mixer that talks to the TAC5212 audio shield adaptor's
+firmware over WebSerial. **Bench tool, not a product.** Per-board, intentionally
+non-portable, deliberately undercooked.
+
+This is one of two client surfaces for the OSC mixer foundation epic. The other
+is a committed Open Stage Control preset (M13). They serve different users:
+
+| Surface | Audience | When useful |
+|---|---|---|
+| Open Stage Control preset | Audio engineer running the board | After firmware is stable, when you want a real mixing UI |
+| **This (web_dev_surface)** | Firmware dev mid-iteration | Any time the dispatcher is alive — moves a fader in Chrome and pokes the audio graph without launching anything else |
+
+See [planning/osc-mixer-foundation/README.md](../../../../planning/osc-mixer-foundation/README.md) for the full epic context.
+
+## Quickstart
+
+```bash
+cd projects/t-dsp_tac5212_audio_shield_adaptor/tools/web_dev_surface
+pnpm install
+pnpm dev
+```
+
+Open the URL Vite prints (default `http://localhost:5173`) in **Chrome, Edge,
+Brave, or any other Chromium-based browser**. Click **Connect**, pick the
+Teensy's COM port from the WebSerial picker, and the UI is live.
+
+For a static build:
+
+```bash
+pnpm build      # → dist/
+pnpm preview    # serve dist/ for a local sanity check
+```
+
+WebSerial requires a secure context — the dev server (`localhost`) and
+HTTPS-served `dist/` both qualify. `file://` does **not** qualify and the
+Connect button will refuse.
+
+## Browser support
+
+WebSerial is **Chromium-only** as of writing. This is an accepted constraint:
+this tool is for the firmware developer at the bench, who can install Chrome.
+Firefox and Safari are explicitly not supported and will show an error in the
+console pane on connect.
+
+If you need a cross-browser surface, that's the OSC preset's job. If you need
+a portable bespoke client, that's a downstream epic.
+
+## What's in here
+
+```
+src/
+  main.ts                  entry: wires WebSerial → demuxer → OSC ↔ UI
+  style.css                dark theme, single file
+  osc.ts                   minimal OSC 1.0 encoder/decoder (i/f/s/b + T/F/N/I)
+  transport.ts             SLIP encoder + stream demultiplexer (SLIP frames vs ASCII text)
+  state.ts                 tiny Signal class + mixer state model
+  dispatcher.ts            mixer state ↔ OSC translation, address routing
+  codec-panel-config.ts    TAC5212 panel descriptor (mirrors 02-osc-protocol.md)
+  ui/
+    connect.ts             Connect/Disconnect button
+    channel-strip.ts       fader + mute + solo + peak/RMS meter
+    main-bus.ts            main bus strip
+    codec-panel.ts         tabbed enum/toggle/action renderer for the descriptor
+    serial-console.ts      scrollback for plain-text side of the multiplexed stream
+    raw-osc.ts             free-form OSC input field with auto-typing
+    util.ts                shared formatters
+```
+
+Zero runtime dependencies. The only `pnpm install` cost is Vite (dev server +
+TypeScript transpile) and the WebSerial type definitions. No React, no Svelte,
+no OSC library, no SLIP library — all hand-rolled because the surface area is
+small enough that the dependencies cost more than the code.
+
+## How the wire protocol works
+
+Two streams multiplexed on the same USB CDC connection, discriminated by the
+first byte of each unit:
+
+- **`0xC0` (SLIP END)** → start of a SLIP frame. Read until the closing `0xC0`,
+  unescape, hand the payload to the OSC decoder.
+- **Any other byte** → plain ASCII text. Accumulate until `\n`, hand the line
+  to the serial console pane.
+
+This matches what the firmware emits per
+[planning/osc-mixer-foundation/03-transport.md](../../../../planning/osc-mixer-foundation/03-transport.md)
+and [02-osc-protocol.md](../../../../planning/osc-mixer-foundation/02-osc-protocol.md#the-cli-escape-hatch).
+The decoder is in `transport.ts` (`StreamDemuxer`).
+
+OSC addresses follow the X32-flavored convention from
+[02-osc-protocol.md](../../../../planning/osc-mixer-foundation/02-osc-protocol.md):
+faders are normalized `0..1`, `mix/on` is X32-inverted (1 = unmuted), the
+codec panel lives under `/codec/tac5212/...`. The dispatcher in `dispatcher.ts`
+is the only place these conventions are encoded; widgets call typed setters
+and never construct addresses themselves.
+
+## Adding controls to the codec panel
+
+Edit [src/codec-panel-config.ts](src/codec-panel-config.ts). Each tab has groups,
+each group has controls, each control is one of `enum` / `toggle` / `action`.
+The renderer in `ui/codec-panel.ts` handles all three kinds — no rendering code
+needs to change when you add a leaf.
+
+**Important:** keep this file in lockstep with the canonical
+`/codec/tac5212/...` subtree in
+[02-osc-protocol.md](../../../../planning/osc-mixer-foundation/02-osc-protocol.md).
+The design notes in that document explain why specific leaves were dropped
+(`/out/N/level`, `/out/N/drive`, `"se_mic_bias"`, `/adc/N/pga`,
+`/micbias/gpio_control`). Don't reintroduce them here without revisiting the
+underlying rules.
+
+## What this surface intentionally doesn't have
+
+- **EQ.** No curve display, no band controls. The raw OSC input field can poke
+  `/ch/NN/eq/B/...` if you need to test handlers; a real UI is the OSC preset's
+  job.
+- **Scenes.** `/-snap/save` and `/-snap/load` can be triggered from the raw
+  field. No scene browser.
+- **Pan, sends, HPF, dynamics.** Not in the strip. Add via the raw field, or
+  edit `state.ts` + `channel-strip.ts` if you genuinely need a widget.
+- **Theming.** One dark theme.
+- **Multi-tab layouts, layout persistence, keyboard shortcuts, drag-and-drop
+  channel reordering, MIDI learn, accessibility audits, mobile breakpoints,
+  i18n.** Not in scope. This is a testing ground.
+- **Cross-browser support.** Chromium only by design. See above.
+
+The rule for adding a feature: does the firmware-side dispatcher already have
+the address? Then the raw OSC input handles it. Promote to a real widget only
+when the friction of typing the address every time is hurting iteration speed.
+
+## Relationship to firmware milestones
+
+This tool is most useful starting at roadmap **M7** (OscDispatcher). Before
+that, there's nothing on the firmware side to talk to.
+
+- **M7 (OscDispatcher)** — fader/mute/solo/main work end-to-end. This is when
+  the connect-and-mix loop first lights up.
+- **M8 (MeterEngine + SubscriptionMgr)** — Meters: ON button starts streaming.
+  The exact wire format of the `/sub` handshake will be confirmed in M8;
+  `dispatcher.ts` `subscribeMeters()` is the one place to update if it changes.
+- **M11 (Tac5212Panel)** — codec panel tab becomes wired to real registers.
+
+The tool reaches "feature complete for its scope" alongside M11. It does **not**
+block M13 (Open Stage Control preset) — both ship.
+
+## Known limitations
+
+- **Fader curve is a single-segment log approximation,** not the real X32
+  piecewise curve. The dB readout next to each fader is rough. Replace
+  `formatFaderDb` in `ui/util.ts` if you need exact display.
+- **No reconnect-on-port-loss.** If the Teensy reboots mid-session, click
+  Disconnect and Connect again. The firmware-side reset is also visible as a
+  fresh boot banner in the console pane.
+- **Subscription wire format is provisional.** The `/sub addSub` argument shape
+  in `dispatcher.ts` matches the convention documented in
+  [02-osc-protocol.md](../../../../planning/osc-mixer-foundation/02-osc-protocol.md#subscriptions-follow-the-x32-xremote-idiom)
+  but the exact types/order will be locked when M8 implements the wrapper.
+- **Meter blob layout is provisional.** Per-channel `(peak, rms)` float32 BE
+  pairs in declared channel order — placeholder until M8 publishes the
+  authoritative spec.
+- **No auto-typing for negative integers in raw field.** `5` parses as `i 5`,
+  `5.0` parses as `f 5.0`, `-5` parses as `i -5`. If you want a negative float
+  to be `f` rather than `i`, write `-5.0` or use explicit-typed mode
+  (`/path f -5`).

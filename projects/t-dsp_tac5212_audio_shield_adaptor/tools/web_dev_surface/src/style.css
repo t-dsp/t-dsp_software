@@ -1,0 +1,283 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #181818;
+  color: #e0e0e0;
+  font: 13px/1.4 -apple-system, "Segoe UI", system-ui, sans-serif;
+}
+
+#app {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+h1, h4 {
+  margin: 0;
+}
+
+h4 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #888;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.header h1 {
+  font-size: 15px;
+  font-weight: 500;
+  flex: 1;
+  color: #f0f0f0;
+}
+
+button {
+  background: #2a2a2a;
+  color: #e0e0e0;
+  border: 1px solid #444;
+  padding: 6px 12px;
+  cursor: pointer;
+  font: inherit;
+  border-radius: 2px;
+}
+
+button:hover {
+  background: #333;
+}
+
+button.active {
+  background: #b86a30;
+  border-color: #d68038;
+  color: #fff;
+}
+
+button.connect.connected {
+  background: #2d6a3a;
+  border-color: #3d8a4a;
+}
+
+select, input[type="text"] {
+  background: #161616;
+  color: #e0e0e0;
+  border: 1px solid #444;
+  padding: 4px 6px;
+  font: inherit;
+  border-radius: 2px;
+}
+
+/* ---------- mixer row ---------- */
+
+.mixer-row {
+  display: flex;
+  gap: 8px;
+  background: #202020;
+  padding: 12px;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+}
+
+.strip {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  background: #262626;
+  padding: 10px 8px;
+  border: 1px solid #333;
+  border-radius: 2px;
+  width: 64px;
+}
+
+.strip-name {
+  font-size: 11px;
+  color: #aaa;
+  text-align: center;
+  width: 100%;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.meter-wrap {
+  width: 10px;
+  height: 130px;
+  background: #0c0c0c;
+  border: 1px solid #333;
+  position: relative;
+  overflow: hidden;
+}
+
+.meter-fill {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 0;
+  transition: height 60ms linear;
+}
+
+.meter-fill.peak {
+  background: linear-gradient(to top, #4a4 0%, #4a4 60%, #cc4 75%, #c44 90%);
+  opacity: 0.95;
+}
+
+.meter-fill.rms {
+  background: #2a5a2a;
+  opacity: 0.6;
+}
+
+.fader {
+  -webkit-appearance: slider-vertical;
+  appearance: slider-vertical;
+  width: 24px;
+  height: 160px;
+}
+
+.fader-value {
+  font-size: 10px;
+  color: #888;
+  font-variant-numeric: tabular-nums;
+  font-family: monospace;
+}
+
+.mute, .solo {
+  width: 100%;
+  font-size: 11px;
+  padding: 4px 0;
+}
+
+.main-strip {
+  background: #2c2c2c;
+  border-color: #4a4a4a;
+}
+
+/* ---------- codec panel ---------- */
+
+.codec-section {
+  background: #202020;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+}
+
+.codec-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.tab-bar {
+  display: flex;
+  border-bottom: 1px solid #2c2c2c;
+}
+
+.tab-btn {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 10px 16px;
+  border-bottom: 2px solid transparent;
+  font-size: 12px;
+}
+
+.tab-btn:hover {
+  background: #262626;
+}
+
+.tab-btn.active {
+  background: #262626;
+  border-bottom-color: #b86a30;
+  color: #f0f0f0;
+}
+
+.tab-content {
+  padding: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.group {
+  background: #262626;
+  padding: 10px 12px;
+  border: 1px solid #333;
+  border-radius: 2px;
+  min-width: 220px;
+}
+
+.group h4 {
+  margin: 0 0 8px;
+}
+
+.control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 4px 0;
+  gap: 8px;
+}
+
+.control label {
+  font-size: 12px;
+  color: #ccc;
+}
+
+/* ---------- raw OSC ---------- */
+
+.raw-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.raw-osc {
+  display: flex;
+  gap: 8px;
+}
+
+.raw-osc-input {
+  flex: 1;
+  font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+/* ---------- console ---------- */
+
+.console-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.console-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.console-clear {
+  font-size: 11px;
+  padding: 3px 8px;
+}
+
+.console {
+  background: #0a0a0a;
+  color: #c0c0c0;
+  font: 11px/1.35 ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  padding: 8px 10px;
+  height: 240px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  border: 1px solid #2c2c2c;
+  border-radius: 2px;
+}

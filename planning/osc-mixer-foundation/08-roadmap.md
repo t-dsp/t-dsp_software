@@ -155,6 +155,10 @@ This milestone has two parts because the codec register library doesn't exist ye
 
 **Output:** A working visual control surface for the small mixer. v1 of the epic is complete.
 
+### Parallel track: web dev surface (Chromium-only WebSerial)
+
+A second client surface, [`projects/t-dsp_tac5212_audio_shield_adaptor/tools/web_dev_surface/`](../../projects/t-dsp_tac5212_audio_shield_adaptor/tools/web_dev_surface/), runs alongside the Open Stage Control preset and serves a different user. It is a small Vite + vanilla TypeScript SPA that opens the Teensy's USB CDC port via the WebSerial API, runs SLIP framing and OSC encoding/decoding in the browser, and exposes channel strips, a main bus, the TAC5212 codec panel, a serial console pane, and a raw OSC input field. Chromium-only, intentionally non-portable, scoped specifically to this board — it is a development and validation tool, not a product, and not a replacement for M13. It becomes useful as soon as M7 (OscDispatcher) lights up, grows alongside M8 (meter subscriptions) and M11 (codec panel), and reaches feature-complete for its scope when M11 lands. It does not block any milestone in the linear M1–M16 sequence; treat it as a parallel track that earns its keep by shortening the firmware iteration loop. A bespoke *product* surface (Tauri or full-featured cross-browser client, portable across boards) is still parked as a downstream epic.
+
 ### M14: Spike 2 — Multi-channel USB
 
 See [07-spike-plan.md](07-spike-plan.md#spike-2-multi-channel-usb-audio) for full scope.
