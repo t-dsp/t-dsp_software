@@ -83,11 +83,11 @@ AudioAnalyzeRMS      rmsHostR;
 
 // Main bus stereo FFT taps — sit on the same pre-hostvol node as the
 // peak/RMS meter taps, so the spectrum analyzer view reflects the mix
-// engineer's faders but NOT Windows volume attenuation. FFT1024 gives
-// us 512 bins at ~86 Hz resolution (44.1 kHz / 1024 * 2), new frame
-// every ~11.6 ms. SpectrumEngine polls them at ~30 Hz.
-AudioAnalyzeFFT1024  fftMainL;
-AudioAnalyzeFFT1024  fftMainR;
+// engineer's faders but NOT Windows volume attenuation. Default 1024-
+// point gives 512 bins at ~86 Hz resolution (44.1 kHz / 1024 * 2),
+// new frame every ~11.6 ms. SpectrumEngine polls them at 10 Hz.
+tdsp::AnalyzeFFT_F32 fftMainL;
+tdsp::AnalyzeFFT_F32 fftMainR;
 
 // PDM mic combiners — 32-bit PDM split across two 16-bit TDM slots, so
 // each PDM mic (L, R) needs a 2-input mixer that re-combines the high

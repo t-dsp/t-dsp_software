@@ -1,8 +1,8 @@
 #include "SpectrumEngine.h"
+#include "AnalyzeFFT_F32.h"
 #include "OscDispatcher.h"
 
 #include <Arduino.h>
-#include <Audio.h>  // AudioAnalyzeFFT1024
 #include <OSCBundle.h>
 
 #include <math.h>
@@ -16,8 +16,8 @@ SpectrumEngine::SpectrumEngine() {
     memset(_bins, 0, sizeof(_bins));
 }
 
-void SpectrumEngine::setChannels(AudioAnalyzeFFT1024 *fftL,
-                                 AudioAnalyzeFFT1024 *fftR) {
+void SpectrumEngine::setChannels(AnalyzeFFT_F32 *fftL,
+                                 AnalyzeFFT_F32 *fftR) {
     _fftL = fftL;
     _fftR = fftR;
 }

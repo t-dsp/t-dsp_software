@@ -58,12 +58,11 @@ const EMA_DECAY = 0.82;
 // floating cap" rate you see on hardware mixer meters.
 const PEAK_DROP_PER_FRAME = 0.4;
 
-// Vertical display stretch. byte=255 (0 dBFS) lands at -0.2*H
-// (20% above the visible top), byte=0 (-80 dB) stays at H (bottom).
-// Levels up to ~ -10 dB get clipped off the top, but the useful
-// -60..-10 dB range expands to fill much more of the visible
-// canvas, matching the "bars fill the screen" ask.
-const Y_SCALE_OVERSHOOT = 1.2;
+// Vertical display boost. 1.2× stretches the bars so typical program
+// material fills more of the canvas. 0 dBFS overshoots the top by
+// 20% and gets clipped — that's fine, it just means hot peaks fill
+// the screen rather than leaving dead space at the top.
+const Y_SCALE = 1.2;
 
 // Pink-flat tilt: a +3 dB/octave slope compensation applied to the
 // displayed bin values (NOT to the raw data). Most real-world audio
@@ -85,15 +84,12 @@ const BYTE_PER_DB        = 255 / 80;
 // meters on the mixer view — each bar uses the same green→yellow
 // →red peak gradient as the mixer's .meter-fill.peak.
 //
-// 128 bars = ~13 per octave across the 9-octave display range.
-// Fine detail, still cheap (~512 fillRects/frame; Canvas 2D
-// handles this trivially). The low end will show some visible
-// stepping because FFT1024's 43 Hz bin spacing means the first
-// ~dozen bars below 200 Hz all fall back to the same handful of
-// bins via barBinFallback — that's a resolution limit of the
-// underlying FFT, not a renderer cost. Going higher than 128
-// adds more visual stepping without more real information.
-const N_BARS = 128;
+// 64 bars = ~7 per octave across the 9-octave display range.
+// Wider bars mean fewer bass bars map to the same FFT bin, which
+// reduces the visible "stepping" at low frequencies. Bars whose
+// center frequency falls between two FFT bins use linear
+// interpolation so the transition is smooth rather than staircase.
+const N_BARS = 64;
 
 const LOG_F_MIN = Math.log(F_MIN);
 const LOG_F_MAX = Math.log(F_MAX);
@@ -170,11 +166,16 @@ export function spectrumView(): SpectrumView {
   // frequency falls into this bar's log-spaced frequency band.
   // barBinStart === -1 when no bins fall in the range (narrow
   // low-frequency bars where the bar is smaller than one FFT bin);
-  // in that case drawBars uses barBinFallback, the nearest bin to
-  // the bar's center frequency.
-  const barBinStart    = new Int32Array(N_BARS);
-  const barBinEnd      = new Int32Array(N_BARS);
-  const barBinFallback = new Int32Array(N_BARS);
+  // in that case barMax interpolates between the two surrounding
+  // FFT bins using barBinLoIdx/barBinFrac for smooth transitions.
+  const barBinStart  = new Int32Array(N_BARS);
+  const barBinEnd    = new Int32Array(N_BARS);
+  // Interpolation data for the fallback path (bass region where a
+  // bar is narrower than one FFT bin). barBinLoIdx is the bin index
+  // below the bar's center frequency; barBinFrac is the fractional
+  // position between barBinLoIdx and barBinLoIdx+1 (0..1).
+  const barBinLoIdx  = new Int32Array(N_BARS);
+  const barBinFrac   = new Float32Array(N_BARS);
   for (let b = 0; b < N_BARS; b++) {
     const tLo = b / N_BARS;
     const tHi = (b + 1) / N_BARS;
@@ -191,11 +192,13 @@ export function spectrumView(): SpectrumView {
     }
     barBinStart[b] = first;
     barBinEnd[b]   = last;
+    // Fractional bin index for the bar's center frequency — used
+    // for linear interpolation when no whole bins fall in range.
     const fMid = Math.exp(LOG_F_MIN + (b + 0.5) / N_BARS * LOG_F_SPAN);
-    barBinFallback[b] = Math.max(
-      1,
-      Math.min(FFT_BINS - 1, Math.round(fMid / BIN_HZ)),
-    );
+    const exactBin = fMid / BIN_HZ;
+    const lo = Math.max(1, Math.min(FFT_BINS - 2, Math.floor(exactBin)));
+    barBinLoIdx[b] = lo;
+    barBinFrac[b]  = exactBin - lo;
   }
 
   // Bar X positions on the canvas. Depend on cssWidth so
@@ -209,9 +212,8 @@ export function spectrumView(): SpectrumView {
   let rafId     = 0;
   let frozen    = false;
   let running   = false;
-  // Default to tilt on — most real audio is pink, so flat-displaying
-  // pink content is the most useful starting point for eyeballing
-  // mix balance. Click Tilt to see the raw un-tilted spectrum.
+  // Default to tilt on — +1.5 dB/octave is a gentle pink-flat
+  // compensation that flattens the display without overcorrecting.
   let tiltOn    = true;
   tiltBtn.classList.add('active');
   // Default to bars mode — closer to the mixer's meter aesthetic
@@ -351,12 +353,12 @@ export function spectrumView(): SpectrumView {
     cachedMeterGrad = meter;
   }
 
-  // dB-byte to y-pixel with the display stretched so byte=255 lands
-  // at -0.2*H (above the visible top). All draw paths (bars, trace,
-  // peak-hold, gridlines) go through this helper so they stay
-  // aligned to the same stretched scale.
+  // dB-byte to y-pixel. byte=255 (0 dBFS) maps to y=0 (top),
+  // byte=0 (-80 dB) maps to y=H (bottom). All draw paths (bars,
+  // trace, peak-hold, gridlines) go through this helper so they
+  // stay aligned to the same scale.
   function byteToY(byte: number): number {
-    return cssHeight * (1 - (byte / 255) * Y_SCALE_OVERSHOOT);
+    return cssHeight * (1 - (byte / 255) * Y_SCALE);
   }
 
   // --- render loop --------------------------------------------------
@@ -390,10 +392,7 @@ export function spectrumView(): SpectrumView {
     }
 
     // Horizontal dB gridlines — routed through byteToY so they
-    // sit on the same stretched scale as the bars and traces.
-    // -20 dB now lands much higher up the canvas than it used
-    // to, which is the whole point of the Y_SCALE_OVERSHOOT
-    // stretch.
+    // sit on the same scale as the bars and traces.
     const dBs = [-20, -40, -60];
     c.beginPath();
     for (const db of dBs) {
@@ -470,12 +469,17 @@ export function spectrumView(): SpectrumView {
   }
 
   // Pick the max display value across the FFT bins that belong to
-  // bar `b`. Falls back to the nearest bin if the bar's frequency
-  // range is smaller than one bin (happens at the low end where
-  // bars are narrow and bins are 43 Hz wide).
+  // bar `b`. When the bar's frequency range is narrower than one
+  // FFT bin (common in the bass), linearly interpolate between the
+  // two surrounding bins so adjacent bars transition smoothly
+  // instead of showing a hard step.
   function barMax(b: number, buf: Float32Array): number {
     const start = barBinStart[b];
-    if (start === -1) return buf[barBinFallback[b]];
+    if (start === -1) {
+      const lo = barBinLoIdx[b];
+      const frac = barBinFrac[b];
+      return buf[lo] * (1 - frac) + buf[lo + 1] * frac;
+    }
     const end = barBinEnd[b];
     let m = 0;
     for (let i = start; i <= end; i++) {
@@ -487,19 +491,14 @@ export function spectrumView(): SpectrumView {
   function drawBars(display: Float32Array, fillStyle: CanvasGradient): void {
     const c = ctx!;
     c.fillStyle = fillStyle;
-    const barGap = 1;  // tight gap at 128-bar density
+    const barGap = 1;
     for (let b = 0; b < N_BARS; b++) {
       const v = barMax(b, display);
       if (v < 1) continue;
       const x = barLeftX[b];
       const w = Math.max(1, barRightX[b] - barLeftX[b] - barGap);
       const y = byteToY(v);
-      // Height extends from top-of-bar to the bottom of the
-      // canvas. If y is negative (bar value overshoots the
-      // visible top because of Y_SCALE_OVERSHOOT), the fillRect
-      // draws with a height > cssHeight; Canvas clips beyond
-      // the backing store, which is exactly what we want — the
-      // bar just "fills the screen" from top to bottom.
+      // Height extends from top-of-bar to the bottom of the canvas.
       const h = cssHeight - y;
       c.fillRect(x, y, w, h);
     }

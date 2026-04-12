@@ -17,3 +17,4 @@
 #include "CodecPanel.h"
 #include "MeterEngine.h"
 #include "SpectrumEngine.h"
+#include "AnalyzeFFT_F32.h"

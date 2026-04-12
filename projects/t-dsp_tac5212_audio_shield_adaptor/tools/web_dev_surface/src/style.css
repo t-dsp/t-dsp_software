@@ -35,7 +35,9 @@ body {
  * reverts to its centered 1200px column. */
 body.spectrum-active #app {
   max-width: none;
+  width: 100%;
   height: 100vh;
+  padding: 8px;
 }
 
 body.spectrum-active .view.view-spectrum {

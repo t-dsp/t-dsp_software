@@ -1,7 +1,7 @@
 // SpectrumEngine — periodic stereo FFT sampling of the main-bus tap.
 //
 // Mirrors MeterEngine's shape (setChannels / setDispatcher / setEnabled /
-// tick) but samples two AudioAnalyzeFFT1024 instances wired to mainAmpL/R
+// tick) but samples two AnalyzeFFT_F32 instances wired to mainAmpL/R
 // (post-fader, pre-hostvol), compresses each of 512 magnitude bins to a
 // single uint8 dB byte, and ships the 1024-byte result as an OSC blob at
 // /spectrum/main.
@@ -19,11 +19,11 @@
 
 #include <stdint.h>
 
-class AudioAnalyzeFFT1024;
 class OSCBundle;
 
 namespace tdsp {
 
+class AnalyzeFFT_F32;
 class OscDispatcher;
 
 class SpectrumEngine {
@@ -32,7 +32,7 @@ public:
 
     // Register the FFT analyzers for the main bus L/R tap. Either
     // pointer may be nullptr; that half of the blob will report zeros.
-    void setChannels(AudioAnalyzeFFT1024 *fftL, AudioAnalyzeFFT1024 *fftR);
+    void setChannels(AnalyzeFFT_F32 *fftL, AnalyzeFFT_F32 *fftR);
 
     void setDispatcher(OscDispatcher *dispatcher) { _dispatcher = dispatcher; }
 
@@ -61,8 +61,8 @@ public:
 
 private:
     OscDispatcher        *_dispatcher     = nullptr;
-    AudioAnalyzeFFT1024  *_fftL           = nullptr;
-    AudioAnalyzeFFT1024  *_fftR           = nullptr;
+    AnalyzeFFT_F32       *_fftL           = nullptr;
+    AnalyzeFFT_F32       *_fftR           = nullptr;
     bool                  _enabled        = false;
     bool                  _warmupPending  = false;
     uint32_t              _enabledAtMs    = 0;
