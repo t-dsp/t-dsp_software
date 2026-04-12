@@ -1,7 +1,7 @@
 // TAC5212 — implementation.
 //
-// See TAC5212.h for the rules this library honors. Values verified against
-// TI datasheet SLASF23A (December 2023, revised January 2025).
+// Values verified against TI datasheet SLASF23A (December 2023, revised
+// January 2025).
 
 #include "TAC5212.h"
 #include "TAC5212_Registers.h"
@@ -104,6 +104,11 @@ constexpr OutRegs outRegs(uint8_t n) {
 // Return the CFG0 address for ADC channel N.
 constexpr uint8_t adcCfg0Addr(uint8_t n) {
     return (n == 2) ? reg::ADC_CH2_CFG0 : reg::ADC_CH1_CFG0;
+}
+
+// Return the DVOL (CFG2) address for ADC channel N.
+constexpr uint8_t adcDvolAddr(uint8_t n) {
+    return (n == 2) ? reg::ADC_CH2_CFG2 : reg::ADC_CH1_CFG2;
 }
 
 }  // anonymous namespace
@@ -371,6 +376,18 @@ Result TAC5212::Adc::setBw(AdcBw bw) {
     return _codec->_write(0, addr, next);
 }
 
+Result TAC5212::Adc::setDvol(float dB) {
+    if (dB > reg::adc_dvol::DB_MAX)
+        return Result::error("ADC dvol exceeds +27 dB max");
+    return _codec->_write(0, adcDvolAddr(_n), reg::adc_dvol::fromDb(dB));
+}
+
+Result TAC5212::Adc::getDvol(float &dB) {
+    const uint8_t raw = _codec->_read(0, adcDvolAddr(_n));
+    dB = reg::adc_dvol::toDb(raw);
+    return Result::ok();
+}
+
 // ADC combo validation: check the compound rules that involve more than one
 // field within ADC_CHx_CFG0, plus the chip-global VREF_FSCALE dependency.
 Result TAC5212::_validateAdcCfg0(uint8_t /*ch*/, uint8_t newCfg0) {
@@ -412,7 +429,7 @@ Result TAC5212::_validateAdcCfg0(uint8_t /*ch*/, uint8_t newCfg0) {
 }
 
 // -----------------------------------------------------------------------------
-// Output mode setter (driver type only — Rule A: no gain)
+// Output mode setter
 // -----------------------------------------------------------------------------
 
 Result TAC5212::Out::setMode(OutMode m) {

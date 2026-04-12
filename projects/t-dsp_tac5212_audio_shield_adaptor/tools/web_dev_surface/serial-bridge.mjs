@@ -15,12 +15,22 @@
 // port reappears, then re-opens the serial connection.
 //
 // Usage:  node serial-bridge.mjs [COM_PORT] [BAUD] [WS_PORT]
+//         node serial-bridge.mjs              — auto-detect Teensy by VID/PID
 //         node serial-bridge.mjs COM4 115200 8765
 
 import { SerialPort } from 'serialport';
 import { WebSocketServer } from 'ws';
 
-const comPort  = process.argv[2] || 'COM4';
+// Teensy 4.x USB VID + known PIDs for composite modes
+const TEENSY_VID = '16C0';
+const TEENSY_PIDS = [
+  '0483',  // USB Serial
+  '0489',  // USB MIDI + Audio + Serial (USB_MIDI_AUDIO_SERIAL)
+  '048A',  // USB Audio + Serial
+  '048B',  // USB MIDI + Serial
+];
+
+const comPort  = process.argv[2] || null;   // null = auto-detect
 const baud     = parseInt(process.argv[3] || '115200', 10);
 const wsPort   = parseInt(process.argv[4] || '8765', 10);
 
@@ -65,12 +75,15 @@ function drainQueue() {
 
 // --- Serial lifecycle ---
 
+// Resolved port path — set by auto-detect or CLI arg
+let resolvedPort = comPort;
+
 function openSerial() {
   // Use the same constructor-auto-open pattern as the original working
   // bridge. autoOpen:true is the default and matches the timing/DTR
   // behavior that the Teensy expects.
   const port = new SerialPort({
-    path: comPort,
+    path: resolvedPort,
     baudRate: baud,
     // Do NOT assert DTR/RTS on open — sending SET_CONTROL_LINE_STATE
     // to the Teensy's CDC endpoint disrupts USB Audio isochronous
@@ -80,7 +93,7 @@ function openSerial() {
   });
 
   port.on('open', () => {
-    console.log(`serial: ${comPort} @ ${baud}`);
+    console.log(`serial: ${resolvedPort} @ ${baud}`);
     serial = port;
     reconnecting = false;
   });
@@ -109,19 +122,41 @@ function openSerial() {
   });
 }
 
-// Poll SerialPort.list() until the target COM port is enumerated.
+// Find a Teensy port from the enumerated list.
+// If the user gave an explicit COM port, match by path; otherwise match
+// by VID/PID so the bridge works regardless of which COM number Windows
+// assigns.
+function findTeensyPort(ports) {
+  if (comPort) {
+    // Explicit port requested — match by path
+    return ports.find(
+      (p) => p.path.toLowerCase() === comPort.toLowerCase()
+    );
+  }
+  // Auto-detect by Teensy VID + any known PID
+  return ports.find(
+    (p) =>
+      p.vendorId &&
+      p.vendorId.toLowerCase() === TEENSY_VID.toLowerCase() &&
+      p.productId &&
+      TEENSY_PIDS.some((pid) => pid.toLowerCase() === p.productId.toLowerCase())
+  );
+}
+
+// Poll SerialPort.list() until the target device is enumerated.
 // list() is a host-side OS query — it does NOT send any USB control
 // transfers to the device, so it can't disrupt Audio isochronous.
 function pollForPort() {
   reconnecting = true;
+  const label = comPort || `Teensy (VID ${TEENSY_VID})`;
+  console.log(`serial: scanning for ${label}...`);
   const check = async () => {
     try {
       const ports = await SerialPort.list();
-      const found = ports.some(
-        (p) => p.path.toLowerCase() === comPort.toLowerCase()
-      );
-      if (found) {
-        console.log(`serial: ${comPort} detected — opening...`);
+      const match = findTeensyPort(ports);
+      if (match) {
+        resolvedPort = match.path;
+        console.log(`serial: ${resolvedPort} detected — opening...`);
         openSerial();
         return;
       }
@@ -172,5 +207,32 @@ process.on('SIGINT', () => {
   process.exit(0);
 });
 
-// Start
-openSerial();
+// Start — scan for the device first if no explicit port was given
+async function start() {
+  if (comPort) {
+    resolvedPort = comPort;
+    openSerial();
+  } else {
+    // Try to detect immediately before falling back to polling
+    try {
+      const ports = await SerialPort.list();
+      if (ports.length) {
+        console.log('serial: available ports:');
+        for (const p of ports) {
+          console.log(`  ${p.path}  vid=${p.vendorId || '?'}  pid=${p.productId || '?'}  ${p.manufacturer || ''}`);
+        }
+      } else {
+        console.log('serial: no ports found');
+      }
+      const match = findTeensyPort(ports);
+      if (match) {
+        resolvedPort = match.path;
+        console.log(`serial: auto-detected ${resolvedPort}`);
+        openSerial();
+        return;
+      }
+    } catch (_) { /* fall through to poll */ }
+    pollForPort();
+  }
+}
+start();

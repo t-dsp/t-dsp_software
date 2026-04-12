@@ -213,6 +213,40 @@ namespace adc_cfg0 {
     constexpr uint8_t BW_96K_WIDE  = 0x01;  // requires 40k impedance
 }
 
+// --- ADC digital volume (§8.1.1.69 / §8.1.1.74) -----------------------------
+//
+// ADC_CHx_CFG2 is the per-channel digital volume (DVOL) register. Encoding:
+//   0       = mute
+//   1..200  = -100.0 dB to -0.5 dB  (0.5 dB steps)
+//   201     = 0.0 dB (POR default, unity)
+//   202..255= +0.5 dB to +27.0 dB   (0.5 dB steps)
+// Formula:  reg = 201 + round(dB * 2)
+//           dB  = (reg - 201) * 0.5
+namespace adc_dvol {
+    constexpr uint8_t MUTE        = 0;
+    constexpr uint8_t UNITY_0DB   = 201;
+    constexpr uint8_t MAX_PLUS_27 = 255;
+
+    constexpr float   DB_MIN      = -100.0f;
+    constexpr float   DB_MAX      =  +27.0f;
+    constexpr float   DB_STEP     =    0.5f;
+
+    // Convert dB to register value (clamps to valid range).
+    inline constexpr uint8_t fromDb(float dB) {
+        if (dB <= -100.5f) return MUTE;  // treat anything below -100 as mute
+        int reg = 201 + static_cast<int>(dB * 2.0f + (dB >= 0 ? 0.5f : -0.5f));
+        if (reg < 1)   reg = 1;    // 0 is mute, 1 is -100 dB
+        if (reg > 255)  reg = 255;
+        return static_cast<uint8_t>(reg);
+    }
+
+    // Convert register value to dB.
+    inline constexpr float toDb(uint8_t reg) {
+        if (reg == 0) return -120.0f;  // mute sentinel
+        return (static_cast<float>(reg) - 201.0f) * 0.5f;
+    }
+}
+
 // --- Chip-global DSP configuration (§8.1.1.100) ------------------------------
 //
 // DSP_CFG0 holds chip-global ADC DSP settings — decimation filter, HPF mode,

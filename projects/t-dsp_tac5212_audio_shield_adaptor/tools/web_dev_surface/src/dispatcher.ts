@@ -198,14 +198,14 @@ export class Dispatcher {
   handleIncoming(msg: OscMessage): void {
     const a = msg.address;
 
-    // /codec/... echoes route through the codec listener registry first.
-    // This is how Tac5212Panel::snapshot() reply messages reach the codec
-    // tab UI. The registry is keyed by exact address (no patterns), so
-    // each control's listener self-registers under its own leaf.
-    if (a.startsWith('/codec/')) {
-      const cb = this.codecListeners.get(a);
-      if (cb) cb(msg);
-      return;
+    // Codec-panel and registered-listener echoes route through the
+    // listener registry first. Keyed by exact address (no patterns).
+    // Also handles non-/codec/ addresses explicitly registered by UI
+    // components (e.g. /line/mode).
+    const codecCb = this.codecListeners.get(a);
+    if (codecCb) {
+      codecCb(msg);
+      if (a.startsWith('/codec/')) return;  // codec-only: don't double-match
     }
 
     let m = a.match(/^\/ch\/(\d+)\/mix\/fader$/);

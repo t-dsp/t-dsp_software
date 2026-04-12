@@ -80,6 +80,15 @@ public:
     // gains at once without rebuilding coefficients.
     void applyAllChannelGains();
 
+    // Mono mirror: when active, applyChannel(srcCh) also sets
+    // targetMixer->gain(targetSlot, effectiveChannelGain(srcCh)), and
+    // applyChannel(muteCh) forces gain to 0 regardless of the model.
+    // Used for line-input mono/differential mode where CH1's signal
+    // cross-feeds to both L and R, and CH2 is silenced.
+    void setMonoMirror(int srcCh, int muteCh,
+                       AudioMixer4 *targetMixer, int targetSlot);
+    void clearMonoMirror();
+
 private:
     MixerModel *_model = nullptr;
 
@@ -95,6 +104,13 @@ private:
     AudioAmplifier *_mainAmpR    = nullptr;
     AudioAmplifier *_hostvolAmpL = nullptr;
     AudioAmplifier *_hostvolAmpR = nullptr;
+
+    // Mono mirror state
+    bool        _mirrorActive    = false;
+    int         _mirrorSrcCh     = 0;
+    int         _mirrorMuteCh    = 0;
+    AudioMixer4 *_mirrorMixer    = nullptr;
+    int         _mirrorSlot      = 0;
 };
 
 }  // namespace tdsp

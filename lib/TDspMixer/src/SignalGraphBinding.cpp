@@ -45,8 +45,18 @@ void SignalGraphBinding::applyChannel(int n) {
     if (n < 1 || n > kChannelCount) return;
     ChannelBinding &b = _channels[n];
     if (!b.mixer) return;
+
+    // Mono mirror: muted channel forced to 0, source channel mirrored.
+    if (_mirrorActive && n == _mirrorMuteCh) {
+        b.mixer->gain(b.slot, 0.0f);
+        applyChannelHpf(n);
+        return;
+    }
     const float gain = _model->effectiveChannelGain(n);
     b.mixer->gain(b.slot, gain);
+    if (_mirrorActive && n == _mirrorSrcCh && _mirrorMixer) {
+        _mirrorMixer->gain(_mirrorSlot, gain);
+    }
     // HPF coefficient update is a separate apply step because it's
     // expensive; apply it only when HPF params actually changed.
     applyChannelHpf(n);
@@ -57,7 +67,15 @@ void SignalGraphBinding::applyAllChannelGains() {
     for (int n = 1; n <= kChannelCount; ++n) {
         ChannelBinding &b = _channels[n];
         if (!b.mixer) continue;
-        b.mixer->gain(b.slot, _model->effectiveChannelGain(n));
+        if (_mirrorActive && n == _mirrorMuteCh) {
+            b.mixer->gain(b.slot, 0.0f);
+            continue;
+        }
+        const float gain = _model->effectiveChannelGain(n);
+        b.mixer->gain(b.slot, gain);
+        if (_mirrorActive && n == _mirrorSrcCh && _mirrorMixer) {
+            _mirrorMixer->gain(_mirrorSlot, gain);
+        }
     }
 }
 
@@ -70,6 +88,23 @@ void SignalGraphBinding::applyMain() {
     const float hv = _model->effectiveHostvolGain();
     if (_hostvolAmpL) _hostvolAmpL->gain(hv);
     if (_hostvolAmpR) _hostvolAmpR->gain(hv);
+}
+
+void SignalGraphBinding::setMonoMirror(int srcCh, int muteCh,
+                                       AudioMixer4 *targetMixer, int targetSlot) {
+    _mirrorActive = true;
+    _mirrorSrcCh  = srcCh;
+    _mirrorMuteCh = muteCh;
+    _mirrorMixer  = targetMixer;
+    _mirrorSlot   = targetSlot;
+}
+
+void SignalGraphBinding::clearMonoMirror() {
+    _mirrorActive = false;
+    _mirrorSrcCh  = 0;
+    _mirrorMuteCh = 0;
+    _mirrorMixer  = nullptr;
+    _mirrorSlot   = 0;
 }
 
 void SignalGraphBinding::applyChannelHpf(int n) {

@@ -27,6 +27,9 @@ export function codecPanel(tabs: Tab[], dispatcher: Dispatcher): HTMLElement {
   const tabPanels: HTMLElement[] = [];
   const tabButtons: HTMLButtonElement[] = [];
 
+  // Track group elements by name so controls can disable/enable groups.
+  const groupElements = new Map<string, HTMLElement>();
+
   let activeIdx = 0;
 
   function selectTab(i: number): void {
@@ -54,9 +57,10 @@ export function codecPanel(tabs: Tab[], dispatcher: Dispatcher): HTMLElement {
       h.textContent = group.name;
       g.appendChild(h);
       for (const ctl of group.controls) {
-        g.appendChild(renderControl(ctl, dispatcher));
+        g.appendChild(renderControl(ctl, dispatcher, groupElements));
       }
       panel.appendChild(g);
+      groupElements.set(group.name, g);
     }
     content.appendChild(panel);
     tabPanels.push(panel);
@@ -67,7 +71,11 @@ export function codecPanel(tabs: Tab[], dispatcher: Dispatcher): HTMLElement {
   return root;
 }
 
-function renderControl(ctl: Control, dispatcher: Dispatcher): HTMLElement {
+function renderControl(
+  ctl: Control,
+  dispatcher: Dispatcher,
+  groupElements: Map<string, HTMLElement>,
+): HTMLElement {
   const wrap = document.createElement('div');
   wrap.className = 'control';
 
@@ -76,10 +84,6 @@ function renderControl(ctl: Control, dispatcher: Dispatcher): HTMLElement {
   wrap.appendChild(label);
 
   if (ctl.kind === 'enum') {
-    // Signal holds the most recent value the firmware reported (or null
-    // if we haven't seen one yet — the <select> falls back to its first
-    // option in that case, but the snapshot reply on connect should
-    // populate it before the user sees the panel).
     const value = new Signal<string | null>(null);
 
     const sel = document.createElement('select');
@@ -90,14 +94,19 @@ function renderControl(ctl: Control, dispatcher: Dispatcher): HTMLElement {
       sel.appendChild(o);
     }
     sel.addEventListener('change', () => {
-      // Optimistic update so the UI doesn't flicker between the user's
-      // pick and the firmware echo. Echo will land here too and re-set
-      // the same value (idempotent).
       value.set(sel.value);
       dispatcher.sendRaw(ctl.address, 's', [sel.value]);
     });
+
+    // disableGroup: when the selected value matches, grey out the
+    // named group. Used by /line/mode "mono" → disable "Channel 2".
+    const dg = ctl.disableGroup;
     value.subscribe((v) => {
       if (v !== null && sel.value !== v) sel.value = v;
+      if (dg) {
+        const grp = groupElements.get(dg.groupName);
+        if (grp) grp.classList.toggle('group-disabled', v === dg.value);
+      }
     });
 
     dispatcher.registerCodecListener(ctl.address, (msg: OscMessage) => {
@@ -127,6 +136,40 @@ function renderControl(ctl: Control, dispatcher: Dispatcher): HTMLElement {
     });
 
     wrap.appendChild(cb);
+  } else if (ctl.kind === 'range') {
+    const value = new Signal<number | null>(null);
+
+    const slider = document.createElement('input');
+    slider.type = 'range';
+    slider.min = String(ctl.min);
+    slider.max = String(ctl.max);
+    slider.step = String(ctl.step);
+    slider.value = '0';
+
+    const readout = document.createElement('span');
+    readout.className = 'range-readout';
+    readout.textContent = `0 ${ctl.unit}`;
+
+    slider.addEventListener('input', () => {
+      const v = parseFloat(slider.value);
+      value.set(v);
+      dispatcher.sendRaw(ctl.address, 'f', [v]);
+    });
+    value.subscribe((v) => {
+      if (v !== null) {
+        readout.textContent = `${v.toFixed(1)} ${ctl.unit}`;
+        if (parseFloat(slider.value) !== v) slider.value = String(v);
+      }
+    });
+
+    dispatcher.registerCodecListener(ctl.address, (msg: OscMessage) => {
+      if (msg.types === 'f' && typeof msg.args[0] === 'number') {
+        value.set(msg.args[0]);
+      }
+    });
+
+    wrap.appendChild(slider);
+    wrap.appendChild(readout);
   } else {
     const btn = document.createElement('button');
     btn.textContent = 'Send';

@@ -48,7 +48,6 @@ static void echoIntReply(OSCBundle &reply, const char *addr, int32_t value) {
     reply.add(m);
 }
 
-__attribute__((unused))
 static void echoFloatReply(OSCBundle &reply, const char *addr, float value) {
     OSCMessage m(addr);
     m.add(value);
@@ -88,6 +87,7 @@ void Tac5212Panel::route(OSCMessage &msg, int addrOffset, OSCBundle &reply) {
                 if (strcmp(leaf, "/fullscale") == 0) { handleAdcFullscale(n, msg, reply); return; }
                 if (strcmp(leaf, "/coupling")  == 0) { handleAdcCoupling(n, msg, reply); return; }
                 if (strcmp(leaf, "/bw")        == 0) { handleAdcBw(n, msg, reply); return; }
+                if (strcmp(leaf, "/dvol")      == 0) { handleAdcDvol(n, msg, reply); return; }
             }
         } else if (strcmp(sub, "/adc/hpf") == 0) {
             handleAdcHpf(msg, reply); return;
@@ -225,6 +225,26 @@ void Tac5212Panel::handleAdcBw(int n, OSCMessage &msg, OSCBundle &reply) {
     snprintf(addr, sizeof(addr), "/codec/tac5212/adc/%d/bw", n);
     if (r.isError()) echoErrorReply(reply, addr, r.message ? r.message : "setBw failed");
     else             echoEnumReply(reply, addr, val);
+}
+
+void Tac5212Panel::handleAdcDvol(int n, OSCMessage &msg, OSCBundle &reply) {
+    // Read: no args → return current value. Write: float arg → set.
+    char addr[56];
+    snprintf(addr, sizeof(addr), "/codec/tac5212/adc/%d/dvol", n);
+    if (msgIsRead(msg)) {
+        float dB = 0.0f;
+        tac5212::Result r = _codec.adc(n).getDvol(dB);
+        if (r.isError()) echoErrorReply(reply, addr, r.message ? r.message : "getDvol failed");
+        else             echoFloatReply(reply, addr, dB);
+        return;
+    }
+    float dB = 0.0f;
+    if (msg.isFloat(0))       dB = msg.getFloat(0);
+    else if (msg.isInt(0))    dB = (float)msg.getInt(0);
+    else { echoErrorReply(reply, addr, "expected float arg"); return; }
+    tac5212::Result r = _codec.adc(n).setDvol(dB);
+    if (r.isError()) echoErrorReply(reply, addr, r.message ? r.message : "setDvol failed");
+    else             echoFloatReply(reply, addr, dB);
 }
 
 void Tac5212Panel::handleAdcHpf(OSCMessage &msg, OSCBundle &reply) {
@@ -461,6 +481,15 @@ void Tac5212Panel::snapshot(OSCBundle &reply) {
         snprintf(addr, sizeof(addr), "/codec/tac5212/out/%d/mode", n);
         echoEnumReply(reply, addr, outModeToString(mode));
     }
+    // ADC DVOL (per-channel)
+    for (int n = 1; n <= 2; ++n) {
+        float dB = 0.0f;
+        tac5212::Result r = _codec.adc(n).getDvol(dB);
+        if (r.isError()) continue;
+        char addr[56];
+        snprintf(addr, sizeof(addr), "/codec/tac5212/adc/%d/dvol", n);
+        echoFloatReply(reply, addr, dB);
+    }
 }
 
 // ----- Boot-time DAC mute / unmute -----
@@ -471,11 +500,8 @@ void Tac5212Panel::snapshot(OSCBundle &reply) {
 // registers cover L1, R1, L2, R2 — both physical outputs OUT1 and
 // OUT2 in the small-mixer routing.
 //
-// These methods bypass the typed lib/TAC5212 API because that library
-// deliberately exposes no gain-flavored setters (Rule A in TAC5212.h).
-// Mute is binary-state and arguably not "gain", but the chip-level
-// mechanism IS the volume register, so we use the writeRegister()
-// escape hatch the lib provides for exactly this kind of case.
+// These methods use the writeRegister() escape hatch to directly
+// write the DAC volume registers for mute/unmute.
 
 void Tac5212Panel::muteOutput() {
     _codec.writeRegister(0, REG_DAC_L1_VOL, 0);

@@ -12,9 +12,11 @@
 // rules in 02-osc-protocol.md.
 
 export type Control =
-  | { kind: 'enum'; label: string; address: string; options: string[] }
+  | { kind: 'enum'; label: string; address: string; options: string[];
+      disableGroup?: { value: string; groupName: string } }
   | { kind: 'toggle'; label: string; address: string }
-  | { kind: 'action'; label: string; address: string };
+  | { kind: 'action'; label: string; address: string }
+  | { kind: 'range'; label: string; address: string; min: number; max: number; step: number; unit: string };
 
 export interface Group {
   name: string;
@@ -29,6 +31,15 @@ export interface Tab {
 const adcChannel = (n: number): Group => ({
   name: `Channel ${n}`,
   controls: [
+    {
+      kind: 'range',
+      label: 'Digital gain',
+      address: `/codec/tac5212/adc/${n}/dvol`,
+      min: -12,
+      max: 27,
+      step: 0.5,
+      unit: 'dB',
+    },
     {
       kind: 'enum',
       label: 'Mode',
@@ -78,6 +89,18 @@ export const tac5212Panel: Tab[] = [
   {
     name: 'ADC',
     groups: [
+      {
+        name: 'Line Input',
+        controls: [
+          {
+            kind: 'enum',
+            label: 'Mode',
+            address: '/line/mode',
+            options: ['stereo', 'mono'],
+            disableGroup: { value: 'mono', groupName: 'Channel 1' },
+          },
+        ],
+      },
       adcChannel(1),
       adcChannel(2),
       {
