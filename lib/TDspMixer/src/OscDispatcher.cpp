@@ -4,6 +4,7 @@
 #include "SignalGraphBinding.h"
 #include "CodecPanel.h"
 #include "MeterEngine.h"
+#include "SpectrumEngine.h"
 
 #include <OSCMessage.h>
 #include <OSCBundle.h>
@@ -343,13 +344,22 @@ void OscDispatcher::handleSub(OSCMessage &msg, OSCBundle &reply) {
     int targetLen = msg.getString(lastArg, target, sizeof(target));
     target[(targetLen < (int)sizeof(target)) ? targetLen : (int)sizeof(target) - 1] = '\0';
 
-    const bool isMeterTarget = (strncmp(target, "/meters/", 8) == 0);
+    const bool isMeterTarget    = (strncmp(target, "/meters/",   8)  == 0);
+    const bool isSpectrumTarget = (strncmp(target, "/spectrum/", 10) == 0);
 
     if (isMeterTarget && _meterEngine) {
         if (strcmp(verb, "addSub") == 0) {
             _meterEngine->setEnabled(true);
         } else if (strcmp(verb, "unsubscribe") == 0) {
             _meterEngine->setEnabled(false);
+        }
+    }
+
+    if (isSpectrumTarget && _spectrumEngine) {
+        if (strcmp(verb, "addSub") == 0) {
+            _spectrumEngine->setEnabled(true);
+        } else if (strcmp(verb, "unsubscribe") == 0) {
+            _spectrumEngine->setEnabled(false);
         }
     }
 }
@@ -482,6 +492,18 @@ void OscDispatcher::broadcastMetersHost(OSCBundle &reply,
                                         const float *peakRmsPairs,
                                         int pairCount) {
     packMeterBlob(reply, "/meters/host", peakRmsPairs, pairCount);
+}
+
+void OscDispatcher::broadcastMainSpectrum(OSCBundle &reply,
+                                          const uint8_t *bytes,
+                                          int byteCount) {
+    if (!bytes || byteCount <= 0) return;
+    // CNMAT/OSC's OSCMessage::add(uint8_t*, int) takes a const-ish
+    // pointer and copies the payload into the internal blob storage,
+    // so passing a pointer to our stack/member scratch buffer is safe.
+    OSCMessage spec("/spectrum/main");
+    spec.add(const_cast<uint8_t *>(bytes), byteCount);
+    reply.add(spec);
 }
 
 }  // namespace tdsp

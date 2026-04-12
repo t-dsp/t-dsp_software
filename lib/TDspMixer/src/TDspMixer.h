@@ -16,3 +16,4 @@
 #include "OscDispatcher.h"
 #include "CodecPanel.h"
 #include "MeterEngine.h"
+#include "SpectrumEngine.h"
