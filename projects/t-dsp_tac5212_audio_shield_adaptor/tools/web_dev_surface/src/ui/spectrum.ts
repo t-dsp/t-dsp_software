@@ -56,6 +56,20 @@ const EMA_DECAY = 0.82;
 // per frame is ~80/255 * 60 dB/s ≈ 19 dB/s — a slow, readable decay.
 const PEAK_DROP_PER_FRAME = 1.0;
 
+// Pink-flat tilt: a +3 dB/octave slope compensation applied to the
+// displayed bin values (NOT to the raw data). Most real-world audio
+// has a natural 1/f "pink" spectrum where power falls ~3 dB/octave;
+// pro analyzers like Voxengo SPAN offer this to make pink content
+// display as flat, which makes mix balance easier to eyeball. The
+// tilt is reversible — click the button again to see the raw
+// un-tilted spectrum.
+const TILT_DB_PER_OCTAVE = 3.0;
+const TILT_REF_HZ        = 1000;  // 0 dB offset at 1 kHz
+
+// Byte-scale factor: our dB-byte mapping is 80 dB over 255 bytes,
+// so 1 dB = 255/80 ≈ 3.1875 bytes.
+const BYTE_PER_DB        = 255 / 80;
+
 const LOG_F_MIN = Math.log(F_MIN);
 const LOG_F_MAX = Math.log(F_MAX);
 const LOG_F_SPAN = LOG_F_MAX - LOG_F_MIN;
@@ -68,10 +82,23 @@ export function spectrumView(): SpectrumView {
   canvas.className = 'spectrum-canvas';
   root.appendChild(canvas);
 
+  // Control strip at top-right of the spectrum wrap. Holds Freeze
+  // and the display toggles (tilt). Positioned absolute in CSS so it
+  // overlays the canvas without affecting canvas layout.
+  const controls = document.createElement('div');
+  controls.className = 'spectrum-controls';
+
   const freezeBtn = document.createElement('button');
-  freezeBtn.className = 'freeze-btn';
+  freezeBtn.className = 'spectrum-btn freeze-btn';
   freezeBtn.textContent = 'Freeze';
-  root.appendChild(freezeBtn);
+
+  const tiltBtn = document.createElement('button');
+  tiltBtn.className = 'spectrum-btn tilt-btn';
+  tiltBtn.title = '+3 dB/octave display tilt — pink content shows as flat';
+  tiltBtn.textContent = 'Tilt';
+
+  controls.append(freezeBtn, tiltBtn);
+  root.appendChild(controls);
 
   const ctx = canvas.getContext('2d');
   if (!ctx) throw new Error('spectrum: 2d context unavailable');
@@ -86,12 +113,35 @@ export function spectrumView(): SpectrumView {
   const peakHoldL = new Float32Array(FFT_BINS);
   const peakHoldR = new Float32Array(FFT_BINS);
 
+  // Display-side buffers — the values the draw functions actually
+  // read. When tilt is off, these are straight copies from smoothed/
+  // peakHold. When tilt is on, each bin has its per-bin tilt offset
+  // added (and clamped to 0..255). Keeping the tilt out of the
+  // smoothed state means toggling the button is instant and
+  // reversible — no retroactive mangling of the EMA state.
+  const displayL     = new Float32Array(FFT_BINS);
+  const displayR     = new Float32Array(FFT_BINS);
+  const displayPeakL = new Float32Array(FFT_BINS);
+  const displayPeakR = new Float32Array(FFT_BINS);
+
+  // Per-bin tilt offset in byte units. tiltOffset[i] = 3 * log2(f/1000)
+  // converted from dB to bytes. Computed once at init — depends only
+  // on FFT bin frequencies, which are fixed constants.
+  const tiltOffset = new Float32Array(FFT_BINS);
+  for (let i = 0; i < FFT_BINS; i++) {
+    const f = i * BIN_HZ;
+    if (f <= 0) { tiltOffset[i] = 0; continue; }
+    const octaves = Math.log2(f / TILT_REF_HZ);
+    tiltOffset[i] = TILT_DB_PER_OCTAVE * octaves * BYTE_PER_DB;
+  }
+
   let cssWidth  = 0;
   let cssHeight = 0;
   let dpr       = 1;
   let rafId     = 0;
   let frozen    = false;
   let running   = false;
+  let tiltOn    = false;
 
   // Precomputed x coordinates for each bin so the render loop doesn't
   // call Math.log per frame per bin. Rebuilt on resize.
@@ -320,6 +370,45 @@ export function spectrumView(): SpectrumView {
       peakHoldR[i] = pr;
     }
 
+    // Populate display buffers. Straight copy if tilt is off, per-bin
+    // offset-and-clamp if on. Tilt is applied to both the filled
+    // smoothed trace AND the peak-hold line so they stay consistent
+    // with each other. Clamp to 0..255 so the draw functions don't
+    // see out-of-range values (a +3 dB/oct tilt can push bins above
+    // 255 at the top of the audible range, and pull bins below 0 at
+    // the bottom).
+    if (tiltOn) {
+      for (let i = 0; i < FFT_BINS; i++) {
+        const o = tiltOffset[i];
+        let vl = smoothedL[i] + o;
+        if (vl < 0) vl = 0;
+        else if (vl > 255) vl = 255;
+        displayL[i] = vl;
+
+        let vr = smoothedR[i] + o;
+        if (vr < 0) vr = 0;
+        else if (vr > 255) vr = 255;
+        displayR[i] = vr;
+
+        let pl = peakHoldL[i] + o;
+        if (pl < 0) pl = 0;
+        else if (pl > 255) pl = 255;
+        displayPeakL[i] = pl;
+
+        let pr = peakHoldR[i] + o;
+        if (pr < 0) pr = 0;
+        else if (pr > 255) pr = 255;
+        displayPeakR[i] = pr;
+      }
+    } else {
+      for (let i = 0; i < FFT_BINS; i++) {
+        displayL[i]     = smoothedL[i];
+        displayR[i]     = smoothedR[i];
+        displayPeakL[i] = peakHoldL[i];
+        displayPeakR[i] = peakHoldR[i];
+      }
+    }
+
     const c = ctx!;
     c.globalCompositeOperation = 'source-over';
     c.fillStyle = '#0a0a10';
@@ -329,12 +418,12 @@ export function spectrumView(): SpectrumView {
 
     // Both traces use 'lighter' so overlapping hot bands add to white.
     c.globalCompositeOperation = 'lighter';
-    drawTrace(smoothedL, coolGradient());
-    drawTrace(smoothedR, warmGradient());
+    drawTrace(displayL, coolGradient());
+    drawTrace(displayR, warmGradient());
 
     // Peak hold lines in channel-tinted bright colors.
-    drawPeakHold(peakHoldL, 'rgba(200, 200, 255, 0.7)');
-    drawPeakHold(peakHoldR, 'rgba(255, 220, 200, 0.7)');
+    drawPeakHold(displayPeakL, 'rgba(200, 200, 255, 0.7)');
+    drawPeakHold(displayPeakR, 'rgba(255, 220, 200, 0.7)');
   }
 
   function start(): void {
@@ -365,6 +454,11 @@ export function spectrumView(): SpectrumView {
   freezeBtn.addEventListener('click', () => {
     if (frozen) unfreeze();
     else freeze();
+  });
+
+  tiltBtn.addEventListener('click', () => {
+    tiltOn = !tiltOn;
+    tiltBtn.classList.toggle('active', tiltOn);
   });
 
   return { element: root, update, start, stop, freeze, unfreeze };
