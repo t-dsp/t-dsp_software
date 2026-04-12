@@ -4,6 +4,8 @@
 #include <OSCMessage.h>
 #include <OSCBundle.h>
 
+#include "tac5212_regs.h"
+
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -459,4 +461,32 @@ void Tac5212Panel::snapshot(OSCBundle &reply) {
         snprintf(addr, sizeof(addr), "/codec/tac5212/out/%d/mode", n);
         echoEnumReply(reply, addr, outModeToString(mode));
     }
+}
+
+// ----- Boot-time DAC mute / unmute -----
+//
+// The TAC5212 DAC has no dedicated mute bit; muting is performed by
+// writing 0 (mute code) to each DAC digital volume register, and
+// unmuting writes back DAC_VOL_0DB (201, unity gain). The four
+// registers cover L1, R1, L2, R2 — both physical outputs OUT1 and
+// OUT2 in the small-mixer routing.
+//
+// These methods bypass the typed lib/TAC5212 API because that library
+// deliberately exposes no gain-flavored setters (Rule A in TAC5212.h).
+// Mute is binary-state and arguably not "gain", but the chip-level
+// mechanism IS the volume register, so we use the writeRegister()
+// escape hatch the lib provides for exactly this kind of case.
+
+void Tac5212Panel::muteOutput() {
+    _codec.writeRegister(0, REG_DAC_L1_VOL, 0);
+    _codec.writeRegister(0, REG_DAC_R1_VOL, 0);
+    _codec.writeRegister(0, REG_DAC_L2_VOL, 0);
+    _codec.writeRegister(0, REG_DAC_R2_VOL, 0);
+}
+
+void Tac5212Panel::unmuteOutput() {
+    _codec.writeRegister(0, REG_DAC_L1_VOL, DAC_VOL_0DB);
+    _codec.writeRegister(0, REG_DAC_R1_VOL, DAC_VOL_0DB);
+    _codec.writeRegister(0, REG_DAC_L2_VOL, DAC_VOL_0DB);
+    _codec.writeRegister(0, REG_DAC_R2_VOL, DAC_VOL_0DB);
 }

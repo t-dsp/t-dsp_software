@@ -55,6 +55,18 @@ public:
     // breaking other codec drivers. A leaf the panel can't read back from
     // the chip (e.g. PDM stubs) should just be omitted.
     virtual void snapshot(OSCBundle &reply) { (void)reply; }
+
+    // Hard-mute / unmute the codec's analog output. Used by the sketch's
+    // boot sequence (mute → load settings → applyAll → unmute) so audio
+    // stays silent until in-memory state has been pushed into the audio
+    // graph. Default is no-op for codecs without a hardware mute primitive
+    // — those rely on the audio graph being initialized to silent gains.
+    //
+    // Implementations must be safe to call multiple times and from any
+    // point after the codec has been initialized. unmuteOutput() is the
+    // boot gate release; once called, the device is producing audio.
+    virtual void muteOutput() {}
+    virtual void unmuteOutput() {}
 };
 
 }  // namespace tdsp

@@ -310,11 +310,17 @@ static void codecConfigureDacOutputs() {
     writeReg(REG_OUT2_CFG2, OUT_CFG1_HP_0DB);
 }
 
-static void codecSetDefaultDacVolume() {
-    writeReg(REG_DAC_L1_VOL, DAC_VOL_0DB);
-    writeReg(REG_DAC_R1_VOL, DAC_VOL_0DB);
-    writeReg(REG_DAC_L2_VOL, DAC_VOL_0DB);
-    writeReg(REG_DAC_R2_VOL, DAC_VOL_0DB);
+static void codecMuteDacVolume() {
+    // Boot the DAC at the mute code (volume == 0) so the chip powers up
+    // silent. The DAC volume registers are written BEFORE codecPowerUp()
+    // turns on the DAC channel via PWR_CFG, so when audio first starts
+    // flowing the analog output is already at -inf. setup() releases the
+    // boot gate later by calling g_codecPanel.unmuteOutput(), which
+    // writes DAC_VOL_0DB into all four registers.
+    writeReg(REG_DAC_L1_VOL, 0);
+    writeReg(REG_DAC_R1_VOL, 0);
+    writeReg(REG_DAC_L2_VOL, 0);
+    writeReg(REG_DAC_R2_VOL, 0);
 }
 
 static void codecPowerUp() {
@@ -331,7 +337,7 @@ static void setupCodecHandRolled() {
     codecConfigurePdmMic();
     codecConfigureAdcInputs();
     codecConfigureDacOutputs();
-    codecSetDefaultDacVolume();
+    codecMuteDacVolume();  // boot gate: DAC powers up muted (volume == 0)
     codecPowerUp();
     Serial.print("DEV_STS0: 0x");
     Serial.println(readReg(REG_DEV_STS0), HEX);
@@ -345,6 +351,15 @@ static void setupCodecHandRolled() {
 // Forward decl — defined below near pollCaptureHostVolume so it can
 // see the sketch-local statics (s_lastCapVolRaw etc), but called here.
 static void broadcastSnapshot(OSCBundle &reply);
+
+// Forward decls — defined later in the file alongside their static
+// state. setup() calls these once at the end of init to read the
+// initial USB Feature Unit values into the audio graph BEFORE the
+// boot-gate release (g_codecPanel.unmuteOutput()), so the first
+// audio frame out of the DAC reflects whatever Windows has already
+// pushed instead of the cold-boot defaults.
+static void pollHostVolume();
+static void pollCaptureHostVolume();
 
 // OSC frame arrived from the transport. Build a reply bundle, route into
 // the dispatcher (which handles /ch/..., /main/..., /sub, /info, and
@@ -552,6 +567,29 @@ void setup() {
 
     g_spectrum.setDispatcher(&g_dispatcher);
     g_spectrum.setChannels(&fftMainL, &fftMainR);
+
+    // --- Boot-gate release ---
+    //
+    // The TAC5212 DAC has been muted since codecMuteDacVolume() ran inside
+    // setupCodecHandRolled() — every analog output has been silent through
+    // the entire init. Before un-muting, capture the current USB Feature
+    // Unit values (playback FU 0x101 = Windows master volume slider,
+    // capture FU 0x30 = Windows recording-device slider) and push them
+    // into the audio graph so the first audio frame out of the DAC
+    // reflects the actual host state instead of the cold-boot defaults.
+    //
+    // If the USB host hasn't enumerated yet (cold cable plug, slow host),
+    // the polled values are the cold-boot defaults — playback FU at 50%
+    // (usb_audio.cpp default), capture FU at 100% (the override applied
+    // above). The next pollHostVolume() / pollCaptureHostVolume() in
+    // loop() will overwrite both as soon as Windows pushes its real
+    // SET_CUR. That brief window is bounded by USB enumeration time
+    // (milliseconds), and during it the audio graph is at the loaded /
+    // applied state — better than the unloaded state we had before
+    // this gate existed.
+    pollHostVolume();
+    pollCaptureHostVolume();
+    g_codecPanel.unmuteOutput();
 
     Serial.println("\nReady!");
     Serial.println("  6 input channels: USB L/R, Line L/R, Mic L/R");

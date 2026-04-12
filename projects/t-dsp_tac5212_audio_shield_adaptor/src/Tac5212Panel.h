@@ -55,6 +55,23 @@ public:
     // (ADC, VREF/MICBIAS, PDM) will be added as their lib-side getters land.
     void snapshot(OSCBundle &reply) override;
 
+    // Hard-mute / unmute the TAC5212 DAC outputs. Implemented by writing 0
+    // (mute code) or DAC_VOL_0DB (201, unity) to the four DAC digital
+    // volume registers L1/R1/L2/R2. Used by the sketch's setup() to keep
+    // audio silent until the mixer model + USB host volumes have been
+    // applied to the audio graph. Once unmuteOutput() runs the device is
+    // producing audio.
+    //
+    // Notes:
+    //   - The TAC5212 has no dedicated DAC mute register; mute IS volume==0.
+    //   - Soft-step is not currently configured, so the unmute transition
+    //     is abrupt. One-time startup transient — acceptable for MVP.
+    //   - These methods do NOT touch the lib/TAC5212 typed API because
+    //     it deliberately exposes no gain-flavored methods (Rule A in
+    //     TAC5212.h). They use the lib's writeRegister() escape hatch.
+    void muteOutput() override;
+    void unmuteOutput() override;
+
 private:
     tac5212::TAC5212 &_codec;
 
