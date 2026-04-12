@@ -35,12 +35,26 @@ void SlipOscTransport::setCliLineHandler(CliLineHandler handler, void *userData)
     _cliHandlerData = userData;
 }
 
+// Control-write timestamp: after any control write (snapshot reply,
+// fader echo), streaming broadcasts AND incoming frame processing are
+// suppressed for a cooldown period. This prevents CDC burst contention
+// with USB Audio isochronous transfers on the shared USB controller.
+static uint32_t s_lastControlWriteMs = 0;
+
 void SlipOscTransport::poll() {
     while (Serial.available()) {
         int firstByte = Serial.peek();
         if (firstByte < 0) break;
 
         if (firstByte == 0xC0) {
+            // Throttle: one OSC frame per poll() call, with minimum gap.
+            // Remaining data sits safely in the serial RX buffer
+            // (4 KB at Hi-Speed) until the next loop() iteration.
+            {
+                uint32_t now = millis();
+                if (now - _lastFrameMs < kFrameGapMs) return;
+            }
+
             // SLIP frame start. Drain the frame using the endofPacket
             // pattern validated by Spike 1.
             OSCMessage msg;
@@ -56,7 +70,8 @@ void SlipOscTransport::poll() {
             if (!msg.hasError() && _oscHandler) {
                 _oscHandler(msg, _oscHandlerData);
             }
-            continue;
+            _lastFrameMs = millis();
+            return;  // one frame per poll() — let remaining data wait
         }
 
         if (firstByte == '\r' || firstByte == '\n') {
@@ -82,16 +97,106 @@ void SlipOscTransport::poll() {
     }
 }
 
+// --- Non-blocking buffered SLIP send ---
+//
+// The CNMAT SLIPEncodedUSBSerial encoder writes byte-by-byte through
+// Serial.write(). If the CDC TX buffer is full (nobody reading),
+// Serial.write() blocks waiting for space, which stalls loop() and
+// freezes the device. Fix: serialize the OSC payload into a scratch
+// buffer, SLIP-encode it, check availableForWrite(), and either send
+// the whole frame in one call or silently drop it.
+
+static constexpr int kSlipBufSize = 2048;
+static uint8_t s_slipBuf[kSlipBufSize];
+
+// Capture OSC serialization into a byte buffer.
+struct BufPrint : public Print {
+    uint8_t *buf;
+    int cap, len;
+    BufPrint(uint8_t *b, int c) : buf(b), cap(c), len(0) {}
+    size_t write(uint8_t b) override {
+        if (len < cap) buf[len++] = b;
+        return 1;
+    }
+    size_t write(const uint8_t *b, size_t s) override {
+        for (size_t i = 0; i < s; ++i) write(b[i]);
+        return s;
+    }
+};
+
+static int slipEncode(const uint8_t *src, int srcLen,
+                      uint8_t *dst, int dstMax) {
+    int pos = 0;
+    if (pos < dstMax) dst[pos++] = 0xC0;
+    for (int i = 0; i < srcLen && pos < dstMax - 1; ++i) {
+        uint8_t b = src[i];
+        if (b == 0xC0)      { dst[pos++] = 0xDB; if (pos < dstMax) dst[pos++] = 0xDC; }
+        else if (b == 0xDB) { dst[pos++] = 0xDB; if (pos < dstMax) dst[pos++] = 0xDD; }
+        else                { dst[pos++] = b; }
+    }
+    if (pos < dstMax) dst[pos++] = 0xC0;
+    return pos;
+}
+
+// --- Priority: control > streaming ---
+//
+// After a control write, streaming is suppressed for a cooldown period
+// so the USB controller has uncontested time for the control transfer
+// (and Audio isochronous transfers aren't disrupted by back-to-back
+// CDC bulk submissions).
+// After a control write (snapshot, fader echo), suppress all streaming
+// broadcasts for this many ms. Prevents CDC burst contention: a control
+// transfer gets exclusive bus time so Audio isochronous scheduling isn't
+// disrupted. Meters/spectrum briefly pause (imperceptible at 100ms) then
+// resume on the next tick.
+static constexpr uint32_t kStreamingCooldownMs = 100;
+
+// Blocking control path — for infrequent, must-deliver control messages
+// (fader echoes, snapshot replies). May block up to TX_TIMEOUT_MSEC
+// (120 ms) if the host isn't reading, then fast-fail via the core's
+// transmit_previous_timeout flag. Records timestamp for cooldown.
+static void sendSlipFrameControl(const uint8_t *oscData, int oscLen) {
+    int slipLen = slipEncode(oscData, oscLen, s_slipBuf, kSlipBufSize);
+    Serial.write(s_slipBuf, slipLen);
+    s_lastControlWriteMs = millis();
+}
+
+// Non-blocking broadcast path — for high-frequency ephemeral data
+// (meters, spectrum). Uses writeNonBlocking() which returns immediately
+// if the TX buffer is full. Skipped entirely during the post-control
+// cooldown window to avoid CDC burst contention with Audio.
+static void sendSlipFrameBroadcast(const uint8_t *oscData, int oscLen) {
+    if (millis() - s_lastControlWriteMs < kStreamingCooldownMs) return;
+    int slipLen = slipEncode(oscData, oscLen, s_slipBuf, kSlipBufSize);
+    Serial.writeNonBlocking((const uint8_t *)s_slipBuf, slipLen);
+}
+
 void SlipOscTransport::sendBundle(OSCBundle &bundle) {
-    g_slipSerial.beginPacket();
-    bundle.send(g_slipSerial);
-    g_slipSerial.endPacket();
+    uint8_t oscBuf[kSlipBufSize];
+    BufPrint bp(oscBuf, kSlipBufSize);
+    bundle.send(bp);
+    sendSlipFrameControl(oscBuf, bp.len);
 }
 
 void SlipOscTransport::sendMessage(OSCMessage &msg) {
-    g_slipSerial.beginPacket();
-    msg.send(g_slipSerial);
-    g_slipSerial.endPacket();
+    uint8_t oscBuf[kSlipBufSize];
+    BufPrint bp(oscBuf, kSlipBufSize);
+    msg.send(bp);
+    sendSlipFrameControl(oscBuf, bp.len);
+}
+
+void SlipOscTransport::broadcastBundle(OSCBundle &bundle) {
+    uint8_t oscBuf[kSlipBufSize];
+    BufPrint bp(oscBuf, kSlipBufSize);
+    bundle.send(bp);
+    sendSlipFrameBroadcast(oscBuf, bp.len);
+}
+
+void SlipOscTransport::broadcastMessage(OSCMessage &msg) {
+    uint8_t oscBuf[kSlipBufSize];
+    BufPrint bp(oscBuf, kSlipBufSize);
+    msg.send(bp);
+    sendSlipFrameBroadcast(oscBuf, bp.len);
 }
 
 }  // namespace tdsp

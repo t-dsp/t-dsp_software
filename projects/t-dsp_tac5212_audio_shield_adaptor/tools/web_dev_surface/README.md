@@ -19,12 +19,21 @@ See [planning/osc-mixer-foundation/README.md](../../../../planning/osc-mixer-fou
 ```bash
 cd projects/t-dsp_tac5212_audio_shield_adaptor/tools/web_dev_surface
 pnpm install
+
+# Terminal 1 — serial bridge (Node.js ↔ COM port)
+pnpm bridge
+
+# Terminal 2 — Vite dev server
 pnpm dev
 ```
 
 Open the URL Vite prints (default `http://localhost:5173`) in **Chrome, Edge,
-Brave, or any other Chromium-based browser**. Click **Connect**, pick the
-Teensy's COM port from the WebSerial picker, and the UI is live.
+Brave, or any other Chromium-based browser**. Click **Connect** and the UI is
+live — the bridge handles the serial port, so there's no WebSerial picker.
+
+**After a firmware upload** the Teensy reboots and re-enumerates USB, which
+drops the bridge's COM handle. Restart the bridge (`Ctrl+C`, then `pnpm bridge`)
+before reconnecting in the browser.
 
 For a static build:
 
@@ -33,25 +42,20 @@ pnpm build      # → dist/
 pnpm preview    # serve dist/ for a local sanity check
 ```
 
-WebSerial requires a secure context — the dev server (`localhost`) and
-HTTPS-served `dist/` both qualify. `file://` does **not** qualify and the
-Connect button will refuse.
-
 ## Browser support
 
-WebSerial is **Chromium-only** as of writing. This is an accepted constraint:
-this tool is for the firmware developer at the bench, who can install Chrome.
-Firefox and Safari are explicitly not supported and will show an error in the
-console pane on connect.
-
-If you need a cross-browser surface, that's the OSC preset's job. If you need
-a portable bespoke client, that's a downstream epic.
+The web client connects to a local WebSocket (`ws://localhost:8765`), so any
+modern browser works — Chrome, Edge, Firefox, Safari, etc. The old direct-
+WebSerial path was removed because Chrome's renderer-process USB handling
+caused audio buzz on the composite device (see `usb_cdc_audio_contention.md`
+in the project memory for the full investigation).
 
 ## What's in here
 
 ```
+serial-bridge.mjs           Node.js WebSocket-to-serial bridge (pnpm bridge)
 src/
-  main.ts                  entry: wires WebSerial → demuxer → OSC ↔ UI
+  main.ts                  entry: wires WebSocket → demuxer → OSC ↔ UI
   style.css                dark theme, single file
   osc.ts                   minimal OSC 1.0 encoder/decoder (i/f/s/b + T/F/N/I)
   transport.ts             SLIP encoder + stream demultiplexer (SLIP frames vs ASCII text)
@@ -68,10 +72,11 @@ src/
     util.ts                shared formatters
 ```
 
-Zero runtime dependencies. The only `pnpm install` cost is Vite (dev server +
-TypeScript transpile) and the WebSerial type definitions. No React, no Svelte,
-no OSC library, no SLIP library — all hand-rolled because the surface area is
-small enough that the dependencies cost more than the code.
+No framework dependencies. The `pnpm install` cost is Vite (dev server +
+TypeScript transpile), `serialport` + `ws` (for the serial bridge), and type
+definitions. No React, no Svelte, no OSC library, no SLIP library — all
+hand-rolled because the surface area is small enough that the dependencies
+cost more than the code.
 
 ## How the wire protocol works
 
@@ -149,9 +154,9 @@ block M13 (Open Stage Control preset) — both ship.
 - **Fader curve is a single-segment log approximation,** not the real X32
   piecewise curve. The dB readout next to each fader is rough. Replace
   `formatFaderDb` in `ui/util.ts` if you need exact display.
-- **No reconnect-on-port-loss.** If the Teensy reboots mid-session, click
-  Disconnect and Connect again. The firmware-side reset is also visible as a
-  fresh boot banner in the console pane.
+- **No reconnect-on-port-loss.** If the Teensy reboots mid-session (e.g. after
+  a firmware upload), restart the bridge (`Ctrl+C`, `pnpm bridge`) and click
+  Connect again in the browser.
 - **Subscription wire format is provisional.** The `/sub addSub` argument shape
   in `dispatcher.ts` matches the convention documented in
   [02-osc-protocol.md](../../../../planning/osc-mixer-foundation/02-osc-protocol.md#subscriptions-follow-the-x32-xremote-idiom)

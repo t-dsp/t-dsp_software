@@ -60,7 +60,7 @@ static volatile uint8_t tx_noautoflush=0;
 extern volatile uint8_t usb_high_speed;
 
 // TODO: should be 2 different timeouts, high speed (480) vs full speed (12)
-#define TRANSMIT_FLUSH_TIMEOUT	75   /* in microseconds */
+#define TRANSMIT_FLUSH_TIMEOUT	4000 /* in microseconds */
 
 static void timer_config(void (*callback)(void), uint32_t microseconds);
 static void timer_start_oneshot();
@@ -372,6 +372,65 @@ int usb_serial_write(const void *buffer, uint32_t size)
 			memcpy(txdata, data, tx_available);
 			//*(txbuffer + (tx_head * TX_SIZE)) = 'A' + tx_head; // to see which buffer
 			//*(txbuffer + (tx_head * TX_SIZE) + 1) = ' '; // really see it
+			uint8_t *txbuf = txbuffer + (tx_head * TX_SIZE);
+			usb_prepare_transfer(xfer, txbuf, TX_SIZE, 0);
+			arm_dcache_flush_delete(txbuf, TX_SIZE);
+			usb_transmit(CDC_TX_ENDPOINT, xfer);
+			if (++tx_head >= TX_NUM) tx_head = 0;
+			size -= tx_available;
+			sent += tx_available;
+			data += tx_available;
+			tx_available = 0;
+			timer_stop();
+		} else {
+			memcpy(txdata, data, size);
+			tx_available -= size;
+			sent += size;
+			size = 0;
+			timer_start_oneshot();
+		}
+		asm("dsb" ::: "memory");
+		tx_noautoflush = 0;
+	}
+	return sent;
+}
+
+// Non-blocking variant of usb_serial_write().  Returns immediately
+// (with a short or zero count) if the current TX transfer buffer is
+// still in-flight.  Never spins, never calls yield().
+//
+// Does NOT set transmit_previous_timeout — that flag is owned by the
+// blocking path.  A non-blocking bail-out is voluntary, not evidence
+// that the host disappeared.  Does clear it on success (a completed
+// transfer proves the host is alive).
+int usb_serial_write_nonblocking(const void *buffer, uint32_t size)
+{
+	uint32_t sent=0;
+	const uint8_t *data = (const uint8_t *)buffer;
+
+	if (!usb_configuration) return 0;
+	while (size > 0) {
+		tx_noautoflush = 1;
+		transfer_t *xfer = tx_transfer + tx_head;
+		if (!tx_available) {
+			uint32_t status = usb_transfer_status(xfer);
+			if (!(status & 0x80)) {
+				if (status & 0x68) {
+					printf("ERROR status = %x, i=%d, ms=%u\n",
+						status, tx_head, systick_millis_count);
+				}
+				tx_available = TX_SIZE;
+				transmit_previous_timeout = 0;
+			} else {
+				// Transfer still in-flight — bail out immediately.
+				asm("dsb" ::: "memory");
+				tx_noautoflush = 0;
+				return sent;
+			}
+		}
+		uint8_t *txdata = txbuffer + (tx_head * TX_SIZE) + (TX_SIZE - tx_available);
+		if (size >= tx_available) {
+			memcpy(txdata, data, tx_available);
 			uint8_t *txbuf = txbuffer + (tx_head * TX_SIZE);
 			usb_prepare_transfer(xfer, txbuf, TX_SIZE, 0);
 			arm_dcache_flush_delete(txbuf, TX_SIZE);

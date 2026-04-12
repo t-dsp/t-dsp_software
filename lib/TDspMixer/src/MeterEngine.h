@@ -57,7 +57,10 @@ public:
     // OscDispatcher::handleSub which calls this method), and turns it
     // off with /sub unsubscribe /meters/input. When disabled, tick()
     // returns false immediately and no blob is emitted.
-    void setEnabled(bool enabled) { _enabled = enabled; }
+    void setEnabled(bool enabled) {
+        if (enabled && !_enabled) _warmupPending = true;
+        _enabled = enabled;
+    }
     bool isEnabled() const        { return _enabled; }
 
     // Call from loop() every iteration. If the poll interval has elapsed,
@@ -71,7 +74,10 @@ public:
 private:
     OscDispatcher    *_dispatcher     = nullptr;
     bool              _enabled        = false;
-    uint32_t          _pollIntervalMs = 33;
+    bool              _warmupPending  = false;
+    uint32_t          _enabledAtMs    = 0;
+    static constexpr uint32_t _warmupMs = 200;
+    uint32_t          _pollIntervalMs = 100;
     uint32_t          _lastPollMs     = 0;
 
     AudioAnalyzePeak *_peaks[kChannelCount + 1] = {0};

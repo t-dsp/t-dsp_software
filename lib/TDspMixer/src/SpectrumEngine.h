@@ -45,7 +45,10 @@ public:
     // client turns it on by sending /sub addSub … /spectrum/main
     // (routed here by OscDispatcher::handleSub). When disabled, tick()
     // returns false immediately and no blob is emitted.
-    void setEnabled(bool enabled) { _enabled = enabled; }
+    void setEnabled(bool enabled) {
+        if (enabled && !_enabled) _warmupPending = true;
+        _enabled = enabled;
+    }
     bool isEnabled() const        { return _enabled; }
 
     // Call from loop() every iteration. If the poll interval has
@@ -61,7 +64,10 @@ private:
     AudioAnalyzeFFT1024  *_fftL           = nullptr;
     AudioAnalyzeFFT1024  *_fftR           = nullptr;
     bool                  _enabled        = false;
-    uint32_t              _pollIntervalMs = 33;
+    bool                  _warmupPending  = false;
+    uint32_t              _enabledAtMs    = 0;
+    static constexpr uint32_t _warmupMs  = 200;
+    uint32_t              _pollIntervalMs = 100;
     uint32_t              _lastPollMs     = 0;
 
     // Scratch buffer: 512 L bytes then 512 R bytes = 1024 bytes total.

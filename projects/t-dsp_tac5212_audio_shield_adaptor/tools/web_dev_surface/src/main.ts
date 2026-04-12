@@ -33,10 +33,13 @@ const state = createMixerState(CHANNEL_COUNT);
 const console_ = serialConsole({ onSubmit: (line) => sendText(line) });
 const log = (line: string): void => console_.append(line);
 
-let port: SerialPort | null = null;
-let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
-let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
-let readLoopAborted = false;
+// Transport: WebSocket bridge to a Node.js serial-bridge process.
+// The bridge opens the COM port via `serialport` (which doesn't disrupt
+// USB Audio) and relays raw bytes over a local WebSocket. The browser
+// never touches WebSerial, avoiding Chrome renderer-process USB
+// contention that causes audio buzz on composite devices.
+const WS_URL = 'ws://localhost:8765';
+let ws: WebSocket | null = null;
 
 // Addresses whose traffic is high-frequency and should NOT be logged to
 // the serial console pane. Meter blobs stream at 30 Hz and the channel
@@ -84,59 +87,67 @@ function formatArg(a: OscArg): string {
 }
 
 const send = (packet: Uint8Array): void => {
-  if (!writer) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
     log('! not connected');
     return;
   }
-  writer.write(slipEncode(packet)).catch((e) => log(`! write error: ${e.message}`));
+  ws.send(slipEncode(packet));
 };
 
-// Plain-text CLI write. Intentionally bypasses SLIP: the firmware's
-// SlipOscTransport demuxes on the first byte of each chunk — 0xC0
-// starts a SLIP/OSC frame, anything else accumulates into a text-
-// line buffer that dispatches on CR/LF. ASCII never starts with 0xC0
-// so the two streams coexist on the same serial pipe.
+// Plain-text CLI write. Bypasses SLIP — see firmware's SlipOscTransport.
 const sendText = (line: string): void => {
-  if (!writer) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
     log('! not connected');
     return;
   }
-  writer.write(new TextEncoder().encode(line + '\n'))
-    .catch((e) => log(`! write error: ${e.message}`));
+  ws.send(new TextEncoder().encode(line + '\n'));
 };
 
 const dispatcher = new Dispatcher(state, send);
 
 async function connect(): Promise<void> {
   try {
-    if (!('serial' in navigator)) {
-      log('! WebSerial not supported in this browser. Use Chrome, Edge, Brave, or another Chromium-based browser.');
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      log('! already connected');
       return;
     }
-    port = await navigator.serial.requestPort();
-    await port.open({ baudRate: 115200 });
-    if (!port.writable || !port.readable) {
-      throw new Error('port has no readable/writable streams');
-    }
-    writer = port.writable.getWriter();
-    reader = port.readable.getReader();
+    log(`connecting to bridge at ${WS_URL}...`);
+    const socket = new WebSocket(WS_URL);
+    socket.binaryType = 'arraybuffer';
+
+    await new Promise<void>((resolve, reject) => {
+      socket.onopen = () => resolve();
+      socket.onerror = () => reject(new Error(
+        `cannot reach bridge at ${WS_URL} — is serial-bridge running? (pnpm bridge)`));
+    });
+
+    ws = socket;
     state.connected.set(true);
-    log('-- connected --');
-    void readLoop();
-    // Ask the firmware for a full state dump so the UI populates with
-    // the current values instead of whatever the signals were initialized
-    // to. Then re-subscribe to any active streams — subscriptions live
-    // on the firmware side and are lost if the USB CDC session reset
-    // (e.g., Windows USB suspend overnight, power management, etc.).
-    // The small delay lets the serial port finish settling and the
-    // firmware's own boot chatter drain before our first write.
+    log('-- connected via bridge --');
+
+    socket.onmessage = (ev) => {
+      demuxer.feed(new Uint8Array(ev.data as ArrayBuffer));
+    };
+
+    socket.onclose = () => {
+      log('-- bridge disconnected --');
+      ws = null;
+      state.connected.set(false);
+    };
+
+    socket.onerror = () => {
+      log('! bridge error');
+    };
+
+    // Snapshot + re-subscribe after a short settle delay. The firmware's
+    // transport layer throttles incoming OSC frames (one per 3ms) to
+    // prevent CDC burst contention with USB Audio, so it's safe to send
+    // all commands at once — they'll be processed with natural spacing.
     setTimeout(() => {
       dispatcher.requestSnapshot();
-      // Re-subscribe to meters if they were on before the disconnect.
       if (state.metersOn.get()) {
         dispatcher.subscribeMeters();
       }
-      // Re-subscribe to spectrum if the Spectrum tab is active.
       if (spectrum.isRunning()) {
         dispatcher.subscribeSpectrum();
       }
@@ -146,38 +157,15 @@ async function connect(): Promise<void> {
   }
 }
 
-async function readLoop(): Promise<void> {
-  readLoopAborted = false;
-  try {
-    while (!readLoopAborted && reader) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      if (value) demuxer.feed(value);
-    }
-  } catch (e) {
-    log(`! read error: ${(e as Error).message}`);
-  }
-}
-
 async function disconnect(): Promise<void> {
-  readLoopAborted = true;
   try {
-    if (reader) {
-      await reader.cancel().catch(() => {});
-      reader.releaseLock();
-    }
-    if (writer) {
-      writer.releaseLock();
-    }
-    if (port) {
-      await port.close();
+    if (ws) {
+      ws.close();
+      ws = null;
     }
   } catch (e) {
     log(`! disconnect error: ${(e as Error).message}`);
   } finally {
-    reader = null;
-    writer = null;
-    port = null;
     state.connected.set(false);
     log('-- disconnected --');
   }

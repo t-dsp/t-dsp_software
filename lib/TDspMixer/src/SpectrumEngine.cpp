@@ -38,6 +38,10 @@ static inline uint8_t magToDbByte(float mag) {
 bool SpectrumEngine::tick(OSCBundle &reply) {
     if (!_enabled) return false;
     const uint32_t now = millis();
+    // Warmup: suppress the first 200ms after enabling so the USB Audio
+    // controller has time to settle after the connect/subscribe burst.
+    if (_warmupPending) { _enabledAtMs = now; _warmupPending = false; }
+    if (now - _enabledAtMs < _warmupMs) return false;
     if (now - _lastPollMs < _pollIntervalMs) return false;
 
     // Only emit a frame when BOTH FFTs have fresh data. If either is

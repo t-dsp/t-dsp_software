@@ -50,6 +50,7 @@ int usb_serial_read(void *buffer, uint32_t size);
 void usb_serial_flush_input(void);
 int usb_serial_putchar(uint8_t c);
 int usb_serial_write(const void *buffer, uint32_t size);
+int usb_serial_write_nonblocking(const void *buffer, uint32_t size);
 int usb_serial_write_buffer_free(void);
 void usb_serial_flush_output(void);
 extern uint32_t usb_cdc_line_coding[2];
@@ -115,6 +116,9 @@ public:
         virtual size_t write(uint8_t c) { return usb_serial_putchar(c); }
 	// Transmit a buffer containing any number of bytes to your PC
         virtual size_t write(const uint8_t *buffer, size_t size) { return usb_serial_write(buffer, size); }
+	// Non-blocking write: returns immediately if TX buffers are full.
+	// Returns number of bytes actually queued (may be 0 or less than size).
+	size_t writeNonBlocking(const uint8_t *buffer, size_t size) { return usb_serial_write_nonblocking(buffer, size); }
 	// Transmit a single byte to your PC
 	size_t write(unsigned long n) { return write((uint8_t)n); }
 	// Transmit a single byte to your PC

@@ -395,14 +395,22 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
     }
 }
 
-// CLI line arrived (plain ASCII). For MVP v1 we only recognize one
-// command: "s" for status dump. The legacy Phase 1 CLI (u/p/i/m/l/+/-/
-// arrow keys) has been removed — volume control moves to OSC via the
-// web_dev_surface client or raw OSC.
+// CLI line arrived (plain ASCII). Recognized commands:
+//   s / S  — status dump (audio memory, CPU, model state)
+//   unsub_all — disable all streaming engines (meters, spectrum).
+//              Used by the serial-bridge when the WebSocket client
+//              disconnects so the firmware stops writing data that
+//              nobody is reading.
 static void onCliLine(char *line, int length, void *userData) {
     (void)userData;
     (void)length;
     if (!line) return;
+    if (strcmp(line, "unsub_all") == 0) {
+        g_meters.setEnabled(false);
+        g_spectrum.setEnabled(false);
+        Serial.println("streaming disabled");
+        return;
+    }
     if (line[0] == 's' || line[0] == 'S') {
         Serial.println("\n--- Status ---");
         Serial.print("Audio Mem: ");
@@ -790,33 +798,46 @@ static void broadcastSnapshot(OSCBundle &reply) {
 // ============================================================================
 
 void loop() {
-    // If the USB CDC host disconnected (Chrome closed the serial
-    // port), immediately disable all streaming engines. Without this,
-    // stale meter + spectrum subscriptions from a previous session keep
-    // trying to write ~36 KB/sec of OSC blobs into a CDC TX buffer
-    // that nobody is reading. usb_serial_write() blocks waiting for
-    // buffer space → loop() stalls → heartbeat LED stops → device
-    // appears frozen. Disabling the engines stops the writes. The
-    // client's connect() path re-subscribes after opening the port and
-    // starting its readLoop, so the engines come back up cleanly.
-    if (!Serial.dtr()) {
-        if (g_meters.isEnabled())   g_meters.setEnabled(false);
-        if (g_spectrum.isEnabled()) g_spectrum.setEnabled(false);
-    }
+    // USB CDC priority model:
+    //   1. Audio  — hardware ISR, isochronous endpoint, never disrupted.
+    //   2. Control — fader echoes, snapshot → sendBundle() (blocking).
+    //      Infrequent, small, must deliver. Triggers a 5ms cooldown
+    //      during which streaming writes are suppressed.
+    //   3. Streaming — meters, spectrum → broadcastBundle() (non-blocking).
+    //      At most ONE frame per loop() tick, with a minimum gap between
+    //      writes so CDC bulk transfers don't crowd Audio isochronous
+    //      scheduling on the shared USB controller.
+    //
+    // The serial-bridge sends "unsub_all" when the last WebSocket client
+    // disconnects, so the firmware stops computing data nobody is watching.
 
     pollHostVolume();
     pollCaptureHostVolume();
 
     g_transport.poll();
 
-    OSCBundle meterReply;
-    if (g_meters.tick(meterReply) && meterReply.size() > 0) {
-        g_transport.sendBundle(meterReply);
-    }
+    // --- Streaming throttle: one broadcast per tick, minimum gap ---
+    static uint32_t s_lastBroadcastMs = 0;
+    static constexpr uint32_t BROADCAST_MIN_GAP_MS = 10;
+    uint32_t now = millis();
 
-    OSCBundle spectrumReply;
-    if (g_spectrum.tick(spectrumReply) && spectrumReply.size() > 0) {
-        g_transport.sendBundle(spectrumReply);
+    if (now - s_lastBroadcastMs >= BROADCAST_MIN_GAP_MS) {
+        // Always call tick() so engines consume analyzer data and track
+        // their internal timing. Send at most one frame: meters have
+        // priority (more useful for mixing); spectrum fills the gaps.
+        OSCBundle meterReply;
+        bool meterReady = g_meters.tick(meterReply) && meterReply.size() > 0;
+
+        OSCBundle spectrumReply;
+        bool spectrumReady = g_spectrum.tick(spectrumReply) && spectrumReply.size() > 0;
+
+        if (meterReady) {
+            g_transport.broadcastBundle(meterReply);
+            s_lastBroadcastMs = now;
+        } else if (spectrumReady) {
+            g_transport.broadcastBundle(spectrumReply);
+            s_lastBroadcastMs = now;
+        }
     }
 
     // Heartbeat LED — proves the main loop is running and not wedged.
