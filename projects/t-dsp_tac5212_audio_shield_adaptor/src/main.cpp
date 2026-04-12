@@ -487,12 +487,12 @@ void setup() {
     // Force the capture-side Feature Unit's cold-boot value to 100% so
     // the headphone monitor is at unity until Windows tells us otherwise.
     // The Teensy core defaults this to FEATURE_MAX_VOLUME/2 = 128 (matches
-    // the playback FU pattern), which would silently attenuate listenback
-    // by ~6 dB linear / ~12 dB square-law on every cold boot. This also
-    // means GET_CUR returns FEATURE_MAX_VOLUME on first query, so Windows
-    // shows the recording slider at 100% on enumeration. Set BEFORE the
-    // first pollCaptureHostVolume() call so the change-detection logic
-    // doesn't fire a spurious /usb/cap/hostvol/value 0.502 broadcast.
+    // the playback FU pattern), which at our linear taper would silently
+    // attenuate listenback by ~6 dB on every cold boot. This also means
+    // GET_CUR returns FEATURE_MAX_VOLUME on first query, so Windows shows
+    // the recording slider at 100% on enumeration. Set BEFORE the first
+    // pollCaptureHostVolume() call so the change-detection logic doesn't
+    // fire a spurious /usb/cap/hostvol/value 0.502 broadcast.
     AudioOutputUSB::features.volume = FEATURE_MAX_VOLUME;
 
     // --- Wire TDspMixer to the audio graph ---
@@ -594,16 +594,20 @@ static float s_lastCapVolRaw = -1.0f;
 static int   s_lastCapMute   = -1;
 
 // Compute the actual gain to apply to the listenback monitor amps from
-// the raw FU 0x30 volume + mute state. Square-law taper matches the
-// playback hostvol so both Windows sliders feel the same to the user.
-// Mute folds into a hard 0 — when Windows mutes the recording slider
-// the user hears nothing in their headphones from mic/line, regardless
-// of where the slider was sitting.
+// the raw FU 0x30 volume + mute state. Linear taper — NOT the square-law
+// that pollHostVolume uses for the playback side. Reason: the sources
+// this attenuates are line-level mic/line inputs, which are already
+// quiet. Square-law gives ~-12 dB at 50% slider, dropping a mic below
+// audibility; linear gives -6 dB at 50%, keeping usable range across
+// the whole slider travel. The playback hostvol still uses square-law
+// because it's attenuating the final DAC output which is much hotter —
+// the tapers are tuned to the signal levels they act on. Mute folds
+// into a hard 0.
 static float captureMonitorGain(float rawVol, int rawMute) {
     if (rawMute) return 0.0f;
-    float scaled = rawVol * rawVol;  // square-law
-    if (scaled > 1.0f) scaled = 1.0f;
-    return scaled;
+    if (rawVol < 0.0f) return 0.0f;
+    if (rawVol > 1.0f) return 1.0f;
+    return rawVol;
 }
 
 static void applyCaptureMonitorGain(float g) {
