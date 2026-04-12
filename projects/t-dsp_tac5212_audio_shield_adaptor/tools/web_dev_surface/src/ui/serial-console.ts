@@ -21,6 +21,7 @@
 // OUT of the log to keep the pane readable.
 
 const MAX_LINES = 500;
+const MAX_HISTORY = 50;
 
 export interface SerialConsole {
   element: HTMLElement;
@@ -28,7 +29,11 @@ export interface SerialConsole {
   clear: () => void;
 }
 
-export function serialConsole(): SerialConsole {
+export interface SerialConsoleOptions {
+  onSubmit?: (line: string) => void;
+}
+
+export function serialConsole(opts: SerialConsoleOptions = {}): SerialConsole {
   const wrap = document.createElement('div');
   wrap.className = 'console-wrap';
 
@@ -47,7 +52,26 @@ export function serialConsole(): SerialConsole {
   const view = document.createElement('div');
   view.className = 'console';
 
-  wrap.append(headerRow, view);
+  // Command input row — plain-text CLI prompt at the bottom of the
+  // console. The firmware's SlipOscTransport demuxes on the first
+  // byte of each chunk (0xC0 = SLIP/OSC frame, else accumulate into
+  // a text-line buffer until CR/LF), so ASCII lines written straight
+  // to the port bypass SLIP and land in onCliLine().
+  const inputRow = document.createElement('div');
+  inputRow.className = 'console-input-row';
+
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'console-input';
+  input.placeholder = 'serial command (e.g. s)';
+
+  const sendBtn = document.createElement('button');
+  sendBtn.textContent = 'Send';
+  sendBtn.className = 'console-send';
+
+  inputRow.append(input, sendBtn);
+
+  wrap.append(headerRow, view, inputRow);
 
   // Ring buffer of line DIVs. New lines are appendChild'd; when the
   // count exceeds MAX_LINES we removeChild the first one. This keeps
@@ -127,6 +151,56 @@ export function serialConsole(): SerialConsole {
   }
 
   clearBtn.addEventListener('click', clear);
+
+  // In-memory command history, ring-buffered at MAX_HISTORY. No
+  // localStorage persistence — out of scope. historyIndex points at
+  // the entry currently shown in the input; === history.length means
+  // "past the end" (fresh empty prompt).
+  const history: string[] = [];
+  let historyIndex = 0;
+
+  function submit(): void {
+    const line = input.value.trim();
+    if (line.length === 0) return;
+    if (opts.onSubmit) opts.onSubmit(line);
+    // Echo through the normal append path so this line rides the
+    // same rAF-batched flush as everything else in the scrollback.
+    append(`$ ${line}`);
+    // Dedupe consecutive duplicates, then ring-buffer trim.
+    if (history.length === 0 || history[history.length - 1] !== line) {
+      history.push(line);
+      if (history.length > MAX_HISTORY) history.shift();
+    }
+    historyIndex = history.length;
+    input.value = '';
+  }
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      submit();
+    } else if (e.key === 'ArrowUp') {
+      if (history.length === 0) return;
+      e.preventDefault();
+      if (historyIndex > 0) historyIndex -= 1;
+      input.value = history[historyIndex] ?? '';
+      // Move caret to end after the value swap.
+      const len = input.value.length;
+      input.setSelectionRange(len, len);
+    } else if (e.key === 'ArrowDown') {
+      if (history.length === 0) return;
+      e.preventDefault();
+      if (historyIndex < history.length) historyIndex += 1;
+      input.value = historyIndex >= history.length ? '' : (history[historyIndex] ?? '');
+      const len = input.value.length;
+      input.setSelectionRange(len, len);
+    }
+  });
+
+  sendBtn.addEventListener('click', () => {
+    submit();
+    input.focus();
+  });
 
   return { element: wrap, append, clear };
 }

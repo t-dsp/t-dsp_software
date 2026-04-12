@@ -404,3 +404,20 @@ select, input[type="text"] {
   border: 1px solid #2c2c2c;
   border-radius: 2px;
 }
+
+.console-input-row {
+  display: flex;
+  gap: 6px;
+}
+
+.console-input {
+  flex: 1;
+  font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.console-send {
+  font-size: 11px;
+  padding: 3px 12px;
+}

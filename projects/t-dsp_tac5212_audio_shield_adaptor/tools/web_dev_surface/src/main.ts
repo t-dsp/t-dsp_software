@@ -29,7 +29,7 @@ import { rawOsc } from './ui/raw-osc';
 const CHANNEL_COUNT = 6;
 
 const state = createMixerState(CHANNEL_COUNT);
-const console_ = serialConsole();
+const console_ = serialConsole({ onSubmit: (line) => sendText(line) });
 const log = (line: string): void => console_.append(line);
 
 let port: SerialPort | null = null;
@@ -82,6 +82,20 @@ const send = (packet: Uint8Array): void => {
     return;
   }
   writer.write(slipEncode(packet)).catch((e) => log(`! write error: ${e.message}`));
+};
+
+// Plain-text CLI write. Intentionally bypasses SLIP: the firmware's
+// SlipOscTransport demuxes on the first byte of each chunk — 0xC0
+// starts a SLIP/OSC frame, anything else accumulates into a text-
+// line buffer that dispatches on CR/LF. ASCII never starts with 0xC0
+// so the two streams coexist on the same serial pipe.
+const sendText = (line: string): void => {
+  if (!writer) {
+    log('! not connected');
+    return;
+  }
+  writer.write(new TextEncoder().encode(line + '\n'))
+    .catch((e) => log(`! write error: ${e.message}`));
 };
 
 const dispatcher = new Dispatcher(state, send);
