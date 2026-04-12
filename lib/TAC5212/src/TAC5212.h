@@ -1,19 +1,14 @@
 // TAC5212 — register-level driver for the TI TAC5212 pro-audio codec.
 //
-// This library exposes chip-specific primitives only. Gain, volume, fader,
-// mute, EQ, and metering concerns belong to the TDspMixer framework, NOT to
-// this library. See planning/osc-mixer-foundation/02-osc-protocol.md for the
-// canonical `/codec/tac5212/...` OSC subtree that this class mirrors 1:1.
+// This library exposes chip-specific primitives only. Mixer-level concerns
+// (fader, mute, EQ, metering, routing) belong to the TDspMixer framework.
+// See planning/osc-mixer-foundation/02-osc-protocol.md for the canonical
+// `/codec/tac5212/...` OSC subtree that this class mirrors 1:1.
 //
-// Design rules this library MUST honor (sharpened 2026-04-11):
-//
-//   A. No gain-flavored methods anywhere. No setPga / setLevel / setDrive /
-//      setVolume / setTrim / setGain on TAC5212, Adc, Out, Pdm, or any
-//      future accessor. Gain is mixer territory, period.
-//
-//   B. Per-channel leaves must not have chip-global side effects. If a knob
-//      affects more than one channel, it lives on the TAC5212 class as a
-//      chip-global method, not on a per-channel accessor.
+// Design rule:
+//   Per-channel leaves must not have chip-global side effects. If a knob
+//   affects more than one channel, it lives on the TAC5212 class as a
+//   chip-global method, not on a per-channel accessor.
 //
 // The architecture targets `-fno-rtti` and `-fno-exceptions` (Teensy default).
 // `Result` is a plain value type, no exceptions, no polymorphism. All setters
@@ -311,12 +306,12 @@ public:
     Result setFullscale(AdcFullscale);
     Result setCoupling(AdcCoupling);
     Result setBw(AdcBw);
-    // NOTE: setHpf() is intentionally NOT exposed yet. The TAC5212's ADC HPF
-    // live in the global DSP_CFG0 register, which creates cross-channel
-    // coupling if exposed per-channel (Rule B violation). The OSC leaf
-    // /codec/tac5212/adc/N/hpf in the current planning doc needs a design
-    // review before implementation — either move HPF to a chip-global leaf,
-    // or accept that "per-channel HPF on/off" is a pretense and document it.
+
+    // ADC digital volume (DVOL). Per-channel, 0.5 dB steps.
+    //   dB range: -100.0 to +27.0  (values below -100 are treated as mute)
+    //   POR default: 0.0 dB (unity)
+    Result setDvol(float dB);
+    Result getDvol(float &dB);
 
 private:
     friend class TAC5212;
@@ -340,7 +335,6 @@ public:
     // out-param holds the decoded value. Used by /snapshot to populate
     // a freshly-connected client's codec panel without a write round-trip.
     Result getMode(OutMode &out);
-    // NO setLevel, setDrive, setVolume, setTrim, setGain. Rule A.
 
 private:
     friend class TAC5212;

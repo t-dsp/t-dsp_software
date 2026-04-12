@@ -448,6 +448,24 @@ select, input[type="text"] {
   color: #ccc;
 }
 
+.control input[type="range"] {
+  flex: 1;
+  min-width: 80px;
+}
+
+.group-disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.range-readout {
+  font-size: 11px;
+  font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  color: #aef;
+  min-width: 56px;
+  text-align: right;
+}
+
 /* ---------- raw OSC ---------- */
 
 .raw-section {

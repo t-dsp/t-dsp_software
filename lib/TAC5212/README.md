@@ -2,26 +2,15 @@
 
 Register-level driver library for the TI TAC5212 pro-audio codec.
 
-This library exposes **chip-specific primitives only**. Gain, volume, fader,
-mute, EQ, dynamics, and metering concerns live in `lib/TDspMixer/`, never here.
-See `planning/osc-mixer-foundation/02-osc-protocol.md` for the canonical
+This library exposes **chip-specific primitives** including hardware gain
+controls (ADC DVOL, DAC volume). Mixer-level concerns (fader, mute, EQ,
+dynamics, metering) live in `lib/TDspMixer/`. See
+`planning/osc-mixer-foundation/02-osc-protocol.md` for the canonical
 `/codec/tac5212/...` OSC subtree that this class mirrors 1:1.
 
 ## Design rules
 
-Two load-bearing rules, sharpened 2026-04-11 during the small-mixer epic:
-
-### Rule A — Gain is always the mixer surface's job, never the codec panel's
-
-No `setPga`, `setLevel`, `setDrive`, `setVolume`, `setTrim`, or `setGain`
-methods exist anywhere on `TAC5212`, `TAC5212::Adc`, `TAC5212::Out`,
-`TAC5212::Pdm`, or any future accessor. If the TAC5212 chip happens to expose
-a gain register (`ADC_CH*_DVOL`, `DAC_*_DVOL`, analog bypass level control),
-that register is reachable only through the raw-register escape hatch
-(`TAC5212::writeRegister` / `readRegister`). The mixer framework decides if
-and when to use it.
-
-### Rule B — A per-channel codec leaf must not have chip-global side effects
+### Per-channel codec leaves must not have chip-global side effects
 
 If a control affects more than one channel, it's exposed as a chip-global
 method on `TAC5212` itself, not as a method on the `Adc` / `Out` accessor.
@@ -170,28 +159,26 @@ These are the calls from the parallel design-chat sync on 2026-04-11
 that ended up as hard rules enforced at the type-system level. Recorded
 here so future sessions don't re-litigate them.
 
-1. **Gain is never a codec-library concern.** No `setPga`, `setLevel`,
-   `setDrive`, `setVolume`, `setTrim`, or `setGain` methods anywhere.
-2. **Per-channel leaves never have cross-channel side effects.** ADC
+1. **Per-channel leaves never have cross-channel side effects.** ADC
    HPF lives on `TAC5212::setAdcHpf(bool)` at the chip-global level,
    not on `TAC5212::Adc`, because DSP_CFG0's HPF_SEL field applies to
    both channels simultaneously. The OSC spec leaf moved from
    `/codec/tac5212/adc/N/hpf` to `/codec/tac5212/adc/hpf` to match.
-3. **`AdcMode` has no `Pdm` value.** ADC channels 1/2 on the TAC5212
+2. **`AdcMode` has no `Pdm` value.** ADC channels 1/2 on the TAC5212
    are analog-only. PDM lives entirely in the `/codec/tac5212/pdm/...`
    subtree and routes to codec channels 3/4, not 1/2. The OSC spec
    `/adc/N/mode` enum dropped `"pdm_input"` to match.
-4. **`MicbiasLevel` stays relative-to-VREF, not absolute volts.** The
+3. **`MicbiasLevel` stays relative-to-VREF, not absolute volts.** The
    hardware register encodes a ratio (same-as-VREF / half-VREF / AVDD),
    so the library mirrors the ratio. The codec panel handler translates
    user-facing absolute-voltage strings like `"1.375v"` into the right
    `(vref/fscale, micbias_val)` pair before calling the library.
-5. **`reset()` is narrow: SW reset + wake, no board-specific config.**
+4. **`reset()` is narrow: SW reset + wake, no board-specific config.**
    TDM format, slot map, PDM routing, channel enables, and power-up
    stay in the project's `setupCodec()` (today) or `Tac5212Panel`
    (future). Library stays chip-generic so the same driver can serve
    multiple boards.
-6. **Accessor pattern, not flat setters.** `codec.adc(1).setMode(...)`
+5. **Accessor pattern, not flat setters.** `codec.adc(1).setMode(...)`
    mirrors the OSC URL shape `/codec/tac5212/adc/1/mode` literally.
    Lower cognitive load in handler code; scales naturally to boards
    with more channels.

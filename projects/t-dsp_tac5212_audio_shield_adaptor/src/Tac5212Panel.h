@@ -12,6 +12,7 @@
 //   /adc/N/impedance s    "5k" | "10k" | "40k"
 //   /adc/N/fullscale s    "2vrms" | "4vrms"
 //   /adc/N/coupling s     "ac" | "dc_low" | "dc_rail_to_rail"
+//   /adc/N/dvol f          -100.0 .. +27.0 dB (0.5 dB steps; ADC digital volume)
 //   /adc/N/bw s           "24khz" | "96khz"
 //   /adc/hpf i            0|1 (chip-global ADC HPF)
 //   /vref/fscale s        "2.75v" | "2.5v" | "1.375v" | "1.25v" | "avdd"
@@ -66,9 +67,8 @@ public:
     //   - The TAC5212 has no dedicated DAC mute register; mute IS volume==0.
     //   - Soft-step is not currently configured, so the unmute transition
     //     is abrupt. One-time startup transient — acceptable for MVP.
-    //   - These methods do NOT touch the lib/TAC5212 typed API because
-    //     it deliberately exposes no gain-flavored methods (Rule A in
-    //     TAC5212.h). They use the lib's writeRegister() escape hatch.
+    //   - These methods use the lib's writeRegister() escape hatch
+    //     for direct DAC volume register access.
     void muteOutput() override;
     void unmuteOutput() override;
 
@@ -82,6 +82,7 @@ private:
     void handleAdcFullscale(int n, OSCMessage &msg, OSCBundle &reply);
     void handleAdcCoupling(int n, OSCMessage &msg, OSCBundle &reply);
     void handleAdcBw(int n, OSCMessage &msg, OSCBundle &reply);
+    void handleAdcDvol(int n, OSCMessage &msg, OSCBundle &reply);
     void handleAdcHpf(OSCMessage &msg, OSCBundle &reply);
 
     void handleVrefFscale(OSCMessage &msg, OSCBundle &reply);

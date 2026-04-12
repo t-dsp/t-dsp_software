@@ -568,24 +568,31 @@ export function spectrumView(): SpectrumView {
     // 255 at the top of the audible range, and pull bins below 0 at
     // the bottom).
     if (tiltOn) {
+      // Gate: don't let the tilt lift silence into visible range.
+      // A raw value ≤ TILT_GATE (~-79 dB) is treated as silence.
+      const TILT_GATE = 3;
       for (let i = 0; i < FFT_BINS; i++) {
         const o = tiltOffset[i];
-        let vl = smoothedL[i] + o;
+        const sl = smoothedL[i];
+        let vl = sl <= TILT_GATE ? sl : sl + o;
         if (vl < 0) vl = 0;
         else if (vl > 255) vl = 255;
         displayL[i] = vl;
 
-        let vr = smoothedR[i] + o;
+        const sr = smoothedR[i];
+        let vr = sr <= TILT_GATE ? sr : sr + o;
         if (vr < 0) vr = 0;
         else if (vr > 255) vr = 255;
         displayR[i] = vr;
 
-        let pl = peakHoldL[i] + o;
+        const pkl = peakHoldL[i];
+        let pl = pkl <= TILT_GATE ? pkl : pkl + o;
         if (pl < 0) pl = 0;
         else if (pl > 255) pl = 255;
         displayPeakL[i] = pl;
 
-        let pr = peakHoldR[i] + o;
+        const pkr = peakHoldR[i];
+        let pr = pkr <= TILT_GATE ? pkr : pkr + o;
         if (pr < 0) pr = 0;
         else if (pr > 255) pr = 255;
         displayPeakR[i] = pr;

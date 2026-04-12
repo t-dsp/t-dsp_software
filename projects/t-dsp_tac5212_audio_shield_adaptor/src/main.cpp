@@ -139,6 +139,11 @@ AudioAmplifier       monLineR;
 AudioAmplifier       monMicL;
 AudioAmplifier       monMicR;
 
+// Mono cross-feed: carries tdmIn ch2 (Line R / ADC CH2) into the L side
+// of the main mixer. In stereo mode gain=0 (silent); in mono/differential
+// mode gain=1 and the binding mirrors ch4's effective gain to mixL[3].
+AudioAmplifier       monoXfeed;
+
 AudioOutputTDM       tdmOut;
 AudioOutputUSB       usbOut;
 
@@ -169,6 +174,13 @@ AudioConnection      c_lineR_peak  (tdmIn, 2, peakCh4, 0);
 AudioConnection      c_lineR_rms   (tdmIn, 2, rmsCh4, 0);
 AudioConnection      c_lineR_mon   (tdmIn, 2, monLineR, 0);
 AudioConnection      c_lineR_mix   (monLineR, 0, mixR, 2);
+
+// Mono cross-feed: Line R (tdmIn ch2 / ADC CH2) → monoXfeed amp → mixL slot 3.
+// Slot 3 is otherwise unused on both mixers. In stereo mode the amp is
+// at gain 0 so this path is silent. In mono mode CH2's differential
+// signal feeds both mixR[2] (normal path) and mixL[3] (cross-feed).
+AudioConnection      c_lineR_xfeed (tdmIn, 2, monoXfeed, 0);
+AudioConnection      c_xfeed_mixL  (monoXfeed, 0, mixL, 3);
 
 // PDM mic: split across TDM slots 2+3 = Teensy ch 4,5,6,7, then combined
 AudioConnection      c_pdmL0       (tdmIn, 4, pdmMixL, 0);
@@ -246,6 +258,10 @@ tdsp::SpectrumEngine      g_spectrum;
 tac5212::TAC5212          g_codec(Wire);
 
 Tac5212Panel              g_codecPanel(g_codec);
+
+// Line input mode: false = stereo (CH1=L, CH2=R, single-ended),
+// true = mono differential (CH1 differential, mono → both L+R outputs).
+static bool g_lineMonoMode = false;
 
 // ============================================================================
 // Hand-rolled codec init (Phase 1 path, preserved as the working audio config)
@@ -361,6 +377,49 @@ static void broadcastSnapshot(OSCBundle &reply);
 static void pollHostVolume();
 static void pollCaptureHostVolume();
 
+// Apply the line input mode to the codec and audio graph.
+// Mono mode: ADC CH2 differential (board IN1+/IN1-), mono → both L+R.
+// Stereo mode: CH1 = Line L (single-ended), CH2 = Line R (single-ended).
+//
+// Note: the board's physical IN1+/IN1- connector is wired to the TAC5212's
+// ADC CH2 input, which appears as mixer ch4 ("Line R") via tdmIn ch2.
+static void applyLineMode(bool mono) {
+    g_lineMonoMode = mono;
+
+    if (mono) {
+        // ADC CH2 → differential (board IN1+/IN1-)
+        g_codec.adc(2).setMode(tac5212::AdcMode::Differential);
+        // Disable ADC CH1 — its input (board IN2+) is tied to the mic's
+        // ring/cold wire. Leaving CH1 powered on loads that signal and
+        // causes buzz. Read-modify-write CH_EN to clear IN_CH1 (bit 7).
+        {
+            uint8_t chEn = g_codec.readRegister(0, 0x76);
+            g_codec.writeRegister(0, 0x76, chEn & ~0x80);
+        }
+        // Cross-feed: ch4 (Line R) mirrors into mixL[3], ch3 muted
+        monoXfeed.gain(1.0f);
+        g_binding.setMonoMirror(4, 3, &mixL, 3);
+    } else {
+        // ADC CH2 → single-ended on INxP
+        g_codec.adc(2).setMode(tac5212::AdcMode::SingleEndedInp);
+        // Re-enable ADC CH1
+        {
+            uint8_t chEn = g_codec.readRegister(0, 0x76);
+            g_codec.writeRegister(0, 0x76, chEn | 0x80);
+        }
+        // Cross-feed off, restore ch3
+        monoXfeed.gain(0.0f);
+        g_binding.clearMonoMirror();
+        // Clear the cross-feed mixer slot
+        mixL.gain(3, 0.0f);
+    }
+
+    // Re-apply ch3 + ch4 gains through the binding so the mirror
+    // (or restored ch3) takes effect immediately.
+    g_binding.applyChannel(3);
+    g_binding.applyChannel(4);
+}
+
 // OSC frame arrived from the transport. Build a reply bundle, route into
 // the dispatcher (which handles /ch/..., /main/..., /sub, /info, and
 // forwards /codec/tac5212/* to Tac5212Panel), and flush the reply back
@@ -385,6 +444,26 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         if (reply.size() > 0) {
             g_transport.sendBundle(reply);
         }
+        return;
+    }
+
+    if (strcmp(address, "/line/mode") == 0) {
+        OSCBundle reply;
+        // Read (no args) → echo current; Write (string arg) → set.
+        if (msg.size() == 0) {
+            OSCMessage m("/line/mode");
+            m.add(g_lineMonoMode ? "mono" : "stereo");
+            reply.add(m);
+        } else {
+            char val[16] = {0};
+            if (msg.isString(0)) msg.getString(0, val, sizeof(val));
+            bool mono = (strcmp(val, "mono") == 0);
+            applyLineMode(mono);
+            OSCMessage m("/line/mode");
+            m.add(mono ? "mono" : "stereo");
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
         return;
     }
 
@@ -523,6 +602,9 @@ void setup() {
     monLineR.gain(1.0f);
     monMicL.gain(1.0f);
     monMicR.gain(1.0f);
+
+    // Mono cross-feed off by default (stereo mode).
+    monoXfeed.gain(0.0f);
 
     // Force the capture-side Feature Unit's cold-boot value to 100% so
     // the headphone monitor is at unity until Windows tells us otherwise.
@@ -764,7 +846,7 @@ static void broadcastSnapshot(OSCBundle &reply) {
     // correctly on reconnect.
     {
         OSCMessage m("/main/st/hostvol/enable");
-        m.add((int32_t)(g_model.main().hostvolEnable ? 1 : 0));
+        m.add((int)(g_model.main().hostvolEnable ? 1 : 0));
         reply.add(m);
     }
 
@@ -781,15 +863,18 @@ static void broadcastSnapshot(OSCBundle &reply) {
     }
     {
         OSCMessage m("/usb/cap/hostvol/mute");
-        m.add((int32_t)(AudioOutputUSB::features.mute ? 1 : 0));
+        m.add((int)(AudioOutputUSB::features.mute ? 1 : 0));
         reply.add(m);
     }
 
-    // Codec panel state — currently the Output tab. The panel reads back
-    // from the chip via the lib/TAC5212 getters, so the values are the
-    // real register state, not a cached "last write". Tabs without
-    // getters yet (ADC, VREF/MICBIAS, PDM) are silently skipped — see
-    // Tac5212Panel::snapshot() in this directory.
+    // Line input mode (stereo vs mono/differential).
+    {
+        OSCMessage m("/line/mode");
+        m.add(g_lineMonoMode ? "mono" : "stereo");
+        reply.add(m);
+    }
+
+    // Codec panel state.
     g_codecPanel.snapshot(reply);
 }
 
