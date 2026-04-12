@@ -790,6 +790,20 @@ static void broadcastSnapshot(OSCBundle &reply) {
 // ============================================================================
 
 void loop() {
+    // If the USB CDC host disconnected (Chrome closed the serial
+    // port), immediately disable all streaming engines. Without this,
+    // stale meter + spectrum subscriptions from a previous session keep
+    // trying to write ~36 KB/sec of OSC blobs into a CDC TX buffer
+    // that nobody is reading. usb_serial_write() blocks waiting for
+    // buffer space → loop() stalls → heartbeat LED stops → device
+    // appears frozen. Disabling the engines stops the writes. The
+    // client's connect() path re-subscribes after opening the port and
+    // starting its readLoop, so the engines come back up cleanly.
+    if (!Serial.dtr()) {
+        if (g_meters.isEnabled())   g_meters.setEnabled(false);
+        if (g_spectrum.isEnabled()) g_spectrum.setEnabled(false);
+    }
+
     pollHostVolume();
     pollCaptureHostVolume();
 
