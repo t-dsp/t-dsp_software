@@ -40,7 +40,13 @@ const FFT_BINS    = 512;            // per channel
 const SAMPLE_RATE = 44100;
 const FFT_SIZE    = 1024;           // AudioAnalyzeFFT1024
 const BIN_HZ      = SAMPLE_RATE / FFT_SIZE;  // ≈ 43.07 Hz
-const F_MIN       = 20;
+// Displayed frequency range. F_MIN is set to one bin below BIN_HZ so
+// that bin 1 (the first usable FFT bin, at ~43 Hz) maps very close to
+// x=0 on the log scale. Earlier we used F_MIN=20, which left an ugly
+// blank strip from 20..43 Hz on the left because FFT1024 at 44.1 kHz
+// simply has no bins in that range — the display was reserving space
+// for data we can never produce.
+const F_MIN       = 40;
 const F_MAX       = 20000;
 
 // EMA decay factor — higher = slower decay. 0.82 gives ~300 ms to 10%.
@@ -108,14 +114,26 @@ export function spectrumView(): SpectrumView {
   }
 
   function resize(): void {
-    const rect = root.getBoundingClientRect();
-    const w = Math.max(1, Math.floor(rect.width));
-    const h = Math.max(1, Math.floor(rect.height));
-    dpr = window.devicePixelRatio || 1;
+    // clientWidth/Height give the padding-box (content + padding,
+    // excludes border). The canvas is position:absolute with inset:0
+    // inside .spectrum-wrap, so it fills exactly this box. Don't use
+    // getBoundingClientRect() — that returns the border-box and would
+    // overshoot by the wrap's 1px border on each side, which used to
+    // create a ResizeObserver feedback loop that grew the canvas
+    // forever.
+    const w = Math.max(1, root.clientWidth);
+    const h = Math.max(1, root.clientHeight);
+    // Bail if unchanged to avoid unnecessary context resets (and to
+    // stop any residual ResizeObserver chatter from re-entering).
+    const nextDpr = window.devicePixelRatio || 1;
+    if (w === cssWidth && h === cssHeight && nextDpr === dpr) return;
     cssWidth  = w;
     cssHeight = h;
-    canvas.style.width  = w + 'px';
-    canvas.style.height = h + 'px';
+    dpr       = nextDpr;
+    // Only the backing store is set from JS. Display size is driven
+    // by the CSS `inset: 0` rule, so no canvas.style.width/height
+    // writes — those were the ones feeding back into the wrap's
+    // layout via the old flow-child setup.
     canvas.width  = Math.floor(w * dpr);
     canvas.height = Math.floor(h * dpr);
     ctx!.setTransform(1, 0, 0, 1, 0, 0);

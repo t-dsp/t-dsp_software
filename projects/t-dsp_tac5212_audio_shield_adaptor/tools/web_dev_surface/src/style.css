@@ -2,6 +2,13 @@
   box-sizing: border-box;
 }
 
+html, body {
+  /* Required so #app's 100vh / min-height: 100vh has something to
+   * anchor to when we go into spectrum-active mode. Harmless in
+   * normal (mixer) mode. */
+  height: 100%;
+}
+
 body {
   margin: 0;
   background: #181818;
@@ -16,6 +23,28 @@ body {
   gap: 16px;
   max-width: 1200px;
   margin: 0 auto;
+  min-height: 100vh;
+}
+
+/* Spectrum-active mode: the body gets `.spectrum-active` added by
+ * main.ts whenever the Spectrum tab is the visible view. In this mode
+ * #app breaks out of its 1200px max-width cap and fills the browser
+ * viewport edge-to-edge, and the spectrum view grows to consume all
+ * remaining vertical space between the tab bar and the serial console.
+ * Dropping back to the Mixer tab removes the class and the layout
+ * reverts to its centered 1200px column. */
+body.spectrum-active #app {
+  max-width: none;
+  height: 100vh;
+}
+
+body.spectrum-active .view.view-spectrum {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+body.spectrum-active .spectrum-wrap {
+  min-height: 0;
 }
 
 /* ---------- top-level view tabs (Mixer / Spectrum) ---------- */
@@ -443,10 +472,17 @@ select, input[type="text"] {
   overflow: hidden;
 }
 
+/* Absolute-positioned inside .spectrum-wrap (which is position:relative)
+ * so the canvas doesn't contribute to the wrap's layout. If the canvas
+ * were a flow child, setting its height from JS on every resize would
+ * push the wrap's content box, which would fire ResizeObserver again,
+ * which would set a bigger height... forever. Canonical pattern for
+ * "canvas fills its container": position it absolute and take it out
+ * of the parent's flow. */
 .spectrum-canvas {
   display: block;
-  width: 100%;
-  height: 100%;
+  position: absolute;
+  inset: 0;
 }
 
 .freeze-btn {

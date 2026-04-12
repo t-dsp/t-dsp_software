@@ -269,6 +269,14 @@ function selectView(name: 'mixer' | 'spectrum'): void {
   mixerView.style.display    = onMixer ? '' : 'none';
   spectrumSection.style.display = onMixer ? 'none' : '';
 
+  // Toggle the body-level class that makes #app break out of its
+  // 1200px max-width and go full viewport in spectrum mode. The CSS
+  // rules in body.spectrum-active do the layout work; we just flip
+  // the class. spectrum.start() below calls resize() which reads the
+  // new layout via getBoundingClientRect, so the canvas picks up the
+  // bigger dimensions on its first frame.
+  document.body.classList.toggle('spectrum-active', !onMixer);
+
   if (onMixer) {
     // Leaving the spectrum view — stop the render loop AND
     // unsubscribe so the firmware stops computing FFTs nobody
