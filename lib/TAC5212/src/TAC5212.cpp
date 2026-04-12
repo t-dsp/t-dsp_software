@@ -427,6 +427,44 @@ Result TAC5212::Out::setMode(OutMode m) {
     return r;
 }
 
+// Read CFG0 (SRC|ROUTE) and CFG1 (DRIVE) and reverse the OutMode mapping
+// from outModeToBytes(). CFG2 is intentionally ignored — for every mode we
+// emit, CFG1 and CFG2 carry the same DRIVE/LVL pattern, so CFG1 alone is a
+// reliable discriminator. SRC must be SRC_DAC; any other source means the
+// chip is in a config we never set (analog bypass / mixed) and we surface
+// it as an error rather than guessing.
+Result TAC5212::Out::getMode(OutMode &out) {
+    out = OutMode::DiffLine;
+    const OutRegs regs = outRegs(_n);
+    const uint8_t cfg0 = _codec->_read(0, regs.cfg0);
+    const uint8_t cfg1 = _codec->_read(0, regs.cfg1);
+
+    const uint8_t src   = cfg0 & reg::out_cfg0::MASK_SRC;
+    const uint8_t route = cfg0 & reg::out_cfg0::MASK_ROUTE;
+    const uint8_t drive = cfg1 & reg::out_cfg1::MASK_DRIVE;
+
+    if (src != reg::out_cfg0::SRC_DAC) {
+        return Result::error("output not in DAC source mode");
+    }
+
+    using namespace reg::out_cfg0;
+    using namespace reg::out_cfg1;
+
+    if (route == ROUTE_DIFF && drive == DRIVE_LINE) {
+        out = OutMode::DiffLine;       return Result::ok();
+    }
+    if (route == ROUTE_MONO_SE_P && drive == DRIVE_LINE) {
+        out = OutMode::SeLine;         return Result::ok();
+    }
+    if (route == ROUTE_MONO_SE_P && drive == DRIVE_HEADPHONE) {
+        out = OutMode::HpDriver;       return Result::ok();
+    }
+    if (route == ROUTE_DIFF && drive == DRIVE_FD_RECEIVER) {
+        out = OutMode::FdReceiver;     return Result::ok();
+    }
+    return Result::error("unrecognized output route/drive combo");
+}
+
 // -----------------------------------------------------------------------------
 // PDM block (stubs — to be filled in after INTF_CFG4 bitfield verification)
 // -----------------------------------------------------------------------------

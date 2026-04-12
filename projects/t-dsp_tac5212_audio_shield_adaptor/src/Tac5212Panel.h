@@ -48,6 +48,13 @@ public:
     // "/codec/tac5212/adc/1/mode" that's "/adc/1/mode".
     void route(OSCMessage &msg, int addrOffset, OSCBundle &reply) override;
 
+    // Append the panel's current chip-side state to a /snapshot reply.
+    // Reads back from the TAC5212 registers and emits the same enum-string
+    // echoes a write would produce, so the dev surface client can populate
+    // its UI on connect. Currently covers the Output tab only — other tabs
+    // (ADC, VREF/MICBIAS, PDM) will be added as their lib-side getters land.
+    void snapshot(OSCBundle &reply) override;
+
 private:
     tac5212::TAC5212 &_codec;
 

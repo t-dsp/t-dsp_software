@@ -43,6 +43,18 @@ public:
     // appends any reply messages (echoes, status replies, error bundles)
     // to it, and the dispatcher flushes the bundle after the route returns.
     virtual void route(OSCMessage &msg, int addrOffset, OSCBundle &reply) = 0;
+
+    // Append the panel's current state to a /snapshot reply bundle. Called
+    // by the sketch's broadcastSnapshot() in response to a /snapshot request
+    // from a freshly-connected client. Each override should emit one OSC
+    // message per leaf the client UI cares about, in the same format the
+    // panel would echo on a write — so the client's existing /codec/...
+    // inbound routes pick them up without special-case handling.
+    //
+    // Default is empty: panels can adopt snapshot support tab-by-tab without
+    // breaking other codec drivers. A leaf the panel can't read back from
+    // the chip (e.g. PDM stubs) should just be omitted.
+    virtual void snapshot(OSCBundle &reply) { (void)reply; }
 };
 
 }  // namespace tdsp

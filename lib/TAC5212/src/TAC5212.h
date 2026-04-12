@@ -332,6 +332,14 @@ private:
 class TAC5212::Out {
 public:
     Result setMode(OutMode);
+    // Read-back: returns the OutMode currently programmed in the chip's
+    // CFG0 (SRC|ROUTE) and CFG1 (DRIVE) registers. If the chip has been
+    // poked into a register combination this driver doesn't recognize
+    // (raw /reg/set, partial config, etc.) the result is Error and the
+    // OutMode out-param is left at DiffLine. Otherwise Ok and the
+    // out-param holds the decoded value. Used by /snapshot to populate
+    // a freshly-connected client's codec panel without a write round-trip.
+    Result getMode(OutMode &out);
     // NO setLevel, setDrive, setVolume, setTrim, setGain. Rule A.
 
 private:

@@ -426,3 +426,37 @@ void Tac5212Panel::handleRegGet(OSCMessage &msg, OSCBundle &reply) {
     m.add((int32_t)value);
     reply.add(m);
 }
+
+// ----- /snapshot contribution -----
+//
+// Reads back the current chip state and emits the same enum-string echoes
+// a write would produce. The dev surface client routes /codec/tac5212/...
+// echoes into its codec-panel UI signals, so a fresh client renders the
+// real chip state instead of whatever defaults its <select> elements were
+// initialized with. Currently covers the Output tab; other tabs join as
+// lib-side getters become available.
+//
+// Quietly skips leaves whose getter returns Error (chip in an unexpected
+// register combo, raw /reg/set tampering, etc.) — the client just keeps
+// its placeholder until the next user action triggers an echo.
+
+static const char *outModeToString(tac5212::OutMode m) {
+    switch (m) {
+        case tac5212::OutMode::DiffLine:   return "diff_line";
+        case tac5212::OutMode::SeLine:     return "se_line";
+        case tac5212::OutMode::HpDriver:   return "hp_driver";
+        case tac5212::OutMode::FdReceiver: return "receiver";
+    }
+    return "diff_line";
+}
+
+void Tac5212Panel::snapshot(OSCBundle &reply) {
+    for (int n = 1; n <= 2; ++n) {
+        tac5212::OutMode mode;
+        tac5212::Result r = _codec.out(n).getMode(mode);
+        if (r.isError()) continue;
+        char addr[48];
+        snprintf(addr, sizeof(addr), "/codec/tac5212/out/%d/mode", n);
+        echoEnumReply(reply, addr, outModeToString(mode));
+    }
+}

@@ -666,6 +666,9 @@ static void pollCaptureHostVolume() {
 //   * Per-channel: fader, on, solo, name, link (odd channels)
 //   * Main bus: faderL, faderR, link, on, hostvol/value
 //   * Capture-side hostvol: /usb/cap/hostvol/{value,mute}
+//   * Codec panel: whatever Tac5212Panel::snapshot() reads back from
+//     the chip (see CodecPanel::snapshot in lib/TDspMixer/) — currently
+//     /codec/tac5212/out/N/mode
 //
 // Meter state is NOT included — clients subscribe to meters separately
 // via /sub addSub and the firmware streams them independently.
@@ -710,6 +713,13 @@ static void broadcastSnapshot(OSCBundle &reply) {
         m.add((int32_t)(AudioOutputUSB::features.mute ? 1 : 0));
         reply.add(m);
     }
+
+    // Codec panel state — currently the Output tab. The panel reads back
+    // from the chip via the lib/TAC5212 getters, so the values are the
+    // real register state, not a cached "last write". Tabs without
+    // getters yet (ADC, VREF/MICBIAS, PDM) are silently skipped — see
+    // Tac5212Panel::snapshot() in this directory.
+    g_codecPanel.snapshot(reply);
 }
 
 // ============================================================================

@@ -116,6 +116,12 @@ async function connect(): Promise<void> {
     state.connected.set(true);
     log('-- connected --');
     void readLoop();
+    // Ask the firmware for a full state dump so the UI populates with
+    // the current values instead of whatever the signals were initialized
+    // to. The small delay lets the serial port finish settling and
+    // the firmware's own boot chatter (if any) drain into our reader
+    // before our first write goes out.
+    setTimeout(() => dispatcher.requestSnapshot(), 150);
   } catch (e) {
     log(`! connect failed: ${(e as Error).message}`);
   }

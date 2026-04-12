@@ -15,11 +15,35 @@ import { MixerState } from './state';
 
 const pad2 = (n: number): string => n.toString().padStart(2, '0');
 
+// Listener for incoming codec-panel echoes (e.g. /codec/tac5212/out/1/mode).
+// The codec-panel UI module registers one of these per control so the
+// firmware's /snapshot reply lands back on the right <select>. The msg
+// payload is forwarded raw — the listener decides how to interpret it.
+export type CodecListener = (msg: OscMessage) => void;
+
 export class Dispatcher {
+  // Address -> listener for /codec/... echoes. Populated by codec-panel.ts
+  // at construction time. The dispatcher matches by exact address; the
+  // panel doesn't get pattern matching for free.
+  private codecListeners = new Map<string, CodecListener>();
+
   constructor(
     private state: MixerState,
     private send: (packet: Uint8Array) => void,
   ) {}
+
+  // Register a callback for a specific /codec/... echo address. The
+  // codec-panel UI calls this once per enum/toggle control so the
+  // firmware's /snapshot reply (or any later echo) updates the UI
+  // signal automatically. Returns an unsubscribe function for symmetry,
+  // though the panel currently never tears down.
+  registerCodecListener(address: string, cb: CodecListener): () => void {
+    this.codecListeners.set(address, cb);
+    return () => {
+      const cur = this.codecListeners.get(address);
+      if (cur === cb) this.codecListeners.delete(address);
+    };
+  }
 
   // ---------- outbound (UI -> firmware) ----------
 
@@ -130,6 +154,17 @@ export class Dispatcher {
     }
   }
 
+  // Ask the firmware to dump all current state. The firmware replies
+  // with a bundle of echoes for every field; handleIncoming() processes
+  // them just like any other firmware-originated update. Call this on
+  // connect so a client that joined mid-session catches up to the live
+  // state instead of sitting on zero-initialized signals. The reply
+  // also drives codec-panel population via the codecListeners map —
+  // see Tac5212Panel::snapshot() on the firmware side.
+  requestSnapshot(): void {
+    this.sendMsg('/snapshot', '', []);
+  }
+
   // Used by the raw OSC input field. Bypasses the typed setters above.
   sendRaw(address: string, types: string, args: OscArg[]): void {
     this.sendMsg(address, types, args);
@@ -139,6 +174,16 @@ export class Dispatcher {
 
   handleIncoming(msg: OscMessage): void {
     const a = msg.address;
+
+    // /codec/... echoes route through the codec listener registry first.
+    // This is how Tac5212Panel::snapshot() reply messages reach the codec
+    // tab UI. The registry is keyed by exact address (no patterns), so
+    // each control's listener self-registers under its own leaf.
+    if (a.startsWith('/codec/')) {
+      const cb = this.codecListeners.get(a);
+      if (cb) cb(msg);
+      return;
+    }
 
     let m = a.match(/^\/ch\/(\d+)\/mix\/fader$/);
     if (m && msg.types === 'f') {
