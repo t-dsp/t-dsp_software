@@ -15,14 +15,17 @@ import { Dispatcher } from './dispatcher';
 import { tac5212Panel } from './codec-panel-config';
 
 import { connectButton } from './ui/connect';
-import { channelStrip } from './ui/channel-strip';
+import { channelPair } from './ui/channel-pair';
 import { mainBus } from './ui/main-bus';
+import { hostStrip } from './ui/host-strip';
 import { codecPanel } from './ui/codec-panel';
 import { serialConsole } from './ui/serial-console';
 import { rawOsc } from './ui/raw-osc';
 
-// Channel count for the small mixer v1 — see planning/osc-mixer-foundation/06-mixer-model-v1.md
-const CHANNEL_COUNT = 5;
+// Channel count for the small mixer v1 — 6 channels (USB L/R, Line L/R,
+// Mic L/R) matching tdsp::kChannelCount in lib/TDspMixer/src/MixerModel.h.
+// Stereo-linked pairs by default: (1,2), (3,4), (5,6).
+const CHANNEL_COUNT = 6;
 
 const state = createMixerState(CHANNEL_COUNT);
 const console_ = serialConsole();
@@ -33,13 +36,29 @@ let writer: WritableStreamDefaultWriter<Uint8Array> | null = null;
 let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
 let readLoopAborted = false;
 
+// Addresses whose traffic is high-frequency and should NOT be logged to
+// the serial console pane. Meter blobs stream at 30 Hz and the channel
+// strips display them visually — logging every one saturates the main
+// thread and fills the scrollback with noise. Dispatcher still handles
+// them; we just don't write them to the log.
+const LOG_BLOCKED_ADDRESSES = new Set<string>([
+  '/meters/input',
+  '/meters/output',
+  '/meters/gr',
+  // /main/st/hostvol/value can also fire frequently when the user drags
+  // the Windows volume slider; allow it through for now but add here if
+  // it becomes a problem.
+]);
+
 const demuxer = new StreamDemuxer(
   (frame) => {
     try {
       const messages = decodePacket(frame);
       for (const m of messages) {
         dispatcher.handleIncoming(m);
-        log(`< ${m.address}${m.types ? ' ' + m.types : ''} ${m.args.map(formatArg).join(' ')}`);
+        if (!LOG_BLOCKED_ADDRESSES.has(m.address)) {
+          log(`< ${m.address}${m.types ? ' ' + m.types : ''} ${m.args.map(formatArg).join(' ')}`);
+        }
       }
     } catch (e) {
       log(`! decode error: ${(e as Error).message}`);
@@ -151,8 +170,16 @@ header.appendChild(connectButton(state.connected, connect, disconnect));
 
 const mixerRow = document.createElement('section');
 mixerRow.className = 'mixer-row';
-state.channels.forEach((ch, i) => mixerRow.appendChild(channelStrip(i, ch, dispatcher)));
-mixerRow.appendChild(mainBus(state.main, dispatcher));
+// 3 stereo pairs (1/2, 3/4, 5/6) on the left, then MAIN + HOST docked
+// to the right edge via `margin-left: auto`. Every wrapper uses the
+// shared 7-row layout so buttons and sliders align across the mixer.
+for (let oddIdx = 0; oddIdx < CHANNEL_COUNT; oddIdx += 2) {
+  mixerRow.appendChild(channelPair(oddIdx, state, dispatcher));
+}
+const outputDock = document.createElement('div');
+outputDock.className = 'output-dock';
+outputDock.append(mainBus(state.main, dispatcher), hostStrip(state.main, dispatcher));
+mixerRow.appendChild(outputDock);
 
 const codecSection = document.createElement('section');
 codecSection.className = 'codec-section';

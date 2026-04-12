@@ -1,34 +1,80 @@
+// Main bus: stereo L/R laid out as the same 7-row structure as a
+// channel pair so the rows line up horizontally across the mixer.
+//
+//   row 1: MAIN label (spans both sides via a single name cell)
+//   row 2: two meters (post-fader / pre-hostvol)
+//   row 3: two faders
+//   row 4: two fader values
+//   row 5: one shared mute button (main has a single mute, not per-side)
+//   row 6: solo spacer (main has no solo — keeps row alignment)
+//   row 7: LINK button (stereo link toggle)
+//
+// When linked, the R side dims and its fader is disabled; the firmware
+// propagates writes so dragging L moves R via echo.
+
 import { BusState } from '../state';
 import { Dispatcher } from '../dispatcher';
-import { formatFaderDb } from './util';
+import {
+  makeRow,
+  makeStaticName,
+  makeMeter,
+  makeFader,
+  makeFaderValue,
+  makeCellSpacer,
+} from './cells';
 
 export function mainBus(bus: BusState, dispatcher: Dispatcher): HTMLElement {
   const root = document.createElement('div');
-  root.className = 'strip main-strip';
+  root.className = 'strip-wrapper main-wrapper';
 
-  const name = document.createElement('div');
-  name.className = 'strip-name';
-  name.textContent = 'MAIN';
+  // Row 1: name — "MAIN" centered, spans both sides (single wide cell).
+  const rowName = makeRow('row-name');
+  const nameCell = makeStaticName('MAIN');
+  nameCell.classList.add('span-2');
+  rowName.append(nameCell);
 
-  const fader = document.createElement('input');
-  fader.type = 'range';
-  fader.className = 'fader';
-  fader.min = '0';
-  fader.max = '1';
-  fader.step = '0.001';
-  bus.fader.subscribe((v) => (fader.value = String(v)));
-  fader.addEventListener('input', () => dispatcher.setMainFader(parseFloat(fader.value)));
+  // Row 2: L + R meters
+  const rowMeter = makeRow('row-meter');
+  rowMeter.append(makeMeter(bus.peakL, bus.rmsL), makeMeter(bus.peakR, bus.rmsR));
 
-  const fv = document.createElement('div');
-  fv.className = 'fader-value';
-  bus.fader.subscribe((v) => (fv.textContent = formatFaderDb(v)));
+  // Row 3: L + R faders
+  const rowFader = makeRow('row-fader');
+  const faderL = makeFader(bus.faderL, (v) => dispatcher.setMainFaderL(v));
+  const faderR = makeFader(bus.faderR, (v) => dispatcher.setMainFaderR(v));
+  rowFader.append(faderL, faderR);
 
-  const mute = document.createElement('button');
-  mute.className = 'mute';
-  mute.textContent = 'M';
-  bus.on.subscribe((on) => mute.classList.toggle('active', !on));
-  mute.addEventListener('click', () => dispatcher.setMainOn(!bus.on.get()));
+  // Row 4: L + R fader values
+  const rowFv = makeRow('row-fv');
+  rowFv.append(makeFaderValue(bus.faderL), makeFaderValue(bus.faderR));
 
-  root.append(name, fader, fv, mute);
+  // Row 5: shared mute (single button, spans both sides)
+  const rowMute = makeRow('row-mute');
+  const muteBtn = document.createElement('button');
+  muteBtn.className = 'mute wide cell';
+  muteBtn.textContent = 'M';
+  muteBtn.title = 'Main mute (shared L/R)';
+  bus.on.subscribe((on) => muteBtn.classList.toggle('active', !on));
+  muteBtn.addEventListener('click', () => dispatcher.setMainOn(!bus.on.get()));
+  rowMute.append(muteBtn);
+
+  // Row 6: solo spacer — main has no solo, but the row still exists so
+  // the link row below it lines up with channel pairs' link rows.
+  const rowSolo = makeRow('row-solo');
+  rowSolo.append(makeCellSpacer('solo'));
+
+  // Row 7: LINK (stereo link). Both L and R faders remain draggable
+  // when linked — the dispatcher propagates writes to the partner
+  // optimistically and the firmware echoes both sides for convergence.
+  const rowLink = makeRow('row-link');
+  const linkBtn = document.createElement('button');
+  linkBtn.className = 'link-btn wide cell';
+  linkBtn.textContent = 'LINK';
+  linkBtn.title = 'Stereo link L/R — writes to either side move both';
+  bus.link.subscribe((linked) => linkBtn.classList.toggle('active', linked));
+  linkBtn.addEventListener('click', () => dispatcher.setMainLink(!bus.link.get()));
+  rowLink.append(linkBtn);
+  void faderR;  // intentionally live in both unlinked and linked modes
+
+  root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink);
   return root;
 }

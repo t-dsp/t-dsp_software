@@ -77,6 +77,22 @@ select, input[type="text"] {
 }
 
 /* ---------- mixer row ---------- */
+/*
+ * Every strip wrapper (channel pair, main, host) uses the same 7-row
+ * column layout so rows line up across the mixer:
+ *   .row-name   14px
+ *   .row-meter  130px
+ *   .row-fader  160px
+ *   .row-fv     14px
+ *   .row-mute   24px
+ *   .row-solo   24px
+ *   .row-link   24px
+ * Row heights are fixed to guarantee alignment regardless of what
+ * cells live inside each row. Cells within a row are flex-row-aligned
+ * (side-by-side for pairs, single for main/host's shared or spacer
+ * cells). Cells are a fixed 26px wide so L/R meters and faders
+ * occupy the same column position in every wrapper.
+ */
 
 .mixer-row {
   display: flex;
@@ -85,32 +101,70 @@ select, input[type="text"] {
   padding: 12px;
   border: 1px solid #2c2c2c;
   border-radius: 3px;
+  align-items: flex-start;
 }
 
-.strip {
+/* Main + host wrapper, docked to the right edge of the mixer row so
+ * the output section stays visually separated from the input strips. */
+.output-dock {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.strip-wrapper {
   display: flex;
   flex-direction: column;
-  align-items: center;
   gap: 6px;
   background: #262626;
   padding: 10px 8px;
   border: 1px solid #333;
   border-radius: 2px;
-  width: 64px;
+}
+
+.strip-row {
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  justify-content: center;
+  align-items: center;
+}
+
+.row-name   { height: 14px;  }
+.row-meter  { height: 130px; align-items: flex-end; }
+.row-fader  { height: 160px; }
+.row-fv     { height: 14px;  }
+.row-mute   { height: 24px;  }
+.row-solo   { height: 24px;  }
+.row-link   { height: 24px;  }
+
+/* Individual cells have a fixed width so columns align across rows
+ * and across wrappers. A 26px cell comfortably holds a meter (10px),
+ * a fader (24px), or a small button. */
+.cell {
+  width: 26px;
+  box-sizing: border-box;
+}
+
+/* A "wide" cell spans two columns (26 * 2 + 6px gap = 58px). Used
+ * for single-spanning controls like main's shared mute, a pair's
+ * LINK button, and main's LINK button. */
+.cell.wide,
+.cell.span-2 {
+  width: 58px;
 }
 
 .strip-name {
   font-size: 11px;
   color: #aaa;
   text-align: center;
-  width: 100%;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  line-height: 14px;
 }
 
 .meter-wrap {
-  width: 10px;
   height: 130px;
   background: #0c0c0c;
   border: 1px solid #333;
@@ -137,11 +191,17 @@ select, input[type="text"] {
   opacity: 0.6;
 }
 
+.meter-spacer {
+  background: transparent;
+  border-color: transparent;
+}
+
 .fader {
   -webkit-appearance: slider-vertical;
   appearance: slider-vertical;
-  width: 24px;
   height: 160px;
+  margin: 0;
+  padding: 0;
 }
 
 .fader-value {
@@ -149,17 +209,67 @@ select, input[type="text"] {
   color: #888;
   font-variant-numeric: tabular-nums;
   font-family: monospace;
+  text-align: center;
+  line-height: 14px;
 }
 
-.mute, .solo {
-  width: 100%;
+.mute, .solo, .link-btn, .enable-btn {
   font-size: 11px;
-  padding: 4px 0;
+  padding: 0;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 }
 
-.main-strip {
+.link-btn {
+  color: #aaa;
+}
+
+.link-btn.active {
+  background: #2d5a6a;
+  border-color: #3d7a8a;
+  color: #fff;
+}
+
+.enable-btn.active {
+  background: #2d6a3a;
+  border-color: #3d8a4a;
+  color: #fff;
+}
+
+/* Linked-slave: dim the R column of a pair (or main's R side) when
+ * the pair is linked. pointer-events:none also blocks the disabled
+ * fader from receiving drag gestures. */
+.linked-slave {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.cell-spacer {
+  background: transparent;
+  border: none;
+}
+
+/* Main wrapper: slightly darker border, extra emphasis. */
+.main-wrapper {
   background: #2c2c2c;
   border-color: #4a4a4a;
+}
+
+/* Host (Windows volume) wrapper. */
+.host-wrapper {
+  background: #1e1e28;
+  border-color: #3a3a4a;
+}
+
+.host-wrapper .strip-name {
+  color: #9aa;
+}
+
+.host-wrapper.bypassed .fader,
+.host-wrapper.bypassed .fader-value {
+  opacity: 0.35;
 }
 
 /* ---------- codec panel ---------- */

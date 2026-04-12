@@ -23,29 +23,88 @@ export class Dispatcher {
 
   // ---------- outbound (UI -> firmware) ----------
 
+  // Returns the 0-based partner index for `idx` if the pair is linked,
+  // else -1. Only the ODD 1-based channel (idx 0, 2, 4) carries the
+  // link flag in the model, so we check the odd side regardless of
+  // which end the user touched.
+  private linkedPartner(idx: number): number {
+    const channels = this.state.channels;
+    if ((idx & 1) === 0) {
+      // 0-based even == 1-based odd: partner is idx+1 if OUR link is on.
+      if (idx + 1 < channels.length && channels[idx].link.get()) return idx + 1;
+      return -1;
+    } else {
+      // 0-based odd == 1-based even: partner is idx-1 if THEIR link is on.
+      if (idx - 1 >= 0 && channels[idx - 1].link.get()) return idx - 1;
+      return -1;
+    }
+  }
+
   setChannelFader(idx: number, v: number): void {
     this.state.channels[idx].fader.set(v);
+    const p = this.linkedPartner(idx);
+    if (p >= 0) this.state.channels[p].fader.set(v);
     this.sendMsg(`/ch/${pad2(idx + 1)}/mix/fader`, 'f', [v]);
   }
 
   setChannelOn(idx: number, on: boolean): void {
     this.state.channels[idx].on.set(on);
+    const p = this.linkedPartner(idx);
+    if (p >= 0) this.state.channels[p].on.set(on);
     this.sendMsg(`/ch/${pad2(idx + 1)}/mix/on`, 'i', [on ? 1 : 0]);
   }
 
   setChannelSolo(idx: number, solo: boolean): void {
     this.state.channels[idx].solo.set(solo);
+    const p = this.linkedPartner(idx);
+    if (p >= 0) this.state.channels[p].solo.set(solo);
     this.sendMsg(`/ch/${pad2(idx + 1)}/mix/solo`, 'i', [solo ? 1 : 0]);
   }
 
-  setMainFader(v: number): void {
-    this.state.main.fader.set(v);
-    this.sendMsg('/main/st/mix/fader', 'f', [v]);
+  // Toggle stereo link on a channel pair. The address only accepts an
+  // odd channel (1, 3, 5) — the even side's link flag is implicit.
+  setChannelLink(oddIdx: number, linked: boolean): void {
+    this.state.channels[oddIdx].link.set(linked);
+    // Propagate optimistically to the even partner so its UI
+    // disabled-state updates immediately.
+    const partner = this.state.channels[oddIdx + 1];
+    if (partner && linked) {
+      partner.fader.set(this.state.channels[oddIdx].fader.get());
+      partner.on.set(this.state.channels[oddIdx].on.get());
+      partner.solo.set(this.state.channels[oddIdx].solo.get());
+    }
+    this.sendMsg(`/ch/${pad2(oddIdx + 1)}/config/link`, 'i', [linked ? 1 : 0]);
+  }
+
+  setMainFaderL(v: number): void {
+    this.state.main.faderL.set(v);
+    if (this.state.main.link.get()) this.state.main.faderR.set(v);
+    this.sendMsg('/main/st/mix/faderL', 'f', [v]);
+  }
+
+  setMainFaderR(v: number): void {
+    this.state.main.faderR.set(v);
+    if (this.state.main.link.get()) this.state.main.faderL.set(v);
+    this.sendMsg('/main/st/mix/faderR', 'f', [v]);
+  }
+
+  setMainLink(linked: boolean): void {
+    this.state.main.link.set(linked);
+    if (linked) {
+      // Snap R to L for visual consistency ahead of the echo.
+      this.state.main.faderR.set(this.state.main.faderL.get());
+    }
+    this.sendMsg('/main/st/mix/link', 'i', [linked ? 1 : 0]);
   }
 
   setMainOn(on: boolean): void {
     this.state.main.on.set(on);
     this.sendMsg('/main/st/mix/on', 'i', [on ? 1 : 0]);
+  }
+
+  setMainHostvolEnable(enable: boolean): void {
+    this.state.main.hostvolEnable.set(enable);
+    this.sendMsg('/main/st/hostvol/enable', 'i', [enable ? 1 : 0]);
   }
 
   // /sub addSub i i s — interval ms, lifetime ms, address pattern
@@ -62,6 +121,13 @@ export class Dispatcher {
     this.sendMsg('/sub', 'ss', ['unsubscribe', '/meters/input']);
     this.sendMsg('/sub', 'ss', ['unsubscribe', '/meters/output']);
     this.state.metersOn.set(false);
+    // Reset all meter displays to 0 so the bars don't look frozen at
+    // whatever the last sampled value was. The firmware has stopped
+    // streaming so no more blobs will arrive to clear them.
+    for (const ch of this.state.channels) {
+      ch.peak.set(0);
+      ch.rms.set(0);
+    }
   }
 
   // Used by the raw OSC input field. Bypasses the typed setters above.
@@ -106,8 +172,26 @@ export class Dispatcher {
       return;
     }
 
-    if (a === '/main/st/mix/fader' && msg.types === 'f') {
-      this.state.main.fader.set(msg.args[0] as number);
+    m = a.match(/^\/ch\/(\d+)\/config\/link$/);
+    if (m && msg.types === 'i') {
+      const idx = parseInt(m[1], 10) - 1;
+      const ch = this.state.channels[idx];
+      if (ch) ch.link.set((msg.args[0] as number) !== 0);
+      return;
+    }
+
+    if (a === '/main/st/mix/faderL' && msg.types === 'f') {
+      this.state.main.faderL.set(msg.args[0] as number);
+      return;
+    }
+
+    if (a === '/main/st/mix/faderR' && msg.types === 'f') {
+      this.state.main.faderR.set(msg.args[0] as number);
+      return;
+    }
+
+    if (a === '/main/st/mix/link' && msg.types === 'i') {
+      this.state.main.link.set((msg.args[0] as number) !== 0);
       return;
     }
 
@@ -116,9 +200,19 @@ export class Dispatcher {
       return;
     }
 
+    if (a === '/main/st/hostvol/enable' && msg.types === 'i') {
+      this.state.main.hostvolEnable.set((msg.args[0] as number) !== 0);
+      return;
+    }
+
+    if (a === '/main/st/hostvol/value' && msg.types === 'f') {
+      this.state.main.hostvolValue.set(msg.args[0] as number);
+      return;
+    }
+
     // /meters/input b — blob of float32 pairs (peak, rms) per channel,
     // big-endian, in declared channel order. See 02-osc-protocol.md "Meters
-    // are blobs, not individual messages." Layout will be locked at M8.
+    // are blobs, not individual messages."
     if (a === '/meters/input' && msg.types === 'b') {
       const blob = msg.args[0] as Uint8Array;
       const dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
@@ -126,6 +220,34 @@ export class Dispatcher {
       for (let i = 0; i < pairCount; i++) {
         this.state.channels[i].peak.set(dv.getFloat32(i * 8, false));
         this.state.channels[i].rms.set(dv.getFloat32(i * 8 + 4, false));
+      }
+      return;
+    }
+
+    // /meters/output b — blob of 2 float32 pairs for the stereo main
+    // bus: [L peak, L rms, R peak, R rms], big-endian, 16 bytes total.
+    if (a === '/meters/output' && msg.types === 'b') {
+      const blob = msg.args[0] as Uint8Array;
+      if (blob.length >= 16) {
+        const dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+        this.state.main.peakL.set(dv.getFloat32(0,  false));
+        this.state.main.rmsL.set( dv.getFloat32(4,  false));
+        this.state.main.peakR.set(dv.getFloat32(8,  false));
+        this.state.main.rmsR.set( dv.getFloat32(12, false));
+      }
+      return;
+    }
+
+    // /meters/host b — 2 float32 pairs for the post-hostvol stereo
+    // output (what the DAC actually receives after Windows volume).
+    if (a === '/meters/host' && msg.types === 'b') {
+      const blob = msg.args[0] as Uint8Array;
+      if (blob.length >= 16) {
+        const dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+        this.state.main.hostPeakL.set(dv.getFloat32(0,  false));
+        this.state.main.hostRmsL.set( dv.getFloat32(4,  false));
+        this.state.main.hostPeakR.set(dv.getFloat32(8,  false));
+        this.state.main.hostRmsR.set( dv.getFloat32(12, false));
       }
       return;
     }
