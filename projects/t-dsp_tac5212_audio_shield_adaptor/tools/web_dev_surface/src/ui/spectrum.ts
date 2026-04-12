@@ -70,6 +70,13 @@ const TILT_REF_HZ        = 1000;  // 0 dB offset at 1 kHz
 // so 1 dB = 255/80 ≈ 3.1875 bytes.
 const BYTE_PER_DB        = 255 / 80;
 
+// Bars mode: render the spectrum as N vertical bars log-spaced
+// across the frequency range, each showing the max level of the
+// FFT bins that fall in its band. Matches the look of the channel
+// meters on the mixer view — one small meter per frequency band.
+// 32 bars = ~3 per octave, a classic "1/3-ish octave" density.
+const N_BARS = 32;
+
 const LOG_F_MIN = Math.log(F_MIN);
 const LOG_F_MAX = Math.log(F_MAX);
 const LOG_F_SPAN = LOG_F_MAX - LOG_F_MIN;
@@ -97,7 +104,12 @@ export function spectrumView(): SpectrumView {
   tiltBtn.title = '+3 dB/octave display tilt — pink content shows as flat';
   tiltBtn.textContent = 'Tilt';
 
-  controls.append(freezeBtn, tiltBtn);
+  const barsBtn = document.createElement('button');
+  barsBtn.className = 'spectrum-btn bars-btn';
+  barsBtn.title = 'Bars mode — log-spaced frequency bands, one bar each';
+  barsBtn.textContent = 'Bars';
+
+  controls.append(freezeBtn, tiltBtn, barsBtn);
   root.appendChild(controls);
 
   const ctx = canvas.getContext('2d');
@@ -135,6 +147,44 @@ export function spectrumView(): SpectrumView {
     tiltOffset[i] = TILT_DB_PER_OCTAVE * octaves * BYTE_PER_DB;
   }
 
+  // Bar-to-bin mapping for bars mode. For each bar, the contiguous
+  // range of FFT bins [barBinStart..barBinEnd] whose center
+  // frequency falls into this bar's log-spaced frequency band.
+  // barBinStart === -1 when no bins fall in the range (narrow
+  // low-frequency bars where the bar is smaller than one FFT bin);
+  // in that case drawBars uses barBinFallback, the nearest bin to
+  // the bar's center frequency.
+  const barBinStart    = new Int32Array(N_BARS);
+  const barBinEnd      = new Int32Array(N_BARS);
+  const barBinFallback = new Int32Array(N_BARS);
+  for (let b = 0; b < N_BARS; b++) {
+    const tLo = b / N_BARS;
+    const tHi = (b + 1) / N_BARS;
+    const fLo = Math.exp(LOG_F_MIN + tLo * LOG_F_SPAN);
+    const fHi = Math.exp(LOG_F_MIN + tHi * LOG_F_SPAN);
+    let first = -1;
+    let last  = -1;
+    for (let i = 1; i < FFT_BINS; i++) {
+      const f = i * BIN_HZ;
+      if (f >= fLo && f < fHi) {
+        if (first === -1) first = i;
+        last = i;
+      }
+    }
+    barBinStart[b] = first;
+    barBinEnd[b]   = last;
+    const fMid = Math.exp(LOG_F_MIN + (b + 0.5) / N_BARS * LOG_F_SPAN);
+    barBinFallback[b] = Math.max(
+      1,
+      Math.min(FFT_BINS - 1, Math.round(fMid / BIN_HZ)),
+    );
+  }
+
+  // Bar X positions on the canvas. Depend on cssWidth so
+  // recomputed in recomputeBinLayout() on every resize.
+  const barLeftX  = new Float32Array(N_BARS);
+  const barRightX = new Float32Array(N_BARS);
+
   let cssWidth  = 0;
   let cssHeight = 0;
   let dpr       = 1;
@@ -142,6 +192,11 @@ export function spectrumView(): SpectrumView {
   let frozen    = false;
   let running   = false;
   let tiltOn    = false;
+  // Default to bars mode — closer to the mixer's meter aesthetic
+  // and generally easier to read at a glance than the continuous
+  // trace. Click the Bars button to toggle back to trace mode.
+  let barsOn    = true;
+  barsBtn.classList.add('active');
 
   // Precomputed x coordinates for each bin so the render loop doesn't
   // call Math.log per frame per bin. Rebuilt on resize.
@@ -160,6 +215,13 @@ export function spectrumView(): SpectrumView {
       binVisible[i] = 1;
       const t = (Math.log(f) - LOG_F_MIN) / LOG_F_SPAN;
       binX[i] = t * cssWidth;
+    }
+    // Bar X positions mirror the same log-space mapping so bar
+    // edges line up with where the underlying bins are drawn in
+    // trace mode — useful when flipping between modes.
+    for (let b = 0; b < N_BARS; b++) {
+      barLeftX[b]  = (b / N_BARS) * cssWidth;
+      barRightX[b] = ((b + 1) / N_BARS) * cssWidth;
     }
   }
 
@@ -342,6 +404,55 @@ export function spectrumView(): SpectrumView {
     c.restore();
   }
 
+  // Pick the max display value across the FFT bins that belong to
+  // bar `b`. Falls back to the nearest bin if the bar's frequency
+  // range is smaller than one bin (happens at the low end where
+  // bars are narrow and bins are 43 Hz wide).
+  function barMax(b: number, buf: Float32Array): number {
+    const start = barBinStart[b];
+    if (start === -1) return buf[barBinFallback[b]];
+    const end = barBinEnd[b];
+    let m = 0;
+    for (let i = start; i <= end; i++) {
+      if (buf[i] > m) m = buf[i];
+    }
+    return m;
+  }
+
+  function drawBars(display: Float32Array, fillStyle: CanvasGradient): void {
+    const c = ctx!;
+    c.fillStyle = fillStyle;
+    const barGap = 2;
+    for (let b = 0; b < N_BARS; b++) {
+      const v = barMax(b, display);
+      if (v < 1) continue;
+      const x = barLeftX[b];
+      const w = Math.max(1, barRightX[b] - barLeftX[b] - barGap);
+      const y = (1 - v / 255) * cssHeight;
+      const h = cssHeight - y;
+      c.fillRect(x, y, w, h);
+    }
+  }
+
+  function drawBarPeaks(peak: Float32Array, stroke: string): void {
+    const c = ctx!;
+    c.save();
+    c.globalCompositeOperation = 'source-over';
+    c.fillStyle = stroke;
+    const barGap = 2;
+    for (let b = 0; b < N_BARS; b++) {
+      const v = barMax(b, peak);
+      if (v < 1) continue;
+      const x = barLeftX[b];
+      const w = Math.max(1, barRightX[b] - barLeftX[b] - barGap);
+      const y = Math.floor((1 - v / 255) * cssHeight);
+      // 2-px peak tick on top of each bar, like the peak indicator
+      // above the channel meters on the mixer view.
+      c.fillRect(x, y - 1, w, 2);
+    }
+    c.restore();
+  }
+
   function frame(): void {
     if (!running) return;
     rafId = requestAnimationFrame(frame);
@@ -416,14 +527,21 @@ export function spectrumView(): SpectrumView {
 
     drawGridlines();
 
-    // Both traces use 'lighter' so overlapping hot bands add to white.
+    // Both channels use 'lighter' so overlapping hot bands add to
+    // white, whether we're in trace or bars mode.
     c.globalCompositeOperation = 'lighter';
-    drawTrace(displayL, coolGradient());
-    drawTrace(displayR, warmGradient());
 
-    // Peak hold lines in channel-tinted bright colors.
-    drawPeakHold(displayPeakL, 'rgba(200, 200, 255, 0.7)');
-    drawPeakHold(displayPeakR, 'rgba(255, 220, 200, 0.7)');
+    if (barsOn) {
+      drawBars(displayL, coolGradient());
+      drawBars(displayR, warmGradient());
+      drawBarPeaks(displayPeakL, 'rgba(200, 200, 255, 0.85)');
+      drawBarPeaks(displayPeakR, 'rgba(255, 220, 200, 0.85)');
+    } else {
+      drawTrace(displayL, coolGradient());
+      drawTrace(displayR, warmGradient());
+      drawPeakHold(displayPeakL, 'rgba(200, 200, 255, 0.7)');
+      drawPeakHold(displayPeakR, 'rgba(255, 220, 200, 0.7)');
+    }
   }
 
   function start(): void {
@@ -459,6 +577,11 @@ export function spectrumView(): SpectrumView {
   tiltBtn.addEventListener('click', () => {
     tiltOn = !tiltOn;
     tiltBtn.classList.toggle('active', tiltOn);
+  });
+
+  barsBtn.addEventListener('click', () => {
+    barsOn = !barsOn;
+    barsBtn.classList.toggle('active', barsOn);
   });
 
   return { element: root, update, start, stop, freeze, unfreeze };
