@@ -16,10 +16,21 @@ import { MixerState } from './state';
 const pad2 = (n: number): string => n.toString().padStart(2, '0');
 
 export class Dispatcher {
+  // Callback sink for /spectrum/main b blobs. Set by the spectrum
+  // view's owner so the 1024-byte payload can bypass MixerState and
+  // land directly in the spectrum canvas renderer — putting 1 KB of
+  // bins through a Signal every 33 ms would fire a lot of listeners
+  // for no gain.
+  private spectrumSink: ((bytes: Uint8Array) => void) | null = null;
+
   constructor(
     private state: MixerState,
     private send: (packet: Uint8Array) => void,
   ) {}
+
+  setSpectrumSink(fn: ((bytes: Uint8Array) => void) | null): void {
+    this.spectrumSink = fn;
+  }
 
   // ---------- outbound (UI -> firmware) ----------
 
@@ -128,6 +139,18 @@ export class Dispatcher {
       ch.peak.set(0);
       ch.rms.set(0);
     }
+  }
+
+  // Spectrum subscription: same /sub verb idiom as meters, bound to
+  // the single /spectrum/main blob address. Called on spectrum-tab
+  // enter/leave so the firmware only computes and streams when a
+  // viewer is actually looking at it.
+  subscribeSpectrum(): void {
+    this.sendMsg('/sub', 'sis', ['addSub', 1000, '/spectrum/main']);
+  }
+
+  unsubscribeSpectrum(): void {
+    this.sendMsg('/sub', 'ss', ['unsubscribe', '/spectrum/main']);
   }
 
   // Used by the raw OSC input field. Bypasses the typed setters above.
@@ -264,6 +287,18 @@ export class Dispatcher {
         this.state.main.hostPeakR.set(dv.getFloat32(8,  false));
         this.state.main.hostRmsR.set( dv.getFloat32(12, false));
       }
+      return;
+    }
+
+    // /spectrum/main b — 1024-byte blob: 512 L bins then 512 R bins,
+    // each as a uint8 dB unit (0 = -80 dB, 255 = 0 dB). Routed
+    // directly to the spectrum view via the sink callback so the
+    // canvas renderer gets the raw payload without a Signal round-
+    // trip. The firmware only streams this when the spectrum tab
+    // subscribes, so no work happens if nobody's watching.
+    if (a === '/spectrum/main' && msg.types === 'b') {
+      const blob = msg.args[0] as Uint8Array;
+      if (this.spectrumSink && blob.length >= 1024) this.spectrumSink(blob);
       return;
     }
   }
