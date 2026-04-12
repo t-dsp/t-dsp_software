@@ -210,6 +210,21 @@ export class Dispatcher {
       return;
     }
 
+    // USB capture-side host volume — read-only mirror of Windows'
+    // recording-device slider, broadcast by the firmware on change.
+    // Routes to the CAP HOST strip in the output dock. See the
+    // teensy4 core patch on branch teensy4-usb-audio-capture-feature-unit
+    // for the FU 0x30 descriptor that drives this.
+    if (a === '/usb/cap/hostvol/value' && msg.types === 'f') {
+      this.state.main.captureHostvolValue.set(msg.args[0] as number);
+      return;
+    }
+
+    if (a === '/usb/cap/hostvol/mute' && msg.types === 'i') {
+      this.state.main.captureHostvolMute.set((msg.args[0] as number) !== 0);
+      return;
+    }
+
     // /meters/input b — blob of float32 pairs (peak, rms) per channel,
     // big-endian, in declared channel order. See 02-osc-protocol.md "Meters
     // are blobs, not individual messages."

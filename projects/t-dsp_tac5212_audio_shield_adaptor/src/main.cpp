@@ -491,11 +491,67 @@ static void pollHostVolume() {
 }
 
 // ============================================================================
+// USB capture-side host volume tracking (Windows recording-device slider)
+// ============================================================================
+//
+// Companion to pollHostVolume() above, but for the OTHER USB Audio Class
+// Feature Unit added by the teensy4 core patch on branch
+// teensy4-usb-audio-capture-feature-unit. FU 0x30 lives on the device->host
+// capture path; Windows binds it to the recording-device "Levels" tab
+// slider. Dragging that slider sends SET_CUR over the USB control endpoint,
+// which lands in AudioOutputUSB::features (volume + mute).
+//
+// We do not (yet) apply this gain to the audio path. The whole reason it
+// exists is so the user can control listenback level from Windows. Wiring
+// it into the capture mixer is a follow-on once the value is verified to
+// be flowing correctly. For now we just broadcast it so the web dev
+// surface can render it as a read-only "CAP HOST" strip and prove the
+// SET_CUR routing works end to end.
+//
+// Wire format:
+//   /usb/cap/hostvol/value f <0..1>
+//   /usb/cap/hostvol/mute  i <0|1>
+//
+// Both addresses fire ONLY on change (rising-edge style). The dev surface
+// signal store de-dupes too, so this just keeps the byte rate down.
+
+static float s_lastCapVolRaw = -1.0f;
+static int   s_lastCapMute   = -1;
+
+static void pollCaptureHostVolume() {
+    // usbOut.volume() bakes in the mute (returns 0 when muted) — that's
+    // fine for the strip's fader display, but we ALSO want to know the
+    // raw mute state so the UI can render a distinct MUTE chip instead
+    // of just "fader at 0". So poll both and broadcast both.
+    const float rawVol = AudioOutputUSB::features.volume *
+                         (1.0f / (float)FEATURE_MAX_VOLUME);
+    const int   rawMute = AudioOutputUSB::features.mute ? 1 : 0;
+
+    if (rawVol != s_lastCapVolRaw) {
+        s_lastCapVolRaw = rawVol;
+        OSCMessage m("/usb/cap/hostvol/value");
+        m.add(rawVol);
+        OSCBundle reply;
+        reply.add(m);
+        g_transport.sendBundle(reply);
+    }
+    if (rawMute != s_lastCapMute) {
+        s_lastCapMute = rawMute;
+        OSCMessage m("/usb/cap/hostvol/mute");
+        m.add(rawMute);
+        OSCBundle reply;
+        reply.add(m);
+        g_transport.sendBundle(reply);
+    }
+}
+
+// ============================================================================
 // loop()
 // ============================================================================
 
 void loop() {
     pollHostVolume();
+    pollCaptureHostVolume();
 
     g_transport.poll();
 

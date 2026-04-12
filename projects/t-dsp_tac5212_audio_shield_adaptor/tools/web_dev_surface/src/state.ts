@@ -75,6 +75,14 @@ export interface BusState {
   hostRmsL: Signal<number>;
   hostPeakR: Signal<number>;
   hostRmsR: Signal<number>;
+  // USB capture-side host volume — driven by Windows' recording-device
+  // slider via the FU 0x30 Feature Unit added by the teensy4 core patch.
+  // The firmware polls AudioOutputUSB::features and broadcasts on change
+  // (/usb/cap/hostvol/value f, /usb/cap/hostvol/mute i). The web surface
+  // displays this as a read-only "CAP HOST" strip — there's no control
+  // path back: only Windows owns this slider.
+  captureHostvolValue: Signal<number>;
+  captureHostvolMute: Signal<boolean>;
 }
 
 export interface MixerState {
@@ -135,6 +143,8 @@ export function createMixerState(channelCount: number): MixerState {
       hostRmsL: new Signal(0),
       hostPeakR: new Signal(0),
       hostRmsR: new Signal(0),
+      captureHostvolValue: new Signal(0),
+      captureHostvolMute: new Signal(false),
     },
     connected: new Signal(false),
     metersOn: new Signal(false),

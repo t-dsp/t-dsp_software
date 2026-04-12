@@ -18,6 +18,7 @@ import { connectButton } from './ui/connect';
 import { channelPair } from './ui/channel-pair';
 import { mainBus } from './ui/main-bus';
 import { hostStrip } from './ui/host-strip';
+import { inputHostStrip } from './ui/input-host-strip';
 import { codecPanel } from './ui/codec-panel';
 import { serialConsole } from './ui/serial-console';
 import { rawOsc } from './ui/raw-osc';
@@ -179,7 +180,11 @@ for (let oddIdx = 0; oddIdx < CHANNEL_COUNT; oddIdx += 2) {
 }
 const outputDock = document.createElement('div');
 outputDock.className = 'output-dock';
-outputDock.append(mainBus(state.main, dispatcher), hostStrip(state.main, dispatcher));
+outputDock.append(
+  mainBus(state.main, dispatcher),
+  hostStrip(state.main, dispatcher),
+  inputHostStrip(state.main),
+);
 mixerRow.appendChild(outputDock);
 
 const codecSection = document.createElement('section');
