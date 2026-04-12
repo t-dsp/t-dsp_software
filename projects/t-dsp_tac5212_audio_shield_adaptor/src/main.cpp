@@ -325,12 +325,37 @@ static void setupCodecHandRolled() {
 // TDspMixer integration callbacks
 // ============================================================================
 
+// Forward decl — defined below near pollCaptureHostVolume so it can
+// see the sketch-local statics (s_lastCapVolRaw etc), but called here.
+static void broadcastSnapshot(OSCBundle &reply);
+
 // OSC frame arrived from the transport. Build a reply bundle, route into
 // the dispatcher (which handles /ch/..., /main/..., /sub, /info, and
 // forwards /codec/tac5212/* to Tac5212Panel), and flush the reply back
 // via SLIP if anything was added.
+//
+// One address is intercepted BEFORE dispatching: /snapshot (no args)
+// triggers a full-state dump and bypasses the dispatcher entirely,
+// since the dispatcher doesn't know about the sketch-local capture-
+// side hostvol state. A client sends /snapshot on connect to catch
+// up to live firmware state without waiting for the next change.
 static void onOscMessage(OSCMessage &msg, void *userData) {
     (void)userData;
+
+    char address[32];
+    int addrLen = msg.getAddress(address, 0, sizeof(address) - 1);
+    if (addrLen < 0) addrLen = 0;
+    address[addrLen] = '\0';
+
+    if (strcmp(address, "/snapshot") == 0) {
+        OSCBundle reply;
+        broadcastSnapshot(reply);
+        if (reply.size() > 0) {
+            g_transport.sendBundle(reply);
+        }
+        return;
+    }
+
     OSCBundle reply;
     g_dispatcher.route(msg, reply);
     if (reply.size() > 0) {
@@ -593,8 +618,8 @@ static void pollCaptureHostVolume() {
                          (1.0f / (float)FEATURE_MAX_VOLUME);
     const int   rawMute = AudioOutputUSB::features.mute ? 1 : 0;
 
-    bool valueChanged = (rawVol != s_lastCapVolRaw);
-    bool muteChanged  = (rawMute != s_lastCapMute);
+    const bool valueChanged = (rawVol != s_lastCapVolRaw);
+    const bool muteChanged  = (rawMute != s_lastCapMute);
 
     if (valueChanged) {
         s_lastCapVolRaw = rawVol;
@@ -618,6 +643,72 @@ static void pollCaptureHostVolume() {
     // needs the gain re-applied at the current mute state, and vice versa.
     if (valueChanged || muteChanged) {
         applyCaptureMonitorGain(captureMonitorGain(rawVol, rawMute));
+    }
+}
+
+// ============================================================================
+// /snapshot — dump all current state on demand
+// ============================================================================
+//
+// When a dev surface client connects mid-session there's no other way to
+// populate its signals — the change-only broadcasts above only fire when
+// something moves, and the initial state dump patterns in TDspMixer
+// (individual broadcast* helpers) aren't wired together anywhere. This
+// function gathers everything a fresh client needs to render the mixer
+// correctly and sends it as one bundle.
+//
+// Triggered by an incoming OSC message at address "/snapshot" (no args).
+// The onOscMessage handler intercepts that address before passing to
+// g_dispatcher.route() so we don't need to extend OscDispatcher just for
+// this sketch-local state (capture-side hostvol).
+//
+// Contents:
+//   * Per-channel: fader, on, solo, name, link (odd channels)
+//   * Main bus: faderL, faderR, link, on, hostvol/value
+//   * Capture-side hostvol: /usb/cap/hostvol/{value,mute}
+//
+// Meter state is NOT included — clients subscribe to meters separately
+// via /sub addSub and the firmware streams them independently.
+static void broadcastSnapshot(OSCBundle &reply) {
+    // Channel state via the existing dispatcher broadcast helpers.
+    for (int n = 1; n <= tdsp::kChannelCount; ++n) {
+        g_dispatcher.broadcastChannelFader(n, reply);
+        g_dispatcher.broadcastChannelOn(n, reply);
+        g_dispatcher.broadcastChannelSolo(n, reply);
+        g_dispatcher.broadcastChannelName(n, reply);
+    }
+
+    // Main bus state.
+    g_dispatcher.broadcastMainFaderL(reply);
+    g_dispatcher.broadcastMainFaderR(reply);
+    g_dispatcher.broadcastMainLink(reply);
+    g_dispatcher.broadcastMainOn(reply);
+    g_dispatcher.broadcastMainHostvolValue(reply);
+
+    // /main/st/hostvol/enable has no broadcast helper in the dispatcher
+    // yet, emit it inline so clients can render the ENABLE button
+    // correctly on reconnect.
+    {
+        OSCMessage m("/main/st/hostvol/enable");
+        m.add((int32_t)(g_model.main().hostvolEnable ? 1 : 0));
+        reply.add(m);
+    }
+
+    // Capture-side hostvol (sketch-local, not in MixerModel). Read
+    // straight from AudioOutputUSB::features so the snapshot always
+    // reflects whatever Windows most recently pushed, not the cached
+    // s_lastCapVolRaw which could be stale between polls.
+    {
+        const float v = AudioOutputUSB::features.volume *
+                        (1.0f / (float)FEATURE_MAX_VOLUME);
+        OSCMessage m("/usb/cap/hostvol/value");
+        m.add(v);
+        reply.add(m);
+    }
+    {
+        OSCMessage m("/usb/cap/hostvol/mute");
+        m.add((int32_t)(AudioOutputUSB::features.mute ? 1 : 0));
+        reply.add(m);
     }
 }
 
