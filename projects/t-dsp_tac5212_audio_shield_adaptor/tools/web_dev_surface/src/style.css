@@ -33,20 +33,33 @@ body {
  * remaining vertical space between the tab bar and the serial console.
  * Dropping back to the Mixer tab removes the class and the layout
  * reverts to its centered 1200px column. */
+body.spectrum-active {
+  overflow: hidden;
+}
+
 body.spectrum-active #app {
   max-width: none;
-  width: 100%;
+  width: 100vw;
   height: 100vh;
-  padding: 8px;
+  padding: 4px;
+  gap: 4px;
+  margin: 0;
+  overflow: hidden;
 }
 
 body.spectrum-active .view.view-spectrum {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 body.spectrum-active .spectrum-wrap {
+  /* Override the normal min-height and border so the canvas
+   * goes edge-to-edge. Position and size are driven by the
+   * flex parent (view-spectrum), not intrinsic content. */
   min-height: 0;
+  border: none;
+  border-radius: 0;
 }
 
 /* ---------- top-level view tabs (Mixer / Spectrum) ---------- */

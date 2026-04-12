@@ -266,20 +266,25 @@ export function spectrumView(): SpectrumView {
     cssWidth  = w;
     cssHeight = h;
     dpr       = nextDpr;
-    // Only the backing store is set from JS. Display size is driven
-    // by the CSS `inset: 0` rule, so no canvas.style.width/height
-    // writes — those were the ones feeding back into the wrap's
-    // layout via the old flow-child setup.
+    // Set both the backing store (canvas.width/height) and the CSS
+    // display size explicitly. The canvas is position:absolute so
+    // setting style dimensions won't feed back into the parent layout.
     canvas.width  = Math.floor(w * dpr);
     canvas.height = Math.floor(h * dpr);
+    canvas.style.width  = w + 'px';
+    canvas.style.height = h + 'px';
     ctx!.setTransform(1, 0, 0, 1, 0, 0);
     ctx!.scale(dpr, dpr);
     recomputeBinLayout();
     rebuildGradients();
   }
 
-  const ro = new ResizeObserver(() => resize());
+  const ro = new ResizeObserver(() => { cssWidth = 0; resize(); });
   ro.observe(root);
+  // Also watch the parent — when the view-spectrum section transitions
+  // from display:none to visible, the parent's size changes before the
+  // child's ResizeObserver fires.
+  if (root.parentElement) ro.observe(root.parentElement);
 
   // Canvas context-loss recovery. Chrome can evict a 2D context's
   // backing store under memory pressure (especially after hours of
@@ -624,8 +629,14 @@ export function spectrumView(): SpectrumView {
   function start(): void {
     if (running) return;
     running = true;
-    resize();
-    rafId = requestAnimationFrame(frame);
+    // Defer the first resize to the next frame so the browser has
+    // finished reflowing after the spectrum-active class was toggled.
+    // Without this, clientWidth can return the stale pre-reflow value.
+    cssWidth = 0;  // force resize() to re-measure
+    requestAnimationFrame(() => {
+      resize();
+      rafId = requestAnimationFrame(frame);
+    });
   }
 
   function stop(): void {
