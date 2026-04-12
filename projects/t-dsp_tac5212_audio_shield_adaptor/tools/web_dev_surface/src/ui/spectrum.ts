@@ -52,9 +52,17 @@ const F_MAX       = 20000;
 // EMA decay factor — higher = slower decay. 0.82 gives ~300 ms to 10%.
 const EMA_DECAY = 0.82;
 
-// Peak-hold drop rate in byte units per frame. At 60 fps one byte
-// per frame is ~80/255 * 60 dB/s ≈ 19 dB/s — a slow, readable decay.
-const PEAK_DROP_PER_FRAME = 1.0;
+// Peak-hold drop rate in byte units per frame. 0.4 byte/frame at
+// 60 fps is ~80/255 * 0.4 * 60 ≈ 7.5 dB/sec — the "graceful
+// floating cap" rate you see on hardware mixer meters.
+const PEAK_DROP_PER_FRAME = 0.4;
+
+// Vertical display stretch. byte=255 (0 dBFS) lands at -0.2*H
+// (20% above the visible top), byte=0 (-80 dB) stays at H (bottom).
+// Levels up to ~ -10 dB get clipped off the top, but the useful
+// -60..-10 dB range expands to fill much more of the visible
+// canvas, matching the "bars fill the screen" ask.
+const Y_SCALE_OVERSHOOT = 1.2;
 
 // Pink-flat tilt: a +3 dB/octave slope compensation applied to the
 // displayed bin values (NOT to the raw data). Most real-world audio
@@ -311,20 +319,39 @@ export function spectrumView(): SpectrumView {
     return g;
   }
 
-  // Exact stops from the mixer's .meter-fill.peak CSS rule
-  // (linear-gradient(to top, #4a4 0%, #4a4 60%, #cc4 75%, #c44 90%)).
-  // Used by bars mode so the spectrum bars match the look of the
-  // channel meters on the mixer page. Both L and R channels use
-  // this same gradient and overlay via `lighter` compositing —
-  // identical mono content shows a single bright band, and stereo
-  // imbalance shows as slightly brighter / dimmer regions.
+  // Mixer-style meter gradient, but with stops pulled substantially
+  // lower on the canvas than the mixer's own CSS rule. The mixer
+  // strips have 130 px of height for a single channel whose peak
+  // regularly pushes into the top third, so the mixer's yellow-at-
+  // 78% / red-at-92% stops get hit. The spectrum bars are a very
+  // different beast: each bar is the energy in one log-spaced
+  // frequency band, which in typical program material rarely
+  // exceeds ~-20 dBFS per band even when the overall peak is
+  // near 0 dBFS. Using the mixer's stops verbatim means yellow
+  // and red almost never appear on the spectrum, which defeats
+  // the whole point of having a color-coded meter.
+  //
+  // Stops tuned for spectral content:
+  //   - yellow @ 0.45 → visible at ~ -50 dBFS per band
+  //   - red    @ 0.70 → visible at ~ -33 dBFS per band
+  // Louder bands still get visibly hotter than quieter ones;
+  // we've just compressed the useful range of the gradient into
+  // the energy range that bars actually occupy.
   function mixerMeterGradient(): CanvasGradient {
     const g = ctx!.createLinearGradient(0, cssHeight, 0, 0);
-    g.addColorStop(0.00, '#4a4');
-    g.addColorStop(0.60, '#4a4');
-    g.addColorStop(0.75, '#cc4');
-    g.addColorStop(0.90, '#c44');
+    g.addColorStop(0.00, '#2c2');
+    g.addColorStop(0.25, '#3d3');
+    g.addColorStop(0.45, '#ee3');
+    g.addColorStop(0.70, '#e33');
     return g;
+  }
+
+  // dB-byte to y-pixel with the display stretched so byte=255 lands
+  // at -0.2*H (above the visible top). All draw paths (bars, trace,
+  // peak-hold, gridlines) go through this helper so they stay
+  // aligned to the same stretched scale.
+  function byteToY(byte: number): number {
+    return cssHeight * (1 - (byte / 255) * Y_SCALE_OVERSHOOT);
   }
 
   // --- render loop --------------------------------------------------
@@ -357,12 +384,16 @@ export function spectrumView(): SpectrumView {
       c.fillText(labels[i], x + 4, cssHeight - 4);
     }
 
-    // Horizontal dB gridlines.
+    // Horizontal dB gridlines — routed through byteToY so they
+    // sit on the same stretched scale as the bars and traces.
+    // -20 dB now lands much higher up the canvas than it used
+    // to, which is the whole point of the Y_SCALE_OVERSHOOT
+    // stretch.
     const dBs = [-20, -40, -60];
     c.beginPath();
     for (const db of dBs) {
       const byte = (db + 80) * (255 / 80);
-      const y = Math.floor((1 - byte / 255) * cssHeight) + 0.5;
+      const y = Math.floor(byteToY(byte)) + 0.5;
       c.moveTo(0, y);
       c.lineTo(cssWidth, y);
     }
@@ -370,7 +401,7 @@ export function spectrumView(): SpectrumView {
     c.textAlign = 'left';
     for (const db of dBs) {
       const byte = (db + 80) * (255 / 80);
-      const y = Math.floor((1 - byte / 255) * cssHeight);
+      const y = Math.floor(byteToY(byte));
       c.fillText(`${db} dB`, 4, y - 2);
     }
     c.restore();
@@ -387,7 +418,7 @@ export function spectrumView(): SpectrumView {
     for (let i = 0; i < FFT_BINS; i++) {
       if (!binVisible[i]) continue;
       const x = binX[i];
-      const y = (1 - smoothed[i] / 255) * cssHeight;
+      const y = byteToY(smoothed[i]);
       if (!started) {
         c.moveTo(x, cssHeight);
         c.lineTo(x, y);
@@ -421,7 +452,7 @@ export function spectrumView(): SpectrumView {
     for (let i = 0; i < FFT_BINS; i++) {
       if (!binVisible[i]) continue;
       const x = binX[i];
-      const y = (1 - peak[i] / 255) * cssHeight;
+      const y = byteToY(peak[i]);
       if (!started) {
         c.moveTo(x, y);
         started = true;
@@ -451,13 +482,19 @@ export function spectrumView(): SpectrumView {
   function drawBars(display: Float32Array, fillStyle: CanvasGradient): void {
     const c = ctx!;
     c.fillStyle = fillStyle;
-    const barGap = 2;
+    const barGap = 1;  // tight gap at 128-bar density
     for (let b = 0; b < N_BARS; b++) {
       const v = barMax(b, display);
       if (v < 1) continue;
       const x = barLeftX[b];
       const w = Math.max(1, barRightX[b] - barLeftX[b] - barGap);
-      const y = (1 - v / 255) * cssHeight;
+      const y = byteToY(v);
+      // Height extends from top-of-bar to the bottom of the
+      // canvas. If y is negative (bar value overshoots the
+      // visible top because of Y_SCALE_OVERSHOOT), the fillRect
+      // draws with a height > cssHeight; Canvas clips beyond
+      // the backing store, which is exactly what we want — the
+      // bar just "fills the screen" from top to bottom.
       const h = cssHeight - y;
       c.fillRect(x, y, w, h);
     }
@@ -468,16 +505,20 @@ export function spectrumView(): SpectrumView {
     c.save();
     c.globalCompositeOperation = 'source-over';
     c.fillStyle = stroke;
-    const barGap = 2;
+    const barGap = 1;
+    // 4-px "floating cap" on top of each bar — thick enough to
+    // read as a distinct element against the green/yellow/red
+    // gradient below it. Combined with PEAK_DROP_PER_FRAME=0.4
+    // this gives the classic hardware-mixer "graceful decay"
+    // look where the caps slowly sink toward the current level.
+    const capH = 4;
     for (let b = 0; b < N_BARS; b++) {
       const v = barMax(b, peak);
       if (v < 1) continue;
       const x = barLeftX[b];
       const w = Math.max(1, barRightX[b] - barLeftX[b] - barGap);
-      const y = Math.floor((1 - v / 255) * cssHeight);
-      // 2-px peak tick on top of each bar, like the peak indicator
-      // above the channel meters on the mixer view.
-      c.fillRect(x, y - 1, w, 2);
+      const y = Math.floor(byteToY(v));
+      c.fillRect(x, y - Math.floor(capH / 2), w, capH);
     }
     c.restore();
   }
