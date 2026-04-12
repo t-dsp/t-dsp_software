@@ -73,9 +73,18 @@ const BYTE_PER_DB        = 255 / 80;
 // Bars mode: render the spectrum as N vertical bars log-spaced
 // across the frequency range, each showing the max level of the
 // FFT bins that fall in its band. Matches the look of the channel
-// meters on the mixer view — one small meter per frequency band.
-// 32 bars = ~3 per octave, a classic "1/3-ish octave" density.
-const N_BARS = 32;
+// meters on the mixer view — each bar uses the same green→yellow
+// →red peak gradient as the mixer's .meter-fill.peak.
+//
+// 128 bars = ~13 per octave across the 9-octave display range.
+// Fine detail, still cheap (~512 fillRects/frame; Canvas 2D
+// handles this trivially). The low end will show some visible
+// stepping because FFT1024's 43 Hz bin spacing means the first
+// ~dozen bars below 200 Hz all fall back to the same handful of
+// bins via barBinFallback — that's a resolution limit of the
+// underlying FFT, not a renderer cost. Going higher than 128
+// adds more visual stepping without more real information.
+const N_BARS = 128;
 
 const LOG_F_MIN = Math.log(F_MIN);
 const LOG_F_MAX = Math.log(F_MAX);
@@ -191,7 +200,11 @@ export function spectrumView(): SpectrumView {
   let rafId     = 0;
   let frozen    = false;
   let running   = false;
-  let tiltOn    = false;
+  // Default to tilt on — most real audio is pink, so flat-displaying
+  // pink content is the most useful starting point for eyeballing
+  // mix balance. Click Tilt to see the raw un-tilted spectrum.
+  let tiltOn    = true;
+  tiltBtn.classList.add('active');
   // Default to bars mode — closer to the mixer's meter aesthetic
   // and generally easier to read at a glance than the continuous
   // trace. Click the Bars button to toggle back to trace mode.
@@ -295,6 +308,22 @@ export function spectrumView(): SpectrumView {
     g.addColorStop(0.40, 'rgba(100, 220,  80, 0.55)');
     g.addColorStop(0.70, 'rgba(240, 220,  80, 0.80)');
     g.addColorStop(1.00, 'rgba(240,  80,  60, 0.95)');
+    return g;
+  }
+
+  // Exact stops from the mixer's .meter-fill.peak CSS rule
+  // (linear-gradient(to top, #4a4 0%, #4a4 60%, #cc4 75%, #c44 90%)).
+  // Used by bars mode so the spectrum bars match the look of the
+  // channel meters on the mixer page. Both L and R channels use
+  // this same gradient and overlay via `lighter` compositing —
+  // identical mono content shows a single bright band, and stereo
+  // imbalance shows as slightly brighter / dimmer regions.
+  function mixerMeterGradient(): CanvasGradient {
+    const g = ctx!.createLinearGradient(0, cssHeight, 0, 0);
+    g.addColorStop(0.00, '#4a4');
+    g.addColorStop(0.60, '#4a4');
+    g.addColorStop(0.75, '#cc4');
+    g.addColorStop(0.90, '#c44');
     return g;
   }
 
@@ -532,10 +561,18 @@ export function spectrumView(): SpectrumView {
     c.globalCompositeOperation = 'lighter';
 
     if (barsOn) {
-      drawBars(displayL, coolGradient());
-      drawBars(displayR, warmGradient());
-      drawBarPeaks(displayPeakL, 'rgba(200, 200, 255, 0.85)');
-      drawBarPeaks(displayPeakR, 'rgba(255, 220, 200, 0.85)');
+      // Both channels use the mixer's peak gradient; compute it
+      // once per frame. `lighter` compositing means L+R overlap
+      // brightens — with identical channels you see one bright
+      // slab, with stereo imbalance you see the brighter side
+      // pop above the dimmer one.
+      const meterGrad = mixerMeterGradient();
+      drawBars(displayL, meterGrad);
+      drawBars(displayR, meterGrad);
+      // Peak-hold ticks in a dim white — subtle but visible over
+      // both green bars and the red upper stops of the gradient.
+      drawBarPeaks(displayPeakL, 'rgba(255, 255, 255, 0.75)');
+      drawBarPeaks(displayPeakR, 'rgba(255, 255, 255, 0.75)');
     } else {
       drawTrace(displayL, coolGradient());
       drawTrace(displayR, warmGradient());
