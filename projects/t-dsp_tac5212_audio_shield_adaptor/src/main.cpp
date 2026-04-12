@@ -110,6 +110,27 @@ AudioAmplifier       hostvolAmpR;
 AudioMixer4          captureL;
 AudioMixer4          captureR;
 
+// Listenback monitor attenuators — driven by the Windows recording-device
+// volume slider via the FU 0x30 capture-side Feature Unit. Inserted on the
+// MONITOR branch of each capture source (line + mic) so the user can pull
+// down what they hear in their headphones without affecting the record
+// level the DAW receives. USB-in monitoring is intentionally NOT routed
+// through these (its level is controlled by the Windows playback slider
+// via hostvolAmpL/R), and the captureL/R → usbOut record path stays at
+// unity (record send is independent).
+//
+// Each tdmIn / pdmMix source tees into THREE branches:
+//   1. captureL/R (record send, unity, untouched)
+//   2. peak/rms taps (meter, unity, untouched)
+//   3. monLine* / monMic* → mixL/R (THIS branch, attenuated by capHostVol)
+//
+// Default gain is unity (1.0); pollCaptureHostVolume() applies the live
+// value once Windows pushes its first SET_CUR.
+AudioAmplifier       monLineL;
+AudioAmplifier       monLineR;
+AudioAmplifier       monMicL;
+AudioAmplifier       monMicR;
+
 AudioOutputTDM       tdmOut;
 AudioOutputUSB       usbOut;
 
@@ -125,15 +146,21 @@ AudioConnection      c_usbR_mix    (usbIn, 1, mixR, 0);
 AudioConnection      c_usbR_peak   (usbIn, 1, peakCh2, 0);
 AudioConnection      c_usbR_rms    (usbIn, 1, rmsCh2, 0);
 
-// Line input (ADC) → main mixer slot 2 + capture + peak/RMS taps
-AudioConnection      c_lineL_mix   (tdmIn, 0, mixL, 2);
+// Line input (ADC) → record send (unity) + peak/RMS taps + listenback
+// monitor branch (through monLine* attenuator → main mixer slot 2). The
+// record send and meter taps draw directly from tdmIn so they're
+// unaffected by the listenback gain — DAW gets full signal regardless
+// of what the user sets the headphone monitor to.
 AudioConnection      c_lineL_cap   (tdmIn, 0, captureL, 0);
 AudioConnection      c_lineL_peak  (tdmIn, 0, peakCh3, 0);
 AudioConnection      c_lineL_rms   (tdmIn, 0, rmsCh3, 0);
-AudioConnection      c_lineR_mix   (tdmIn, 2, mixR, 2);
+AudioConnection      c_lineL_mon   (tdmIn, 0, monLineL, 0);
+AudioConnection      c_lineL_mix   (monLineL, 0, mixL, 2);
 AudioConnection      c_lineR_cap   (tdmIn, 2, captureR, 0);
 AudioConnection      c_lineR_peak  (tdmIn, 2, peakCh4, 0);
 AudioConnection      c_lineR_rms   (tdmIn, 2, rmsCh4, 0);
+AudioConnection      c_lineR_mon   (tdmIn, 2, monLineR, 0);
+AudioConnection      c_lineR_mix   (monLineR, 0, mixR, 2);
 
 // PDM mic: split across TDM slots 2+3 = Teensy ch 4,5,6,7, then combined
 AudioConnection      c_pdmL0       (tdmIn, 4, pdmMixL, 0);
@@ -141,15 +168,20 @@ AudioConnection      c_pdmL1       (tdmIn, 5, pdmMixL, 1);
 AudioConnection      c_pdmR0       (tdmIn, 6, pdmMixR, 0);
 AudioConnection      c_pdmR1       (tdmIn, 7, pdmMixR, 1);
 
-// PDM combiners → main mixer slot 1 + capture + peak/RMS taps
-AudioConnection      c_micL_mix    (pdmMixL, 0, mixL, 1);
+// PDM combiners → record send (unity) + peak/RMS taps + listenback
+// monitor branch (through monMic* attenuator → main mixer slot 1). Same
+// pattern as the line inputs above: record and meters stay unity, only
+// the headphone-monitor branch is attenuated.
 AudioConnection      c_micL_cap    (pdmMixL, 0, captureL, 1);
 AudioConnection      c_micL_peak   (pdmMixL, 0, peakCh5, 0);
 AudioConnection      c_micL_rms    (pdmMixL, 0, rmsCh5, 0);
-AudioConnection      c_micR_mix    (pdmMixR, 0, mixR, 1);
+AudioConnection      c_micL_mon    (pdmMixL, 0, monMicL, 0);
+AudioConnection      c_micL_mix    (monMicL, 0, mixL, 1);
 AudioConnection      c_micR_cap    (pdmMixR, 0, captureR, 1);
 AudioConnection      c_micR_peak   (pdmMixR, 0, peakCh6, 0);
 AudioConnection      c_micR_rms    (pdmMixR, 0, rmsCh6, 0);
+AudioConnection      c_micR_mon    (pdmMixR, 0, monMicR, 0);
+AudioConnection      c_micR_mix    (monMicR, 0, mixR, 1);
 
 // Main mixers → main fader amps → hostvol amps → DAC (TDM out slots 0, 2)
 AudioConnection      c_mainL_amp   (mixL, 0, mainAmpL, 0);
@@ -420,6 +452,24 @@ void setup() {
     captureR.gain(0, 1.0f);
     captureR.gain(1, 1.0f);
 
+    // Listenback monitor amps default to unity. pollCaptureHostVolume()
+    // will overwrite them as soon as Windows pushes a SET_CUR for FU 0x30.
+    monLineL.gain(1.0f);
+    monLineR.gain(1.0f);
+    monMicL.gain(1.0f);
+    monMicR.gain(1.0f);
+
+    // Force the capture-side Feature Unit's cold-boot value to 100% so
+    // the headphone monitor is at unity until Windows tells us otherwise.
+    // The Teensy core defaults this to FEATURE_MAX_VOLUME/2 = 128 (matches
+    // the playback FU pattern), which would silently attenuate listenback
+    // by ~6 dB linear / ~12 dB square-law on every cold boot. This also
+    // means GET_CUR returns FEATURE_MAX_VOLUME on first query, so Windows
+    // shows the recording slider at 100% on enumeration. Set BEFORE the
+    // first pollCaptureHostVolume() call so the change-detection logic
+    // doesn't fire a spurious /usb/cap/hostvol/value 0.502 broadcast.
+    AudioOutputUSB::features.volume = FEATURE_MAX_VOLUME;
+
     // --- Wire TDspMixer to the audio graph ---
 
     g_binding.setModel(&g_model);
@@ -518,16 +568,35 @@ static void pollHostVolume() {
 static float s_lastCapVolRaw = -1.0f;
 static int   s_lastCapMute   = -1;
 
+// Compute the actual gain to apply to the listenback monitor amps from
+// the raw FU 0x30 volume + mute state. Square-law taper matches the
+// playback hostvol so both Windows sliders feel the same to the user.
+// Mute folds into a hard 0 — when Windows mutes the recording slider
+// the user hears nothing in their headphones from mic/line, regardless
+// of where the slider was sitting.
+static float captureMonitorGain(float rawVol, int rawMute) {
+    if (rawMute) return 0.0f;
+    float scaled = rawVol * rawVol;  // square-law
+    if (scaled > 1.0f) scaled = 1.0f;
+    return scaled;
+}
+
+static void applyCaptureMonitorGain(float g) {
+    monLineL.gain(g);
+    monLineR.gain(g);
+    monMicL.gain(g);
+    monMicR.gain(g);
+}
+
 static void pollCaptureHostVolume() {
-    // usbOut.volume() bakes in the mute (returns 0 when muted) — that's
-    // fine for the strip's fader display, but we ALSO want to know the
-    // raw mute state so the UI can render a distinct MUTE chip instead
-    // of just "fader at 0". So poll both and broadcast both.
     const float rawVol = AudioOutputUSB::features.volume *
                          (1.0f / (float)FEATURE_MAX_VOLUME);
     const int   rawMute = AudioOutputUSB::features.mute ? 1 : 0;
 
-    if (rawVol != s_lastCapVolRaw) {
+    bool valueChanged = (rawVol != s_lastCapVolRaw);
+    bool muteChanged  = (rawMute != s_lastCapMute);
+
+    if (valueChanged) {
         s_lastCapVolRaw = rawVol;
         OSCMessage m("/usb/cap/hostvol/value");
         m.add(rawVol);
@@ -535,13 +604,20 @@ static void pollCaptureHostVolume() {
         reply.add(m);
         g_transport.sendBundle(reply);
     }
-    if (rawMute != s_lastCapMute) {
+    if (muteChanged) {
         s_lastCapMute = rawMute;
         OSCMessage m("/usb/cap/hostvol/mute");
         m.add(rawMute);
         OSCBundle reply;
         reply.add(m);
         g_transport.sendBundle(reply);
+    }
+
+    // Push the new gain into all four monitor amps when EITHER value or
+    // mute changed — mute is a multiplier so a value-only change still
+    // needs the gain re-applied at the current mute state, and vice versa.
+    if (valueChanged || muteChanged) {
+        applyCaptureMonitorGain(captureMonitorGain(rawVol, rawMute));
     }
 }
 
