@@ -81,6 +81,14 @@ AudioAnalyzePeak     peakHostR;
 AudioAnalyzeRMS      rmsHostL;
 AudioAnalyzeRMS      rmsHostR;
 
+// Main bus stereo FFT taps — sit on the same pre-hostvol node as the
+// peak/RMS meter taps, so the spectrum analyzer view reflects the mix
+// engineer's faders but NOT Windows volume attenuation. FFT1024 gives
+// us 512 bins at ~86 Hz resolution (44.1 kHz / 1024 * 2), new frame
+// every ~11.6 ms. SpectrumEngine polls them at ~30 Hz.
+AudioAnalyzeFFT1024  fftMainL;
+AudioAnalyzeFFT1024  fftMainR;
+
 // PDM mic combiners — 32-bit PDM split across two 16-bit TDM slots, so
 // each PDM mic (L, R) needs a 2-input mixer that re-combines the high
 // and low halves with correct scaling.
@@ -198,6 +206,14 @@ AudioConnection      c_mainL_rms   (mainAmpL, 0, rmsMainL, 0);
 AudioConnection      c_mainR_peak  (mainAmpR, 0, peakMainR, 0);
 AudioConnection      c_mainR_rms   (mainAmpR, 0, rmsMainR, 0);
 
+// Main bus FFT taps — same tap node as the peak/RMS meters above so
+// the spectrum reflects the engineer's fader but not Windows volume.
+// Each FFT1024 instance runs continuously (the stock Audio lib offers
+// no clean enable/disable); it only costs network + CPU when the
+// SpectrumEngine is actually polling and emitting blobs.
+AudioConnection      c_mainL_fft   (mainAmpL, 0, fftMainL, 0);
+AudioConnection      c_mainR_fft   (mainAmpR, 0, fftMainR, 0);
+
 // Host meter taps — on the hostvol amp output, POST-hostvol. So the
 // meter shows what the DAC actually receives, including Windows volume
 // attenuation. Compare vs the main meters to see hostvol in action.
@@ -219,6 +235,7 @@ tdsp::SignalGraphBinding  g_binding;
 tdsp::OscDispatcher       g_dispatcher;
 tdsp::SlipOscTransport    g_transport;
 tdsp::MeterEngine         g_meters;
+tdsp::SpectrumEngine      g_spectrum;
 
 // lib/TAC5212 codec instance used by Tac5212Panel for runtime register
 // access. The chip is physically initialized by setupCodecHandRolled()
@@ -516,6 +533,7 @@ void setup() {
     g_dispatcher.setModel(&g_model);
     g_dispatcher.setBinding(&g_binding);
     g_dispatcher.setMeterEngine(&g_meters);
+    g_dispatcher.setSpectrumEngine(&g_spectrum);
     g_dispatcher.registerCodecPanel(&g_codecPanel);
 
     g_transport.begin(115200);
@@ -531,6 +549,9 @@ void setup() {
     g_meters.setChannel(6, &peakCh6, &rmsCh6);
     g_meters.setMain(&peakMainL, &rmsMainL, &peakMainR, &rmsMainR);
     g_meters.setHost(&peakHostL, &rmsHostL, &peakHostR, &rmsHostR);
+
+    g_spectrum.setDispatcher(&g_dispatcher);
+    g_spectrum.setChannels(&fftMainL, &fftMainR);
 
     Serial.println("\nReady!");
     Serial.println("  6 input channels: USB L/R, Line L/R, Mic L/R");
@@ -739,6 +760,11 @@ void loop() {
     OSCBundle meterReply;
     if (g_meters.tick(meterReply) && meterReply.size() > 0) {
         g_transport.sendBundle(meterReply);
+    }
+
+    OSCBundle spectrumReply;
+    if (g_spectrum.tick(spectrumReply) && spectrumReply.size() > 0) {
+        g_transport.sendBundle(spectrumReply);
     }
 
     // Heartbeat LED — proves the main loop is running and not wedged.

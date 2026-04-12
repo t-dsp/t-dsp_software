@@ -22,6 +22,7 @@ import { inputHostStrip } from './ui/input-host-strip';
 import { codecPanel } from './ui/codec-panel';
 import { serialConsole } from './ui/serial-console';
 import { rawOsc } from './ui/raw-osc';
+import { spectrumView } from './ui/spectrum';
 
 // Channel count for the small mixer v1 — 6 channels (USB L/R, Line L/R,
 // Mic L/R) matching tdsp::kChannelCount in lib/TDspMixer/src/MixerModel.h.
@@ -47,6 +48,12 @@ const LOG_BLOCKED_ADDRESSES = new Set<string>([
   '/meters/output',
   '/meters/host',
   '/meters/gr',
+  // Spectrum blobs stream at ~30 Hz at 1 KB apiece — the rendered
+  // line in the console would be both enormous and floodworthy, and
+  // we learned twice already (see commit de74db28) that any high-
+  // rate OSC address needs to be on this list or it saturates the
+  // console pane.
+  '/spectrum/main',
   // /main/st/hostvol/value can also fire frequently when the user drags
   // the Windows volume slider; allow it through for now but add here if
   // it becomes a problem.
@@ -190,6 +197,30 @@ header.appendChild(meterToggle);
 
 header.appendChild(connectButton(state.connected, connect, disconnect));
 
+// --- View tab bar -------------------------------------------------
+//
+// Two top-level views share the content area: the mixer (channel
+// strips + codec panel + raw OSC) and the stereo spectrum analyzer.
+// The tab bar toggles display between two wrapper sections. Serial
+// console stays below both — it's useful in either view.
+
+const viewTabs = document.createElement('nav');
+viewTabs.className = 'view-tabs';
+const mixerTab = document.createElement('button');
+mixerTab.className = 'view-tab active';
+mixerTab.dataset.view = 'mixer';
+mixerTab.textContent = 'Mixer';
+const spectrumTab = document.createElement('button');
+spectrumTab.className = 'view-tab';
+spectrumTab.dataset.view = 'spectrum';
+spectrumTab.textContent = 'Spectrum';
+viewTabs.append(mixerTab, spectrumTab);
+
+// --- Mixer view section (wraps existing mixer content) ------------
+
+const mixerView = document.createElement('section');
+mixerView.className = 'view view-mixer';
+
 const mixerRow = document.createElement('section');
 mixerRow.className = 'mixer-row';
 // 3 stereo pairs (1/2, 3/4, 5/6) on the left, then MAIN + HOST docked
@@ -217,4 +248,40 @@ const rawLabel = document.createElement('h4');
 rawLabel.textContent = 'Raw OSC';
 rawSection.append(rawLabel, rawOsc(dispatcher, log));
 
-app.append(header, mixerRow, codecSection, rawSection, console_.element);
+mixerView.append(mixerRow, codecSection, rawSection);
+
+// --- Spectrum view section ----------------------------------------
+
+const spectrum = spectrumView();
+dispatcher.setSpectrumSink((bytes) => spectrum.update(bytes));
+
+const spectrumSection = document.createElement('section');
+spectrumSection.className = 'view view-spectrum';
+spectrumSection.style.display = 'none';
+spectrumSection.appendChild(spectrum.element);
+
+// --- Tab switching -------------------------------------------------
+
+function selectView(name: 'mixer' | 'spectrum'): void {
+  const onMixer = name === 'mixer';
+  mixerTab.classList.toggle('active', onMixer);
+  spectrumTab.classList.toggle('active', !onMixer);
+  mixerView.style.display    = onMixer ? '' : 'none';
+  spectrumSection.style.display = onMixer ? 'none' : '';
+
+  if (onMixer) {
+    // Leaving the spectrum view — stop the render loop AND
+    // unsubscribe so the firmware stops computing FFTs nobody
+    // will see. Same pattern as the Meters ON/OFF toggle.
+    spectrum.stop();
+    dispatcher.unsubscribeSpectrum();
+  } else {
+    // Entering the spectrum view — start render loop and sub.
+    dispatcher.subscribeSpectrum();
+    spectrum.start();
+  }
+}
+mixerTab.addEventListener('click', () => selectView('mixer'));
+spectrumTab.addEventListener('click', () => selectView('spectrum'));
+
+app.append(header, viewTabs, mixerView, spectrumSection, console_.element);

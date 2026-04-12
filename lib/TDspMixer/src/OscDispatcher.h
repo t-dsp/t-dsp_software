@@ -44,15 +44,17 @@ class MixerModel;
 class SignalGraphBinding;
 class CodecPanel;
 class MeterEngine;
+class SpectrumEngine;
 
 class OscDispatcher {
 public:
     OscDispatcher();
 
-    void setModel(MixerModel *model)               { _model = model; }
-    void setBinding(SignalGraphBinding *binding)   { _binding = binding; }
-    void setMeterEngine(MeterEngine *engine)       { _meterEngine = engine; }
-    void registerCodecPanel(CodecPanel *panel)     { _codecPanel = panel; }
+    void setModel(MixerModel *model)                 { _model = model; }
+    void setBinding(SignalGraphBinding *binding)     { _binding = binding; }
+    void setMeterEngine(MeterEngine *engine)         { _meterEngine = engine; }
+    void setSpectrumEngine(SpectrumEngine *engine)   { _spectrumEngine = engine; }
+    void registerCodecPanel(CodecPanel *panel)       { _codecPanel = panel; }
 
     // Route an incoming OSCMessage. Called from SlipOscTransport's OSC
     // handler callback. The reply bundle accumulates echoes and is
@@ -77,12 +79,18 @@ public:
                                const float *peakRmsPairs, int pairCount);
     void broadcastMetersHost(OSCBundle &reply,
                              const float *peakRmsPairs, int pairCount);
+    // Pack a raw byte array as a /spectrum/main blob (uint8 dB bytes,
+    // 512 L then 512 R for the stereo main bus FFT). No byte-swapping:
+    // the payload is raw bytes, not big-endian float pairs.
+    void broadcastMainSpectrum(OSCBundle &reply,
+                               const uint8_t *bytes, int byteCount);
 
 private:
-    MixerModel         *_model       = nullptr;
-    SignalGraphBinding *_binding     = nullptr;
-    CodecPanel         *_codecPanel  = nullptr;
-    MeterEngine        *_meterEngine = nullptr;
+    MixerModel         *_model          = nullptr;
+    SignalGraphBinding *_binding        = nullptr;
+    CodecPanel         *_codecPanel     = nullptr;
+    MeterEngine        *_meterEngine    = nullptr;
+    SpectrumEngine     *_spectrumEngine = nullptr;
 
     // Per-leaf handlers. Called from route() after matching the address.
     // Each mutates the model, calls binding, and appends echo to reply.
