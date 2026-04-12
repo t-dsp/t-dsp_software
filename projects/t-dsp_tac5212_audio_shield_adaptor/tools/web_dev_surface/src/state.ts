@@ -147,6 +147,6 @@ export function createMixerState(channelCount: number): MixerState {
       captureHostvolMute: new Signal(false),
     },
     connected: new Signal(false),
-    metersOn: new Signal(false),
+    metersOn: new Signal(true),   // on by default; connect() re-subscribes
   };
 }

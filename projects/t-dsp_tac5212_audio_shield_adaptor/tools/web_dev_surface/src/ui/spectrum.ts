@@ -34,6 +34,7 @@ export interface SpectrumView {
   stop(): void;
   freeze(): void;
   unfreeze(): void;
+  isRunning(): boolean;
 }
 
 const FFT_BINS    = 512;            // per channel
@@ -272,10 +273,29 @@ export function spectrumView(): SpectrumView {
     ctx!.setTransform(1, 0, 0, 1, 0, 0);
     ctx!.scale(dpr, dpr);
     recomputeBinLayout();
+    rebuildGradients();
   }
 
   const ro = new ResizeObserver(() => resize());
   ro.observe(root);
+
+  // Canvas context-loss recovery. Chrome can evict a 2D context's
+  // backing store under memory pressure (especially after hours of
+  // continuous rendering). All draw calls then silently fail — the
+  // canvas goes blank with no error thrown. Listening for the
+  // contextlost/contextrestored pair lets us re-acquire the context
+  // and resume. This is the safety net that keeps the spectrum view
+  // alive across overnight runs.
+  canvas.addEventListener('contextlost', (e) => {
+    e.preventDefault();  // tell the browser we WILL handle restoration
+  });
+  canvas.addEventListener('contextrestored', () => {
+    // The context is freshly reset — no transform, no state. Re-run
+    // the full resize path which rebuilds the backing store, resets
+    // the DPR scale, and rebuilds the cached gradients.
+    cssWidth = 0;  // force the "unchanged" bail-out in resize() to NOT fire
+    resize();
+  });
 
   // --- wire input ---------------------------------------------------
 
@@ -287,63 +307,48 @@ export function spectrumView(): SpectrumView {
     for (let i = 0; i < FFT_BINS; i++) rawR[i] = bytes[FFT_BINS + i];
   }
 
-  // --- color helpers ------------------------------------------------
+  // --- cached gradients ----------------------------------------------
   //
-  // Both channels map the smoothed byte value (0..255) to a hue-ish
-  // gradient. Returned as an rgb() string — cheap enough at 60 fps for
-  // ~512 values per frame, but we batch the fill into a single path so
-  // this is actually called once per channel for the gradient, NOT per
-  // bin. Per-bin we just draw a path-segment in one fill color.
-  //
-  // Actually for the filled-area rendering we use a single gradient
-  // computed once per frame per channel, rather than per-bin colors.
-  // Peak hold is drawn in plain white.
+  // CRITICAL: gradients are cached and rebuilt ONLY on resize. The
+  // previous implementation called createLinearGradient() inside every
+  // frame() call — 3 new CanvasGradient objects × 60 fps = 180/sec.
+  // Over an 8-hour overnight run that's 5.2 million allocations, each
+  // needing GC. The cumulative GC pressure caused Chrome to throttle
+  // the tab, lose the canvas context, and ultimately freeze the
+  // display. Caching fixes the leak entirely.
 
-  function coolGradient(): CanvasGradient {
-    // Blue at bottom -> magenta at top, semi-transparent.
-    const g = ctx!.createLinearGradient(0, cssHeight, 0, 0);
-    g.addColorStop(0.00, 'rgba(40,  80, 200, 0.05)');
-    g.addColorStop(0.40, 'rgba(80, 120, 240, 0.55)');
-    g.addColorStop(0.80, 'rgba(200, 80, 240, 0.85)');
-    g.addColorStop(1.00, 'rgba(240, 120, 240, 0.95)');
-    return g;
-  }
+  let cachedCoolGrad: CanvasGradient | null = null;
+  let cachedWarmGrad: CanvasGradient | null = null;
+  let cachedMeterGrad: CanvasGradient | null = null;
 
-  function warmGradient(): CanvasGradient {
-    // Green at bottom -> yellow -> red near top.
-    const g = ctx!.createLinearGradient(0, cssHeight, 0, 0);
-    g.addColorStop(0.00, 'rgba( 60, 180,  60, 0.05)');
-    g.addColorStop(0.40, 'rgba(100, 220,  80, 0.55)');
-    g.addColorStop(0.70, 'rgba(240, 220,  80, 0.80)');
-    g.addColorStop(1.00, 'rgba(240,  80,  60, 0.95)');
-    return g;
-  }
+  function rebuildGradients(): void {
+    const c = ctx!;
 
-  // Mixer-style meter gradient, but with stops pulled substantially
-  // lower on the canvas than the mixer's own CSS rule. The mixer
-  // strips have 130 px of height for a single channel whose peak
-  // regularly pushes into the top third, so the mixer's yellow-at-
-  // 78% / red-at-92% stops get hit. The spectrum bars are a very
-  // different beast: each bar is the energy in one log-spaced
-  // frequency band, which in typical program material rarely
-  // exceeds ~-20 dBFS per band even when the overall peak is
-  // near 0 dBFS. Using the mixer's stops verbatim means yellow
-  // and red almost never appear on the spectrum, which defeats
-  // the whole point of having a color-coded meter.
-  //
-  // Stops tuned for spectral content:
-  //   - yellow @ 0.45 → visible at ~ -50 dBFS per band
-  //   - red    @ 0.70 → visible at ~ -33 dBFS per band
-  // Louder bands still get visibly hotter than quieter ones;
-  // we've just compressed the useful range of the gradient into
-  // the energy range that bars actually occupy.
-  function mixerMeterGradient(): CanvasGradient {
-    const g = ctx!.createLinearGradient(0, cssHeight, 0, 0);
-    g.addColorStop(0.00, '#2c2');
-    g.addColorStop(0.25, '#3d3');
-    g.addColorStop(0.45, '#ee3');
-    g.addColorStop(0.70, '#e33');
-    return g;
+    // Trace mode: L channel cool (blue → magenta), semi-transparent.
+    const cool = c.createLinearGradient(0, cssHeight, 0, 0);
+    cool.addColorStop(0.00, 'rgba(40,  80, 200, 0.05)');
+    cool.addColorStop(0.40, 'rgba(80, 120, 240, 0.55)');
+    cool.addColorStop(0.80, 'rgba(200, 80, 240, 0.85)');
+    cool.addColorStop(1.00, 'rgba(240, 120, 240, 0.95)');
+    cachedCoolGrad = cool;
+
+    // Trace mode: R channel warm (green → yellow → red).
+    const warm = c.createLinearGradient(0, cssHeight, 0, 0);
+    warm.addColorStop(0.00, 'rgba( 60, 180,  60, 0.05)');
+    warm.addColorStop(0.40, 'rgba(100, 220,  80, 0.55)');
+    warm.addColorStop(0.70, 'rgba(240, 220,  80, 0.80)');
+    warm.addColorStop(1.00, 'rgba(240,  80,  60, 0.95)');
+    cachedWarmGrad = warm;
+
+    // Bars mode: mixer-style green → yellow → red with stops tuned
+    // for spectral content. Yellow at 45% (~-50 dBFS per band), red
+    // at 70% (~-33 dBFS per band).
+    const meter = c.createLinearGradient(0, cssHeight, 0, 0);
+    meter.addColorStop(0.00, '#2c2');
+    meter.addColorStop(0.25, '#3d3');
+    meter.addColorStop(0.45, '#ee3');
+    meter.addColorStop(0.70, '#e33');
+    cachedMeterGrad = meter;
   }
 
   // dB-byte to y-pixel with the display stretched so byte=255 lands
@@ -602,21 +607,16 @@ export function spectrumView(): SpectrumView {
     c.globalCompositeOperation = 'lighter';
 
     if (barsOn) {
-      // Both channels use the mixer's peak gradient; compute it
-      // once per frame. `lighter` compositing means L+R overlap
-      // brightens — with identical channels you see one bright
-      // slab, with stereo imbalance you see the brighter side
-      // pop above the dimmer one.
-      const meterGrad = mixerMeterGradient();
-      drawBars(displayL, meterGrad);
-      drawBars(displayR, meterGrad);
-      // Peak-hold ticks in a dim white — subtle but visible over
-      // both green bars and the red upper stops of the gradient.
+      // Both channels use the cached mixer gradient. No per-frame
+      // createLinearGradient calls — the cache is rebuilt only on
+      // resize. `lighter` compositing means L+R overlap brightens.
+      drawBars(displayL, cachedMeterGrad!);
+      drawBars(displayR, cachedMeterGrad!);
       drawBarPeaks(displayPeakL, 'rgba(255, 255, 255, 0.75)');
       drawBarPeaks(displayPeakR, 'rgba(255, 255, 255, 0.75)');
     } else {
-      drawTrace(displayL, coolGradient());
-      drawTrace(displayR, warmGradient());
+      drawTrace(displayL, cachedCoolGrad!);
+      drawTrace(displayR, cachedWarmGrad!);
       drawPeakHold(displayPeakL, 'rgba(200, 200, 255, 0.7)');
       drawPeakHold(displayPeakR, 'rgba(255, 220, 200, 0.7)');
     }
@@ -662,5 +662,8 @@ export function spectrumView(): SpectrumView {
     barsBtn.classList.toggle('active', barsOn);
   });
 
-  return { element: root, update, start, stop, freeze, unfreeze };
+  return {
+    element: root, update, start, stop, freeze, unfreeze,
+    isRunning(): boolean { return running; },
+  };
 }

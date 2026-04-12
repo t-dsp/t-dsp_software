@@ -125,10 +125,22 @@ async function connect(): Promise<void> {
     void readLoop();
     // Ask the firmware for a full state dump so the UI populates with
     // the current values instead of whatever the signals were initialized
-    // to. The small delay lets the serial port finish settling and
-    // the firmware's own boot chatter (if any) drain into our reader
-    // before our first write goes out.
-    setTimeout(() => dispatcher.requestSnapshot(), 150);
+    // to. Then re-subscribe to any active streams — subscriptions live
+    // on the firmware side and are lost if the USB CDC session reset
+    // (e.g., Windows USB suspend overnight, power management, etc.).
+    // The small delay lets the serial port finish settling and the
+    // firmware's own boot chatter drain before our first write.
+    setTimeout(() => {
+      dispatcher.requestSnapshot();
+      // Re-subscribe to meters if they were on before the disconnect.
+      if (state.metersOn.get()) {
+        dispatcher.subscribeMeters();
+      }
+      // Re-subscribe to spectrum if the Spectrum tab is active.
+      if (spectrum.isRunning()) {
+        dispatcher.subscribeSpectrum();
+      }
+    }, 150);
   } catch (e) {
     log(`! connect failed: ${(e as Error).message}`);
   }
