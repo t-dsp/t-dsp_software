@@ -76,6 +76,7 @@ public:
 		if (features.mute) return 0.0;
 		return (float)(features.volume) * (1.0 / (float)FEATURE_MAX_VOLUME);
 	}
+	bool mute(void) { return features.mute != 0; }
 private:
 	static bool update_responsibility;
 	static audio_block_t *incoming_left;
