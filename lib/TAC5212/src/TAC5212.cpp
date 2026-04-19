@@ -16,8 +16,9 @@ namespace {
 constexpr uint8_t adcModeToInsrc(AdcMode m) {
     switch (m) {
         case AdcMode::Differential:    return reg::adc_cfg0::INSRC_DIFFERENTIAL;
-        case AdcMode::SingleEndedInp:  return reg::adc_cfg0::INSRC_SE_INP;
-        case AdcMode::SingleEndedInm:  return reg::adc_cfg0::INSRC_SE_MUX_INM;
+        case AdcMode::SingleEndedInp:       return reg::adc_cfg0::INSRC_SE_MUX_INP;
+        case AdcMode::SingleEndedInpInmGnd: return reg::adc_cfg0::INSRC_SE_INP;
+        case AdcMode::SingleEndedInm:       return reg::adc_cfg0::INSRC_SE_MUX_INM;
     }
     return reg::adc_cfg0::INSRC_DIFFERENTIAL;
 }

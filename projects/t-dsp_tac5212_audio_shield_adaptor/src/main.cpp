@@ -294,7 +294,7 @@ static void codecConfigureSerialInterface() {
     writeReg(REG_INTF_CFG1, INTF_CFG1_DOUT_PASI);
     writeReg(REG_INTF_CFG2, INTF_CFG2_DIN_ENABLE);
     writeReg(REG_PASI_RX_CFG0, PASI_OFFSET_1);
-    writeReg(REG_PASI_TX_CFG2, PASI_OFFSET_1);
+    writeReg(REG_PASI_TX_CFG1, PASI_OFFSET_1);
 }
 
 static void codecConfigureSlotMappings() {
@@ -400,7 +400,9 @@ static void applyLineMode(bool mono) {
         monoXfeed.gain(1.0f);
         g_binding.setMonoMirror(4, 3, &mixL, 3);
     } else {
-        // ADC CH2 → single-ended on INxP
+        // ADC CH2 → single-ended on INxP. INxM is disabled because on this
+        // board it's tied to the other channel's INxP through the TRS ring
+        // (for differential/balanced-input support in mono mode).
         g_codec.adc(2).setMode(tac5212::AdcMode::SingleEndedInp);
         // Re-enable ADC CH1
         {

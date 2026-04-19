@@ -26,7 +26,10 @@ constexpr uint8_t REG_INTF_CFG2    = 0x11;  // DIN enable
 constexpr uint8_t REG_INTF_CFG4    = 0x13;  // GPIO/GPI → channel routing
 
 constexpr uint8_t REG_PASI_CFG0    = 0x1A;  // ASI format / word length / polarity
-constexpr uint8_t REG_PASI_TX_CFG2 = 0x1D;  // TX BCLK offset
+// 0x1C = PASI_TX_CFG1 (TX BCLK offset in bits[4:0]). 0x1D is PASI_TX_CFG2,
+// which holds per-channel DOUT/DOUT2 select bits — writing the offset value
+// there flips TX_CH1_SEL and routes ADC CH1 to DOUT2, killing the CH1 slot.
+constexpr uint8_t REG_PASI_TX_CFG1 = 0x1C;  // TX BCLK offset
 
 constexpr uint8_t REG_TX_CH1_SLOT  = 0x1E;  // TX channel 1 slot assignment
 constexpr uint8_t REG_TX_CH2_SLOT  = 0x1F;
@@ -87,9 +90,12 @@ constexpr uint8_t GPI1_INPUT    = 0x02;
 // INTF_CFG4: route GPI1 → PDM channels 3+4
 constexpr uint8_t INTF_CFG4_GPI1_PDM_3_4 = 0x03;
 
-// ADC_CHx_CFG0: single-ended on INxP only.
-// On this board, IN1- is tied to IN2+ for balanced-mic mode, so we MUST
-// ignore INxM in differential mode would cancel a mono line input.
+// ADC_CHx_CFG0 INSRC[7:6] = 10b: single-ended mux on INxP only. INxM is
+// "don't care" per the datasheet (Figure 7-19), which is what this board
+// needs — INxM is tied to the other channel's INxP through the TRS ring
+// for differential/balanced-input support, so in SE stereo mode we MUST
+// ignore INxM entirely or we get cross-bleed between channels. The normal
+// SE mode (0x40, INSRC_SE_INP) uses INxM as ground reference and bleeds.
 constexpr uint8_t ADC_CFG0_SE_INP_ONLY = 0x80;
 
 // --- OUTx_CFG0 / OUTx_CFG1 / OUTx_CFG2 bitfield constants ---
