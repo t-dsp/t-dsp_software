@@ -61,9 +61,14 @@ struct Result {
 // -----------------------------------------------------------------------------
 
 enum class AdcMode : uint8_t {
-    Differential,
-    SingleEndedInp,
-    SingleEndedInm,
+    Differential,          // INxP/INxM as differential pair (INSRC=00)
+    SingleEndedInp,        // INxP only, INxM ignored (INSRC=10). The sensible
+                           // default for SE — safe regardless of what INxM is
+                           // wired to on the board.
+    SingleEndedInpInmGnd,  // INxP as signal, INxM as ground reference (INSRC=01).
+                           // ONLY correct if the board AC-couples INxM to ground;
+                           // otherwise INxM's signal subtracts from INxP.
+    SingleEndedInm,        // INxM only, INxP ignored (INSRC=11)
     // NOTE: "pdm_input" appears in the planning doc OSC tree but has no
     // matching hardware field in ADC_CH*_CFG0. PDM is handled entirely via
     // the TAC5212::pdm() subsystem. This enum deliberately omits a Pdm value;
