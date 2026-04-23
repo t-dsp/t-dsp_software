@@ -1,0 +1,299 @@
+{
+  "schema_version": 1,
+  "description": "Preset definitions for the TDspMPE virtual-analog synth engine. Each preset is a full parameter snapshot — the UI (Phase 2e) fires the corresponding OSC writes in a batch to load it onto the firmware. All numeric ranges match the firmware's clamps so loading a preset always produces a defined state.",
+  "schema": {
+    "waveform":          "int 0..3 — 0=saw, 1=square, 2=triangle, 3=sine (OSC /synth/mpe/waveform)",
+    "attack_sec":        "float 0..10 — envelope attack in seconds (OSC /synth/mpe/attack)",
+    "release_sec":       "float 0..10 — envelope release in seconds (OSC /synth/mpe/release)",
+    "volume":            "float 0..1 — post-voice gain (OSC /synth/mpe/volume)",
+    "filter_cutoff_hz":  "float 20..20000 — base filter cutoff before CC#74 modulation (OSC /synth/mpe/filter/cutoff)",
+    "filter_resonance":  "float 0.707..5.0 — filter Q; 5.0 = self-oscillation (OSC /synth/mpe/filter/resonance)",
+    "lfo_rate_hz":       "float 0..20 — LFO rate; 0 disables (OSC /synth/mpe/lfo/rate)",
+    "lfo_depth":         "float 0..1 — LFO depth; 0 disables (OSC /synth/mpe/lfo/depth)",
+    "lfo_dest":          "int 0..3 — 0=off, 1=cutoff, 2=pitch, 3=amp (OSC /synth/mpe/lfo/dest)",
+    "lfo_waveform":      "int 0..3 — 0=sine, 1=triangle, 2=saw, 3=square (OSC /synth/mpe/lfo/waveform)"
+  },
+  "categories": {
+    "retro":    { "color": "#ff6a00", "label": "Retro" },
+    "emulating":{ "color": "#22aa66", "label": "Emulating" },
+    "abstract": { "color": "#8844cc", "label": "Abstract" },
+    "modern":   { "color": "#0088ff", "label": "Modern" }
+  },
+  "presets": [
+    {
+      "id": "buzzsaw",
+      "name": "Buzzsaw",
+      "category": "retro",
+      "description": "Raw single-osc sawtooth lead. Unshy and punchy. MPE gives it per-note pitch-bend expression.",
+      "params": {
+        "waveform": 0, "attack_sec": 0.001, "release_sec": 0.05, "volume": 0.65,
+        "filter_cutoff_hz": 16000, "filter_resonance": 0.707,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "chiptune",
+      "name": "Chiptune",
+      "category": "retro",
+      "description": "NES-style square-wave bass. Hold for gated plonks, press down for character.",
+      "params": {
+        "waveform": 1, "attack_sec": 0.003, "release_sec": 0.15, "volume": 0.5,
+        "filter_cutoff_hz": 18000, "filter_resonance": 0.707,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "acid",
+      "name": "Acid",
+      "category": "retro",
+      "description": "303-style filter squelch — high resonance, low cutoff. Ride CC#74 for the sweep.",
+      "params": {
+        "waveform": 0, "attack_sec": 0.001, "release_sec": 0.12, "volume": 0.55,
+        "filter_cutoff_hz": 400, "filter_resonance": 4.5,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "juno_pad",
+      "name": "Juno Pad",
+      "category": "retro",
+      "description": "Swelling triangle pad with a gentle chorus-like amp tremolo. Press down to open the filter.",
+      "params": {
+        "waveform": 2, "attack_sec": 0.8, "release_sec": 1.5, "volume": 0.6,
+        "filter_cutoff_hz": 3000, "filter_resonance": 1.0,
+        "lfo_rate_hz": 1.2, "lfo_depth": 0.15, "lfo_dest": 3, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "moog_bass",
+      "name": "Moog Bass",
+      "category": "retro",
+      "description": "Classic monosynth bass feel — saw through a resonant filter. Plays best in the bottom two octaves.",
+      "params": {
+        "waveform": 0, "attack_sec": 0.003, "release_sec": 0.2, "volume": 0.7,
+        "filter_cutoff_hz": 1500, "filter_resonance": 2.0,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "polysynth",
+      "name": "Polysynth",
+      "category": "retro",
+      "description": "80s polysynth patch with subtle vibrato. The LFO adds slow pitch wobble; pressure opens the filter.",
+      "params": {
+        "waveform": 0, "attack_sec": 0.04, "release_sec": 0.4, "volume": 0.6,
+        "filter_cutoff_hz": 5000, "filter_resonance": 1.5,
+        "lfo_rate_hz": 4.5, "lfo_depth": 0.04, "lfo_dest": 2, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "clavinet",
+      "name": "Clavinet",
+      "category": "emulating",
+      "description": "Plucky square-wave attack, quick decay. Percussive feel for funk lines.",
+      "params": {
+        "waveform": 1, "attack_sec": 0.001, "release_sec": 0.08, "volume": 0.6,
+        "filter_cutoff_hz": 4000, "filter_resonance": 1.0,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "breath_flute",
+      "name": "Breath Flute",
+      "category": "emulating",
+      "description": "Pure sine tone with a breathy attack. LFO is a slow pitch vibrato — press down for more.",
+      "params": {
+        "waveform": 3, "attack_sec": 0.18, "release_sec": 0.3, "volume": 0.7,
+        "filter_cutoff_hz": 12000, "filter_resonance": 0.707,
+        "lfo_rate_hz": 5.0, "lfo_depth": 0.03, "lfo_dest": 2, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "organ",
+      "name": "Organ",
+      "category": "emulating",
+      "description": "Gate-style organ: on when held, off when released. Full sustain, no envelope taper.",
+      "params": {
+        "waveform": 1, "attack_sec": 0.001, "release_sec": 0.005, "volume": 0.55,
+        "filter_cutoff_hz": 16000, "filter_resonance": 0.707,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "rhodes",
+      "name": "Rhodes-ish",
+      "category": "emulating",
+      "description": "Soft sine attack with long sustain tail — stand-in for an electric piano until wavetable lands.",
+      "params": {
+        "waveform": 3, "attack_sec": 0.002, "release_sec": 0.9, "volume": 0.65,
+        "filter_cutoff_hz": 3500, "filter_resonance": 1.0,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "theremin",
+      "name": "Theremin",
+      "category": "emulating",
+      "description": "Sine with pronounced pitch wobble. LinnStrument glissando + this = proper theremin.",
+      "params": {
+        "waveform": 3, "attack_sec": 0.08, "release_sec": 0.15, "volume": 0.6,
+        "filter_cutoff_hz": 14000, "filter_resonance": 0.707,
+        "lfo_rate_hz": 5.5, "lfo_depth": 0.06, "lfo_dest": 2, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "harmonica",
+      "name": "Harmonica",
+      "category": "emulating",
+      "description": "Reedy triangle with a touch of vibrato. Short release for chord stabs.",
+      "params": {
+        "waveform": 2, "attack_sec": 0.015, "release_sec": 0.1, "volume": 0.65,
+        "filter_cutoff_hz": 3500, "filter_resonance": 1.2,
+        "lfo_rate_hz": 6.0, "lfo_depth": 0.025, "lfo_dest": 2, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "arrival",
+      "name": "Arrival",
+      "category": "abstract",
+      "description": "Commit to a note for two full seconds before you hear anything. Cinematic slow swell with filter drift.",
+      "params": {
+        "waveform": 2, "attack_sec": 2.0, "release_sec": 3.0, "volume": 0.5,
+        "filter_cutoff_hz": 2500, "filter_resonance": 1.5,
+        "lfo_rate_hz": 0.2, "lfo_depth": 0.6, "lfo_dest": 1, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "spark",
+      "name": "Spark",
+      "category": "abstract",
+      "description": "Percussive stab — each touch is a single transient and then silence. Rhythmic MPE drumming.",
+      "params": {
+        "waveform": 0, "attack_sec": 0.0005, "release_sec": 0.002, "volume": 0.7,
+        "filter_cutoff_hz": 1200, "filter_resonance": 3.5,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "whalesong",
+      "name": "Whalesong",
+      "category": "abstract",
+      "description": "Inverse pad: swells in, cuts on release. Breathing amp LFO for living texture.",
+      "params": {
+        "waveform": 3, "attack_sec": 0.5, "release_sec": 0.08, "volume": 0.5,
+        "filter_cutoff_hz": 2500, "filter_resonance": 1.0,
+        "lfo_rate_hz": 0.4, "lfo_depth": 0.4, "lfo_dest": 3, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "dream_bell",
+      "name": "Dream Bell",
+      "category": "abstract",
+      "description": "Triangle bell tone, instant attack, long ring. Slow cutoff wobble keeps it from sounding static.",
+      "params": {
+        "waveform": 2, "attack_sec": 0.001, "release_sec": 2.5, "volume": 0.6,
+        "filter_cutoff_hz": 2000, "filter_resonance": 1.8,
+        "lfo_rate_hz": 0.5, "lfo_depth": 0.3, "lfo_dest": 1, "lfo_waveform": 2
+      }
+    },
+    {
+      "id": "static",
+      "name": "Static",
+      "category": "abstract",
+      "description": "Self-oscillating filter resonance dominates the tone — the oscillator is almost incidental.",
+      "params": {
+        "waveform": 1, "attack_sec": 0.1, "release_sec": 1.0, "volume": 0.35,
+        "filter_cutoff_hz": 1800, "filter_resonance": 5.0,
+        "lfo_rate_hz": 0.8, "lfo_depth": 0.5, "lfo_dest": 1, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "dubstep_wobble",
+      "name": "Dubstep Wobble",
+      "category": "modern",
+      "description": "The classic low-cutoff wobble. Sine LFO on filter at 2 Hz — slower for halftime, faster for double-time.",
+      "params": {
+        "waveform": 0, "attack_sec": 0.003, "release_sec": 0.08, "volume": 0.7,
+        "filter_cutoff_hz": 600, "filter_resonance": 3.5,
+        "lfo_rate_hz": 2.0, "lfo_depth": 0.8, "lfo_dest": 1, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "hard_wobble",
+      "name": "Hard Wobble",
+      "category": "modern",
+      "description": "Square-LFO on filter = hard on/off switch between closed and open. Aggressive.",
+      "params": {
+        "waveform": 0, "attack_sec": 0.003, "release_sec": 0.05, "volume": 0.7,
+        "filter_cutoff_hz": 800, "filter_resonance": 3.5,
+        "lfo_rate_hz": 4.0, "lfo_depth": 1.0, "lfo_dest": 1, "lfo_waveform": 3
+      }
+    },
+    {
+      "id": "reese_bass",
+      "name": "Reese Bass",
+      "category": "modern",
+      "description": "DnB staple — saw through medium filter, medium Q. Plays best in the low-mid register.",
+      "params": {
+        "waveform": 0, "attack_sec": 0.005, "release_sec": 0.4, "volume": 0.65,
+        "filter_cutoff_hz": 1200, "filter_resonance": 2.0,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "supersaw_lead",
+      "name": "Supersaw Lead",
+      "category": "modern",
+      "description": "Trance lead with slow pitch vibrato. Waiting on Phase 2f unison to really earn the name.",
+      "params": {
+        "waveform": 0, "attack_sec": 0.005, "release_sec": 0.3, "volume": 0.65,
+        "filter_cutoff_hz": 12000, "filter_resonance": 1.0,
+        "lfo_rate_hz": 5.0, "lfo_depth": 0.04, "lfo_dest": 2, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "acid_squelch",
+      "name": "Acid Squelch",
+      "category": "modern",
+      "description": "Max resonance self-oscillating squelch — cross between a lead and a whistle. Use CC#74 for the sweep.",
+      "params": {
+        "waveform": 0, "attack_sec": 0.001, "release_sec": 0.15, "volume": 0.45,
+        "filter_cutoff_hz": 300, "filter_resonance": 5.0,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "trap_bass",
+      "name": "Trap Bass",
+      "category": "modern",
+      "description": "Square sub with a slow saw-LFO filter sweep — each note rises from dark to bright across its tail.",
+      "params": {
+        "waveform": 1, "attack_sec": 0.001, "release_sec": 0.5, "volume": 0.7,
+        "filter_cutoff_hz": 900, "filter_resonance": 2.2,
+        "lfo_rate_hz": 0.8, "lfo_depth": 0.6, "lfo_dest": 1, "lfo_waveform": 2
+      }
+    },
+    {
+      "id": "synthwave_lead",
+      "name": "Synthwave Lead",
+      "category": "modern",
+      "description": "80s retrowave lead with classic vibrato. Smooth saw, medium filter, singing vibrato.",
+      "params": {
+        "waveform": 0, "attack_sec": 0.05, "release_sec": 0.4, "volume": 0.65,
+        "filter_cutoff_hz": 4500, "filter_resonance": 1.3,
+        "lfo_rate_hz": 5.5, "lfo_depth": 0.05, "lfo_dest": 2, "lfo_waveform": 0
+      }
+    },
+    {
+      "id": "techno_stab",
+      "name": "Techno Stab",
+      "category": "modern",
+      "description": "Sharp techno chord-stab tone. Instant attack + short release + resonance gives it a distinctive bite.",
+      "params": {
+        "waveform": 0, "attack_sec": 0.001, "release_sec": 0.08, "volume": 0.6,
+        "filter_cutoff_hz": 1500, "filter_resonance": 2.5,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0
+      }
+    }
+  ]
+}

@@ -46,6 +46,7 @@
 #include <TAC5212.h>
 #include <TDspMixer.h>
 #include <TDspMidi.h>
+#include <TDspMPE.h>
 #include <synth_dexed.h>
 
 #include "Tac5212Panel.h"
@@ -143,10 +144,27 @@ AudioSynthDexed      g_dexed((uint8_t)8, (uint16_t)AUDIO_SAMPLE_RATE_EXACT);
 AudioAmplifier       g_dexedGain;
 
 // Per-synth FX send amp — scales the tap that feeds the shared FX
-// send bus. Sits between g_dexedGain and fxSendBus (below). When
-// TDspMPE lands it gets its own g_mpeSend that feeds the same bus
-// on a different slot.
+// send bus. Sits between g_dexedGain and fxSendBus (below). TDspMPE
+// has its own g_mpeSend on slot 1 of the same bus.
 AudioAmplifier       g_dexedSend;
+
+// MPE-native virtual-analog engine (Phase 2d). Four voices of stock
+// Teensy Audio primitives: osc → state-variable filter → amp
+// envelope. Each voice is dual-mono into mpeMixL/R; the summed mix
+// trims through mpeGainL/R into preMix slot 2. The per-voice filter
+// is what makes MPE expression actually useful — CC#74 routes to
+// each voice's own cutoff, so a LinnStrument finger steers brightness
+// on its own note only.
+//
+// g_mpeSend taps post-volume (L side only; MPE is dual-mono so L
+// carries the full content) into the shared FX bus on slot 1 —
+// matching the slot reservation in g_dexedSend's comment above.
+AudioSynthWaveform       mpeOsc0, mpeOsc1, mpeOsc2, mpeOsc3;
+AudioFilterStateVariable mpeFilt0, mpeFilt1, mpeFilt2, mpeFilt3;
+AudioEffectEnvelope      mpeEnv0, mpeEnv1, mpeEnv2, mpeEnv3;
+AudioMixer4              mpeMixL, mpeMixR;
+AudioAmplifier           mpeGainL, mpeGainR;
+AudioAmplifier           g_mpeSend;
 
 // ---- Shared FX bus -------------------------------------------------
 //
@@ -347,6 +365,37 @@ AudioConnection      c_dexed_preR  (g_dexedGain, 0, preMixR,     1);
 // just this synth's contribution; other synths keep sending.
 AudioConnection      c_dexed_send  (g_dexedGain, 0, g_dexedSend, 0);
 AudioConnection      c_dexed_bus   (g_dexedSend, 0, fxSendBus,   0);
+
+// MPE VA voice chains: osc → filter → env → mpeMixL/R (slot = voice
+// index for easy debugging). Voice chains go in voice-order so a
+// silent slot is obviously "voice N missing" rather than a wiring
+// confusion.
+AudioConnection      c_mpeOsc0_filt (mpeOsc0,  0, mpeFilt0, 0);
+AudioConnection      c_mpeFilt0_env (mpeFilt0, 0, mpeEnv0,  0);
+AudioConnection      c_mpeEnv0_L    (mpeEnv0,  0, mpeMixL,  0);
+AudioConnection      c_mpeEnv0_R    (mpeEnv0,  0, mpeMixR,  0);
+AudioConnection      c_mpeOsc1_filt (mpeOsc1,  0, mpeFilt1, 0);
+AudioConnection      c_mpeFilt1_env (mpeFilt1, 0, mpeEnv1,  0);
+AudioConnection      c_mpeEnv1_L    (mpeEnv1,  0, mpeMixL,  1);
+AudioConnection      c_mpeEnv1_R    (mpeEnv1,  0, mpeMixR,  1);
+AudioConnection      c_mpeOsc2_filt (mpeOsc2,  0, mpeFilt2, 0);
+AudioConnection      c_mpeFilt2_env (mpeFilt2, 0, mpeEnv2,  0);
+AudioConnection      c_mpeEnv2_L    (mpeEnv2,  0, mpeMixL,  2);
+AudioConnection      c_mpeEnv2_R    (mpeEnv2,  0, mpeMixR,  2);
+AudioConnection      c_mpeOsc3_filt (mpeOsc3,  0, mpeFilt3, 0);
+AudioConnection      c_mpeFilt3_env (mpeFilt3, 0, mpeEnv3,  0);
+AudioConnection      c_mpeEnv3_L    (mpeEnv3,  0, mpeMixL,  3);
+AudioConnection      c_mpeEnv3_R    (mpeEnv3,  0, mpeMixR,  3);
+AudioConnection      c_mpeMixL_gain (mpeMixL,  0, mpeGainL, 0);
+AudioConnection      c_mpeMixR_gain (mpeMixR,  0, mpeGainR, 0);
+// Dry path — mpeGainL/R into preMix slot 2 (preMix slot 3 is taken
+// by the shared FX wet return).
+AudioConnection      c_mpeGainL_pre (mpeGainL, 0, preMixL,  2);
+AudioConnection      c_mpeGainR_pre (mpeGainR, 0, preMixR,  2);
+// FX send path — L side only (MPE is dual-mono so mpeGainL carries
+// the full mono content). Feeds shared FX bus slot 1.
+AudioConnection      c_mpe_send     (mpeGainL, 0, g_mpeSend, 0);
+AudioConnection      c_mpe_bus      (g_mpeSend, 0, fxSendBus, 1);
 
 // Shared FX chain: send bus → chorus → stereo reverb → return amps → preMix slot 3.
 AudioConnection      c_fx_bus_cho  (fxSendBus,  0, fxChorus,  0);
@@ -607,6 +656,38 @@ MIDIDevice   g_midiIn(g_usbHost);
 tdsp::MidiRouter g_midiRouter;
 DexedSink        g_dexedSink(&g_dexed);
 
+// MPE VA sink + voice-port wiring. The sink never allocates; it just
+// steers the file-scope oscillator / filter / envelope primitives via
+// pointers handed to it at construction.
+MpeVaSink::VoicePorts g_mpeVoices[4] = {
+    {&mpeOsc0, &mpeEnv0, &mpeFilt0},
+    {&mpeOsc1, &mpeEnv1, &mpeFilt1},
+    {&mpeOsc2, &mpeEnv2, &mpeFilt2},
+    {&mpeOsc3, &mpeEnv3, &mpeFilt3},
+};
+MpeVaSink g_mpeSink(g_mpeVoices, 4);
+
+// MPE VA output level (post-summing, pre-preMix). Mirrors the Dexed
+// volume pattern — AudioAmplifier has no getter, so the sketch keeps
+// the last-set value for broadcastSnapshot() and OSC echo.
+static float g_mpeVolume     = 0.7f;
+static float g_mpeSendAmount = 0.0f;
+
+static void applyMpeVolume(float v) {
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    g_mpeVolume = v;
+    mpeGainL.gain(v);
+    mpeGainR.gain(v);
+}
+
+static void applyMpeSend(float v) {
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    g_mpeSendAmount = v;
+    g_mpeSend.gain(v);
+}
+
 // ============================================================================
 // MidiVizSink — broadcasts /midi/note on each note-on/off for the web
 // keyboard visualization. Subscription-gated: the web UI sends
@@ -651,6 +732,32 @@ private:
 };
 
 MidiVizSink g_midiVizSink;
+
+// MPE voice telemetry broadcast. Subscription-gated (Synth tab flips
+// it on via /sub addSub /synth/mpe/voices). When enabled, every ~33
+// ms the firmware snapshots MpeVaSink's voice state and fires
+// /synth/mpe/voices with 4 × {held, ch, note, pitchSemi, pressure,
+// timbre}. Flat layout keeps the OSC overhead to one bundle per
+// frame.
+static bool     g_mpeVoicesEnabled = false;
+static uint32_t g_mpeLastVoicesMs  = 0;
+
+static void broadcastMpeVoices() {
+    MpeVaSink::VoiceSnapshot snap[4];
+    const int n = g_mpeSink.voiceSnapshot(snap, 4);
+    OSCMessage m("/synth/mpe/voices");
+    for (int i = 0; i < n; ++i) {
+        m.add((int)(snap[i].held ? 1 : 0));
+        m.add((int)snap[i].channel);
+        m.add((int)snap[i].note);
+        m.add(snap[i].pitchSemi);
+        m.add(snap[i].pressure);
+        m.add(snap[i].timbre);
+    }
+    OSCBundle b;
+    b.add(m);
+    g_transport.broadcastBundle(b);
+}
 
 // ---------------------------------------------------------------------
 // USB host MIDI callbacks — forward to the router. Keep these as plain
@@ -1248,6 +1355,167 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
+    // ------------- /synth/mpe/* — MPE-native VA synth engine -------------
+    //
+    // 11 addresses total. All follow the read/write/echo pattern: empty
+    // args = read-back, single-arg write updates and echoes. The sink
+    // itself handles all range clamping so this handler can forward
+    // raw values and trust the sink's getters for the echo.
+
+    if (strcmp(address, "/synth/mpe/volume") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/mpe/volume"); m.add(g_mpeVolume); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            applyMpeVolume(msg.getFloat(0));
+            OSCMessage m("/synth/mpe/volume"); m.add(g_mpeVolume); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/mpe/attack") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/mpe/attack"); m.add(g_mpeSink.attack()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_mpeSink.setAttack(msg.getFloat(0));
+            OSCMessage m("/synth/mpe/attack"); m.add(g_mpeSink.attack()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/mpe/release") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/mpe/release"); m.add(g_mpeSink.release()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_mpeSink.setRelease(msg.getFloat(0));
+            OSCMessage m("/synth/mpe/release"); m.add(g_mpeSink.release()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/mpe/waveform") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/mpe/waveform"); m.add((int)g_mpeSink.waveform()); reply.add(m);
+        } else if (msg.isInt(0)) {
+            int w = msg.getInt(0);
+            if (w < 0 || w > 3) w = 0;
+            g_mpeSink.setWaveform((uint8_t)w);
+            OSCMessage m("/synth/mpe/waveform"); m.add((int)g_mpeSink.waveform()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/mpe/filter/cutoff") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/mpe/filter/cutoff"); m.add(g_mpeSink.filterCutoff()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_mpeSink.setFilterCutoff(msg.getFloat(0));
+            OSCMessage m("/synth/mpe/filter/cutoff"); m.add(g_mpeSink.filterCutoff()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/mpe/filter/resonance") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/mpe/filter/resonance"); m.add(g_mpeSink.filterResonance()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_mpeSink.setFilterResonance(msg.getFloat(0));
+            OSCMessage m("/synth/mpe/filter/resonance"); m.add(g_mpeSink.filterResonance()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/mpe/lfo/rate") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/mpe/lfo/rate"); m.add(g_mpeSink.lfoRate()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_mpeSink.setLfoRate(msg.getFloat(0));
+            OSCMessage m("/synth/mpe/lfo/rate"); m.add(g_mpeSink.lfoRate()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/mpe/lfo/depth") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/mpe/lfo/depth"); m.add(g_mpeSink.lfoDepth()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_mpeSink.setLfoDepth(msg.getFloat(0));
+            OSCMessage m("/synth/mpe/lfo/depth"); m.add(g_mpeSink.lfoDepth()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/mpe/lfo/dest") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/mpe/lfo/dest"); m.add((int)g_mpeSink.lfoDest()); reply.add(m);
+        } else if (msg.isInt(0)) {
+            g_mpeSink.setLfoDest((uint8_t)msg.getInt(0));
+            OSCMessage m("/synth/mpe/lfo/dest"); m.add((int)g_mpeSink.lfoDest()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/mpe/lfo/waveform") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/mpe/lfo/waveform"); m.add((int)g_mpeSink.lfoWaveform()); reply.add(m);
+        } else if (msg.isInt(0)) {
+            g_mpeSink.setLfoWaveform((uint8_t)msg.getInt(0));
+            OSCMessage m("/synth/mpe/lfo/waveform"); m.add((int)g_mpeSink.lfoWaveform()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/mpe/midi/master") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/mpe/midi/master"); m.add((int)g_mpeSink.masterChannel()); reply.add(m);
+        } else if (msg.isInt(0)) {
+            int ch = msg.getInt(0);
+            if (ch < 1 || ch > 16) ch = 1;
+            // Release everything before re-interpreting the master
+            // channel so a mid-performance switch doesn't strand
+            // voices on the (now-reinterpreted) old master.
+            g_mpeSink.onAllNotesOff(0);
+            g_mpeSink.setMasterChannel((uint8_t)ch);
+            OSCMessage m("/synth/mpe/midi/master"); m.add((int)g_mpeSink.masterChannel()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    // /synth/mpe/fx/send f — MPE's contribution into the shared FX bus
+    // (chorus → reverb chain). 0..1 linear; 0 = dry only.
+    if (strcmp(address, "/synth/mpe/fx/send") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/mpe/fx/send"); m.add(g_mpeSendAmount); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            applyMpeSend(msg.getFloat(0));
+            OSCMessage m("/synth/mpe/fx/send"); m.add(g_mpeSendAmount); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
     // /sub target=/midi/events — subscription for the MIDI visualization
     // broadcast. Intercepted here (not in OscDispatcher) to keep the MIDI
     // path confined to this sketch: OscDispatcher::handleSub only
@@ -1268,6 +1536,20 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
                 verb[(vl < (int)sizeof(verb)) ? vl : (int)sizeof(verb) - 1] = '\0';
                 if (strcmp(verb, "addSub") == 0) g_midiVizSink.setEnabled(true);
                 else if (strcmp(verb, "unsubscribe") == 0) g_midiVizSink.setEnabled(false);
+                return;
+            }
+            if (strcmp(target, "/synth/mpe/voices") == 0) {
+                char verb[16] = {0};
+                int vl = msg.getString(0, verb, sizeof(verb));
+                verb[(vl < (int)sizeof(verb)) ? vl : (int)sizeof(verb) - 1] = '\0';
+                if (strcmp(verb, "addSub") == 0) {
+                    g_mpeVoicesEnabled = true;
+                    // Fire one frame immediately so the UI paints
+                    // current state without waiting up to 33 ms.
+                    broadcastMpeVoices();
+                } else if (strcmp(verb, "unsubscribe") == 0) {
+                    g_mpeVoicesEnabled = false;
+                }
                 return;
             }
         }
@@ -1294,6 +1576,7 @@ static void onCliLine(char *line, int length, void *userData) {
         g_meters.setEnabled(false);
         g_spectrum.setEnabled(false);
         g_midiVizSink.setEnabled(false);
+        g_mpeVoicesEnabled = false;
         Serial.println("streaming disabled");
         return;
     }
@@ -1393,7 +1676,12 @@ void setup() {
     // the preMix adds ~4; the existing graph was already near 70 under
     // load. Monitor via the 's' CLI — AudioMemoryUsageMax() should stay
     // well below this ceiling.
-    AudioMemory(144);
+    //
+    // Phase 2d adds the MPE VA engine on preMix slot 2: 4 oscs + 4
+    // filters + 4 envs + 2 mixers + 3 amps = 17 primitives, each
+    // envelope fan-outs into both L+R. Conservatively +24 blocks peak
+    // for fan-out headroom → 168.
+    AudioMemory(168);
 
     // PDM mic amplitude trim: 32-bit PDM split across two 16-bit slots
     // — high 16 bits need a 16x boost, low 16 bits need a 1/65536
@@ -1406,17 +1694,18 @@ void setup() {
 
     // preMix bus: slot 0 = input-channel mix, slot 1 = Dexed (volume
     // is controlled by g_dexedGain upstream, so the slot itself is
-    // unity), slot 2 reserved for TDspMPE (future), slot 3 = shared
-    // FX bus wet return (level owned by fxReturnL/R amps upstream,
-    // so the slot is unity here — wet amount is controlled by
+    // unity), slot 2 = TDspMPE (same pattern — mpeGainL/R upstream
+    // controls volume, this slot just passes), slot 3 = shared FX
+    // bus wet return (level owned by fxReturnL/R amps upstream, so
+    // the slot is unity here — wet amount is controlled by
     // g_fxReverbReturnAmt via applyFxReverb()).
     preMixL.gain(0, 1.0f);
     preMixL.gain(1, 1.0f);
-    preMixL.gain(2, 0.0f);
+    preMixL.gain(2, 1.0f);
     preMixL.gain(3, 1.0f);
     preMixR.gain(0, 1.0f);
     preMixR.gain(1, 1.0f);
-    preMixR.gain(2, 0.0f);
+    preMixR.gain(2, 1.0f);
     preMixR.gain(3, 1.0f);
 
     // Capture mixers at unity on every slot. The per-source gating is
@@ -1559,7 +1848,16 @@ void setup() {
     // Always pass a non-zero count here; applyFxChorus() then flips
     // between voices(1)=passthrough and voices(2..8)=active.
     fxChorus.begin(g_fxChorusDelayLine, kFxChorusDelayLen, 2);
-    for (int i = 0; i < 4; ++i) fxSendBus.gain(i, 1.0f);
+    // FX send bus per-slot gain: 0.5 (-6 dB) gives the reverb the
+    // headroom it needs. AudioEffectFreeverbStereo sums 8 comb-filter
+    // taps internally with int16 accumulators — feeding it near
+    // full-scale is the classic recipe for overflow distortion. The
+    // 6 dB headroom is the same convention hardware mixers use on
+    // aux send buses for the same reason. The user's per-synth send
+    // slider still spans 0..1, so they keep full control of how much
+    // signal arrives here; we're just preventing arithmetic clipping
+    // even at slider=1.0.
+    for (int i = 0; i < 4; ++i) fxSendBus.gain(i, 0.5f);
     applyDexedSend();
     applyFxChorus();
     applyFxReverb();
@@ -1603,6 +1901,53 @@ void setup() {
     // notes on channels 2..16, which Dexed ignores until the user flips
     // /synth/dexed/midi/ch to 0 (omni).
     g_midiRouter.addSink(&g_dexedSink);
+
+    // --- MPE VA engine init -------------------------------------------
+    //
+    // mpeMixL/R slot gains at 0.25 each so 4 simultaneous voices at
+    // unity sum to 1.0 without clipping. Per-voice amplitude is
+    // already trimmed by velocity × pressure × setVoiceVolumeScale
+    // inside MpeVaSink, so this mixer-side fraction is the pure
+    // polyphony-headroom factor.
+    for (int s = 0; s < 4; ++s) {
+        mpeMixL.gain(s, 0.25f);
+        mpeMixR.gain(s, 0.25f);
+    }
+
+    // Envelope defaults: 5 ms attack, 300 ms release. Decay (100 ms)
+    // + sustain (0.7) are set per-voice directly since the sink's
+    // public API only exposes A and R — the other two shape
+    // parameters live at the envelope-object level.
+    g_mpeSink.setAttack (0.005f);
+    g_mpeSink.setRelease(0.300f);
+    g_mpeSink.setWaveform(0);  // 0 = saw
+    for (int i = 0; i < 4; ++i) {
+        g_mpeVoices[i].env->decay  (100.0f);
+        g_mpeVoices[i].env->sustain(0.7f);
+    }
+
+    // Filter defaults: wide open (8 kHz Butterworth). CC#74 steers
+    // each voice's cutoff around this base by ±1 octave.
+    g_mpeSink.setFilterCutoff   (8000.0f);
+    g_mpeSink.setFilterResonance(0.707f);
+
+    // LFO defaults: rate=0 disables the whole path. tick() is a
+    // no-op until the user engages it.
+    g_mpeSink.setLfoRate    (0.0f);
+    g_mpeSink.setLfoDepth   (0.0f);
+    g_mpeSink.setLfoDest    (MpeVaSink::LfoOff);
+    g_mpeSink.setLfoWaveform(0);
+
+    // Output volume + FX send. Volume 0.7 matches Dexed so both
+    // synths sit at comparable loudness; send defaults to 0 (dry).
+    applyMpeVolume(g_mpeVolume);
+    applyMpeSend  (g_mpeSendAmount);
+
+    // Register the MPE sink AFTER Dexed. When a LinnStrument sends a
+    // member-channel note-on (ch 2..16) and Dexed is in omni mode, it
+    // fires first; MPE then also fires. Users who want only MPE on
+    // those notes leave Dexed on channel 1 (default).
+    g_midiRouter.addSink(&g_mpeSink);
 
     Serial.println("\nReady!");
     Serial.println("  6 input channels: USB L/R, Line L/R, Mic L/R");
@@ -1822,6 +2167,46 @@ static void broadcastSnapshot(OSCBundle &reply) {
         reply.add(m);
     }
 
+    // MPE VA synth state — all 11 OSC addresses echoed so a
+    // reconnecting client renders every control correctly without
+    // having to round-trip per-address reads.
+    {
+        OSCMessage m("/synth/mpe/volume");           m.add(g_mpeVolume); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/mpe/attack");           m.add(g_mpeSink.attack()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/mpe/release");          m.add(g_mpeSink.release()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/mpe/waveform");         m.add((int)g_mpeSink.waveform()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/mpe/filter/cutoff");    m.add(g_mpeSink.filterCutoff()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/mpe/filter/resonance"); m.add(g_mpeSink.filterResonance()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/mpe/lfo/rate");         m.add(g_mpeSink.lfoRate()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/mpe/lfo/depth");        m.add(g_mpeSink.lfoDepth()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/mpe/lfo/dest");         m.add((int)g_mpeSink.lfoDest()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/mpe/lfo/waveform");     m.add((int)g_mpeSink.lfoWaveform()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/mpe/midi/master");      m.add((int)g_mpeSink.masterChannel()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/mpe/fx/send");          m.add(g_mpeSendAmount); reply.add(m);
+    }
+
     // Shared FX bus (FX tab + per-synth send).
     {
         OSCMessage m("/synth/dexed/fx/send");
@@ -1906,6 +2291,12 @@ void loop() {
     pollHostVolume();
     pollCaptureHostVolume();
 
+    // Advance the MPE VA's LFO and push current modulation into held
+    // voices. Cheap no-op when LFO dest=OFF; at dest!=OFF this costs
+    // ~12 writes per call per held voice. Running every loop() tick
+    // keeps modulation smooth (loop() turns over in under 1 ms typ).
+    g_mpeSink.tick(millis());
+
     // USB host: service enumeration + drain all queued MIDI events. Each
     // midi1.read() returns true if it dispatched one event to the installed
     // handler; the while loop keeps draining so a fast-running arpeggio
@@ -1922,19 +2313,29 @@ void loop() {
 
     if (now - s_lastBroadcastMs >= BROADCAST_MIN_GAP_MS) {
         // Always call tick() so engines consume analyzer data and track
-        // their internal timing. Send at most one frame: meters have
-        // priority (more useful for mixing); spectrum fills the gaps.
+        // their internal timing. Send at most one frame per pass.
+        // Priority: meters (most useful for mixing) → spectrum → MPE
+        // voices. MPE at ~30 Hz is smooth without crowding mix-critical
+        // data; the subscription gate turns it off when no UI is
+        // watching.
         OSCBundle meterReply;
         bool meterReady = g_meters.tick(meterReply) && meterReply.size() > 0;
 
         OSCBundle spectrumReply;
         bool spectrumReady = g_spectrum.tick(spectrumReply) && spectrumReply.size() > 0;
 
+        bool mpeVoicesReady = g_mpeVoicesEnabled &&
+                              (now - g_mpeLastVoicesMs >= 33);
+
         if (meterReady) {
             g_transport.broadcastBundle(meterReply);
             s_lastBroadcastMs = now;
         } else if (spectrumReady) {
             g_transport.broadcastBundle(spectrumReply);
+            s_lastBroadcastMs = now;
+        } else if (mpeVoicesReady) {
+            broadcastMpeVoices();
+            g_mpeLastVoicesMs = now;
             s_lastBroadcastMs = now;
         }
     }
