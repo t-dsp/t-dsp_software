@@ -60,6 +60,18 @@ public:
     // is true on the final chunk of a multi-packet SysEx. Sinks that
     // don't need SysEx leave the default no-op.
     virtual void onSysEx(const uint8_t *data, size_t length, bool last) { (void)data; (void)length; (void)last; }
+
+    // System Real-Time messages (channelless). These are dispatched to
+    // every registered sink regardless of channel. 24 PPQN is standard.
+    //   onClock    — 0xF8, one tick, 24 per quarter note
+    //   onStart    — 0xFA, transport start from the top
+    //   onContinue — 0xFB, transport resume from where Stop left off
+    //   onStop     — 0xFC, transport stop
+    // Sinks that don't care about timing leave the defaults as no-ops.
+    virtual void onClock()    {}
+    virtual void onStart()    {}
+    virtual void onContinue() {}
+    virtual void onStop()     {}
 };
 
 }  // namespace tdsp

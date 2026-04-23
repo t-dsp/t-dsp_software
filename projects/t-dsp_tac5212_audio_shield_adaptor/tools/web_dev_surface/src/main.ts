@@ -28,6 +28,10 @@ import { dexedPanel } from './ui/dexed-panel';
 import { mpePanel } from './ui/mpe-panel';
 import { processingPanel } from './ui/processing-panel';
 import { fxPanel } from './ui/fx-panel';
+import { looperPanel } from './ui/looper-panel';
+import { clockPanel } from './ui/clock-panel';
+import { beatsPanel } from './ui/beats-panel';
+import { synthBusStrip } from './ui/synth-bus';
 
 // Channel count for the small mixer v1 — 6 channels (USB L/R, Line L/R,
 // Mic L/R) matching tdsp::kChannelCount in lib/TDspMixer/src/MixerModel.h.
@@ -240,7 +244,19 @@ const processingTab = document.createElement('button');
 processingTab.className = 'view-tab';
 processingTab.dataset.view = 'processing';
 processingTab.textContent = 'Processing';
-viewTabs.append(mixerTab, spectrumTab, synthTab, fxTab, processingTab);
+const loopTab = document.createElement('button');
+loopTab.className = 'view-tab';
+loopTab.dataset.view = 'loop';
+loopTab.textContent = 'Loop';
+const beatsTab = document.createElement('button');
+beatsTab.className = 'view-tab';
+beatsTab.dataset.view = 'beats';
+beatsTab.textContent = 'Beats';
+const clockTab = document.createElement('button');
+clockTab.className = 'view-tab';
+clockTab.dataset.view = 'clock';
+clockTab.textContent = 'Clock';
+viewTabs.append(mixerTab, spectrumTab, synthTab, fxTab, processingTab, loopTab, beatsTab, clockTab);
 
 // --- Mixer view section (wraps existing mixer content) ------------
 
@@ -249,12 +265,17 @@ mixerView.className = 'view view-mixer';
 
 const mixerRow = document.createElement('section');
 mixerRow.className = 'mixer-row';
-// 3 stereo pairs (1/2, 3/4, 5/6) on the left, then MAIN + HOST docked
-// to the right edge via `margin-left: auto`. Every wrapper uses the
-// shared 7-row layout so buttons and sliders align across the mixer.
+// 3 stereo pairs (1/2, 3/4, 5/6) on the left, then the SYNTH group
+// strip, then MAIN + HOST docked to the right edge via `margin-left:
+// auto` on the output dock. Every wrapper uses the shared 7-row
+// layout so buttons and sliders align across the mixer.
 for (let oddIdx = 0; oddIdx < CHANNEL_COUNT; oddIdx += 2) {
   mixerRow.appendChild(channelPair(oddIdx, state, dispatcher));
 }
+// Synth group bus — sits between the input strips and the output
+// dock so it visually belongs with the input-side column of faders.
+mixerRow.appendChild(synthBusStrip(state.synthBus, dispatcher));
+
 const outputDock = document.createElement('div');
 outputDock.className = 'output-dock';
 outputDock.append(
@@ -439,9 +460,39 @@ processingSection.className = 'view view-processing';
 processingSection.style.display = 'none';
 processingSection.appendChild(processingPanel(state, dispatcher));
 
+// --- Loop view section --------------------------------------------
+//
+// Mono sample looper fed off a selectable pre-fader channel tap.
+// Sits alongside FX / Processing because it's another main-bus
+// audio-path feature rather than a synth engine.
+const loopSection = document.createElement('section');
+loopSection.className = 'view view-loop';
+loopSection.style.display = 'none';
+loopSection.appendChild(looperPanel(state, dispatcher));
+
+// --- Beats view section -------------------------------------------
+//
+// 4-track × 16-step drum machine. Synth drums on tracks 0/1, SD WAV
+// samples on tracks 2/3. See ui/beats-panel.ts for the full layout.
+const beatsSection = document.createElement('section');
+beatsSection.className = 'view view-beats';
+beatsSection.style.display = 'none';
+beatsSection.appendChild(beatsPanel(state, dispatcher));
+
+// --- Clock view section -------------------------------------------
+//
+// Shared musical clock — one source for every tempo-aware module. See
+// ui/clock-panel.ts. No live subscription: the four clock echoes fire
+// on change, and the panel's one-shot queryClockRunning() fills in the
+// transport state when the tab opens.
+const clockSection = document.createElement('section');
+clockSection.className = 'view view-clock';
+clockSection.style.display = 'none';
+clockSection.appendChild(clockPanel(state, dispatcher));
+
 // --- Tab switching -------------------------------------------------
 
-type ViewName = 'mixer' | 'spectrum' | 'synth' | 'fx' | 'processing';
+type ViewName = 'mixer' | 'spectrum' | 'synth' | 'fx' | 'processing' | 'loop' | 'beats' | 'clock';
 
 function selectView(name: ViewName): void {
   mixerTab.classList.toggle('active',      name === 'mixer');
@@ -449,11 +500,17 @@ function selectView(name: ViewName): void {
   synthTab.classList.toggle('active',      name === 'synth');
   fxTab.classList.toggle('active',         name === 'fx');
   processingTab.classList.toggle('active', name === 'processing');
+  loopTab.classList.toggle('active',       name === 'loop');
+  beatsTab.classList.toggle('active',      name === 'beats');
+  clockTab.classList.toggle('active',      name === 'clock');
   mixerView.style.display         = name === 'mixer'      ? '' : 'none';
   spectrumSection.style.display   = name === 'spectrum'   ? '' : 'none';
   synthSection.style.display      = name === 'synth'      ? '' : 'none';
   fxSection.style.display         = name === 'fx'         ? '' : 'none';
   processingSection.style.display = name === 'processing' ? '' : 'none';
+  loopSection.style.display       = name === 'loop'       ? '' : 'none';
+  beatsSection.style.display      = name === 'beats'      ? '' : 'none';
+  clockSection.style.display      = name === 'clock'      ? '' : 'none';
 
   // Toggle the body-level class that makes #app break out of its
   // 1200px max-width and go full viewport in spectrum mode. Only the
@@ -494,5 +551,8 @@ spectrumTab.addEventListener('click',   () => selectView('spectrum'));
 synthTab.addEventListener('click',      () => selectView('synth'));
 fxTab.addEventListener('click',         () => selectView('fx'));
 processingTab.addEventListener('click', () => selectView('processing'));
+loopTab.addEventListener('click',       () => selectView('loop'));
+beatsTab.addEventListener('click',      () => selectView('beats'));
+clockTab.addEventListener('click',      () => selectView('clock'));
 
-app.append(header, viewTabs, mixerView, spectrumSection, synthSection, fxSection, processingSection, console_.element);
+app.append(header, viewTabs, mixerView, spectrumSection, synthSection, fxSection, processingSection, loopSection, beatsSection, clockSection, console_.element);

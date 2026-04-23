@@ -11,7 +11,7 @@
 // (X32-flavored: /ch/NN, /bus/NN, /main/st, faders 0..1, mute = mix/on inverted).
 
 import { encodeMessage, OscArg, OscMessage } from './osc';
-import { MixerState } from './state';
+import { MixerState, BEATS_TRACK_COUNT, BEATS_STEP_COUNT } from './state';
 
 const pad2 = (n: number): string => n.toString().padStart(2, '0');
 
@@ -220,6 +220,14 @@ export class Dispatcher {
   // also drives codec-panel population via the codecListeners map —
   // see Tac5212Panel::snapshot() on the firmware side.
   requestSnapshot(): void {
+    // The firmware's snapshot emits /beats/step only for ON cells — so
+    // any cells that are ON locally but OFF in the firmware's pattern
+    // would remain stuck ON after the snapshot lands. Zero the grid
+    // client-side first so the snapshot's sparse "on" messages paint
+    // the authoritative state onto a blank canvas.
+    for (const track of this.state.beats.tracks) {
+      for (const s of track.stepsOn) s.set(false);
+    }
     this.sendMsg('/snapshot', '', []);
   }
 
@@ -422,6 +430,156 @@ export class Dispatcher {
   setProcLimiterEnable(on: boolean): void {
     this.state.processing.limiterEnable.set(on);
     this.sendMsg('/proc/limiter/enable', 'i', [on ? 1 : 0]);
+  }
+
+  // ---------- Synth bus (group fader + mute) ----------
+  //
+  // Sits downstream of every per-synth volume and upstream of preMix
+  // slot 1 on the firmware side. Also taps the looper source mux, so
+  // the "Synth" looper source captures whatever this fader lets through.
+
+  setSynthBusVolume(v: number): void {
+    this.state.synthBus.volume.set(v);
+    this.sendThrottled('/synth/bus/volume', 'f', [v]);
+  }
+
+  setSynthBusOn(on: boolean): void {
+    this.state.synthBus.on.set(on);
+    this.sendMsg('/synth/bus/on', 'i', [on ? 1 : 0]);
+  }
+
+  // ---------- Looper ----------
+  //
+  // Transport actions (/loop/record, /loop/play, /loop/stop, /loop/clear)
+  // take no args; the firmware echoes /loop/state and /loop/length after
+  // each one so the UI doesn't need to guess state transitions. source
+  // and level follow the standard "optimistic mirror + OSC write + echo"
+  // pattern used elsewhere.
+
+  setLooperSource(n: number): void {
+    this.state.looper.source.set(n);
+    this.sendMsg('/loop/source', 'i', [n]);
+  }
+
+  setLooperLevel(v: number): void {
+    this.state.looper.level.set(v);
+    this.sendThrottled('/loop/level', 'f', [v]);
+  }
+
+  looperRecord(): void { this.sendMsg('/loop/record', '', []); }
+  looperPlay():   void { this.sendMsg('/loop/play',   '', []); }
+  looperStop():   void { this.sendMsg('/loop/stop',   '', []); }
+  looperClear():  void { this.sendMsg('/loop/clear',  '', []); }
+
+  setLooperQuantize(on: boolean): void {
+    this.state.looper.quantize.set(on);
+    this.sendMsg('/loop/quantize', 'i', [on ? 1 : 0]);
+  }
+
+  // ---------- Clock (shared musical time) ----------
+  //
+  // The device runs one clock. External mode slaves to incoming MIDI
+  // 0xF8 / 0xFA / 0xFB / 0xFC; Internal mode is free-running at a
+  // user-set BPM. Writing /clock/bpm only takes effect when Source is
+  // Internal — External BPM is measured from ticks, not set.
+
+  setClockSource(s: 'ext' | 'int'): void {
+    this.state.clock.source.set(s);
+    this.sendMsg('/clock/source', 's', [s]);
+  }
+  setClockBpm(v: number): void {
+    this.state.clock.bpm.set(v);
+    this.sendThrottled('/clock/bpm', 'f', [v]);
+  }
+  setClockBeatsPerBar(n: number): void {
+    this.state.clock.beatsPerBar.set(n);
+    this.sendMsg('/clock/beatsPerBar', 'i', [n]);
+  }
+  // Read-only probe — fire to request a /clock/running echo. Useful
+  // when the Clock tab first opens so the UI doesn't show stale data.
+  queryClockRunning(): void {
+    this.sendMsg('/clock/running', '', []);
+  }
+
+  // ---------- Beats drum machine ----------
+
+  setBeatsRun(on: boolean): void {
+    this.state.beats.running.set(on);
+    this.sendMsg('/beats/run', 'i', [on ? 1 : 0]);
+  }
+  setBeatsBpm(v: number): void {
+    this.state.beats.bpm.set(v);
+    this.sendMsg('/beats/bpm', 'f', [v]);
+  }
+  setBeatsSwing(v: number): void {
+    this.state.beats.swing.set(v);
+    this.sendMsg('/beats/swing', 'f', [v]);
+  }
+  setBeatsVolume(v: number): void {
+    this.state.beats.volume.set(v);
+    this.sendMsg('/beats/volume', 'f', [v]);
+  }
+  setBeatsTrackMute(track: number, muted: boolean): void {
+    const t = this.state.beats.tracks[track];
+    if (t) t.muted.set(muted);
+    this.sendMsg('/beats/mute', 'ii', [track, muted ? 1 : 0]);
+  }
+  // Toggle or set a single step. Optimistic update on the per-step signal
+  // so the UI flips instantly; firmware echo re-applies (idempotent).
+  setBeatsStep(track: number, step: number, on: boolean): void {
+    const t = this.state.beats.tracks[track];
+    if (t && t.stepsOn[step]) t.stepsOn[step].set(on);
+    this.sendMsg('/beats/step', 'iii', [track, step, on ? 1 : 0]);
+  }
+  setBeatsStepVel(track: number, step: number, vel: number): void {
+    const t = this.state.beats.tracks[track];
+    if (t && t.stepsVel[step]) t.stepsVel[step].set(vel);
+    this.sendMsg('/beats/vel', 'iif', [track, step, vel]);
+  }
+  clearBeatsTrack(track: number): void {
+    // -1 clears all tracks; 0..3 clears just that row. Optimistic update
+    // so the grid wipes immediately.
+    const clearOne = (i: number): void => {
+      const t = this.state.beats.tracks[i];
+      if (!t) return;
+      for (const s of t.stepsOn) s.set(false);
+    };
+    if (track < 0) {
+      for (let i = 0; i < BEATS_TRACK_COUNT; i++) clearOne(i);
+    } else {
+      clearOne(track);
+    }
+    this.sendMsg('/beats/clear', 'i', [track]);
+  }
+  setBeatsSample(track: number, filename: string): void {
+    const t = this.state.beats.tracks[track];
+    if (t) t.sample.set(filename);
+    this.sendMsg('/beats/sample', 'is', [track, filename]);
+  }
+  setBeatsClockSource(src: 'internal' | 'external'): void {
+    this.state.beats.clockSource.set(src);
+    this.sendMsg('/beats/clockSource', 's', [src]);
+  }
+
+  // Apply a full preset: BPM, swing, and the entire 4×16 pattern grid.
+  // Clears all tracks first (one /beats/clear -1) then emits /beats/step
+  // only for on-cells, so a sparse pattern generates minimal traffic.
+  // Firmware's 3 ms frame throttle paces the burst naturally.
+  applyBeatsPreset(preset: {
+    bpm: number;
+    swing: number;
+    pattern: boolean[][];
+  }): void {
+    this.setBeatsBpm(preset.bpm);
+    this.setBeatsSwing(preset.swing);
+    this.clearBeatsTrack(-1);
+    for (let t = 0; t < preset.pattern.length; t++) {
+      const row = preset.pattern[t];
+      if (!row) continue;
+      for (let s = 0; s < row.length; s++) {
+        if (row[s]) this.setBeatsStep(t, s, true);
+      }
+    }
   }
 
   // UI-originated note from the on-screen keyboard in the Synth tab.
@@ -759,6 +917,134 @@ export class Dispatcher {
     }
     if (a === '/fx/reverb/return' && msg.types === 'f') {
       this.state.fx.reverbReturn.set(msg.args[0] as number);
+      return;
+    }
+
+    // Synth bus echoes — group fader + mute for all synths.
+    if (a === '/synth/bus/volume' && msg.types === 'f') {
+      this.state.synthBus.volume.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/bus/on' && msg.types === 'i') {
+      this.state.synthBus.on.set((msg.args[0] as number) !== 0);
+      return;
+    }
+
+    // Looper echoes — source (int), level (float), state (string),
+    // length (float seconds). Transport actions on the firmware side
+    // always fire /loop/state + /loop/length together so the UI flips
+    // button highlights without polling.
+    if (a === '/loop/source' && msg.types === 'i') {
+      this.state.looper.source.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/loop/level' && msg.types === 'f') {
+      this.state.looper.level.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/loop/state' && msg.types === 's') {
+      this.state.looper.transport.set(msg.args[0] as string);
+      return;
+    }
+    if (a === '/loop/length' && msg.types === 'f') {
+      this.state.looper.length.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/loop/quantize' && msg.types === 'i') {
+      this.state.looper.quantize.set((msg.args[0] as number) !== 0);
+      return;
+    }
+    if (a === '/loop/armed' && msg.types === 'i') {
+      this.state.looper.armed.set(msg.args[0] as number);
+      return;
+    }
+
+    // Clock echoes — source (string), bpm (float), running (int),
+    // beatsPerBar (int). Source strings are 'ext' / 'int'; clamp to
+    // the two legal values so a malformed echo can't poison the UI.
+    if (a === '/clock/source' && msg.types === 's') {
+      const s = msg.args[0] as string;
+      this.state.clock.source.set(s === 'int' ? 'int' : 'ext');
+      return;
+    }
+    if (a === '/clock/bpm' && msg.types === 'f') {
+      this.state.clock.bpm.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/clock/running' && msg.types === 'i') {
+      this.state.clock.running.set((msg.args[0] as number) !== 0);
+      return;
+    }
+    if (a === '/clock/beatsPerBar' && msg.types === 'i') {
+      this.state.clock.beatsPerBar.set(msg.args[0] as number);
+      return;
+    }
+
+    // Beats echoes. Per-step messages arrive with type 'iii' — clamp
+    // track/step to valid ranges before poking the signal arrays.
+    if (a === '/beats/run' && msg.types === 'i') {
+      this.state.beats.running.set((msg.args[0] as number) !== 0);
+      return;
+    }
+    if (a === '/beats/bpm' && msg.types === 'f') {
+      this.state.beats.bpm.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/beats/swing' && msg.types === 'f') {
+      this.state.beats.swing.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/beats/volume' && msg.types === 'f') {
+      this.state.beats.volume.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/beats/cursor' && msg.types === 'i') {
+      this.state.beats.cursor.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/beats/sd' && msg.types === 'i') {
+      this.state.beats.sdReady.set((msg.args[0] as number) !== 0);
+      return;
+    }
+    if (a === '/beats/clockSource' && msg.types === 's') {
+      const s = msg.args[0] as string;
+      if (s === 'internal' || s === 'external') this.state.beats.clockSource.set(s);
+      return;
+    }
+    if (a === '/beats/mute' && msg.types === 'ii') {
+      const trk = msg.args[0] as number;
+      const t = this.state.beats.tracks[trk];
+      if (t) t.muted.set((msg.args[1] as number) !== 0);
+      return;
+    }
+    if (a === '/beats/step' && msg.types === 'iii') {
+      const trk  = msg.args[0] as number;
+      const step = msg.args[1] as number;
+      const t = this.state.beats.tracks[trk];
+      if (t && step >= 0 && step < BEATS_STEP_COUNT) {
+        t.stepsOn[step].set((msg.args[2] as number) !== 0);
+      }
+      return;
+    }
+    if (a === '/beats/vel' && msg.types === 'iif') {
+      const trk  = msg.args[0] as number;
+      const step = msg.args[1] as number;
+      const t = this.state.beats.tracks[trk];
+      if (t && step >= 0 && step < BEATS_STEP_COUNT) {
+        t.stepsVel[step].set(msg.args[2] as number);
+      }
+      return;
+    }
+    if (a === '/beats/sample' && msg.types === 'is') {
+      const trk = msg.args[0] as number;
+      const t = this.state.beats.tracks[trk];
+      if (t) t.sample.set(msg.args[1] as string);
+      return;
+    }
+    // Firmware /beats/clear is a write-only echo; the per-step echoes
+    // that follow (for any steps that were actually on) drive per-cell
+    // signals. Optimistic clear already zeroed the cells on outbound.
+    if (a === '/beats/clear' && msg.types === 'i') {
       return;
     }
 

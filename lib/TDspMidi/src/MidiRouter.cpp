@@ -245,4 +245,25 @@ void MidiRouter::handleSysEx(const uint8_t *data, size_t length, bool last) {
     }
 }
 
+// --- System Real-Time -------------------------------------------------
+//
+// No channel, no payload. Fan out as-is; sinks that don't care return
+// via the MidiSink default no-op overrides.
+
+void MidiRouter::handleClock() {
+    for (int i = 0; i < _sinkCount; ++i) _sinks[i]->onClock();
+}
+
+void MidiRouter::handleStart() {
+    for (int i = 0; i < _sinkCount; ++i) _sinks[i]->onStart();
+}
+
+void MidiRouter::handleContinue() {
+    for (int i = 0; i < _sinkCount; ++i) _sinks[i]->onContinue();
+}
+
+void MidiRouter::handleStop() {
+    for (int i = 0; i < _sinkCount; ++i) _sinks[i]->onStop();
+}
+
 }  // namespace tdsp

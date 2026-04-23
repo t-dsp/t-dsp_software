@@ -191,6 +191,72 @@ export interface FxState {
   reverbReturn: Signal<number>;  // 0..1 wet level into main
 }
 
+// Mono looper state — mirror of the firmware's tdsp::Looper plus the
+// sketch-side source/level bookkeeping. transport is the authoritative
+// mode string echoed from /loop/state: "idle" | "rec" | "play" | "stopped".
+// length is in seconds (0 while Idle / before the first take finalizes).
+export interface LooperState {
+  source:    Signal<number>;  // 0 = none, 1..N = channel index
+  level:     Signal<number>;  // 0..1 return level
+  transport: Signal<string>;  // idle | rec | play | stopped
+  length:    Signal<number>;  // seconds
+  // Quantize-to-beat: when true, the firmware defers transport actions
+  // (rec/play/stop/clear) to the next clock beat edge instead of firing
+  // immediately. `armed` echoes which action is pending (0=none,
+  // 1=rec, 2=play, 3=stop, 4=clear). Used by the Loop panel to show
+  // a pending-action indicator.
+  quantize:  Signal<boolean>;
+  armed:     Signal<number>;
+}
+
+// Beats drum machine state (Beats tab). 4 tracks × 16 steps, per-step
+// on/velocity signals so a click on a single cell only notifies
+// subscribers watching that cell. Track names are client-fixed —
+// firmware doesn't broadcast them.
+export const BEATS_TRACK_COUNT = 4;
+export const BEATS_STEP_COUNT  = 16;
+
+export interface BeatsTrackState {
+  name:     string;                 // fixed; not broadcast
+  muted:    Signal<boolean>;
+  sample:   Signal<string>;         // filename on SD; empty for synth tracks
+  isSample: boolean;                // true for tracks 2/3 in the MVP
+  stepsOn:  Signal<boolean>[];      // length 16
+  stepsVel: Signal<number>[];       // length 16; 0..1
+}
+
+export interface BeatsState {
+  running:     Signal<boolean>;
+  bpm:         Signal<number>;      // 20..300
+  swing:       Signal<number>;      // 0..0.75
+  volume:      Signal<number>;      // 0..1 group level
+  cursor:      Signal<number>;      // last-fired step (-1 idle)
+  sdReady:     Signal<boolean>;
+  clockSource: Signal<'internal' | 'external'>;
+  tracks:      BeatsTrackState[];   // length BEATS_TRACK_COUNT
+}
+
+// Shared musical-time clock — mirror of firmware `tdsp::Clock`. Drives
+// every tempo-aware module (looper quantize, future LFO sync, beat
+// machine). source=='ext' means the clock is slaved to incoming MIDI
+// 0xF8 ticks; 'int' means the firmware is master at `bpm`. `running`
+// is echoed from transport (Start / Stop / Continue or stall watchdog).
+export interface ClockState {
+  source:       Signal<'ext' | 'int'>;
+  bpm:          Signal<number>;     // 20..300; last-measured in ext, set point in int
+  running:      Signal<boolean>;    // transport running / stopped
+  beatsPerBar:  Signal<number>;     // 1..16
+}
+
+// Synth bus — group fader + mute sitting downstream of every per-synth
+// volume and upstream of preMix slot 1. Also taps the looper source mux
+// (the "Synth" option), so recording the synth source captures whatever
+// this bus lets through.
+export interface SynthBusState {
+  volume: Signal<number>;   // 0..1 linear
+  on:     Signal<boolean>;  // X32-style mix-on
+}
+
 export interface MixerState {
   channels: ChannelState[];
   main: BusState;
@@ -198,6 +264,10 @@ export interface MixerState {
   mpe: MpeState;
   processing: ProcessingState;
   fx: FxState;
+  synthBus: SynthBusState;
+  looper: LooperState;
+  clock: ClockState;
+  beats: BeatsState;
   connected: Signal<boolean>;
   metersOn: Signal<boolean>;
 }
@@ -325,7 +395,80 @@ export function createMixerState(channelCount: number): MixerState {
       reverbDamping: new Signal(0.5),
       reverbReturn:  new Signal(0.6),
     },
+    synthBus: {
+      // Defaults match main.cpp cold-boot (g_synthBusVolume=0.8, g_synthBusOn=true).
+      volume: new Signal(0.8),
+      on:     new Signal(true),
+    },
+    looper: {
+      // Defaults match main.cpp cold-boot (g_looperSource=0, g_looperLevel=1.0,
+      // Looper::state()=Idle, length=0). /snapshot echoes overwrite on connect.
+      source:    new Signal(0),
+      level:     new Signal(1.0),
+      transport: new Signal('idle'),
+      length:    new Signal(0),
+      quantize:  new Signal(false),
+      armed:     new Signal(0),
+    },
+    clock: {
+      // Defaults match tdsp::Clock cold-boot: External source, 120 BPM
+      // placeholder (overwritten by first /clock/bpm echo or snapshot),
+      // not running until transport fires, 4/4.
+      source:       new Signal<'ext' | 'int'>('ext'),
+      bpm:          new Signal(120),
+      running:      new Signal(false),
+      beatsPerBar:  new Signal(4),
+    },
+    beats: createBeatsState(),
     connected: new Signal(false),
     metersOn: new Signal(true),   // on by default; connect() re-subscribes
+  };
+}
+
+const BEATS_TRACK_DEFS: Array<{ name: string; isSample: boolean; defaultSample: string }> = [
+  { name: 'Kick',  isSample: false, defaultSample: '' },
+  { name: 'Snare', isSample: false, defaultSample: '' },
+  { name: 'Hat',   isSample: true,  defaultSample: 'HAT.WAV' },
+  { name: 'Perc',  isSample: true,  defaultSample: 'CLAP.WAV' },
+];
+
+// Default demo pattern mirrors the firmware's setup() preload so the
+// grid renders correctly on the very first frame (before /snapshot's
+// echoes land). Four-on-the-floor kick + backbeat snare + offbeat hat.
+const BEATS_DEFAULT_PATTERN: boolean[][] = [
+  /* Kick  */ [true, false,false,false, true, false,false,false, true, false,false,false, true, false,false,false],
+  /* Snare */ [false,false,false,false, true, false,false,false, false,false,false,false, true, false,false,false],
+  /* Hat   */ [false,false,true, false, false,false,true, false, false,false,true, false, false,false,true, false],
+  /* Perc  */ [false,false,false,false, false,false,false,false, false,false,false,false, false,false,false,false],
+];
+
+function createBeatsState(): BeatsState {
+  const tracks: BeatsTrackState[] = [];
+  for (let t = 0; t < BEATS_TRACK_COUNT; t++) {
+    const def = BEATS_TRACK_DEFS[t];
+    const stepsOn:  Signal<boolean>[] = [];
+    const stepsVel: Signal<number>[]  = [];
+    for (let s = 0; s < BEATS_STEP_COUNT; s++) {
+      stepsOn.push (new Signal(BEATS_DEFAULT_PATTERN[t]?.[s] ?? false));
+      stepsVel.push(new Signal(100 / 127));  // matches firmware default vel=100
+    }
+    tracks.push({
+      name: def.name,
+      isSample: def.isSample,
+      muted:  new Signal(false),
+      sample: new Signal(def.defaultSample),
+      stepsOn,
+      stepsVel,
+    });
+  }
+  return {
+    running:     new Signal(false),
+    bpm:         new Signal(120),
+    swing:       new Signal(0),
+    volume:      new Signal(0.7),     // matches firmware default
+    cursor:      new Signal(-1),
+    sdReady:     new Signal(false),
+    clockSource: new Signal<'internal' | 'external'>('internal'),
+    tracks,
   };
 }

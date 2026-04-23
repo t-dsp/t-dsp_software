@@ -47,6 +47,9 @@
 #include <TDspMixer.h>
 #include <TDspMidi.h>
 #include <TDspMPE.h>
+#include <TDspNeuro.h>
+#include <TDspLooper.h>
+#include <TDspClock.h>
 #include <synth_dexed.h>
 
 #include "Tac5212Panel.h"
@@ -166,6 +169,20 @@ AudioMixer4              mpeMixL, mpeMixR;
 AudioAmplifier           mpeGainL, mpeGainR;
 AudioAmplifier           g_mpeSend;
 
+// TDspNeuro — monophonic reese/neuro bass engine (Phase 2e). One voice,
+// four oscillators (three saws + one sub sine) summed through a mixer
+// into a resonant SVF filter, then envelope, then volume + FX send.
+// Because the engine is mono-out, a single g_neuroGain amp fans out to
+// BOTH sides of synthBus slot 3 (same dual-mono pattern Dexed uses).
+// The FX-send amp taps post-gain into fxSendBus slot 2 (Dexed=0, MPE=1).
+AudioSynthWaveform       neuroOsc1, neuroOsc2, neuroOsc3;  // saws
+AudioSynthWaveform       neuroOscSub;                      // sub sine
+AudioMixer4              neuroVoiceMix;                    // sums the 4 oscs
+AudioFilterStateVariable neuroFilt;
+AudioEffectEnvelope      neuroEnv;
+AudioAmplifier           g_neuroGain;
+AudioAmplifier           g_neuroSend;
+
 // ---- Shared FX bus -------------------------------------------------
 //
 // Every synth taps its post-volume signal through its own send amp
@@ -196,6 +213,26 @@ AudioEffectChorus        fxChorus;
 AudioEffectFreeverbStereo fxReverb;
 AudioAmplifier           fxReturnL;
 AudioAmplifier           fxReturnR;
+
+// ---- Synth bus -----------------------------------------------------
+//
+// Aggregates every synth signal (Dexed dry, MPE dry, shared-FX wet
+// return) into a single stereo bus with its own fader + mute. The
+// bus output feeds BOTH the main mix (preMix slot 1) and the looper
+// source mux (loopSrcB slot 3, mono from the L side), so one fader
+// controls what the engineer hears AND what the looper records.
+// preMix slots 2,3 are freed up by this refactor — kept documented as
+// "reserved" so future engines know where to land.
+//
+// synthAmp gain = g_synthOn ? g_synthVolume : 0. When off, the synths
+// keep running silently (same pattern as per-synth on/off) so a
+// toggle is click-free. Per-synth volumes (g_dexedGain, mpeGainL/R)
+// are still the primary trim; this bus fader is a quick "all synths"
+// knob that also owns the looper tap.
+AudioMixer4              synthBusL;
+AudioMixer4              synthBusR;
+AudioAmplifier           synthAmpL;
+AudioAmplifier           synthAmpR;
 
 // Four-stage main bus chain:
 //   preMixL → mainAmpL (faderL × on) → hostvolAmpL (hostvol bypass)
@@ -273,6 +310,37 @@ AudioAmplifier       monMicR;
 // of the main mixer. In stereo mode gain=0 (silent); in mono/differential
 // mode gain=1 and the binding mirrors ch3's effective gain to mixR[3].
 AudioAmplifier       monoXfeed;
+
+// ---- Mono looper ---------------------------------------------------
+//
+// One tdsp::Looper node with a caller-owned int16 sample buffer. For
+// the stock-build (no PSRAM) we put the buffer in DMAMEM sized for
+// ~2 s mono — plenty for a drum-pattern bar or a chord stab and well
+// under the 300-400 KB of DMAMEM that's typically free after the
+// audio-block pool and other DMAMEM users. When an APS6404L-3SQR-ZR
+// is soldered into the T4.1's PSRAM1 footprint, flip the storage
+// class to EXTMEM and bump kLooperSamples — the class is storage-
+// agnostic, so that's the only edit needed.
+//
+// Source is selected via a 2-stage mux (loopSrcA + loopSrcB). Exactly
+// one gain is 1.0 across the whole tree; all others 0.0. Tap points
+// are PRE-fader (raw inputs from usbIn / tdmIn / pdmMix) so the loop
+// captures the performance independently of the channel strip's
+// fader position — standard pedal-looper behavior.
+//
+// Return: g_looper's mono output is dual-monoed into postMixL/R slot 1,
+// which sits between preMix and mainAmp. postMix slot 0 is the existing
+// preMix mix; the extra stage adds one audio block of latency (~2.9 ms
+// at 44.1 kHz) to the main path — the same tax preMix already pays.
+constexpr uint32_t kLooperSamples = 88200;  // ~2.0 s @ 44.1 kHz mono int16
+DMAMEM int16_t g_looperBuffer[kLooperSamples];
+tdsp::Looper   g_looper(g_looperBuffer, kLooperSamples);
+
+AudioMixer4    loopSrcA;   // channels 1..4 pre-fader taps
+AudioMixer4    loopSrcB;   // cascades loopSrcA + ch5 + ch6 → looper input
+
+AudioMixer4    postMixL;   // preMixL + looper return → mainAmpL
+AudioMixer4    postMixR;   // preMixR + looper return → mainAmpR
 
 AudioOutputTDM       tdmOut;
 AudioOutputUSB       usbOut;
@@ -357,9 +425,10 @@ AudioConnection      c_mixR_pre    (mixR, 0, preMixR, 0);
 // which Teensy Audio supports natively (each connection gets the same
 // block, ref-counted internally).
 AudioConnection      c_dexed_gain  (g_dexed,     0, g_dexedGain, 0);
-// Dry path — dual-mono into preMix slot 1.
-AudioConnection      c_dexed_preL  (g_dexedGain, 0, preMixL,     1);
-AudioConnection      c_dexed_preR  (g_dexedGain, 0, preMixR,     1);
+// Dry path — dual-mono into synthBus slot 0 (Dexed is mono; g_dexedGain
+// fans out to both L and R sides of the bus so it centers in the field).
+AudioConnection      c_dexed_busL  (g_dexedGain, 0, synthBusL,   0);
+AudioConnection      c_dexed_busR  (g_dexedGain, 0, synthBusR,   0);
 // FX send path — post-volume tap through the per-synth send amp into
 // the shared FX bus slot 0. Setting g_dexedSend's gain to 0 mutes
 // just this synth's contribution; other synths keep sending.
@@ -388,25 +457,87 @@ AudioConnection      c_mpeEnv3_L    (mpeEnv3,  0, mpeMixL,  3);
 AudioConnection      c_mpeEnv3_R    (mpeEnv3,  0, mpeMixR,  3);
 AudioConnection      c_mpeMixL_gain (mpeMixL,  0, mpeGainL, 0);
 AudioConnection      c_mpeMixR_gain (mpeMixR,  0, mpeGainR, 0);
-// Dry path — mpeGainL/R into preMix slot 2 (preMix slot 3 is taken
-// by the shared FX wet return).
-AudioConnection      c_mpeGainL_pre (mpeGainL, 0, preMixL,  2);
-AudioConnection      c_mpeGainR_pre (mpeGainR, 0, preMixR,  2);
+// Dry path — mpeGainL/R into synthBus slot 1.
+AudioConnection      c_mpeGainL_bus (mpeGainL, 0, synthBusL, 1);
+AudioConnection      c_mpeGainR_bus (mpeGainR, 0, synthBusR, 1);
 // FX send path — L side only (MPE is dual-mono so mpeGainL carries
 // the full mono content). Feeds shared FX bus slot 1.
 AudioConnection      c_mpe_send     (mpeGainL, 0, g_mpeSend, 0);
 AudioConnection      c_mpe_bus      (g_mpeSend, 0, fxSendBus, 1);
 
-// Shared FX chain: send bus → chorus → stereo reverb → return amps → preMix slot 3.
+// Neuro (reese) voice chain: 3 saws + sub sine → voiceMix → filter →
+// env → gain → synth bus (dual-mono, slot 3). Engine is mono so a
+// single g_neuroGain amp fans out to both L+R sides of the synth bus.
+// FX send taps post-gain into fxSendBus slot 2 (Dexed=0, MPE=1, Neuro=2).
+AudioConnection      c_neuro_o1_mix (neuroOsc1,     0, neuroVoiceMix, 0);
+AudioConnection      c_neuro_o2_mix (neuroOsc2,     0, neuroVoiceMix, 1);
+AudioConnection      c_neuro_o3_mix (neuroOsc3,     0, neuroVoiceMix, 2);
+AudioConnection      c_neuro_os_mix (neuroOscSub,   0, neuroVoiceMix, 3);
+AudioConnection      c_neuro_mix_f  (neuroVoiceMix, 0, neuroFilt,     0);
+AudioConnection      c_neuro_f_env  (neuroFilt,     0, neuroEnv,      0);
+AudioConnection      c_neuro_env_g  (neuroEnv,      0, g_neuroGain,   0);
+AudioConnection      c_neuro_g_busL (g_neuroGain,   0, synthBusL,     3);
+AudioConnection      c_neuro_g_busR (g_neuroGain,   0, synthBusR,     3);
+AudioConnection      c_neuro_g_send (g_neuroGain,   0, g_neuroSend,   0);
+AudioConnection      c_neuro_fx_bus (g_neuroSend,   0, fxSendBus,     2);
+
+// Shared FX chain: send bus → chorus → stereo reverb → return amps → synthBus slot 2.
+// Routing the wet return through the synth bus (rather than directly into
+// preMix) means the Synth strip's fader also scales the FX return — which
+// matches the mental model "the synths, dry + wet, as a group." Non-synth
+// sources never reach fxSendBus, so there's no collateral effect.
 AudioConnection      c_fx_bus_cho  (fxSendBus,  0, fxChorus,  0);
 AudioConnection      c_fx_cho_rev  (fxChorus,   0, fxReverb,  0);
 AudioConnection      c_fx_rev_retL (fxReverb,   0, fxReturnL, 0);
 AudioConnection      c_fx_rev_retR (fxReverb,   1, fxReturnR, 0);
-AudioConnection      c_fx_retL_pre (fxReturnL,  0, preMixL,   3);
-AudioConnection      c_fx_retR_pre (fxReturnR,  0, preMixR,   3);
+AudioConnection      c_fx_retL_bus (fxReturnL,  0, synthBusL, 2);
+AudioConnection      c_fx_retR_bus (fxReturnR,  0, synthBusR, 2);
 
-AudioConnection      c_mainL_amp   (preMixL, 0, mainAmpL, 0);
-AudioConnection      c_mainR_amp   (preMixR, 0, mainAmpR, 0);
+// Synth bus → synth amp (fader/mute) → preMix slot 1 (stereo, one slot
+// per side). preMix slots 2,3 are now unused — reserved for future
+// aggregate buses (a "drum bus" would land there, mirroring this pattern).
+AudioConnection      c_synthBusL_amp (synthBusL, 0, synthAmpL, 0);
+AudioConnection      c_synthBusR_amp (synthBusR, 0, synthAmpR, 0);
+AudioConnection      c_synthAmpL_pre (synthAmpL, 0, preMixL,   1);
+AudioConnection      c_synthAmpR_pre (synthAmpR, 0, preMixR,   1);
+
+// ---- Looper source mux + return wiring -----------------------------
+//
+// Pre-fader taps from the six input channels feed into a 2-stage mux
+// whose output drives g_looper's input. Selection is by gain: exactly
+// one path is 1.0, all others 0.0 (driven by applyLooperSource()).
+//
+//   ch1 USB L ──┐
+//   ch2 USB R ──┤
+//   ch3 Line L ─┼─ loopSrcA ──┐
+//   ch4 Line R ─┘             ├─ loopSrcB ── g_looper ─┐
+//                 ch5 Mic L ──┤                        │ (dual-mono)
+//                 ch6 Mic R ──┤                        ├→ postMixL[1]
+//                synthAmpL ──┘                         └→ postMixR[1]
+// "Synth" source is a seventh option (see applyLooperSource) that
+// lands on loopSrcB slot 3. The L side of the synth bus is used as
+// the mono summary — Dexed is mono (dual-monoed into L+R), MPE is
+// dual-mono, FX wet has true stereo content but L-only is a fine mono
+// reduction for a bench-tool looper.
+AudioConnection      c_loopTap_ch1 (usbIn,    0, loopSrcA, 0);
+AudioConnection      c_loopTap_ch2 (usbIn,    1, loopSrcA, 1);
+AudioConnection      c_loopTap_ch3 (tdmIn,    0, loopSrcA, 2);
+AudioConnection      c_loopTap_ch4 (tdmIn,    2, loopSrcA, 3);
+AudioConnection      c_loopSrcA_B  (loopSrcA, 0, loopSrcB, 0);
+AudioConnection      c_loopTap_ch5 (pdmMixL,  0, loopSrcB, 1);
+AudioConnection      c_loopTap_ch6 (pdmMixR,  0, loopSrcB, 2);
+AudioConnection      c_loopTap_syn (synthAmpL,0, loopSrcB, 3);
+AudioConnection      c_loopSrcB_lp (loopSrcB, 0, g_looper, 0);
+AudioConnection      c_loop_retL   (g_looper, 0, postMixL, 1);
+AudioConnection      c_loop_retR   (g_looper, 0, postMixR, 1);
+
+// Main path: preMix → postMix → mainAmp. The extra stage carries the
+// looper return on slot 1 (slot 0 is the regular pre-main mix). Adds
+// one audio block of latency (~2.9 ms) to the main path.
+AudioConnection      c_pre_postL   (preMixL,  0, postMixL, 0);
+AudioConnection      c_pre_postR   (preMixR,  0, postMixR, 0);
+AudioConnection      c_mainL_amp   (postMixL, 0, mainAmpL, 0);
+AudioConnection      c_mainR_amp   (postMixR, 0, mainAmpR, 0);
 AudioConnection      c_mainL_hv    (mainAmpL, 0, hostvolAmpL, 0);
 AudioConnection      c_mainR_hv    (mainAmpR, 0, hostvolAmpR, 0);
 AudioConnection      c_hvL_shelf   (hostvolAmpL, 0, procShelfL,   0);
@@ -671,6 +802,23 @@ MIDIDevice   g_midiIn(g_usbHost);
 tdsp::MidiRouter g_midiRouter;
 DexedSink        g_dexedSink(&g_dexed);
 
+// Shared musical-time clock. Drives any module that wants tempo-sync
+// (looper quantize, future arpeggiators / tempo-synced LFOs). Defaults
+// to External source — it slaves to an upstream sequencer's MIDI clock
+// as soon as one starts sending 0xF8. Switching to Internal runs a
+// free-running 120 BPM tick so LFOs can sync even without an upstream.
+// g_clockSink is the MidiRouter bridge: 0xF8/0xFA/0xFB/0xFC arrive
+// there and get folded into g_clock.
+tdsp::Clock     g_clock;
+tdsp::ClockSink g_clockSink(&g_clock);
+
+// Quantize flag for looper transport. When on, /looper/record /play
+// /stop are deferred to the next beat boundary instead of firing
+// immediately. Acted on in loop() via g_clock.consumeBeatEdge().
+//   0 = none, 1 = record, 2 = play, 3 = stop, 4 = clear
+static uint8_t g_looperArmedAction = 0;
+static bool    g_looperQuantize    = false;
+
 // MPE VA sink + voice-port wiring. The sink never allocates; it just
 // steers the file-scope oscillator / filter / envelope primitives via
 // pointers handed to it at construction.
@@ -714,6 +862,133 @@ static void applyMpeSend(float v) {
     if (v > 1.0f) v = 1.0f;
     g_mpeSendAmount = v;
     g_mpeSend.gain(v);
+}
+
+// --------------------------------------------------------------------
+// TDspNeuro — monophonic reese bass engine (Phase 2e)
+//
+// Same volume / on / fx-send pattern as Dexed and MPE. The engine
+// itself is a single mono voice (NeuroSink handles last-note priority
+// + legato portamento); most parameters live inside the sink and are
+// reached via /synth/neuro/* OSC in the handler section. The sketch
+// only tracks the values AudioAmplifier has no getter for (volume,
+// on, send amount).
+//
+// Default listen channel is 3 (Dexed=1, MPE=2, Neuro=3) so a three-
+// zone keyboard naturally routes to three engines.
+// --------------------------------------------------------------------
+NeuroSink::VoicePorts g_neuroPorts = {
+    &neuroOsc1, &neuroOsc2, &neuroOsc3, &neuroOscSub,
+    &neuroVoiceMix, &neuroFilt, &neuroEnv,
+};
+NeuroSink g_neuroSink(g_neuroPorts);
+
+static float g_neuroVolume     = 0.7f;
+static float g_neuroSendAmount = 0.0f;
+static bool  g_neuroOn         = true;
+
+static void applyNeuroGain() {
+    g_neuroGain.gain(g_neuroOn ? g_neuroVolume : 0.0f);
+}
+static void applyNeuroVolume(float v) {
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    g_neuroVolume = v;
+    applyNeuroGain();
+}
+static void applyNeuroOn(bool on) {
+    g_neuroOn = on;
+    applyNeuroGain();
+}
+static void applyNeuroSend(float v) {
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    g_neuroSendAmount = v;
+    g_neuroSend.gain(v);
+}
+
+// --------------------------------------------------------------------
+// Synth bus (aggregate of Dexed + MPE + shared FX wet return)
+//
+// A stereo sum with its own fader + mute. Downstream of every synth's
+// own per-engine volume — this bus is the "all synths, as a group"
+// trim — and upstream of preMix slot 1. Also taps the looper source
+// mux (loopSrcB slot 3, mono from the L side).
+//
+// X32-style on/off: muting zeros synthAmp gain without touching the
+// stored volume, so toggling back on restores the fader position.
+// --------------------------------------------------------------------
+static float g_synthBusVolume = 0.8f;   // 0..1 linear
+static bool  g_synthBusOn     = true;
+
+static void applySynthBusGain() {
+    const float g = g_synthBusOn ? g_synthBusVolume : 0.0f;
+    synthAmpL.gain(g);
+    synthAmpR.gain(g);
+}
+
+static void applySynthBusVolume(float v) {
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    g_synthBusVolume = v;
+    applySynthBusGain();
+}
+
+static void applySynthBusOn(bool on) {
+    g_synthBusOn = on;
+    applySynthBusGain();
+}
+
+// --------------------------------------------------------------------
+// Looper state (source mux + return level)
+//
+// g_looperSource is 1..6 = channel index, 7 = synth bus, 0 = none
+// (mux gains all zero, looper input is silent). Kept in the sketch so
+// snapshot() can echo it; the Looper class itself is source-agnostic.
+//
+// g_looperLevel mirrors the Looper's return level (0..1) for the same
+// reason — AudioAmplifier has no getter for gain, and we want to echo
+// what was last set via OSC.
+// --------------------------------------------------------------------
+static uint8_t g_looperSource = 0;     // 0 = none, 1..6 = channel, 7 = synth bus
+static float   g_looperLevel  = 1.0f;  // 0..1 return level
+
+// Drive the 2-stage source mux from g_looperSource. Exactly one path
+// is unity, all others zero.
+//   src 1..4 → loopSrcA slot (src-1), loopSrcB slot 0
+//   src 5..6 → loopSrcB slot (src-4)
+//   src 7    → loopSrcB slot 3 (synth bus L tap)
+//   src 0    → everything silent
+static void applyLooperSource() {
+    const uint8_t s = g_looperSource;
+    for (int i = 0; i < 4; ++i) {
+        loopSrcA.gain(i, (s >= 1 && s <= 4 && (s - 1) == i) ? 1.0f : 0.0f);
+    }
+    // loopSrcB slot 0 carries loopSrcA's output (channels 1..4).
+    // Slots 1,2 carry Mic L / Mic R direct taps. Slot 3 carries the
+    // synth bus (L side) for the "Synth" source option.
+    loopSrcB.gain(0, (s >= 1 && s <= 4) ? 1.0f : 0.0f);
+    loopSrcB.gain(1, (s == 5)           ? 1.0f : 0.0f);
+    loopSrcB.gain(2, (s == 6)           ? 1.0f : 0.0f);
+    loopSrcB.gain(3, (s == 7)           ? 1.0f : 0.0f);
+}
+
+static void applyLooperLevel(float v) {
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    g_looperLevel = v;
+    g_looper.setReturnLevel(v);
+}
+
+// String form of the looper state for OSC echo. "idle" / "rec" / "play"
+// / "stopped" — matches the verb set the UI uses for transport buttons.
+static const char *looperStateStr() {
+    switch (g_looper.state()) {
+        case tdsp::Looper::Recording: return "rec";
+        case tdsp::Looper::Playing:   return "play";
+        case tdsp::Looper::Stopped:   return "stopped";
+        default:                      return "idle";
+    }
 }
 
 // ============================================================================
@@ -817,6 +1092,14 @@ static void onUsbHostProgramChange(uint8_t channel, uint8_t program) {
 static void onUsbHostSysEx(const uint8_t *data, uint16_t length, bool last) {
     g_midiRouter.handleSysEx(data, (size_t)length, last);
 }
+
+// System Real-Time handlers. USBHost_t36 delivers these as channelless
+// events — no payload, just the event kind. Fan them into the router
+// which dispatches to g_clockSink and any other sink that listens.
+static void onUsbHostClock()    { g_midiRouter.handleClock();    }
+static void onUsbHostStart()    { g_midiRouter.handleStart();    }
+static void onUsbHostContinue() { g_midiRouter.handleContinue(); }
+static void onUsbHostStop()     { g_midiRouter.handleStop();     }
 
 // ============================================================================
 // Hand-rolled codec init (Phase 1 path, preserved as the working audio config)
@@ -1253,12 +1536,214 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
+    // --- Synth bus (group fader / mute for all synths) ---------------
+    //
+    // /synth/bus/volume f — 0..1 linear
+    // /synth/bus/on     i — X32-style mix-on
+    //
+    // Group trim that sits between the per-synth volumes (g_dexedGain,
+    // mpeGainL/R, fxReturnL/R) and preMix slot 1. Also feeds the looper
+    // source mux so recording the "Synth" source captures whatever this
+    // fader lets through. No args = read, typed arg = write-then-echo.
+    if (strcmp(address, "/synth/bus/volume") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/bus/volume"); m.add(g_synthBusVolume); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            applySynthBusVolume(msg.getFloat(0));
+            OSCMessage m("/synth/bus/volume"); m.add(g_synthBusVolume); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/bus/on") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/bus/on"); m.add((int)(g_synthBusOn ? 1 : 0)); reply.add(m);
+        } else if (msg.isInt(0)) {
+            applySynthBusOn(msg.getInt(0) != 0);
+            OSCMessage m("/synth/bus/on"); m.add((int)(g_synthBusOn ? 1 : 0)); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
     // --- Main-bus processing: high-shelf EQ + peak-limit waveshaper --
     //
     // Addresses live under /proc/ so they're clearly separate from the
     // mixer's /main/st/* tree; the Processing tab in the web UI owns
     // this namespace. All four fields follow the standard pattern:
     // no args = echo current, typed args = write-then-echo.
+
+    // --- Mono looper ---------------------------------------------------
+    //
+    // Addresses:
+    //   /loop/source i              0=none, 1..6=channel, 7=synth bus
+    //   /loop/record / /play /
+    //   /loop/stop / /clear          transport actions (no args required)
+    //   /loop/level f                0..1 return level into main
+    //   /loop/state                  read-only; echoes "idle|rec|play|stopped"
+    //   /loop/length                 read-only; echoes float seconds
+    //
+    // Transport actions always reply with /loop/state (and /loop/length,
+    // which changes on record-finalize) so the UI can flip button states
+    // without a round-trip query. /source and /level follow the standard
+    // "no args = echo, typed arg = write-then-echo" pattern used elsewhere.
+
+    if (strcmp(address, "/loop/source") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/loop/source"); m.add((int)g_looperSource); reply.add(m);
+        } else if (msg.isInt(0)) {
+            int s = msg.getInt(0);
+            if (s < 0) s = 0;
+            if (s > 7) s = 7;  // 0=none, 1..6=channels, 7=synth bus
+            g_looperSource = (uint8_t)s;
+            applyLooperSource();
+            OSCMessage m("/loop/source"); m.add((int)g_looperSource); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/loop/level") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/loop/level"); m.add(g_looperLevel); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            applyLooperLevel(msg.getFloat(0));
+            OSCMessage m("/loop/level"); m.add(g_looperLevel); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/loop/state") == 0) {
+        OSCBundle reply;
+        OSCMessage m("/loop/state"); m.add(looperStateStr()); reply.add(m);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/loop/length") == 0) {
+        OSCBundle reply;
+        OSCMessage m("/loop/length"); m.add(g_looper.lengthSeconds()); reply.add(m);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/loop/record") == 0 ||
+        strcmp(address, "/loop/play")   == 0 ||
+        strcmp(address, "/loop/stop")   == 0 ||
+        strcmp(address, "/loop/clear")  == 0) {
+        // Pick the action code for g_looperArmedAction / immediate fire.
+        uint8_t action = 0;
+        if      (strcmp(address, "/loop/record") == 0) action = 1;
+        else if (strcmp(address, "/loop/play")   == 0) action = 2;
+        else if (strcmp(address, "/loop/stop")   == 0) action = 3;
+        else                                           action = 4;
+
+        // Quantize arms the action — it fires on the next beat edge
+        // consumed in loop(). Toggling quantize off while armed cancels
+        // the pending action (user re-arms by re-sending). If the clock
+        // is stopped (no external ticks, no internal start) quantize
+        // would hang forever — fall through to immediate fire so the
+        // looper still responds to UI taps.
+        if (g_looperQuantize && g_clock.running()) {
+            g_looperArmedAction = action;
+        } else {
+            g_looperArmedAction = 0;
+            switch (action) {
+                case 1: g_looper.record(); break;
+                case 2: g_looper.play();   break;
+                case 3: g_looper.stop();   break;
+                case 4: g_looper.clear();  break;
+            }
+        }
+        OSCBundle reply;
+        OSCMessage ms("/loop/state");  ms.add(looperStateStr());        reply.add(ms);
+        OSCMessage ml("/loop/length"); ml.add(g_looper.lengthSeconds()); reply.add(ml);
+        OSCMessage ma("/loop/armed");  ma.add((int)g_looperArmedAction); reply.add(ma);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/loop/quantize") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/loop/quantize"); m.add((int)(g_looperQuantize ? 1 : 0)); reply.add(m);
+        } else if (msg.isInt(0)) {
+            g_looperQuantize = msg.getInt(0) != 0;
+            // Cancel any pending arm if user toggles off — cleaner than
+            // leaving a ghost action that would fire on the next Start.
+            if (!g_looperQuantize) g_looperArmedAction = 0;
+            OSCMessage m("/loop/quantize"); m.add((int)(g_looperQuantize ? 1 : 0)); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    // --------------- /clock/* — shared musical clock ---------------
+    //
+    // Four endpoints:
+    //   /clock/source        s     "ext" | "int"   (read/write)
+    //   /clock/bpm           f     current tempo   (write only meaningful in int mode)
+    //   /clock/running       i     0 | 1           (read only; transport state)
+    //   /clock/beatsPerBar   i     1..16           (read/write)
+    // Reply shape for write is "echo current value", same convention
+    // as the rest of the OSC surface.
+
+    if (strcmp(address, "/clock/source") == 0) {
+        OSCBundle reply;
+        auto echo = [&]() {
+            OSCMessage m("/clock/source");
+            m.add(g_clock.source() == tdsp::Clock::Internal ? "int" : "ext");
+            reply.add(m);
+        };
+        if (msg.size() == 0) {
+            echo();
+        } else if (msg.isString(0)) {
+            char buf[8] = {0};
+            msg.getString(0, buf, sizeof(buf));
+            if (strncmp(buf, "int", 3) == 0)      g_clock.setSource(tdsp::Clock::Internal);
+            else if (strncmp(buf, "ext", 3) == 0) g_clock.setSource(tdsp::Clock::External);
+            echo();
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/clock/bpm") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/clock/bpm"); m.add(g_clock.bpm()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_clock.setInternalBpm(msg.getFloat(0));
+            OSCMessage m("/clock/bpm"); m.add(g_clock.bpm()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/clock/running") == 0) {
+        OSCBundle reply;
+        OSCMessage m("/clock/running"); m.add((int)(g_clock.running() ? 1 : 0)); reply.add(m);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/clock/beatsPerBar") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/clock/beatsPerBar"); m.add((int)g_clock.beatsPerBar()); reply.add(m);
+        } else if (msg.isInt(0)) {
+            g_clock.setBeatsPerBar((uint8_t)msg.getInt(0));
+            OSCMessage m("/clock/beatsPerBar"); m.add((int)g_clock.beatsPerBar()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
 
     if (strcmp(address, "/proc/shelf/enable") == 0) {
         OSCBundle reply;
@@ -1582,6 +2067,207 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
+    // ------------- /synth/neuro/* — reese/neuro bass engine (Phase 2e)
+    //
+    // Read/write/echo pattern, same as /synth/mpe/*. Every parameter
+    // clamps inside the sink so we can forward raw values and trust
+    // the getters for echo.
+
+    if (strcmp(address, "/synth/neuro/volume") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/volume"); m.add(g_neuroVolume); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            applyNeuroVolume(msg.getFloat(0));
+            OSCMessage m("/synth/neuro/volume"); m.add(g_neuroVolume); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/on") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/on"); m.add((int)(g_neuroOn ? 1 : 0)); reply.add(m);
+        } else if (msg.isInt(0)) {
+            applyNeuroOn(msg.getInt(0) != 0);
+            OSCMessage m("/synth/neuro/on"); m.add((int)(g_neuroOn ? 1 : 0)); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/midi/ch") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/midi/ch"); m.add((int)g_neuroSink.midiChannel()); reply.add(m);
+        } else if (msg.isInt(0)) {
+            int ch = msg.getInt(0);
+            if (ch < 0 || ch > 16) ch = 0;
+            g_neuroSink.onAllNotesOff(0);
+            g_neuroSink.setMidiChannel((uint8_t)ch);
+            OSCMessage m("/synth/neuro/midi/ch"); m.add((int)g_neuroSink.midiChannel()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/attack") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/attack"); m.add(g_neuroSink.attack()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_neuroSink.setAttack(msg.getFloat(0));
+            OSCMessage m("/synth/neuro/attack"); m.add(g_neuroSink.attack()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/release") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/release"); m.add(g_neuroSink.release()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_neuroSink.setRelease(msg.getFloat(0));
+            OSCMessage m("/synth/neuro/release"); m.add(g_neuroSink.release()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/detune") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/detune"); m.add(g_neuroSink.detuneCents()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_neuroSink.setDetuneCents(msg.getFloat(0));
+            OSCMessage m("/synth/neuro/detune"); m.add(g_neuroSink.detuneCents()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/sub") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/sub"); m.add(g_neuroSink.subLevel()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_neuroSink.setSubLevel(msg.getFloat(0));
+            OSCMessage m("/synth/neuro/sub"); m.add(g_neuroSink.subLevel()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/osc3") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/osc3"); m.add(g_neuroSink.osc3Level()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_neuroSink.setOsc3Level(msg.getFloat(0));
+            OSCMessage m("/synth/neuro/osc3"); m.add(g_neuroSink.osc3Level()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/filter/cutoff") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/filter/cutoff"); m.add(g_neuroSink.filterCutoff()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_neuroSink.setFilterCutoff(msg.getFloat(0));
+            OSCMessage m("/synth/neuro/filter/cutoff"); m.add(g_neuroSink.filterCutoff()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/filter/resonance") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/filter/resonance"); m.add(g_neuroSink.filterResonance()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_neuroSink.setFilterResonance(msg.getFloat(0));
+            OSCMessage m("/synth/neuro/filter/resonance"); m.add(g_neuroSink.filterResonance()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/lfo/rate") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/lfo/rate"); m.add(g_neuroSink.lfoRate()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_neuroSink.setLfoRate(msg.getFloat(0));
+            OSCMessage m("/synth/neuro/lfo/rate"); m.add(g_neuroSink.lfoRate()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/lfo/depth") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/lfo/depth"); m.add(g_neuroSink.lfoDepth()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_neuroSink.setLfoDepth(msg.getFloat(0));
+            OSCMessage m("/synth/neuro/lfo/depth"); m.add(g_neuroSink.lfoDepth()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/lfo/dest") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/lfo/dest"); m.add((int)g_neuroSink.lfoDest()); reply.add(m);
+        } else if (msg.isInt(0)) {
+            g_neuroSink.setLfoDest((uint8_t)msg.getInt(0));
+            OSCMessage m("/synth/neuro/lfo/dest"); m.add((int)g_neuroSink.lfoDest()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/lfo/waveform") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/lfo/waveform"); m.add((int)g_neuroSink.lfoWaveform()); reply.add(m);
+        } else if (msg.isInt(0)) {
+            g_neuroSink.setLfoWaveform((uint8_t)msg.getInt(0));
+            OSCMessage m("/synth/neuro/lfo/waveform"); m.add((int)g_neuroSink.lfoWaveform()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/portamento") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/portamento"); m.add(g_neuroSink.portamentoMs()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_neuroSink.setPortamentoMs(msg.getFloat(0));
+            OSCMessage m("/synth/neuro/portamento"); m.add(g_neuroSink.portamentoMs()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/fx/send") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/fx/send"); m.add(g_neuroSendAmount); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            applyNeuroSend(msg.getFloat(0));
+            OSCMessage m("/synth/neuro/fx/send"); m.add(g_neuroSendAmount); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
     // /sub target=/midi/events — subscription for the MIDI visualization
     // broadcast. Intercepted here (not in OscDispatcher) to keep the MIDI
     // path confined to this sketch: OscDispatcher::handleSub only
@@ -1747,7 +2433,24 @@ void setup() {
     // filters + 4 envs + 2 mixers + 3 amps = 17 primitives, each
     // envelope fan-outs into both L+R. Conservatively +24 blocks peak
     // for fan-out headroom → 168.
-    AudioMemory(168);
+    //
+    // TDspLooper adds: g_looper (1 block per update), loopSrcA/B mux
+    // (2 mixers), postMixL/R (2 mixers, inserted between preMix and
+    // mainAmp so they carry the full stereo main signal). Source taps
+    // add one extra fan-out per input source. +16 blocks for the whole
+    // node → 184.
+    //
+    // Synth bus refactor adds synthBusL/R (2 mixers) + synthAmpL/R
+    // (2 amps) between the per-synth gains and preMix. synthAmpL also
+    // fans into loopSrcB slot 3 as the "Synth" looper source. +8
+    // blocks → 192.
+    //
+    // Phase 2e adds TDspNeuro (reese bass) on synthBus slot 3: 4 oscs
+    // + voiceMix + filter + env + gain + send = 9 primitives, plus
+    // dual-mono fan-out from g_neuroGain into both synthBus sides
+    // and an FX-send tap. Conservatively +16 blocks for the whole
+    // node including fan-outs → 208.
+    AudioMemory(208);
 
     // PDM mic amplitude trim: 32-bit PDM split across two 16-bit slots
     // — high 16 bits need a 16x boost, low 16 bits need a 1/65536
@@ -1758,21 +2461,21 @@ void setup() {
     pdmMixR.gain(0, kPdmGain);
     pdmMixR.gain(1, kPdmGain / 65536.0f);
 
-    // preMix bus: slot 0 = input-channel mix, slot 1 = Dexed (volume
-    // is controlled by g_dexedGain upstream, so the slot itself is
-    // unity), slot 2 = TDspMPE (same pattern — mpeGainL/R upstream
-    // controls volume, this slot just passes), slot 3 = shared FX
-    // bus wet return (level owned by fxReturnL/R amps upstream, so
-    // the slot is unity here — wet amount is controlled by
-    // g_fxReverbReturnAmt via applyFxReverb()).
+    // preMix bus: slot 0 = input-channel mix, slot 1 = synth bus (the
+    // synthAmpL/R fader + mute owns the group level; this slot stays
+    // unity), slots 2,3 = reserved for future aggregate buses (e.g. a
+    // "drum bus" mirroring the synth bus pattern). What used to be
+    // per-synth preMix slots (Dexed on 1, MPE on 2, FX wet on 3) is
+    // now rolled into the synth bus upstream so one fader can drive
+    // both main audio and the looper source tap.
     preMixL.gain(0, 1.0f);
     preMixL.gain(1, 1.0f);
-    preMixL.gain(2, 1.0f);
-    preMixL.gain(3, 1.0f);
+    preMixL.gain(2, 0.0f);
+    preMixL.gain(3, 0.0f);
     preMixR.gain(0, 1.0f);
     preMixR.gain(1, 1.0f);
-    preMixR.gain(2, 1.0f);
-    preMixR.gain(3, 1.0f);
+    preMixR.gain(2, 0.0f);
+    preMixR.gain(3, 0.0f);
 
     // Capture mixers at unity on every slot. The per-source gating is
     // done by the upstream rec/loop amps (applyChannelRec / applyMainLoop
@@ -1795,6 +2498,40 @@ void setup() {
 
     // Mono cross-feed off by default (stereo mode).
     monoXfeed.gain(0.0f);
+
+    // postMix: slot 0 = pre-main mix (preMixL/R), slot 1 = looper return
+    // (dual-mono from g_looper). Slots 2,3 unused. Both sides at unity.
+    // The looper's own returnLevel (applyLooperLevel) controls wet amount;
+    // the slot itself stays at 1.0.
+    postMixL.gain(0, 1.0f);
+    postMixL.gain(1, 1.0f);
+    postMixL.gain(2, 0.0f);
+    postMixL.gain(3, 0.0f);
+    postMixR.gain(0, 1.0f);
+    postMixR.gain(1, 1.0f);
+    postMixR.gain(2, 0.0f);
+    postMixR.gain(3, 0.0f);
+
+    // Synth bus: slot 0 = Dexed (dual-mono), slot 1 = MPE (per-side),
+    // slot 2 = FX wet return, slot 3 = Neuro (dual-mono from g_neuroGain).
+    // Unity gain on every slot; the fader happens downstream in
+    // synthAmpL/R.
+    synthBusL.gain(0, 1.0f);
+    synthBusL.gain(1, 1.0f);
+    synthBusL.gain(2, 1.0f);
+    synthBusL.gain(3, 1.0f);
+    synthBusR.gain(0, 1.0f);
+    synthBusR.gain(1, 1.0f);
+    synthBusR.gain(2, 1.0f);
+    synthBusR.gain(3, 1.0f);
+    // Push the initial synthAmp gain (on=true × volume=0.8).
+    applySynthBusGain();
+
+    // Looper source mux default = no source (all zero). applyLooperSource()
+    // is the authoritative writer; call it so the initial g_looperSource=0
+    // is pushed through.
+    applyLooperSource();
+    applyLooperLevel(g_looperLevel);
 
     // Force the capture-side Feature Unit's cold-boot value to 100% so
     // the headphone monitor is at unity until Windows tells us otherwise.
@@ -1893,6 +2630,10 @@ void setup() {
     g_midiIn.setHandleAfterTouch    (onUsbHostAfterTouch);
     g_midiIn.setHandleProgramChange (onUsbHostProgramChange);
     g_midiIn.setHandleSysEx         (onUsbHostSysEx);
+    g_midiIn.setHandleClock         (onUsbHostClock);
+    g_midiIn.setHandleStart         (onUsbHostStart);
+    g_midiIn.setHandleContinue      (onUsbHostContinue);
+    g_midiIn.setHandleStop          (onUsbHostStop);
 
     // Seed pitch bend range for the LinnStrument master + members.
     // LinnStrument factory default is 48 semi; it will re-assert this
@@ -1903,6 +2644,7 @@ void setup() {
     }
 
     g_midiRouter.addSink(&g_midiVizSink);
+    g_midiRouter.addSink(&g_clockSink);
 
     // --- Shared FX bus init -------------------------------------------
     //
@@ -2014,6 +2756,39 @@ void setup() {
     // fires first; MPE then also fires. Users who want only MPE on
     // those notes leave Dexed on channel 1 (default).
     g_midiRouter.addSink(&g_mpeSink);
+
+    // --- Neuro (reese bass) init -------------------------------------
+    //
+    // Mono engine — one voice across 4 oscillators (3 saws + sub sine).
+    // voiceMix sums at unity; g_neuroGain downstream provides the
+    // polyphony-headroom trim (not needed for mono but matches the
+    // other engines). Envelope defaults match a bass patch: fast
+    // attack, medium-short release so fast bass runs don't slur.
+    //
+    // Listen channel defaults to 3 so Dexed (ch 1), MPE (any), and
+    // Neuro (ch 3) route cleanly to three zones from a split keyboard.
+    // The engine accepts omni mode via /synth/neuro/midi/ch 0.
+    neuroEnv.attack (5.0f);
+    neuroEnv.decay  (100.0f);
+    neuroEnv.sustain(0.8f);
+    neuroEnv.release(200.0f);
+    g_neuroSink.setAttack (0.005f);
+    g_neuroSink.setRelease(0.200f);
+    g_neuroSink.setDetuneCents(7.0f);
+    g_neuroSink.setSubLevel   (0.6f);
+    g_neuroSink.setOsc3Level  (0.7f);
+    g_neuroSink.setFilterCutoff   (600.0f);
+    g_neuroSink.setFilterResonance(2.5f);
+    g_neuroSink.setLfoRate    (0.0f);
+    g_neuroSink.setLfoDepth   (0.5f);
+    g_neuroSink.setLfoDest    (NeuroSink::LfoOff);
+    g_neuroSink.setLfoWaveform(1);  // triangle — smoothest wobble
+    g_neuroSink.setPortamentoMs(0.0f);
+    g_neuroSink.setMidiChannel(3);
+    applyNeuroVolume(g_neuroVolume);
+    applyNeuroSend  (g_neuroSendAmount);
+
+    g_midiRouter.addSink(&g_neuroSink);
 
     Serial.println("\nReady!");
     Serial.println("  6 input channels: USB L/R, Line L/R, Mic L/R");
@@ -2281,6 +3056,57 @@ static void broadcastSnapshot(OSCBundle &reply) {
         OSCMessage m("/synth/mpe/fx/send");          m.add(g_mpeSendAmount); reply.add(m);
     }
 
+    // Neuro (reese bass) engine — every addressable param echoed so a
+    // reconnecting client paints the panel without round-trip reads.
+    {
+        OSCMessage m("/synth/neuro/volume");           m.add(g_neuroVolume); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/on");               m.add((int)(g_neuroOn ? 1 : 0)); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/midi/ch");          m.add((int)g_neuroSink.midiChannel()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/attack");           m.add(g_neuroSink.attack()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/release");          m.add(g_neuroSink.release()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/detune");           m.add(g_neuroSink.detuneCents()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/sub");              m.add(g_neuroSink.subLevel()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/osc3");             m.add(g_neuroSink.osc3Level()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/filter/cutoff");    m.add(g_neuroSink.filterCutoff()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/filter/resonance"); m.add(g_neuroSink.filterResonance()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/lfo/rate");         m.add(g_neuroSink.lfoRate()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/lfo/depth");        m.add(g_neuroSink.lfoDepth()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/lfo/dest");         m.add((int)g_neuroSink.lfoDest()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/lfo/waveform");     m.add((int)g_neuroSink.lfoWaveform()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/portamento");       m.add(g_neuroSink.portamentoMs()); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/fx/send");          m.add(g_neuroSendAmount); reply.add(m);
+    }
+
     // Shared FX bus (FX tab + per-synth send).
     {
         OSCMessage m("/synth/dexed/fx/send");
@@ -2340,6 +3166,28 @@ static void broadcastSnapshot(OSCBundle &reply) {
         reply.add(m);
     }
 
+    // Synth bus — group fader + mute.
+    {
+        OSCMessage m("/synth/bus/volume"); m.add(g_synthBusVolume); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/bus/on"); m.add((int)(g_synthBusOn ? 1 : 0)); reply.add(m);
+    }
+
+    // Looper state — source, level, transport state, current length.
+    {
+        OSCMessage m("/loop/source"); m.add((int)g_looperSource); reply.add(m);
+    }
+    {
+        OSCMessage m("/loop/level"); m.add(g_looperLevel); reply.add(m);
+    }
+    {
+        OSCMessage m("/loop/state"); m.add(looperStateStr()); reply.add(m);
+    }
+    {
+        OSCMessage m("/loop/length"); m.add(g_looper.lengthSeconds()); reply.add(m);
+    }
+
     // Codec panel state.
     g_codecPanel.snapshot(reply);
 }
@@ -2371,12 +3219,39 @@ void loop() {
     // keeps modulation smooth (loop() turns over in under 1 ms typ).
     g_mpeSink.tick(millis());
 
+    // Neuro bass: LFO + portamento glide. Same cost profile as the MPE
+    // tick — a few writes per call when something is modulating, zero
+    // cost when both LFO and portamento are idle.
+    g_neuroSink.tick(millis());
+
+    // Advance the shared musical clock. Stamps a reference for external
+    // tick-interval math and, when Source=Internal, emits catch-up
+    // ticks so edge latches fire even without external MIDI. Called
+    // BEFORE draining MIDI so the external-clock path sees a fresh
+    // _lastUpdateMicros when 0xF8 folds in during g_midiIn.read().
+    g_clock.update(micros());
+
     // USB host: service enumeration + drain all queued MIDI events. Each
     // midi1.read() returns true if it dispatched one event to the installed
     // handler; the while loop keeps draining so a fast-running arpeggio
     // doesn't back up across loop() ticks.
     g_usbHost.Task();
     while (g_midiIn.read()) {}
+
+    // Fire quantized looper transport. When /looper/quantize is on and
+    // the user requested a transport change, the request is held in
+    // g_looperArmedAction until the next beat boundary, then committed
+    // here. One beat = quarter note at the clock's current tempo.
+    if (g_looperArmedAction != 0 && g_clock.consumeBeatEdge()) {
+        switch (g_looperArmedAction) {
+            case 1: g_looper.record(); break;
+            case 2: g_looper.play();   break;
+            case 3: g_looper.stop();   break;
+            case 4: g_looper.clear();  break;
+            default: break;
+        }
+        g_looperArmedAction = 0;
+    }
 
     g_transport.poll();
 

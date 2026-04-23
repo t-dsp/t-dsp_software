@@ -88,6 +88,14 @@ public:
     void handleProgramChange  (uint8_t channel, uint8_t program);
     void handleSysEx          (const uint8_t *data, size_t length, bool last);
 
+    // System Real-Time (channelless). Forwarded from USB host / device
+    // MIDI callbacks. Fan out to every sink — the clock sink consumes
+    // them to drive tempo/phase; other sinks typically no-op.
+    void handleClock();
+    void handleStart();
+    void handleContinue();
+    void handleStop();
+
 private:
     struct ChannelState {
         float   pitchBendRange  = kDefaultPitchBendRange;
