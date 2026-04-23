@@ -386,6 +386,88 @@ export class Dispatcher {
     }
   }
 
+  // ---------- Neuro (reese bass) synth controls ----------
+
+  setNeuroVolume(v: number): void {
+    this.state.neuro.volume.set(v);
+    this.sendThrottled('/synth/neuro/volume', 'f', [v]);
+  }
+
+  setNeuroOn(on: boolean): void {
+    this.state.neuro.on.set(on);
+    this.sendMsg('/synth/neuro/on', 'i', [on ? 1 : 0]);
+  }
+
+  setNeuroMidiChannel(ch: number): void {
+    this.state.neuro.midiChannel.set(ch);
+    this.sendMsg('/synth/neuro/midi/ch', 'i', [ch]);
+  }
+
+  setNeuroAttack(s: number): void {
+    this.state.neuro.attack.set(s);
+    this.sendThrottled('/synth/neuro/attack', 'f', [s]);
+  }
+
+  setNeuroRelease(s: number): void {
+    this.state.neuro.release.set(s);
+    this.sendThrottled('/synth/neuro/release', 'f', [s]);
+  }
+
+  setNeuroDetune(cents: number): void {
+    this.state.neuro.detuneCents.set(cents);
+    this.sendThrottled('/synth/neuro/detune', 'f', [cents]);
+  }
+
+  setNeuroSub(level: number): void {
+    this.state.neuro.subLevel.set(level);
+    this.sendThrottled('/synth/neuro/sub', 'f', [level]);
+  }
+
+  setNeuroOsc3(level: number): void {
+    this.state.neuro.osc3Level.set(level);
+    this.sendThrottled('/synth/neuro/osc3', 'f', [level]);
+  }
+
+  setNeuroFilterCutoff(hz: number): void {
+    this.state.neuro.filterCutoffHz.set(hz);
+    this.sendThrottled('/synth/neuro/filter/cutoff', 'f', [hz]);
+  }
+
+  setNeuroFilterResonance(q: number): void {
+    this.state.neuro.filterResonance.set(q);
+    this.sendThrottled('/synth/neuro/filter/resonance', 'f', [q]);
+  }
+
+  setNeuroLfoRate(hz: number): void {
+    this.state.neuro.lfoRate.set(hz);
+    this.sendThrottled('/synth/neuro/lfo/rate', 'f', [hz]);
+  }
+
+  setNeuroLfoDepth(d: number): void {
+    this.state.neuro.lfoDepth.set(d);
+    this.sendThrottled('/synth/neuro/lfo/depth', 'f', [d]);
+  }
+
+  setNeuroLfoDest(dest: number): void {
+    this.state.neuro.lfoDest.set(dest);
+    this.sendMsg('/synth/neuro/lfo/dest', 'i', [dest]);
+  }
+
+  setNeuroLfoWaveform(w: number): void {
+    this.state.neuro.lfoWaveform.set(w);
+    this.sendMsg('/synth/neuro/lfo/waveform', 'i', [w]);
+  }
+
+  setNeuroPortamento(ms: number): void {
+    this.state.neuro.portamentoMs.set(ms);
+    this.sendThrottled('/synth/neuro/portamento', 'f', [ms]);
+  }
+
+  setNeuroFxSend(v: number): void {
+    this.state.neuro.fxSend.set(v);
+    this.sendThrottled('/synth/neuro/fx/send', 'f', [v]);
+  }
+
   // ---------- Shared FX bus (chorus + reverb) ----------
 
   setFxChorusEnable(on: boolean): void {
@@ -887,6 +969,72 @@ export class Dispatcher {
         v.pressure.set (msg.args[base + 4] as number);
         v.timbre.set   (msg.args[base + 5] as number);
       }
+      return;
+    }
+
+    // Neuro (reese bass) echoes — same scalar-param layout as MPE.
+    if (a === '/synth/neuro/volume' && msg.types === 'f') {
+      this.state.neuro.volume.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/on' && msg.types === 'i') {
+      this.state.neuro.on.set((msg.args[0] as number) !== 0);
+      return;
+    }
+    if (a === '/synth/neuro/midi/ch' && msg.types === 'i') {
+      this.state.neuro.midiChannel.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/attack' && msg.types === 'f') {
+      this.state.neuro.attack.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/release' && msg.types === 'f') {
+      this.state.neuro.release.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/detune' && msg.types === 'f') {
+      this.state.neuro.detuneCents.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/sub' && msg.types === 'f') {
+      this.state.neuro.subLevel.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/osc3' && msg.types === 'f') {
+      this.state.neuro.osc3Level.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/filter/cutoff' && msg.types === 'f') {
+      this.state.neuro.filterCutoffHz.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/filter/resonance' && msg.types === 'f') {
+      this.state.neuro.filterResonance.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/lfo/rate' && msg.types === 'f') {
+      this.state.neuro.lfoRate.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/lfo/depth' && msg.types === 'f') {
+      this.state.neuro.lfoDepth.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/lfo/dest' && msg.types === 'i') {
+      this.state.neuro.lfoDest.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/lfo/waveform' && msg.types === 'i') {
+      this.state.neuro.lfoWaveform.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/portamento' && msg.types === 'f') {
+      this.state.neuro.portamentoMs.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/fx/send' && msg.types === 'f') {
+      this.state.neuro.fxSend.set(msg.args[0] as number);
       return;
     }
 

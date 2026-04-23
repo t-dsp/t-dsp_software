@@ -1,0 +1,8 @@
+{
+  "name": "TDspBeats",
+  "version": "0.1.0",
+  "description": "Step-sequencer core for T-DSP drum machines. Pure logic: pattern grid, tempo/swing clock, per-step trigger callbacks. Audio voices (synth, sample, SD-WAV) are wired in the sketch.",
+  "keywords": "audio, drum, sequencer, teensy, t-dsp",
+  "frameworks": "arduino",
+  "platforms": "teensy"
+}

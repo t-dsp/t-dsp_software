@@ -1,0 +1,115 @@
+{
+  "version": 1,
+  "categories": {
+    "classic":  { "color": "#4a90e2", "label": "Classic" },
+    "growl":    { "color": "#d9843a", "label": "Growl" },
+    "wobble":   { "color": "#8e44ad", "label": "Wobble" },
+    "sub":      { "color": "#27ae60", "label": "Sub" }
+  },
+  "presets": [
+    {
+      "id": "clean-reese",
+      "name": "Clean Reese",
+      "category": "classic",
+      "description": "The canonical Massive-style reese. Detuned saws, moderate cutoff, no movement.",
+      "params": {
+        "volume": 0.7, "attack_sec": 0.005, "release_sec": 0.200,
+        "detune_cents": 7.0, "sub_level": 0.6, "osc3_level": 0.7,
+        "filter_cutoff_hz": 600, "filter_resonance": 2.2,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 1,
+        "portamento_ms": 0
+      }
+    },
+    {
+      "id": "hollow-reese",
+      "name": "Hollow Reese",
+      "category": "classic",
+      "description": "Wider detune, sub turned down, osc3 low — the thin/wiry reese flavour.",
+      "params": {
+        "volume": 0.7, "attack_sec": 0.003, "release_sec": 0.150,
+        "detune_cents": 18.0, "sub_level": 0.25, "osc3_level": 0.15,
+        "filter_cutoff_hz": 900, "filter_resonance": 2.8,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0,
+        "portamento_ms": 0
+      }
+    },
+    {
+      "id": "growler",
+      "name": "Growler",
+      "category": "growl",
+      "description": "Low cutoff, high Q, tight sub. Menacing floor-dweller bass.",
+      "params": {
+        "volume": 0.7, "attack_sec": 0.002, "release_sec": 0.180,
+        "detune_cents": 10.0, "sub_level": 0.85, "osc3_level": 0.8,
+        "filter_cutoff_hz": 350, "filter_resonance": 3.8,
+        "lfo_rate_hz": 0.3, "lfo_depth": 0.2, "lfo_dest": 1, "lfo_waveform": 0,
+        "portamento_ms": 40
+      }
+    },
+    {
+      "id": "screwface",
+      "name": "Screwface",
+      "category": "growl",
+      "description": "High resonance at ~450 Hz — the self-oscillation sweet spot. Close to pulling that stinky face.",
+      "params": {
+        "volume": 0.65, "attack_sec": 0.002, "release_sec": 0.220,
+        "detune_cents": 14.0, "sub_level": 0.5, "osc3_level": 0.9,
+        "filter_cutoff_hz": 450, "filter_resonance": 4.5,
+        "lfo_rate_hz": 0.7, "lfo_depth": 0.35, "lfo_dest": 1, "lfo_waveform": 1,
+        "portamento_ms": 0
+      }
+    },
+    {
+      "id": "wobbler",
+      "name": "Wobbler",
+      "category": "wobble",
+      "description": "Classic 1/4-note dubstep wobble. Triangle LFO on cutoff, full depth.",
+      "params": {
+        "volume": 0.7, "attack_sec": 0.005, "release_sec": 0.300,
+        "detune_cents": 9.0, "sub_level": 0.7, "osc3_level": 0.5,
+        "filter_cutoff_hz": 700, "filter_resonance": 3.0,
+        "lfo_rate_hz": 2.0, "lfo_depth": 0.8, "lfo_dest": 1, "lfo_waveform": 1,
+        "portamento_ms": 0
+      }
+    },
+    {
+      "id": "ripper",
+      "name": "Ripper",
+      "category": "wobble",
+      "description": "Fast square-wave LFO on cutoff — gated/chopped pulse feel. Good for one-shot drops.",
+      "params": {
+        "volume": 0.7, "attack_sec": 0.001, "release_sec": 0.150,
+        "detune_cents": 12.0, "sub_level": 0.4, "osc3_level": 0.7,
+        "filter_cutoff_hz": 550, "filter_resonance": 3.5,
+        "lfo_rate_hz": 8.0, "lfo_depth": 0.7, "lfo_dest": 1, "lfo_waveform": 3,
+        "portamento_ms": 0
+      }
+    },
+    {
+      "id": "deep-sub",
+      "name": "Deep Sub",
+      "category": "sub",
+      "description": "Sub sine dominant, saws low. Mostly felt, barely heard — the 40 Hz fundamental.",
+      "params": {
+        "volume": 0.8, "attack_sec": 0.020, "release_sec": 0.400,
+        "detune_cents": 5.0, "sub_level": 1.0, "osc3_level": 0.3,
+        "filter_cutoff_hz": 200, "filter_resonance": 1.5,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0,
+        "portamento_ms": 80
+      }
+    },
+    {
+      "id": "glide-bass",
+      "name": "Glide Bass",
+      "category": "sub",
+      "description": "Slow portamento between notes — TB-style acid bass slides.",
+      "params": {
+        "volume": 0.7, "attack_sec": 0.003, "release_sec": 0.180,
+        "detune_cents": 6.0, "sub_level": 0.7, "osc3_level": 0.5,
+        "filter_cutoff_hz": 800, "filter_resonance": 3.5,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0,
+        "portamento_ms": 150
+      }
+    }
+  ]
+}

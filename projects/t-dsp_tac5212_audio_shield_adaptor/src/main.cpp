@@ -37,6 +37,8 @@
 #include <Arduino.h>
 #include <Audio.h>
 #include <Wire.h>
+#include <SPI.h>
+#include <SD.h>
 #include <USBHost_t36.h>
 
 #include <OSCMessage.h>
@@ -50,6 +52,7 @@
 #include <TDspNeuro.h>
 #include <TDspLooper.h>
 #include <TDspClock.h>
+#include <TDspBeats.h>
 #include <synth_dexed.h>
 
 #include "Tac5212Panel.h"
@@ -104,8 +107,12 @@ AudioAnalyzeRMS      rmsHostR;
 // engineer's faders but NOT Windows volume attenuation. Default 1024-
 // point gives 512 bins at ~86 Hz resolution (44.1 kHz / 1024 * 2),
 // new frame every ~11.6 ms. SpectrumEngine polls them at 10 Hz.
-tdsp::AnalyzeFFT_F32 fftMainL;
-tdsp::AnalyzeFFT_F32 fftMainR;
+//
+// DMAMEM — 1024-point FFT scratch buffers are ~4 KB apiece, worth
+// moving off RAM1 since the spectrum view reads them at 10 Hz (no
+// tight-latency need).
+DMAMEM tdsp::AnalyzeFFT_F32 fftMainL;
+DMAMEM tdsp::AnalyzeFFT_F32 fftMainR;
 
 // PDM mic combiners — 32-bit PDM split across two 16-bit TDM slots, so
 // each PDM mic (L, R) needs a 2-input mixer that re-combines the high
@@ -229,10 +236,47 @@ AudioAmplifier           fxReturnR;
 // toggle is click-free. Per-synth volumes (g_dexedGain, mpeGainL/R)
 // are still the primary trim; this bus fader is a quick "all synths"
 // knob that also owns the looper tap.
-AudioMixer4              synthBusL;
-AudioMixer4              synthBusR;
-AudioAmplifier           synthAmpL;
-AudioAmplifier           synthAmpR;
+// DMAMEM — RAM1 budget is tight on this board; these aggregate-bus
+// objects don't need tightly-coupled memory.
+DMAMEM AudioMixer4       synthBusL;
+DMAMEM AudioMixer4       synthBusR;
+DMAMEM AudioAmplifier    synthAmpL;
+DMAMEM AudioAmplifier    synthAmpR;
+
+// ---- Beats bus -----------------------------------------------------
+//
+// 4-track × 16-step drum machine. Tracks 0/1 are synth drums
+// (AudioSynthSimpleDrum), tracks 2/3 are SD WAV samples (AudioPlaySdWav).
+// The group's stereo sum lands in preMix slot 2 — the previously
+// "reserved for future aggregate bus" slot — gated by preMixL/R.gain(2)
+// which doubles as the beats group volume.
+//
+// Synth drums are mono: one post-voice velocity amp per track, which
+// feeds both beatsMixL and beatsMixR (dual-mono, centered). SdWav
+// players are stereo: a pair of velocity amps per track (L / R).
+//
+// Velocity: on trigger, onBeatsStepFire() sets the track's amp gain
+// to the step's velocity (0..1) before calling noteOn() / play(). The
+// gain is sticky through the hit's tail — perceptually correct for
+// drum hits (a soft kick is softer both on impact and on decay).
+// DMAMEM on the Sd WAV players + mixers moves their per-instance
+// buffers off the tight RAM1 budget. Audio objects self-register in
+// their constructors, which run from Teensyduino's DMAMEM init path
+// just like RAM1 globals, so graph wiring stays identical.
+DMAMEM AudioSynthSimpleDrum g_beatKick;
+DMAMEM AudioSynthSimpleDrum g_beatSnare;
+DMAMEM AudioPlaySdWav       g_beatHat;
+DMAMEM AudioPlaySdWav       g_beatPerc;
+
+DMAMEM AudioAmplifier g_beatKickAmp;
+DMAMEM AudioAmplifier g_beatSnareAmp;
+DMAMEM AudioAmplifier g_beatHatAmpL;
+DMAMEM AudioAmplifier g_beatHatAmpR;
+DMAMEM AudioAmplifier g_beatPercAmpL;
+DMAMEM AudioAmplifier g_beatPercAmpR;
+
+DMAMEM AudioMixer4   beatsMixL;
+DMAMEM AudioMixer4   beatsMixR;
 
 // Four-stage main bus chain:
 //   preMixL → mainAmpL (faderL × on) → hostvolAmpL (hostvol bypass)
@@ -265,25 +309,27 @@ AudioEffectWaveshaper procLimiterR;
 //   slot 1: recMicL/R   → PDM mic
 //   slot 2: recUsbL/R   → USB playback (default off)
 //   slot 3: loopL/R     → main-mix loopback (default off)
-AudioMixer4          captureL;
-AudioMixer4          captureR;
+// DMAMEM — capture/rec/loop objects are part of the USB-capture side
+// of the graph; they don't need the tighter latency of RAM1.
+DMAMEM AudioMixer4   captureL;
+DMAMEM AudioMixer4   captureR;
 
 // Per-source capture-send amplifiers. Gain is 0.0 or 1.0, driven by
 // SignalGraphBinding::applyChannelRec() from Channel.recSend (overridden
 // to 0 when Main.loopEnable is true so loop + direct sends don't
 // double-count in the USB recording).
-AudioAmplifier       recUsbL;
-AudioAmplifier       recUsbR;
-AudioAmplifier       recLineL;
-AudioAmplifier       recLineR;
-AudioAmplifier       recMicL;
-AudioAmplifier       recMicR;
+DMAMEM AudioAmplifier recUsbL;
+DMAMEM AudioAmplifier recUsbR;
+DMAMEM AudioAmplifier recLineL;
+DMAMEM AudioAmplifier recLineR;
+DMAMEM AudioAmplifier recMicL;
+DMAMEM AudioAmplifier recMicR;
 
 // Main-bus loopback tap amps. Fed from mainAmpL/R output (post-main-fader,
 // pre-hostvol) so the recording tracks the fader but not Windows volume.
 // Gain is 1.0 when Main.loopEnable is true, else 0.0.
-AudioAmplifier       loopL;
-AudioAmplifier       loopR;
+DMAMEM AudioAmplifier loopL;
+DMAMEM AudioAmplifier loopR;
 
 // Listenback monitor attenuators — driven by the Windows recording-device
 // volume slider via the FU 0x30 capture-side Feature Unit. Inserted on the
@@ -336,11 +382,14 @@ constexpr uint32_t kLooperSamples = 88200;  // ~2.0 s @ 44.1 kHz mono int16
 DMAMEM int16_t g_looperBuffer[kLooperSamples];
 tdsp::Looper   g_looper(g_looperBuffer, kLooperSamples);
 
-AudioMixer4    loopSrcA;   // channels 1..4 pre-fader taps
-AudioMixer4    loopSrcB;   // cascades loopSrcA + ch5 + ch6 → looper input
+// DMAMEM — frees RAM1 for Teensy Audio library's internal state.
+// These mixers hold only gain coefficients + input block pointers,
+// neither of which needs tightly-coupled memory.
+DMAMEM AudioMixer4    loopSrcA;   // channels 1..4 pre-fader taps
+DMAMEM AudioMixer4    loopSrcB;   // cascades loopSrcA + ch5 + ch6 → looper input
 
-AudioMixer4    postMixL;   // preMixL + looper return → mainAmpL
-AudioMixer4    postMixR;   // preMixR + looper return → mainAmpR
+DMAMEM AudioMixer4    postMixL;   // preMixL + looper return → mainAmpL
+DMAMEM AudioMixer4    postMixR;   // preMixR + looper return → mainAmpR
 
 AudioOutputTDM       tdmOut;
 AudioOutputUSB       usbOut;
@@ -494,12 +543,37 @@ AudioConnection      c_fx_retL_bus (fxReturnL,  0, synthBusL, 2);
 AudioConnection      c_fx_retR_bus (fxReturnR,  0, synthBusR, 2);
 
 // Synth bus → synth amp (fader/mute) → preMix slot 1 (stereo, one slot
-// per side). preMix slots 2,3 are now unused — reserved for future
-// aggregate buses (a "drum bus" would land there, mirroring this pattern).
+// per side). preMix slot 2 is now the beats group (below); slot 3 is
+// unused (reserved for future aggregate buses).
 AudioConnection      c_synthBusL_amp (synthBusL, 0, synthAmpL, 0);
 AudioConnection      c_synthBusR_amp (synthBusR, 0, synthAmpR, 0);
 AudioConnection      c_synthAmpL_pre (synthAmpL, 0, preMixL,   1);
 AudioConnection      c_synthAmpR_pre (synthAmpR, 0, preMixR,   1);
+
+// Beats: 4 voices → per-track velocity amps → beatsMixL/R → preMix slot 2.
+// Synth tracks (0/1) go dual-mono through a single amp into both sides.
+// Sample tracks (2/3) are stereo; each side has its own amp so L/R stay
+// independent but share a common velocity scale (set in pairs by onBeatsStepFire).
+AudioConnection      c_bkick_amp   (g_beatKick,    0, g_beatKickAmp,  0);
+AudioConnection      c_bkick_bmL   (g_beatKickAmp, 0, beatsMixL,      0);
+AudioConnection      c_bkick_bmR   (g_beatKickAmp, 0, beatsMixR,      0);
+
+AudioConnection      c_bsnare_amp  (g_beatSnare,    0, g_beatSnareAmp, 0);
+AudioConnection      c_bsnare_bmL  (g_beatSnareAmp, 0, beatsMixL,      1);
+AudioConnection      c_bsnare_bmR  (g_beatSnareAmp, 0, beatsMixR,      1);
+
+AudioConnection      c_bhat_ampL   (g_beatHat,     0, g_beatHatAmpL,  0);
+AudioConnection      c_bhat_ampR   (g_beatHat,     1, g_beatHatAmpR,  0);
+AudioConnection      c_bhat_bmL    (g_beatHatAmpL, 0, beatsMixL,      2);
+AudioConnection      c_bhat_bmR    (g_beatHatAmpR, 0, beatsMixR,      2);
+
+AudioConnection      c_bperc_ampL  (g_beatPerc,     0, g_beatPercAmpL, 0);
+AudioConnection      c_bperc_ampR  (g_beatPerc,     1, g_beatPercAmpR, 0);
+AudioConnection      c_bperc_bmL   (g_beatPercAmpL, 0, beatsMixL,      3);
+AudioConnection      c_bperc_bmR   (g_beatPercAmpR, 0, beatsMixR,      3);
+
+AudioConnection      c_bmL_pre     (beatsMixL,   0, preMixL,   2);
+AudioConnection      c_bmR_pre     (beatsMixR,   0, preMixR,   2);
 
 // ---- Looper source mux + return wiring -----------------------------
 //
@@ -908,6 +982,79 @@ static void applyNeuroSend(float v) {
 }
 
 // --------------------------------------------------------------------
+// Beats sequencer state — MVP v1 drum machine.
+//
+// g_beats is the pattern + clock; the sketch owns the voices and wires
+// them to trigger callbacks. preMixL/R slot 2 gain serves as the beats
+// group volume (no extra amp needed — Dexed uses an upstream amp, but
+// here we piggyback on the preMix channel-strip).
+//
+// SD card is optional: if SD.begin() fails, synth tracks (0,1) still
+// work, sample tracks (2,3) stay silent. g_beatsSdReady reflects init
+// state so snapshot can report it and UIs can show a greyed-out sample
+// slot when no card is present.
+//
+// Filenames for the sample tracks live in g_beatsSampleName[] — up to
+// 32 chars each including the null. Default "" = no sample loaded.
+// --------------------------------------------------------------------
+
+constexpr int kBeatsTracks = tdsp::beats::BeatSequencer::kTracks;
+constexpr int kBeatsSteps  = tdsp::beats::BeatSequencer::kSteps;
+
+tdsp::beats::BeatSequencer g_beats;
+
+static float g_beatsVolume   = 0.7f;   // applied to preMixL/R slot 2
+static bool  g_beatsSdReady  = false;
+static char  g_beatsSampleName[kBeatsTracks][32] = { "", "", "HAT.WAV", "CLAP.WAV" };
+
+static void applyBeatsVolume(float v) {
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    g_beatsVolume = v;
+    preMixL.gain(2, v);
+    preMixR.gain(2, v);
+}
+
+// Step-fire callback: sequencer tells us "track T, step S fired with
+// velocity V in [0,1]". Set the track's velocity amp, then trigger the
+// voice. Gain change is smoothed over one audio block by AudioAmplifier,
+// which is fine for drums (blocks are ~2.9 ms — well below the ~10 ms
+// attack transient where a listener might otherwise notice a velocity
+// slew).
+static void onBeatsStepFire(void* /*ctx*/, int track, int /*step*/, float velocity) {
+    switch (track) {
+        case 0:
+            g_beatKickAmp.gain(velocity);
+            g_beatKick.noteOn();
+            break;
+        case 1:
+            g_beatSnareAmp.gain(velocity);
+            g_beatSnare.noteOn();
+            break;
+        case 2:
+            if (g_beatsSdReady && g_beatsSampleName[2][0] != '\0') {
+                g_beatHatAmpL.gain(velocity);
+                g_beatHatAmpR.gain(velocity);
+                g_beatHat.play(g_beatsSampleName[2]);
+            }
+            break;
+        case 3:
+            if (g_beatsSdReady && g_beatsSampleName[3][0] != '\0') {
+                g_beatPercAmpL.gain(velocity);
+                g_beatPercAmpR.gain(velocity);
+                g_beatPerc.play(g_beatsSampleName[3]);
+            }
+            break;
+        default: break;
+    }
+}
+
+// Advance callback: broadcasts the /beats/cursor after each step's
+// track callbacks have run. Forward-declared here, defined after
+// g_transport/g_dispatcher are visible.
+static void onBeatsStepAdvance(void* ctx, int step);
+
+// --------------------------------------------------------------------
 // Synth bus (aggregate of Dexed + MPE + shared FX wet return)
 //
 // A stereo sum with its own fader + mute. Downstream of every synth's
@@ -1096,10 +1243,13 @@ static void onUsbHostSysEx(const uint8_t *data, uint16_t length, bool last) {
 // System Real-Time handlers. USBHost_t36 delivers these as channelless
 // events — no payload, just the event kind. Fan them into the router
 // which dispatches to g_clockSink and any other sink that listens.
-static void onUsbHostClock()    { g_midiRouter.handleClock();    }
-static void onUsbHostStart()    { g_midiRouter.handleStart();    }
-static void onUsbHostContinue() { g_midiRouter.handleContinue(); }
-static void onUsbHostStop()     { g_midiRouter.handleStop();     }
+// g_beats consumes clock + transport directly (its own `onMidiStart`
+// etc. API wants µs timestamps); we tee into it here rather than
+// routing through another sink abstraction.
+static void onUsbHostClock()    { g_midiRouter.handleClock();    g_beats.clockPulse();                 }
+static void onUsbHostStart()    { g_midiRouter.handleStart();    g_beats.onMidiStart   (micros());     }
+static void onUsbHostContinue() { g_midiRouter.handleContinue(); g_beats.onMidiContinue(micros());     }
+static void onUsbHostStop()     { g_midiRouter.handleStop();     g_beats.onMidiStop    (micros());     }
 
 // ============================================================================
 // Hand-rolled codec init (Phase 1 path, preserved as the working audio config)
@@ -1260,6 +1410,20 @@ static void applyLineMode(bool mono) {
     // (or restored ch4) takes effect immediately.
     g_binding.applyChannel(3);
     g_binding.applyChannel(4);
+}
+
+// Step-advance callback: broadcast current cursor so the web surface
+// can light up the playhead every 16th. Fires AFTER all track callbacks
+// for the step have dispatched, so this is the one authoritative
+// "step N played" signal — one bundle per step, not N copies per track.
+static void onBeatsStepAdvance(void* /*ctx*/, int step) {
+    OSCBundle reply;
+    OSCMessage m("/beats/cursor");
+    m.add((int)step);
+    reply.add(m);
+    if (reply.size() > 0) {
+        g_transport.sendBundle(reply);
+    }
 }
 
 // OSC frame arrived from the transport. Build a reply bundle, route into
@@ -1566,6 +1730,162 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
             OSCMessage m("/synth/bus/on"); m.add((int)(g_synthBusOn ? 1 : 0)); reply.add(m);
         }
         if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    // --- Beats drum machine -----------------------------------------
+    //
+    // /beats/run    i        — 0=stop 1=start (start resets cursor to step 0)
+    // /beats/bpm    f        — 20..300
+    // /beats/swing  f        — 0..0.75 (MPC-style odd-16th delay)
+    // /beats/volume f        — 0..1 group level (preMix slot 2 gain)
+    // /beats/mute   i i      — (track 0..3, muted 0/1)
+    // /beats/step   i i i    — (track, step 0..15, on 0/1) set a single step
+    // /beats/vel    i i f    — (track, step, velocity 0..1) per-step velocity
+    // /beats/clear  i        — (track; -1 clears all) wipe pattern row
+    // /beats/sample i s      — (track 2 or 3, filename) set SD WAV for sample track
+    // /beats/cursor          — read-only: last-fired step
+    // /beats/sd              — read-only: 1 if SD.begin() succeeded else 0
+    //
+    // Echo pattern matches the Dexed/FX handlers: no args = read, typed
+    // args = write-then-echo. Broadcast cursor updates come from the
+    // sequencer's advance callback, not from this handler.
+
+    if (strcmp(address, "/beats/run") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/beats/run");
+            m.add(g_beats.isRunning() ? 1 : 0);
+            reply.add(m);
+        } else if (msg.isInt(0)) {
+            const bool run = msg.getInt(0) != 0;
+            if (run) g_beats.start(micros());
+            else     g_beats.stop();
+            OSCMessage m("/beats/run");
+            m.add(g_beats.isRunning() ? 1 : 0);
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/beats/bpm") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/beats/bpm"); m.add(g_beats.bpm()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_beats.setBpm(msg.getFloat(0));
+            OSCMessage m("/beats/bpm"); m.add(g_beats.bpm()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/beats/swing") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/beats/swing"); m.add(g_beats.swing()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_beats.setSwing(msg.getFloat(0));
+            OSCMessage m("/beats/swing"); m.add(g_beats.swing()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/beats/volume") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/beats/volume"); m.add(g_beatsVolume); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            applyBeatsVolume(msg.getFloat(0));
+            OSCMessage m("/beats/volume"); m.add(g_beatsVolume); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/beats/mute") == 0 && msg.size() >= 2
+        && msg.isInt(0) && msg.isInt(1)) {
+        const int trk   = msg.getInt(0);
+        const bool mute = msg.getInt(1) != 0;
+        g_beats.setMute(trk, mute);
+        OSCBundle reply;
+        OSCMessage m("/beats/mute");
+        m.add(trk); m.add(g_beats.isMuted(trk) ? 1 : 0);
+        reply.add(m);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/beats/step") == 0 && msg.size() >= 3
+        && msg.isInt(0) && msg.isInt(1) && msg.isInt(2)) {
+        const int trk  = msg.getInt(0);
+        const int step = msg.getInt(1);
+        const bool on  = msg.getInt(2) != 0;
+        const uint8_t prevVel = g_beats.getStepVel(trk, step);
+        g_beats.setStep(trk, step, on, prevVel > 0 ? prevVel : 100);
+        OSCBundle reply;
+        OSCMessage m("/beats/step");
+        m.add(trk); m.add(step); m.add(g_beats.getStepOn(trk, step) ? 1 : 0);
+        reply.add(m);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/beats/vel") == 0 && msg.size() >= 3
+        && msg.isInt(0) && msg.isInt(1) && msg.isFloat(2)) {
+        const int trk  = msg.getInt(0);
+        const int step = msg.getInt(1);
+        float     v    = msg.getFloat(2);
+        if (v < 0.0f) v = 0.0f;
+        if (v > 1.0f) v = 1.0f;
+        const uint8_t vel127 = (uint8_t)(v * 127.0f + 0.5f);
+        g_beats.setStep(trk, step, g_beats.getStepOn(trk, step), vel127);
+        OSCBundle reply;
+        OSCMessage m("/beats/vel");
+        m.add(trk); m.add(step);
+        m.add((float)g_beats.getStepVel(trk, step) * (1.0f / 127.0f));
+        reply.add(m);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/beats/clear") == 0 && msg.size() >= 1 && msg.isInt(0)) {
+        const int trk = msg.getInt(0);
+        g_beats.clear(trk);
+        OSCBundle reply;
+        OSCMessage m("/beats/clear"); m.add(trk); reply.add(m);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/beats/sample") == 0 && msg.size() >= 2
+        && msg.isInt(0) && msg.isString(1)) {
+        const int trk = msg.getInt(0);
+        if (trk >= 0 && trk < kBeatsTracks) {
+            msg.getString(1, g_beatsSampleName[trk], sizeof(g_beatsSampleName[trk]));
+        }
+        OSCBundle reply;
+        OSCMessage m("/beats/sample");
+        m.add(trk);
+        m.add((trk >= 0 && trk < kBeatsTracks) ? g_beatsSampleName[trk] : "");
+        reply.add(m);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/beats/cursor") == 0) {
+        OSCBundle reply;
+        OSCMessage m("/beats/cursor"); m.add((int)g_beats.cursor()); reply.add(m);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/beats/sd") == 0) {
+        OSCBundle reply;
+        OSCMessage m("/beats/sd"); m.add(g_beatsSdReady ? 1 : 0); reply.add(m);
+        g_transport.sendBundle(reply);
         return;
     }
 
@@ -2463,19 +2783,28 @@ void setup() {
 
     // preMix bus: slot 0 = input-channel mix, slot 1 = synth bus (the
     // synthAmpL/R fader + mute owns the group level; this slot stays
-    // unity), slots 2,3 = reserved for future aggregate buses (e.g. a
-    // "drum bus" mirroring the synth bus pattern). What used to be
-    // per-synth preMix slots (Dexed on 1, MPE on 2, FX wet on 3) is
-    // now rolled into the synth bus upstream so one fader can drive
-    // both main audio and the looper source tap.
+    // unity), slot 2 = beats group (level IS this slot's gain —
+    // applyBeatsVolume() writes here), slot 3 = unused (reserved).
+    // What used to be per-synth preMix slots (Dexed on 1, MPE on 2,
+    // FX wet on 3) is now rolled into the synth bus upstream so one
+    // fader can drive both main audio and the looper source tap.
     preMixL.gain(0, 1.0f);
     preMixL.gain(1, 1.0f);
-    preMixL.gain(2, 0.0f);
+    preMixL.gain(2, g_beatsVolume);
     preMixL.gain(3, 0.0f);
     preMixR.gain(0, 1.0f);
     preMixR.gain(1, 1.0f);
-    preMixR.gain(2, 0.0f);
+    preMixR.gain(2, g_beatsVolume);
     preMixR.gain(3, 0.0f);
+
+    // Beats summing mixers at unity on every slot. Group volume lives
+    // on preMixL/R slot 2 (above). Per-track level comes from the
+    // voices themselves (AudioSynthSimpleDrum envelope amplitude;
+    // AudioPlaySdWav sample level) — the beatsMix slot is just sum.
+    beatsMixL.gain(0, 1.0f); beatsMixL.gain(1, 1.0f);
+    beatsMixL.gain(2, 1.0f); beatsMixL.gain(3, 1.0f);
+    beatsMixR.gain(0, 1.0f); beatsMixR.gain(1, 1.0f);
+    beatsMixR.gain(2, 1.0f); beatsMixR.gain(3, 1.0f);
 
     // Capture mixers at unity on every slot. The per-source gating is
     // done by the upstream rec/loop amps (applyChannelRec / applyMainLoop
@@ -2532,6 +2861,54 @@ void setup() {
     // is pushed through.
     applyLooperSource();
     applyLooperLevel(g_looperLevel);
+
+    // --- Beats drum machine init --------------------------------------
+    //
+    // SD card: used for sample tracks (2 = HAT.WAV, 3 = CLAP.WAV by
+    // default — user can /beats/sample <trk> <filename> to override).
+    // BUILTIN_SDCARD is the Teensy 4.1's native socket. If begin()
+    // fails (no card, bad filesystem), synth tracks still work and
+    // sample tracks stay silent — g_beatsSdReady gates the .play()
+    // calls in onBeatsStepFire.
+    g_beatsSdReady = SD.begin(BUILTIN_SDCARD);
+    if (g_beatsSdReady) Serial.println("Beats: SD card ready.");
+    else                Serial.println("Beats: no SD card — sample tracks muted.");
+
+    // Velocity amps start at unity so a step with vel=1.0 plays at
+    // full amplitude. onBeatsStepFire overwrites these before each
+    // trigger; init values just cover the silence-before-first-hit
+    // state without any zero-gain startup pop.
+    g_beatKickAmp.gain (1.0f);
+    g_beatSnareAmp.gain(1.0f);
+    g_beatHatAmpL.gain (1.0f); g_beatHatAmpR.gain (1.0f);
+    g_beatPercAmpL.gain(1.0f); g_beatPercAmpR.gain(1.0f);
+
+    // Voice defaults: kick = sub-bass thump; snare = mid-band crack.
+    g_beatKick.frequency(60.0f);
+    g_beatKick.length(500);
+    g_beatKick.pitchMod(0.55f);
+    g_beatKick.secondMix(0.0f);
+
+    g_beatSnare.frequency(200.0f);
+    g_beatSnare.length(180);
+    g_beatSnare.pitchMod(0.85f);
+    g_beatSnare.secondMix(0.8f);  // adds the noise-ish second oscillator for snap
+
+    // Demo pattern: four-on-the-floor + backbeat. Gives an audible
+    // "hit /beats/run 1" moment even with no SD card.
+    g_beats.setStep(0, 0,  true);
+    g_beats.setStep(0, 4,  true);
+    g_beats.setStep(0, 8,  true);
+    g_beats.setStep(0, 12, true);
+    g_beats.setStep(1, 4,  true);
+    g_beats.setStep(1, 12, true);
+    g_beats.setStep(2, 2,  true);
+    g_beats.setStep(2, 6,  true);
+    g_beats.setStep(2, 10, true);
+    g_beats.setStep(2, 14, true);
+
+    g_beats.setOnStepFire   (onBeatsStepFire,    nullptr);
+    g_beats.setOnStepAdvance(onBeatsStepAdvance, nullptr);
 
     // Force the capture-side Feature Unit's cold-boot value to 100% so
     // the headphone monitor is at unity until Windows tells us otherwise.
@@ -3188,6 +3565,57 @@ static void broadcastSnapshot(OSCBundle &reply) {
         OSCMessage m("/loop/length"); m.add(g_looper.lengthSeconds()); reply.add(m);
     }
 
+    // Beats state: transport, group level, pattern grid (one message
+    // per on-step — off-steps are implicit). 4 tracks × 16 steps = 64
+    // potential messages worst case, but sparse patterns emit far
+    // fewer. Sample filenames + SD ready flag let the UI label
+    // sample-track slots correctly.
+    {
+        OSCMessage m("/beats/run"); m.add(g_beats.isRunning() ? 1 : 0); reply.add(m);
+    }
+    {
+        OSCMessage m("/beats/bpm"); m.add(g_beats.bpm()); reply.add(m);
+    }
+    {
+        OSCMessage m("/beats/swing"); m.add(g_beats.swing()); reply.add(m);
+    }
+    {
+        OSCMessage m("/beats/volume"); m.add(g_beatsVolume); reply.add(m);
+    }
+    {
+        OSCMessage m("/beats/sd"); m.add(g_beatsSdReady ? 1 : 0); reply.add(m);
+    }
+    for (int t = 0; t < kBeatsTracks; ++t) {
+        {
+            OSCMessage m("/beats/mute");
+            m.add(t);
+            m.add(g_beats.isMuted(t) ? 1 : 0);
+            reply.add(m);
+        }
+        {
+            OSCMessage m("/beats/sample");
+            m.add(t);
+            m.add(g_beatsSampleName[t]);
+            reply.add(m);
+        }
+        for (int s = 0; s < kBeatsSteps; ++s) {
+            if (!g_beats.getStepOn(t, s)) continue;
+            OSCMessage step("/beats/step");
+            step.add(t);
+            step.add(s);
+            step.add(1);
+            reply.add(step);
+            const uint8_t vel = g_beats.getStepVel(t, s);
+            if (vel != 100) {
+                OSCMessage v("/beats/vel");
+                v.add(t);
+                v.add(s);
+                v.add((float)vel * (1.0f / 127.0f));
+                reply.add(v);
+            }
+        }
+    }
+
     // Codec panel state.
     g_codecPanel.snapshot(reply);
 }
@@ -3254,6 +3682,12 @@ void loop() {
     }
 
     g_transport.poll();
+
+    // Beats sequencer: advance cursor + fire step callbacks on schedule.
+    // Cheap to call every loop tick — no-op unless running, and a no-op
+    // when running-but-not-due. The fire callback calls noteOn() /
+    // play() directly, both of which are non-blocking.
+    g_beats.tick(micros());
 
     // --- Streaming throttle: one broadcast per tick, minimum gap ---
     static uint32_t s_lastBroadcastMs = 0;

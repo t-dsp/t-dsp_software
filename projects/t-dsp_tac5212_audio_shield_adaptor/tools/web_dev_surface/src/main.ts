@@ -26,6 +26,7 @@ import { spectrumView } from './ui/spectrum';
 import { keyboardView } from './ui/keyboard';
 import { dexedPanel } from './ui/dexed-panel';
 import { mpePanel } from './ui/mpe-panel';
+import { neuroPanel } from './ui/neuro-panel';
 import { processingPanel } from './ui/processing-panel';
 import { fxPanel } from './ui/fx-panel';
 import { looperPanel } from './ui/looper-panel';
@@ -334,9 +335,14 @@ dispatcher.setMidiSink((note, velocity, channel) => {
 // treats channel 1 as its master channel (notes silently dropped per
 // MPE spec) so we send on channel 2, a member channel MpeVaSink will
 // actually allocate a voice for.
-let activeSynthSubtab: 'dexed' | 'mpe' = 'dexed';
+let activeSynthSubtab: 'dexed' | 'mpe' | 'neuro' = 'dexed';
 const keyboardChannelForSubtab = (): number => {
-  return activeSynthSubtab === 'mpe' ? 2 : 1;
+  // Dexed default ch 1, MPE member ch 2 (ch 1 is its master/ignored
+  // channel per MPE spec), Neuro default ch 3. Keys always reach the
+  // synth the user is currently looking at.
+  if (activeSynthSubtab === 'mpe')   return 2;
+  if (activeSynthSubtab === 'neuro') return 3;
+  return 1;
 };
 keyboard.onPress((note, down) => {
   // Fixed velocity 100 for Phase 1 — velocity-from-gesture is a
@@ -375,16 +381,20 @@ dexedSubtab.classList.add('active');
 state.dexed.on.subscribe((on) => dexedSubtab.classList.toggle('playing', on));
 const mpeSubtab = makeSubtab('MPE');
 state.mpe.on.subscribe((on) => mpeSubtab.classList.toggle('playing', on));
-synthSubnav.append(dexedSubtab, mpeSubtab);
+const neuroSubtab = makeSubtab('Neuro');
+state.neuro.on.subscribe((on) => neuroSubtab.classList.toggle('playing', on));
+synthSubnav.append(dexedSubtab, mpeSubtab, neuroSubtab);
 
 const synthContent = document.createElement('div');
 synthContent.className = 'synth-content';
 const dexedPanelEl = dexedPanel(state, dispatcher);
 const mpe = mpePanel(state, dispatcher);
+const neuro = neuroPanel(state, dispatcher);
 mpe.element.style.display = 'none';
-synthContent.append(dexedPanelEl, mpe.element);
+neuro.element.style.display = 'none';
+synthContent.append(dexedPanelEl, mpe.element, neuro.element);
 
-type SynthSubtab = 'dexed' | 'mpe';
+type SynthSubtab = 'dexed' | 'mpe' | 'neuro';
 
 // MIDI-Auto enforcer — called from every place that should "take
 // Auto's opinion": sub-tab changes, connect events, Auto toggles
@@ -404,30 +414,39 @@ const enforceMidiAuto = (): void => {
     const want = activeSynthSubtab === 'mpe';
     if (state.mpe.on.get() !== want) dispatcher.setMpeOn(want);
   }
+  if (state.neuro.midiAuto.get()) {
+    const want = activeSynthSubtab === 'neuro';
+    if (state.neuro.on.get() !== want) dispatcher.setNeuroOn(want);
+  }
 };
 
 const selectSynthSubtab = (which: SynthSubtab): void => {
   activeSynthSubtab = which;
   dexedSubtab.classList.toggle('active', which === 'dexed');
   mpeSubtab.classList.toggle('active',   which === 'mpe');
-  dexedPanelEl.style.display = which === 'dexed' ? '' : 'none';
-  mpe.element.style.display  = which === 'mpe'   ? '' : 'none';
-  // Only the MPE panel has telemetry to subscribe to; Dexed panel
-  // doesn't need an active hook.
+  neuroSubtab.classList.toggle('active', which === 'neuro');
+  dexedPanelEl.style.display  = which === 'dexed' ? '' : 'none';
+  mpe.element.style.display   = which === 'mpe'   ? '' : 'none';
+  neuro.element.style.display = which === 'neuro' ? '' : 'none';
+  // Only the MPE panel has telemetry to subscribe to; Dexed/Neuro
+  // panels don't need an active hook (Neuro is mono, no voice orbs).
   mpe.setActive(which === 'mpe');
+  neuro.setActive(which === 'neuro');
   // Drive Auto's "only active-tab synth is audible" behaviour.
   enforceMidiAuto();
 };
 
 // Re-apply Auto on connect so the firmware's cold-boot defaults
-// (both synths on) converge to the UI's sub-tab-follows layout.
+// (all synths on) converge to the UI's sub-tab-follows layout.
 state.connected.subscribe((c) => { if (c) enforceMidiAuto(); });
-// Re-apply Auto whenever the user toggles either synth's midiAuto
-// ON — flipping Auto on should immediately enforce its rule.
+// Re-apply Auto whenever the user toggles any synth's midiAuto ON —
+// flipping Auto on should immediately enforce its rule.
 state.dexed.midiAuto.subscribe((on) => { if (on) enforceMidiAuto(); });
 state.mpe.midiAuto.subscribe  ((on) => { if (on) enforceMidiAuto(); });
+state.neuro.midiAuto.subscribe((on) => { if (on) enforceMidiAuto(); });
 dexedSubtab.addEventListener('click', () => selectSynthSubtab('dexed'));
 mpeSubtab  .addEventListener('click', () => selectSynthSubtab('mpe'));
+neuroSubtab.addEventListener('click', () => selectSynthSubtab('neuro'));
 
 const synthKeyboardDock = document.createElement('div');
 synthKeyboardDock.className = 'synth-keyboard-dock';

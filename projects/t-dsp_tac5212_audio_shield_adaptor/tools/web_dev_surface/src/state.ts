@@ -169,6 +169,30 @@ export interface MpeState {
   activePresetId:   Signal<string>;
 }
 
+// Neuro (reese/neuro bass) synth state — mirror of the firmware's
+// NeuroSink controls. Mono engine, so no per-voice telemetry; every
+// field is a simple scalar param.
+export interface NeuroState {
+  volume:           Signal<number>;  // 0..1 linear
+  on:               Signal<boolean>; // X32-style mix on/off
+  midiAuto:         Signal<boolean>; // see DexedState.midiAuto
+  midiChannel:      Signal<number>;  // 0 = omni, 1..16 (default 3)
+  attack:           Signal<number>;  // seconds
+  release:          Signal<number>;  // seconds
+  detuneCents:      Signal<number>;  // 0..50 (spread between osc1/osc2)
+  subLevel:         Signal<number>;  // 0..1 (sine sub level)
+  osc3Level:        Signal<number>;  // 0..1 (center saw level)
+  filterCutoffHz:   Signal<number>;  // 20..20000
+  filterResonance:  Signal<number>;  // 0.707..5.0
+  lfoRate:          Signal<number>;  // 0..20 Hz
+  lfoDepth:         Signal<number>;  // 0..1
+  lfoDest:          Signal<number>;  // 0=off, 1=cutoff, 2=pitch, 3=amp
+  lfoWaveform:      Signal<number>;  // 0=sine, 1=tri, 2=saw, 3=square
+  portamentoMs:     Signal<number>;  // 0..2000 (0 = snap)
+  fxSend:           Signal<number>;  // 0..1 into shared FX bus
+  activePresetId:   Signal<string>;  // UI-only preset highlight
+}
+
 // Main-bus processing (Processing tab). Post-hostvol, pre-DAC stages
 // mirrored here so the UI can render current values without a query.
 export interface ProcessingState {
@@ -262,6 +286,7 @@ export interface MixerState {
   main: BusState;
   dexed: DexedState;
   mpe: MpeState;
+  neuro: NeuroState;
   processing: ProcessingState;
   fx: FxState;
   synthBus: SynthBusState;
@@ -379,6 +404,29 @@ export function createMixerState(channelCount: number): MixerState {
         pressure:  new Signal(0),
         timbre:    new Signal(0.5),
       })),
+      activePresetId:  new Signal(''),
+    },
+    neuro: {
+      // Defaults match NeuroSink's firmware cold-boot (see main.cpp
+      // "Neuro (reese bass) init" block). /snapshot echoes overwrite
+      // these on connect; matching here keeps the UI sane before then.
+      volume:          new Signal(0.7),
+      on:              new Signal(true),
+      midiAuto:        new Signal(true),   // follow sub-tab by default
+      midiChannel:     new Signal(3),      // Dexed=1, MPE=2, Neuro=3
+      attack:          new Signal(0.005),
+      release:         new Signal(0.200),
+      detuneCents:     new Signal(7.0),
+      subLevel:        new Signal(0.6),
+      osc3Level:       new Signal(0.7),
+      filterCutoffHz:  new Signal(600),
+      filterResonance: new Signal(2.5),
+      lfoRate:         new Signal(0),
+      lfoDepth:        new Signal(0.5),
+      lfoDest:         new Signal(0),
+      lfoWaveform:     new Signal(1),      // triangle
+      portamentoMs:    new Signal(0),
+      fxSend:          new Signal(0),
       activePresetId:  new Signal(''),
     },
     processing: {
