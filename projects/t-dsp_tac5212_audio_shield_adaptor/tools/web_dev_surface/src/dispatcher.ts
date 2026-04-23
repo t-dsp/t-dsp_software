@@ -41,6 +41,21 @@ export class Dispatcher {
   // no point routing it through a Signal.
   private midiSink: ((note: number, velocity: number, channel: number) => void) | null = null;
 
+  // Per-address throttle state for sendThrottled(). Continuous-value
+  // controls (sliders) can fire hundreds of input events per second
+  // during a drag; the firmware's CDC transport throttles incoming
+  // OSC frames to one per 3 ms, so unthrottled bursts queue up and
+  // make the UI feel "slow" — every drag position takes a real bridge
+  // round-trip to settle. Coalescing client-side to ~30 Hz means the
+  // firmware sees a smooth update stream without queue buildup.
+  private throttle = new Map<string, {
+    lastSentAt: number;
+    pendingTimer: number | null;
+    pendingTypes: string;
+    pendingArgs: OscArg[] | null;
+  }>();
+  private static readonly THROTTLE_MS = 33;  // ~30 Hz — matches LFO/meter cadence
+
   constructor(
     private state: MixerState,
     private send: (packet: Uint8Array) => void,
@@ -248,7 +263,7 @@ export class Dispatcher {
 
   setDexedVolume(v: number): void {
     this.state.dexed.volume.set(v);
-    this.sendMsg('/synth/dexed/volume', 'f', [v]);
+    this.sendThrottled('/synth/dexed/volume', 'f', [v]);
   }
 
   setDexedMidiChannel(ch: number): void {
@@ -271,7 +286,86 @@ export class Dispatcher {
   // Per-synth FX send into the shared bus. 0..1 linear.
   setDexedFxSend(v: number): void {
     this.state.dexed.fxSend.set(v);
-    this.sendMsg('/synth/dexed/fx/send', 'f', [v]);
+    this.sendThrottled('/synth/dexed/fx/send', 'f', [v]);
+  }
+
+  // ---------- MPE VA synth controls ----------
+
+  setMpeVolume(v: number): void {
+    this.state.mpe.volume.set(v);
+    this.sendThrottled('/synth/mpe/volume', 'f', [v]);
+  }
+
+  setMpeAttack(s: number): void {
+    this.state.mpe.attack.set(s);
+    this.sendThrottled('/synth/mpe/attack', 'f', [s]);
+  }
+
+  setMpeRelease(s: number): void {
+    this.state.mpe.release.set(s);
+    this.sendThrottled('/synth/mpe/release', 'f', [s]);
+  }
+
+  setMpeWaveform(w: number): void {
+    this.state.mpe.waveform.set(w);
+    this.sendMsg('/synth/mpe/waveform', 'i', [w]);
+  }
+
+  setMpeFilterCutoff(hz: number): void {
+    this.state.mpe.filterCutoffHz.set(hz);
+    this.sendThrottled('/synth/mpe/filter/cutoff', 'f', [hz]);
+  }
+
+  setMpeFilterResonance(q: number): void {
+    this.state.mpe.filterResonance.set(q);
+    this.sendThrottled('/synth/mpe/filter/resonance', 'f', [q]);
+  }
+
+  setMpeLfoRate(hz: number): void {
+    this.state.mpe.lfoRate.set(hz);
+    this.sendThrottled('/synth/mpe/lfo/rate', 'f', [hz]);
+  }
+
+  setMpeLfoDepth(d: number): void {
+    this.state.mpe.lfoDepth.set(d);
+    this.sendThrottled('/synth/mpe/lfo/depth', 'f', [d]);
+  }
+
+  setMpeLfoDest(dest: number): void {
+    this.state.mpe.lfoDest.set(dest);
+    this.sendMsg('/synth/mpe/lfo/dest', 'i', [dest]);
+  }
+
+  setMpeLfoWaveform(w: number): void {
+    this.state.mpe.lfoWaveform.set(w);
+    this.sendMsg('/synth/mpe/lfo/waveform', 'i', [w]);
+  }
+
+  setMpeMasterChannel(ch: number): void {
+    this.state.mpe.masterChannel.set(ch);
+    this.sendMsg('/synth/mpe/midi/master', 'i', [ch]);
+  }
+
+  setMpeFxSend(v: number): void {
+    this.state.mpe.fxSend.set(v);
+    this.sendThrottled('/synth/mpe/fx/send', 'f', [v]);
+  }
+
+  // Subscribe / unsubscribe the voice-telemetry broadcast. The
+  // panel opens the firehose on tab-enter and closes it on leave
+  // so unwatched tabs don't waste CDC bandwidth.
+  subscribeMpeVoices(): void {
+    this.sendMsg('/sub', 'sis', ['addSub', 1000, '/synth/mpe/voices']);
+  }
+
+  unsubscribeMpeVoices(): void {
+    this.sendMsg('/sub', 'ss', ['unsubscribe', '/synth/mpe/voices']);
+    // Reset every voice to "released" so stale orbs don't keep
+    // glowing after we stop receiving telemetry.
+    for (const v of this.state.mpe.voices) {
+      v.held.set(false);
+      v.pressure.set(0);
+    }
   }
 
   // ---------- Shared FX bus (chorus + reverb) ----------
@@ -290,15 +384,15 @@ export class Dispatcher {
   }
   setFxReverbSize(v: number): void {
     this.state.fx.reverbSize.set(v);
-    this.sendMsg('/fx/reverb/size', 'f', [v]);
+    this.sendThrottled('/fx/reverb/size', 'f', [v]);
   }
   setFxReverbDamping(v: number): void {
     this.state.fx.reverbDamping.set(v);
-    this.sendMsg('/fx/reverb/damping', 'f', [v]);
+    this.sendThrottled('/fx/reverb/damping', 'f', [v]);
   }
   setFxReverbReturn(v: number): void {
     this.state.fx.reverbReturn.set(v);
-    this.sendMsg('/fx/reverb/return', 'f', [v]);
+    this.sendThrottled('/fx/reverb/return', 'f', [v]);
   }
 
   // ---------- Main-bus processing (Processing tab) ----------
@@ -309,11 +403,11 @@ export class Dispatcher {
   }
   setProcShelfFreq(hz: number): void {
     this.state.processing.shelfFreqHz.set(hz);
-    this.sendMsg('/proc/shelf/freq', 'f', [hz]);
+    this.sendThrottled('/proc/shelf/freq', 'f', [hz]);
   }
   setProcShelfGain(db: number): void {
     this.state.processing.shelfGainDb.set(db);
-    this.sendMsg('/proc/shelf/gain', 'f', [db]);
+    this.sendThrottled('/proc/shelf/gain', 'f', [db]);
   }
   setProcLimiterEnable(on: boolean): void {
     this.state.processing.limiterEnable.set(on);
@@ -550,6 +644,76 @@ export class Dispatcher {
       return;
     }
 
+    // MPE VA synth echoes — 12 simple scalar params + one voice
+    // telemetry array.
+    if (a === '/synth/mpe/volume' && msg.types === 'f') {
+      this.state.mpe.volume.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/mpe/attack' && msg.types === 'f') {
+      this.state.mpe.attack.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/mpe/release' && msg.types === 'f') {
+      this.state.mpe.release.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/mpe/waveform' && msg.types === 'i') {
+      this.state.mpe.waveform.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/mpe/filter/cutoff' && msg.types === 'f') {
+      this.state.mpe.filterCutoffHz.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/mpe/filter/resonance' && msg.types === 'f') {
+      this.state.mpe.filterResonance.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/mpe/lfo/rate' && msg.types === 'f') {
+      this.state.mpe.lfoRate.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/mpe/lfo/depth' && msg.types === 'f') {
+      this.state.mpe.lfoDepth.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/mpe/lfo/dest' && msg.types === 'i') {
+      this.state.mpe.lfoDest.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/mpe/lfo/waveform' && msg.types === 'i') {
+      this.state.mpe.lfoWaveform.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/mpe/midi/master' && msg.types === 'i') {
+      this.state.mpe.masterChannel.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/mpe/fx/send' && msg.types === 'f') {
+      this.state.mpe.fxSend.set(msg.args[0] as number);
+      return;
+    }
+    // /synth/mpe/voices i i i f f f × kVoiceCount — 6 args per voice.
+    // Firmware sends 4 voices = 24 args. Each group: held, channel,
+    // note, pitchSemi, pressure, timbre.
+    if (a === '/synth/mpe/voices') {
+      const perVoice = 6;
+      const n = Math.min(this.state.mpe.voices.length,
+                         Math.floor(msg.args.length / perVoice));
+      for (let i = 0; i < n; i++) {
+        const base = i * perVoice;
+        const v = this.state.mpe.voices[i];
+        v.held.set     ((msg.args[base + 0] as number) !== 0);
+        v.channel.set  (msg.args[base + 1] as number);
+        v.note.set     (msg.args[base + 2] as number);
+        v.pitchSemi.set(msg.args[base + 3] as number);
+        v.pressure.set (msg.args[base + 4] as number);
+        v.timbre.set   (msg.args[base + 5] as number);
+      }
+      return;
+    }
+
     // Shared FX bus + per-synth send echoes.
     if (a === '/synth/dexed/fx/send' && msg.types === 'f') {
       this.state.dexed.fxSend.set(msg.args[0] as number);
@@ -595,5 +759,45 @@ export class Dispatcher {
 
   private sendMsg(address: string, types: string, args: OscArg[]): void {
     this.send(encodeMessage(address, types, args));
+  }
+
+  // Coalesce repeated sends to the same address to at most one per
+  // THROTTLE_MS. The latest call's args always "win" — if a drag fires
+  // 50 events in 50 ms, we send the first immediately, then the last
+  // value 33 ms later, and skip the middle 48. The trailing-edge fire
+  // matters: it guarantees the firmware lands on the value the user
+  // released the slider on, not on whatever happened to be latest at
+  // the start of the throttle window.
+  private sendThrottled(address: string, types: string, args: OscArg[]): void {
+    const now = performance.now();
+    let entry = this.throttle.get(address);
+    if (!entry) {
+      entry = { lastSentAt: 0, pendingTimer: null, pendingTypes: types, pendingArgs: null };
+      this.throttle.set(address, entry);
+    }
+    const elapsed = now - entry.lastSentAt;
+    if (elapsed >= Dispatcher.THROTTLE_MS && entry.pendingTimer === null) {
+      // Cold path — fire immediately and arm the throttle window.
+      entry.lastSentAt = now;
+      this.sendMsg(address, types, args);
+      return;
+    }
+    // Hot path — coalesce. Stash the latest args; the trailing timer
+    // will pick them up.
+    entry.pendingTypes = types;
+    entry.pendingArgs = args;
+    if (entry.pendingTimer === null) {
+      const delay = Math.max(0, Dispatcher.THROTTLE_MS - elapsed);
+      entry.pendingTimer = window.setTimeout(() => {
+        const e = this.throttle.get(address);
+        if (!e) return;
+        if (e.pendingArgs !== null) {
+          e.lastSentAt = performance.now();
+          this.sendMsg(address, e.pendingTypes, e.pendingArgs);
+          e.pendingArgs = null;
+        }
+        e.pendingTimer = null;
+      }, delay);
+    }
   }
 }

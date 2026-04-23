@@ -25,6 +25,7 @@ import { rawOsc } from './ui/raw-osc';
 import { spectrumView } from './ui/spectrum';
 import { keyboardView } from './ui/keyboard';
 import { dexedPanel } from './ui/dexed-panel';
+import { mpePanel } from './ui/mpe-panel';
 import { processingPanel } from './ui/processing-panel';
 import { fxPanel } from './ui/fx-panel';
 
@@ -317,16 +318,40 @@ const synthSection = document.createElement('section');
 synthSection.className = 'view view-synth';
 synthSection.style.display = 'none';
 
+// Synth sub-tabs — Dexed (FM) and MPE (VA). One content container
+// swaps its visible panel on sub-tab click; both panels stay mounted
+// so their subscribe/unsubscribe cycles are triggered by the
+// setActive hooks rather than DOM add/remove (keeps canvas scroll
+// state, form values, etc. stable across switches).
 const synthSubnav = document.createElement('nav');
 synthSubnav.className = 'synth-subnav';
 const dexedSubtab = document.createElement('button');
 dexedSubtab.className = 'synth-subnav-tab active';
 dexedSubtab.textContent = 'Dexed';
-synthSubnav.appendChild(dexedSubtab);
+const mpeSubtab = document.createElement('button');
+mpeSubtab.className = 'synth-subnav-tab';
+mpeSubtab.textContent = 'MPE';
+synthSubnav.append(dexedSubtab, mpeSubtab);
 
 const synthContent = document.createElement('div');
 synthContent.className = 'synth-content';
-synthContent.appendChild(dexedPanel(state, dispatcher));
+const dexedPanelEl = dexedPanel(state, dispatcher);
+const mpe = mpePanel(state, dispatcher);
+mpe.element.style.display = 'none';
+synthContent.append(dexedPanelEl, mpe.element);
+
+type SynthSubtab = 'dexed' | 'mpe';
+const selectSynthSubtab = (which: SynthSubtab): void => {
+  dexedSubtab.classList.toggle('active', which === 'dexed');
+  mpeSubtab.classList.toggle('active',   which === 'mpe');
+  dexedPanelEl.style.display = which === 'dexed' ? '' : 'none';
+  mpe.element.style.display  = which === 'mpe'   ? '' : 'none';
+  // Only the MPE panel has telemetry to subscribe to; Dexed panel
+  // doesn't need an active hook.
+  mpe.setActive(which === 'mpe');
+};
+dexedSubtab.addEventListener('click', () => selectSynthSubtab('dexed'));
+mpeSubtab  .addEventListener('click', () => selectSynthSubtab('mpe'));
 
 const synthKeyboardDock = document.createElement('div');
 synthKeyboardDock.className = 'synth-keyboard-dock';
@@ -388,10 +413,12 @@ function selectView(name: ViewName): void {
     dispatcher.unsubscribeSpectrum();
   }
   // Leaving synth: clear keyboard state, unsubscribe so the firmware
-  // stops forwarding MIDI events over USB CDC.
+  // stops forwarding MIDI events over USB CDC. Also turn off MPE
+  // voice telemetry if the MPE sub-tab was active.
   if (name !== 'synth' && keyboard.isRunning()) {
     keyboard.stop();
     dispatcher.unsubscribeMidi();
+    mpe.setActive(false);
   }
 
   if (name === 'spectrum' && !spectrum.isRunning()) {
@@ -401,6 +428,10 @@ function selectView(name: ViewName): void {
   if (name === 'synth' && !keyboard.isRunning()) {
     dispatcher.subscribeMidi();
     keyboard.start();
+    // If the MPE sub-tab was the last active one, re-subscribe its
+    // telemetry stream. Default sub-tab is Dexed so first visit is a
+    // no-op.
+    if (mpeSubtab.classList.contains('active')) mpe.setActive(true);
   }
 }
 mixerTab.addEventListener('click',      () => selectView('mixer'));

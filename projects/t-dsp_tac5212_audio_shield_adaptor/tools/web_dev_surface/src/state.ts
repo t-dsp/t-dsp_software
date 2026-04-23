@@ -116,6 +116,45 @@ export interface DexedState {
   voiceNames: Signal<string[]>; // names for the currently-selected bank
 }
 
+// Per-voice MPE state — one entry per physical voice slot (4 slots
+// in the firmware's kVoiceCount). The firmware streams these via
+// /synth/mpe/voices at 30 Hz when the client subscribes.
+//
+// Signals, not a plain array, because the voice orb renderer wants
+// to subscribe to each voice independently and repaint only when
+// that specific voice's state changes.
+export interface MpeVoiceState {
+  held:      Signal<boolean>;
+  channel:   Signal<number>;   // 1..16 MIDI channel; 0 if never used
+  note:      Signal<number>;   // 0..127 MIDI note
+  pitchSemi: Signal<number>;   // signed semitone offset (bend + LFO)
+  pressure:  Signal<number>;   // 0..1
+  timbre:    Signal<number>;   // 0..1 (CC#74)
+}
+
+// MPE VA synth state — mirror of the firmware's MpeVaSink controls.
+// Same read/write/echo pattern as DexedState. `voices` is streamed
+// telemetry; everything else is parameter state.
+export interface MpeState {
+  volume:           Signal<number>;  // 0..1
+  attack:           Signal<number>;  // seconds (0..10)
+  release:          Signal<number>;  // seconds (0..10)
+  waveform:         Signal<number>;  // 0=saw, 1=square, 2=tri, 3=sine
+  filterCutoffHz:   Signal<number>;  // 20..20000
+  filterResonance:  Signal<number>;  // 0.707..5.0
+  lfoRate:          Signal<number>;  // 0..20 Hz
+  lfoDepth:         Signal<number>;  // 0..1
+  lfoDest:          Signal<number>;  // 0=off, 1=cutoff, 2=pitch, 3=amp
+  lfoWaveform:      Signal<number>;  // 0=sine, 1=tri, 2=saw, 3=square
+  masterChannel:    Signal<number>;  // 1..16 (MPE master channel)
+  fxSend:           Signal<number>;  // 0..1 into shared FX bus
+  voices:           MpeVoiceState[]; // fixed-length 4; telemetry-driven
+  // Currently-selected preset id ('' = none). Informational only —
+  // firmware doesn't know about presets; this is the UI's memory of
+  // "which card did the user last click?" for highlight state.
+  activePresetId:   Signal<string>;
+}
+
 // Main-bus processing (Processing tab). Post-hostvol, pre-DAC stages
 // mirrored here so the UI can render current values without a query.
 export interface ProcessingState {
@@ -142,6 +181,7 @@ export interface MixerState {
   channels: ChannelState[];
   main: BusState;
   dexed: DexedState;
+  mpe: MpeState;
   processing: ProcessingState;
   fx: FxState;
   connected: Signal<boolean>;
@@ -218,6 +258,33 @@ export function createMixerState(channelCount: number): MixerState {
       fxSend: new Signal(0),      // dry by default, matches firmware
       bankNames: new Signal<string[]>([]),
       voiceNames: new Signal<string[]>([]),
+    },
+    mpe: {
+      // Defaults match MpeVaSink's firmware defaults. First
+      // /snapshot reply will overwrite with whatever's actually
+      // running, but matching here keeps the UI sensible before
+      // connect.
+      volume:          new Signal(0.7),
+      attack:          new Signal(0.005),
+      release:         new Signal(0.300),
+      waveform:        new Signal(0),
+      filterCutoffHz:  new Signal(8000),
+      filterResonance: new Signal(0.707),
+      lfoRate:         new Signal(0),
+      lfoDepth:        new Signal(0),
+      lfoDest:         new Signal(0),
+      lfoWaveform:     new Signal(0),
+      masterChannel:   new Signal(1),
+      fxSend:          new Signal(0),
+      voices: Array.from({ length: 4 }, () => ({
+        held:      new Signal(false),
+        channel:   new Signal(0),
+        note:      new Signal(0),
+        pitchSemi: new Signal(0),
+        pressure:  new Signal(0),
+        timbre:    new Signal(0.5),
+      })),
+      activePresetId:  new Signal(''),
     },
     processing: {
       shelfEnable:    new Signal(true),    // matches firmware defaults

@@ -999,3 +999,293 @@ select, input[type="text"] {
   font-size: 11px;
   padding: 3px 12px;
 }
+
+/* ================================================================
+ *  MPE VA synth panel
+ * ================================================================ */
+
+.mpe-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 760px;
+}
+
+.mpe-section-title {
+  color: #bbb;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 0 0 6px 0;
+}
+
+/* ---- voice orbs ---- */
+
+.mpe-orbs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mpe-orbs-canvas {
+  width: 100%;
+  height: 160px;
+  background: #0b0f14;
+  border: 1px solid #2c2c2c;
+  border-radius: 4px;
+  display: block;
+}
+
+.mpe-orbs-legend {
+  display: flex;
+  flex-direction: row;
+  gap: 14px;
+  font-size: 10px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 4px;
+}
+
+/* ---- preset grid ---- */
+
+.mpe-presets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mpe-preset-filter {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.mpe-preset-filter-btn {
+  --cat-color: #666;
+  background: #1a1a1a;
+  color: #bbb;
+  border: 1px solid #2c2c2c;
+  border-left: 3px solid var(--cat-color);
+  border-radius: 3px;
+  padding: 4px 10px;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.mpe-preset-filter-btn.active {
+  background: #2c2c2c;
+  color: #fff;
+  border-color: #3a3a3a;
+  border-left-color: var(--cat-color);
+}
+.mpe-preset-filter-btn:hover {
+  background: #222;
+}
+
+.mpe-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 6px;
+}
+
+.mpe-preset-card {
+  --cat-color: #666;
+  background: #181818;
+  color: #e0e0e0;
+  border: 1px solid #2c2c2c;
+  border-left: 3px solid var(--cat-color);
+  border-radius: 3px;
+  padding: 8px 10px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  font-family: inherit;
+  transition: background 0.1s, border-color 0.1s;
+}
+.mpe-preset-card:hover {
+  background: #1e1e1e;
+  border-color: #3a3a3a;
+}
+.mpe-preset-card.active {
+  background: #262626;
+  border-color: #4a4a4a;
+  box-shadow: 0 0 0 1px var(--cat-color);
+}
+
+.mpe-preset-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e8e8e8;
+}
+
+.mpe-preset-glyphs {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  align-items: center;
+  color: #888;
+}
+.mpe-preset-glyph {
+  display: inline-flex;
+  align-items: center;
+}
+.mpe-preset-glyph-lfo {
+  font-size: 9px;
+  color: #d68038;
+  border: 1px solid #5a3010;
+  padding: 1px 4px;
+  border-radius: 2px;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+/* ---- controls ---- */
+
+.mpe-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mpe-row {
+  display: grid;
+  grid-template-columns: 70px 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.mpe-row-col {
+  /* LFO row wants a vertical stack inside a single full-width cell
+   * so both sub-rows share the column grid. Reset to single column. */
+  grid-template-columns: 1fr;
+  gap: 4px;
+}
+
+.mpe-row label {
+  color: #bbb;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.mpe-row input[type="range"] {
+  background: #181818;
+  border: 1px solid #333;
+  border-radius: 2px;
+  min-width: 0;
+}
+
+.mpe-readout {
+  color: #888;
+  font-size: 11px;
+  font-family: monospace;
+  min-width: 60px;
+  text-align: right;
+}
+
+/* waveform picker — 4 tiles */
+
+.mpe-wave-row {
+  grid-template-columns: 70px repeat(4, auto) 1fr;
+}
+
+.mpe-wave-tile {
+  background: #181818;
+  color: #888;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 4px 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+.mpe-wave-tile:hover {
+  background: #222;
+  color: #ccc;
+}
+.mpe-wave-tile.active {
+  background: #b86a30;
+  color: #111;
+  border-color: #d68038;
+}
+
+/* LFO row — nested sub-rows */
+
+.mpe-lfo-sub {
+  display: grid;
+  grid-template-columns: 70px 1fr 50px 0.6fr 40px;
+  align-items: center;
+  gap: 10px;
+}
+
+.mpe-lfo-sub-pickers {
+  grid-template-columns: 70px auto 1fr auto;
+}
+
+.mpe-segmented {
+  display: inline-flex;
+  flex-direction: row;
+  border: 1px solid #333;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.mpe-segmented button {
+  background: #181818;
+  color: #888;
+  border: none;
+  border-right: 1px solid #2c2c2c;
+  padding: 4px 10px;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.mpe-segmented button:last-child {
+  border-right: none;
+}
+.mpe-segmented button:hover {
+  background: #222;
+  color: #ccc;
+}
+.mpe-segmented button.active {
+  background: #b86a30;
+  color: #111;
+}
+
+/* master channel picker — 16 pills */
+
+.mpe-channel-pills {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+.mpe-channel-pill {
+  background: #181818;
+  color: #888;
+  border: 1px solid #2c2c2c;
+  border-radius: 2px;
+  width: 26px;
+  height: 22px;
+  padding: 0;
+  font-family: monospace;
+  font-size: 10px;
+  cursor: pointer;
+}
+.mpe-channel-pill:hover {
+  background: #222;
+  color: #ccc;
+}
+.mpe-channel-pill.active {
+  background: #b86a30;
+  color: #111;
+  border-color: #d68038;
+  font-weight: 600;
+}
