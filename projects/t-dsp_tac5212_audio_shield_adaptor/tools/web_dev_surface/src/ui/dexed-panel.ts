@@ -18,6 +18,24 @@ export function dexedPanel(state: MixerState, dispatcher: Dispatcher): HTMLEleme
   const root = document.createElement('div');
   root.className = 'dexed-panel';
 
+  // ---- On/off header row ----
+  const onRow = document.createElement('div');
+  onRow.className = 'synth-on-row';
+  const onBtn = document.createElement('button');
+  onBtn.type = 'button';
+  onBtn.className = 'synth-on-btn';
+  const updateOnBtn = (on: boolean): void => {
+    onBtn.classList.toggle('on', on);
+    onBtn.textContent = on ? 'ON' : 'OFF';
+    onBtn.title = on ? 'Click to mute Dexed output' : 'Click to un-mute Dexed output';
+  };
+  state.dexed.on.subscribe(updateOnBtn);
+  onBtn.addEventListener('click', () => dispatcher.setDexedOn(!state.dexed.on.get()));
+  const onLabel = document.createElement('span');
+  onLabel.className = 'synth-on-label';
+  onLabel.textContent = 'Dexed FM';
+  onRow.append(onBtn, onLabel);
+
   // ---- Bank row ----
   const bankRow = document.createElement('div');
   bankRow.className = 'dexed-row';
@@ -159,7 +177,7 @@ export function dexedPanel(state: MixerState, dispatcher: Dispatcher): HTMLEleme
   }
   chRow.append(chLabel, chSelect);
 
-  root.append(bankRow, voiceRow, volRow, sendRow, chRow);
+  root.append(onRow, bankRow, voiceRow, volRow, sendRow, chRow);
 
   // ---- Populate dropdowns from state signals ----
 

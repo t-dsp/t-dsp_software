@@ -72,6 +72,7 @@ export function mpePanel(state: MixerState, dispatcher: Dispatcher): MpePanel {
   root.className = 'mpe-panel';
 
   root.append(
+    buildOnRow(state, dispatcher),
     buildVoiceOrbs(state, dispatcher),
     buildPresetGrid(state, dispatcher),
     buildControls(state, dispatcher),
@@ -86,6 +87,31 @@ export function mpePanel(state: MixerState, dispatcher: Dispatcher): MpePanel {
   };
 
   return { element: root, setActive };
+}
+
+// ---- on/off header --------------------------------------------------
+
+function buildOnRow(state: MixerState, dispatcher: Dispatcher): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'synth-on-row';
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'synth-on-btn';
+  const update = (on: boolean): void => {
+    btn.classList.toggle('on', on);
+    btn.textContent = on ? 'ON' : 'OFF';
+    btn.title = on ? 'Click to mute MPE output' : 'Click to un-mute MPE output';
+  };
+  state.mpe.on.subscribe(update);
+  btn.addEventListener('click', () => dispatcher.setMpeOn(!state.mpe.on.get()));
+
+  const label = document.createElement('span');
+  label.className = 'synth-on-label';
+  label.textContent = 'MPE VA';
+
+  row.append(btn, label);
+  return row;
 }
 
 // ---- voice orbs -----------------------------------------------------

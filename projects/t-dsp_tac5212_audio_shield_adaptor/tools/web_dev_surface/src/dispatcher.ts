@@ -266,6 +266,11 @@ export class Dispatcher {
     this.sendThrottled('/synth/dexed/volume', 'f', [v]);
   }
 
+  setDexedOn(on: boolean): void {
+    this.state.dexed.on.set(on);
+    this.sendMsg('/synth/dexed/on', 'i', [on ? 1 : 0]);
+  }
+
   setDexedMidiChannel(ch: number): void {
     this.state.dexed.midiChannel.set(ch);
     this.sendMsg('/synth/dexed/midi/ch', 'i', [ch]);
@@ -294,6 +299,11 @@ export class Dispatcher {
   setMpeVolume(v: number): void {
     this.state.mpe.volume.set(v);
     this.sendThrottled('/synth/mpe/volume', 'f', [v]);
+  }
+
+  setMpeOn(on: boolean): void {
+    this.state.mpe.on.set(on);
+    this.sendMsg('/synth/mpe/on', 'i', [on ? 1 : 0]);
   }
 
   setMpeAttack(s: number): void {
@@ -608,6 +618,10 @@ export class Dispatcher {
       this.state.dexed.volume.set(msg.args[0] as number);
       return;
     }
+    if (a === '/synth/dexed/on' && msg.types === 'i') {
+      this.state.dexed.on.set((msg.args[0] as number) !== 0);
+      return;
+    }
     if (a === '/synth/dexed/midi/ch' && msg.types === 'i') {
       this.state.dexed.midiChannel.set(msg.args[0] as number);
       return;
@@ -648,6 +662,10 @@ export class Dispatcher {
     // telemetry array.
     if (a === '/synth/mpe/volume' && msg.types === 'f') {
       this.state.mpe.volume.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/mpe/on' && msg.types === 'i') {
+      this.state.mpe.on.set((msg.args[0] as number) !== 0);
       return;
     }
     if (a === '/synth/mpe/attack' && msg.types === 'f') {

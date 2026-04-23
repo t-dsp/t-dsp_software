@@ -481,12 +481,26 @@ static bool g_lineMonoMode = false;
 // and any future UI echo needs the last-set value. Applied via
 // applyDexedVolume() which writes g_dexedGain.gain().
 static float g_dexedVolume = 0.7f;
+// Dexed on/off gate. X32-style "mix on": when off, gain goes to 0 but
+// the stored volume is preserved so turning back on restores the fader
+// position. Engine keeps running (cheap enough — FM voices are always
+// on), just silent.
+static bool  g_dexedOn     = true;
+
+static void applyDexedGain() {
+    g_dexedGain.gain(g_dexedOn ? g_dexedVolume : 0.0f);
+}
 
 static void applyDexedVolume(float v) {
     if (v < 0.0f) v = 0.0f;
     if (v > 1.0f) v = 1.0f;
     g_dexedVolume = v;
-    g_dexedGain.gain(v);
+    applyDexedGain();
+}
+
+static void applyDexedOn(bool on) {
+    g_dexedOn = on;
+    applyDexedGain();
 }
 
 // Currently-loaded voice within the bundled DX7 bank set. Mirrored
@@ -555,9 +569,10 @@ static void applyFxReverb() {
 // --------------------------------------------------------------------
 // Main-bus processing stage: high-shelf EQ + peak-limit waveshaper.
 //
-// Tone shelf defaults to -4 dB above 5 kHz — a mild "darken" that
-// takes the hardest edge off FM synth sizzle without making things
-// sound veiled. The limiter uses a tanh soft-clip curve capped at
+// Tone shelf defaults to -12 dB above 3 kHz — the "Dull" preset,
+// an aggressive darkening that reins in FM synth sizzle hard by
+// default; users can dial it back to lighter presets from the UI.
+// The limiter uses a tanh soft-clip curve capped at
 // 0.7079 (-3 dBFS), giving a generous peak margin the DAC can't
 // exceed no matter how hot the upstream signal is.
 //
@@ -573,8 +588,8 @@ static void applyFxReverb() {
 // --------------------------------------------------------------------
 
 static bool  g_procShelfEnable   = true;
-static float g_procShelfFreqHz   = 5000.0f;
-static float g_procShelfGainDb   = -4.0f;
+static float g_procShelfFreqHz   = 3000.0f;
+static float g_procShelfGainDb   = -12.0f;
 static bool  g_procLimiterEnable = true;
 
 constexpr int   kProcLimiterTableLen = 513;      // 2^N + 1 as required by AudioEffectWaveshaper
@@ -669,16 +684,29 @@ MpeVaSink g_mpeSink(g_mpeVoices, 4);
 
 // MPE VA output level (post-summing, pre-preMix). Mirrors the Dexed
 // volume pattern — AudioAmplifier has no getter, so the sketch keeps
-// the last-set value for broadcastSnapshot() and OSC echo.
+// the last-set value for broadcastSnapshot() and OSC echo. Same X32-
+// style on/off gate as Dexed: on=false zeros mpeGainL/R but preserves
+// the stored volume.
 static float g_mpeVolume     = 0.7f;
 static float g_mpeSendAmount = 0.0f;
+static bool  g_mpeOn         = true;
+
+static void applyMpeGain() {
+    const float g = g_mpeOn ? g_mpeVolume : 0.0f;
+    mpeGainL.gain(g);
+    mpeGainR.gain(g);
+}
 
 static void applyMpeVolume(float v) {
     if (v < 0.0f) v = 0.0f;
     if (v > 1.0f) v = 1.0f;
     g_mpeVolume = v;
-    mpeGainL.gain(v);
-    mpeGainR.gain(v);
+    applyMpeGain();
+}
+
+static void applyMpeOn(bool on) {
+    g_mpeOn = on;
+    applyMpeGain();
 }
 
 static void applyMpeSend(float v) {
@@ -1034,6 +1062,26 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
+    // /synth/dexed/on i — X32-style mix on/off for the Dexed output.
+    // 0 mutes g_dexedGain without touching the stored volume; 1 restores
+    // the fader position. Other synths are unaffected — they share the
+    // preMix bus but each has its own gain amp.
+    if (strcmp(address, "/synth/dexed/on") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/dexed/on");
+            m.add((int)(g_dexedOn ? 1 : 0));
+            reply.add(m);
+        } else if (msg.isInt(0)) {
+            applyDexedOn(msg.getInt(0) != 0);
+            OSCMessage m("/synth/dexed/on");
+            m.add((int)(g_dexedOn ? 1 : 0));
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
     // /synth/dexed/midi/ch i — which MIDI channel Dexed listens on.
     // 0 = omni (accept all channels), 1..16 = single-channel. Clamped
     // to valid range in DexedSink::setListenChannel. Values outside
@@ -1369,6 +1417,24 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         } else if (msg.isFloat(0)) {
             applyMpeVolume(msg.getFloat(0));
             OSCMessage m("/synth/mpe/volume"); m.add(g_mpeVolume); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    // /synth/mpe/on i — X32-style on/off. Same semantics as
+    // /synth/dexed/on: 0 zeros mpeGainL/R, 1 restores stored volume.
+    if (strcmp(address, "/synth/mpe/on") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/mpe/on");
+            m.add((int)(g_mpeOn ? 1 : 0));
+            reply.add(m);
+        } else if (msg.isInt(0)) {
+            applyMpeOn(msg.getInt(0) != 0);
+            OSCMessage m("/synth/mpe/on");
+            m.add((int)(g_mpeOn ? 1 : 0));
+            reply.add(m);
         }
         if (reply.size() > 0) g_transport.sendBundle(reply);
         return;
@@ -2153,6 +2219,11 @@ static void broadcastSnapshot(OSCBundle &reply) {
         reply.add(m);
     }
     {
+        OSCMessage m("/synth/dexed/on");
+        m.add((int)(g_dexedOn ? 1 : 0));
+        reply.add(m);
+    }
+    {
         OSCMessage m("/synth/dexed/midi/ch");
         m.add((int)g_dexedSink.listenChannel());
         reply.add(m);
@@ -2172,6 +2243,9 @@ static void broadcastSnapshot(OSCBundle &reply) {
     // having to round-trip per-address reads.
     {
         OSCMessage m("/synth/mpe/volume");           m.add(g_mpeVolume); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/mpe/on");               m.add((int)(g_mpeOn ? 1 : 0)); reply.add(m);
     }
     {
         OSCMessage m("/synth/mpe/attack");           m.add(g_mpeSink.attack()); reply.add(m);

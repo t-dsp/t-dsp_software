@@ -110,6 +110,10 @@ export interface DexedState {
   voice: Signal<number>;       // 0..31
   voiceName: Signal<string>;   // trimmed 10-char voice name
   volume: Signal<number>;      // 0..1 linear
+  // X32-style on/off. When false, firmware zeros g_dexedGain but
+  // preserves the stored volume so turning back on restores the
+  // fader position.
+  on: Signal<boolean>;
   midiChannel: Signal<number>; // 0 = omni, 1..16
   fxSend: Signal<number>;      // 0..1 send amount into shared FX bus
   bankNames: Signal<string[]>;
@@ -137,6 +141,7 @@ export interface MpeVoiceState {
 // telemetry; everything else is parameter state.
 export interface MpeState {
   volume:           Signal<number>;  // 0..1
+  on:               Signal<boolean>; // X32-style mix on/off
   attack:           Signal<number>;  // seconds (0..10)
   release:          Signal<number>;  // seconds (0..10)
   waveform:         Signal<number>;  // 0=saw, 1=square, 2=tri, 3=sine
@@ -254,6 +259,7 @@ export function createMixerState(channelCount: number): MixerState {
       voice: new Signal(0),
       voiceName: new Signal(''),
       volume: new Signal(0.7),    // matches firmware default
+      on: new Signal(true),       // firmware defaults on=true
       midiChannel: new Signal(1), // matches DexedSink default
       fxSend: new Signal(0),      // dry by default, matches firmware
       bankNames: new Signal<string[]>([]),
@@ -265,6 +271,7 @@ export function createMixerState(channelCount: number): MixerState {
       // running, but matching here keeps the UI sensible before
       // connect.
       volume:          new Signal(0.7),
+      on:              new Signal(true),   // firmware defaults on=true
       attack:          new Signal(0.005),
       release:         new Signal(0.300),
       waveform:        new Signal(0),
@@ -288,8 +295,8 @@ export function createMixerState(channelCount: number): MixerState {
     },
     processing: {
       shelfEnable:    new Signal(true),    // matches firmware defaults
-      shelfFreqHz:    new Signal(5000),
-      shelfGainDb:    new Signal(-4),
+      shelfFreqHz:    new Signal(3000),
+      shelfGainDb:    new Signal(-12),
       limiterEnable:  new Signal(true),
     },
     fx: {

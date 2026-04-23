@@ -307,11 +307,21 @@ dispatcher.setMidiSink((note, velocity, channel) => {
   // channel breakdown is surfaced via the banner readout in keyboardView.
   keyboard.setNote(note, velocity > 0, channel);
 });
+
+// Active synth sub-tab dictates which MIDI channel the on-screen
+// keyboard targets. Dexed listens on channel 1 (its default); MPE
+// treats channel 1 as its master channel (notes silently dropped per
+// MPE spec) so we send on channel 2, a member channel MpeVaSink will
+// actually allocate a voice for.
+let activeSynthSubtab: 'dexed' | 'mpe' = 'dexed';
+const keyboardChannelForSubtab = (): number => {
+  return activeSynthSubtab === 'mpe' ? 2 : 1;
+};
 keyboard.onPress((note, down) => {
   // Fixed velocity 100 for Phase 1 — velocity-from-gesture is a
-  // follow-on. Channel 1 is the default; once per-synth MIDI channel
-  // filtering exists, the currently-focused synth sub-tab can override.
-  dispatcher.sendMidiNote(note, down ? 100 : 0, 1);
+  // follow-on. Channel routes by active sub-tab so the key you press
+  // always reaches the synth you're looking at.
+  dispatcher.sendMidiNote(note, down ? 100 : 0, keyboardChannelForSubtab());
 });
 
 const synthSection = document.createElement('section');
@@ -325,12 +335,25 @@ synthSection.style.display = 'none';
 // state, form values, etc. stable across switches).
 const synthSubnav = document.createElement('nav');
 synthSubnav.className = 'synth-subnav';
-const dexedSubtab = document.createElement('button');
-dexedSubtab.className = 'synth-subnav-tab active';
-dexedSubtab.textContent = 'Dexed';
-const mpeSubtab = document.createElement('button');
-mpeSubtab.className = 'synth-subnav-tab';
-mpeSubtab.textContent = 'MPE';
+
+// Each sub-tab button has a label + a "playing" dot that lights
+// up when the synth's on state is true. Keeps the on/off state
+// visible even when the sub-tab isn't selected.
+const makeSubtab = (label: string): HTMLButtonElement => {
+  const b = document.createElement('button');
+  b.className = 'synth-subnav-tab';
+  const dot = document.createElement('span');
+  dot.className = 'synth-subnav-dot';
+  const text = document.createElement('span');
+  text.textContent = label;
+  b.append(dot, text);
+  return b;
+};
+const dexedSubtab = makeSubtab('Dexed');
+dexedSubtab.classList.add('active');
+state.dexed.on.subscribe((on) => dexedSubtab.classList.toggle('playing', on));
+const mpeSubtab = makeSubtab('MPE');
+state.mpe.on.subscribe((on) => mpeSubtab.classList.toggle('playing', on));
 synthSubnav.append(dexedSubtab, mpeSubtab);
 
 const synthContent = document.createElement('div');
@@ -342,6 +365,7 @@ synthContent.append(dexedPanelEl, mpe.element);
 
 type SynthSubtab = 'dexed' | 'mpe';
 const selectSynthSubtab = (which: SynthSubtab): void => {
+  activeSynthSubtab = which;
   dexedSubtab.classList.toggle('active', which === 'dexed');
   mpeSubtab.classList.toggle('active',   which === 'mpe');
   dexedPanelEl.style.display = which === 'dexed' ? '' : 'none';

@@ -632,10 +632,84 @@ select, input[type="text"] {
   padding: 4px 12px;
   cursor: pointer;
 }
+.synth-subnav-tab {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
 .synth-subnav-tab.active {
   background: #b86a30;
   color: #111;
   border-color: #d68038;
+}
+
+/* "Playing" dot next to each sub-tab label — lit when the synth's
+ * on state is true, dim when off. Stays visible on inactive sub-tabs
+ * so the user can see at a glance that (for example) Dexed is still
+ * sounding while they configure MPE. */
+.synth-subnav-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #333;
+  flex-shrink: 0;
+  transition: background 0.12s, box-shadow 0.12s;
+}
+.synth-subnav-tab.playing .synth-subnav-dot {
+  background: #3dd16a;
+  box-shadow: 0 0 4px rgba(61, 209, 106, 0.8);
+}
+.synth-subnav-tab.active.playing .synth-subnav-dot {
+  background: #2a6;
+  box-shadow: 0 0 4px rgba(61, 209, 106, 0.6);
+}
+
+/* ---- per-synth on/off header row (Dexed + MPE panels share this) ---- */
+
+.synth-on-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #2c2c2c;
+  margin-bottom: 6px;
+}
+
+.synth-on-btn {
+  background: #2a2a2a;
+  color: #999;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  padding: 5px 14px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  min-width: 48px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s, box-shadow 0.12s;
+}
+.synth-on-btn:hover {
+  background: #333;
+  color: #ccc;
+}
+.synth-on-btn.on {
+  background: #1d6e34;
+  color: #eaffe8;
+  border-color: #2e9a4a;
+  box-shadow: 0 0 6px rgba(61, 209, 106, 0.4);
+}
+.synth-on-btn.on:hover {
+  background: #228240;
+}
+
+.synth-on-label {
+  color: #ccc;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
 }
 
 .dexed-panel {
