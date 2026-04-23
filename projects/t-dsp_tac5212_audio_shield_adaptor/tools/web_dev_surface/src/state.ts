@@ -114,6 +114,12 @@ export interface DexedState {
   // preserves the stored volume so turning back on restores the
   // fader position.
   on: Signal<boolean>;
+  // MIDI-Auto mode. When true, this synth's on-state tracks the
+  // active sub-tab (switching tabs mutes the outgoing synth and
+  // unmutes the incoming one). Client-side only — enforced by
+  // enforceMidiAuto. Turning it off keeps the synth sounding even
+  // when its tab isn't selected, so you can layer synths.
+  midiAuto: Signal<boolean>;
   midiChannel: Signal<number>; // 0 = omni, 1..16
   fxSend: Signal<number>;      // 0..1 send amount into shared FX bus
   bankNames: Signal<string[]>;
@@ -142,6 +148,7 @@ export interface MpeVoiceState {
 export interface MpeState {
   volume:           Signal<number>;  // 0..1
   on:               Signal<boolean>; // X32-style mix on/off
+  midiAuto:         Signal<boolean>; // see DexedState.midiAuto
   attack:           Signal<number>;  // seconds (0..10)
   release:          Signal<number>;  // seconds (0..10)
   waveform:         Signal<number>;  // 0=saw, 1=square, 2=tri, 3=sine
@@ -166,6 +173,7 @@ export interface MpeState {
 export interface NeuroState {
   volume:           Signal<number>;  // 0..1 linear
   on:               Signal<boolean>; // X32-style mix on/off
+  midiAuto:         Signal<boolean>; // see DexedState.midiAuto
   midiChannel:      Signal<number>;  // 0 = omni, 1..16
   attack:           Signal<number>;  // seconds
   release:          Signal<number>;  // seconds
@@ -434,7 +442,8 @@ export function createMixerState(channelCount: number): MixerState {
       // selectSynthSubtab('dexed') call at app boot would set this
       // anyway, but matching here keeps the first-paint state sane.
       on: new Signal(true),
-      midiChannel: new Signal(0),    // matches DexedSink default (omni)
+      midiAuto: new Signal(true),    // follow sub-tab by default
+      midiChannel: new Signal(1),    // matches DexedSink default — ch 1 for auto-follow
       fxSend: new Signal(0),         // dry by default, matches firmware
       bankNames: new Signal<string[]>([]),
       voiceNames: new Signal<string[]>([]),
@@ -450,6 +459,7 @@ export function createMixerState(channelCount: number): MixerState {
       // from the current sub-tab (mutes MPE if Dexed is the default
       // tab) without creating a mismatch window before /snapshot.
       on:              new Signal(true),
+      midiAuto:        new Signal(true),   // follow sub-tab by default
       attack:          new Signal(0.005),
       release:         new Signal(0.300),
       waveform:        new Signal(0),
@@ -477,7 +487,8 @@ export function createMixerState(channelCount: number): MixerState {
       // these on connect; matching here keeps the UI sane before then.
       volume:          new Signal(0.7),
       on:              new Signal(true),
-      midiChannel:     new Signal(0),      // matches NeuroSink default (omni)
+      midiAuto:        new Signal(true),   // follow sub-tab by default
+      midiChannel:     new Signal(3),      // Dexed=1, MPE=2, Neuro=3, Acid=4, Supersaw=5, Chip=6
       attack:          new Signal(0.005),
       release:         new Signal(0.200),
       detuneCents:     new Signal(7.0),

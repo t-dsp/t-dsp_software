@@ -331,6 +331,15 @@ dispatcher.setMidiSink((note, velocity, channel) => {
   // running-status). All channels light the same keyboard — the per-
   // channel breakdown is surfaced via the banner readout in keyboardView.
   keyboard.setNote(note, velocity > 0, channel);
+  // Auto-follow: on note-on, switch the active sub-tab to whichever
+  // synth claims this channel. Lets the user pick up an unknown-channel
+  // keyboard (or an MPE one that spreads notes across channels) without
+  // hunting for the right tab. Resolver + selectSynthSubtab are defined
+  // below; the closure resolves them at call time, post-init.
+  if (velocity > 0 && channel >= 1 && channel <= 16) {
+    const target = resolveAutoTarget(channel);
+    if (target && target !== activeSynthSubtab) selectSynthSubtab(target);
+  }
 });
 
 // Active synth sub-tab dictates which MIDI channel the on-screen
@@ -416,15 +425,61 @@ synthContent.append(dexedPanelEl, mpe.element, neuro.element, acid.element, supe
 
 type SynthSubtab = 'dexed' | 'mpe' | 'neuro' | 'acid' | 'supersaw' | 'chip';
 
-// Sub-tab enforcer — "only the active sub-tab's synth is audible."
-const enforceSubtab = (): void => {
+// MIDI-Auto enforcer — only touches on-states for synths whose
+// midiAuto flag is TRUE. Gives each synth an opt-out: unchecking
+// MIDI Auto on (say) Dexed means the Dexed on-state stays put even
+// as you switch tabs, so you can layer Dexed + Supersaw on the
+// same performance. Only fires when state.connected is true —
+// otherwise the OSC writes are thrown away into a disconnected
+// bridge and the firmware's defaults stay intact.
+const enforceMidiAuto = (): void => {
   if (!state.connected.get()) return;
-  if (state.dexed.on.get()    !== (activeSynthSubtab === 'dexed'))    dispatcher.setDexedOn(activeSynthSubtab === 'dexed');
-  if (state.mpe.on.get()      !== (activeSynthSubtab === 'mpe'))      dispatcher.setMpeOn(activeSynthSubtab === 'mpe');
-  if (state.neuro.on.get()    !== (activeSynthSubtab === 'neuro'))    dispatcher.setNeuroOn(activeSynthSubtab === 'neuro');
-  if (state.acid.on.get()     !== (activeSynthSubtab === 'acid'))     dispatcher.setAcidOn(activeSynthSubtab === 'acid');
-  if (state.supersaw.on.get() !== (activeSynthSubtab === 'supersaw')) dispatcher.setSupersawOn(activeSynthSubtab === 'supersaw');
-  if (state.chip.on.get()     !== (activeSynthSubtab === 'chip'))     dispatcher.setChipOn(activeSynthSubtab === 'chip');
+  if (state.dexed.midiAuto.get()) {
+    const want = activeSynthSubtab === 'dexed';
+    if (state.dexed.on.get() !== want) dispatcher.setDexedOn(want);
+  }
+  if (state.mpe.midiAuto.get()) {
+    const want = activeSynthSubtab === 'mpe';
+    if (state.mpe.on.get() !== want) dispatcher.setMpeOn(want);
+  }
+  if (state.neuro.midiAuto.get()) {
+    const want = activeSynthSubtab === 'neuro';
+    if (state.neuro.on.get() !== want) dispatcher.setNeuroOn(want);
+  }
+  if (state.acid.midiAuto.get()) {
+    const want = activeSynthSubtab === 'acid';
+    if (state.acid.on.get() !== want) dispatcher.setAcidOn(want);
+  }
+  if (state.supersaw.midiAuto.get()) {
+    const want = activeSynthSubtab === 'supersaw';
+    if (state.supersaw.on.get() !== want) dispatcher.setSupersawOn(want);
+  }
+  if (state.chip.midiAuto.get()) {
+    const want = activeSynthSubtab === 'chip';
+    if (state.chip.on.get() !== want) dispatcher.setChipOn(want);
+  }
+};
+
+// Channel → synth resolver for the auto-follow-the-keyboard behaviour.
+// Priority: explicit per-synth midiChannel matches first (Dexed 1,
+// Neuro 3, Acid 4, Supersaw 5, Chip 6), then MPE as the catch-all so
+// MPE keyboards (notes spread across member channels 2..16) and
+// single-channel keyboards on an unclaimed channel both land on MPE.
+// A claimed channel is claimed regardless of that synth's Auto state
+// — turning Dexed Auto off doesn't cause channel 1 traffic to bleed
+// into MPE; it just means we won't switch to Dexed for it.
+const resolveAutoTarget = (channel: number): SynthSubtab | null => {
+  const dexedCh    = state.dexed.midiChannel.get();
+  const neuroCh    = state.neuro.midiChannel.get();
+  const acidCh     = state.acid.midiChannel.get();
+  const supersawCh = state.supersaw.midiChannel.get();
+  const chipCh     = state.chip.midiChannel.get();
+  if (dexedCh    !== 0 && dexedCh    === channel) return state.dexed.midiAuto.get()    ? 'dexed'    : null;
+  if (neuroCh    !== 0 && neuroCh    === channel) return state.neuro.midiAuto.get()    ? 'neuro'    : null;
+  if (acidCh     !== 0 && acidCh     === channel) return state.acid.midiAuto.get()     ? 'acid'     : null;
+  if (supersawCh !== 0 && supersawCh === channel) return state.supersaw.midiAuto.get() ? 'supersaw' : null;
+  if (chipCh     !== 0 && chipCh     === channel) return state.chip.midiAuto.get()     ? 'chip'     : null;
+  return state.mpe.midiAuto.get() ? 'mpe' : null;
 };
 
 const selectSynthSubtab = (which: SynthSubtab): void => {
@@ -448,10 +503,21 @@ const selectSynthSubtab = (which: SynthSubtab): void => {
   acid.setActive(which === 'acid');
   supersaw.setActive(which === 'supersaw');
   chip.setActive(which === 'chip');
-  enforceSubtab();
+  enforceMidiAuto();
 };
 
-state.connected.subscribe((c) => { if (c) enforceSubtab(); });
+// Re-apply on connect so the firmware's cold-boot defaults (all synths
+// on) converge to the UI's sub-tab-follows layout. Re-apply whenever
+// any synth's midiAuto toggles ON — flipping Auto on immediately
+// enforces its rule.
+state.connected.subscribe((c) => { if (c) enforceMidiAuto(); });
+state.dexed.midiAuto   .subscribe((on) => { if (on) enforceMidiAuto(); });
+state.mpe.midiAuto     .subscribe((on) => { if (on) enforceMidiAuto(); });
+state.neuro.midiAuto   .subscribe((on) => { if (on) enforceMidiAuto(); });
+state.acid.midiAuto    .subscribe((on) => { if (on) enforceMidiAuto(); });
+state.supersaw.midiAuto.subscribe((on) => { if (on) enforceMidiAuto(); });
+state.chip.midiAuto    .subscribe((on) => { if (on) enforceMidiAuto(); });
+
 dexedSubtab   .addEventListener('click', () => selectSynthSubtab('dexed'));
 mpeSubtab     .addEventListener('click', () => selectSynthSubtab('mpe'));
 neuroSubtab   .addEventListener('click', () => selectSynthSubtab('neuro'));

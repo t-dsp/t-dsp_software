@@ -105,7 +105,7 @@ public:
 
 private:
     AudioSynthDexed *_dexed;
-    uint8_t          _listenChannel = 0;  // default: omni (all channels)
+    uint8_t          _listenChannel = 1;  // default: channel 1 (auto-follow resolver routes ch 1 here)
 
     bool listens(uint8_t channel) const {
         return _listenChannel == 0 || _listenChannel == channel;

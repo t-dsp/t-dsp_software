@@ -4204,7 +4204,10 @@ void setup() {
     g_neuroSink.setLfoDest    (NeuroSink::LfoOff);
     g_neuroSink.setLfoWaveform(1);  // triangle — smoothest wobble
     g_neuroSink.setPortamentoMs(0.0f);
-    g_neuroSink.setMidiChannel(0);
+    // Channel 3 so the auto-follow resolver can route ch-3 traffic to
+    // Neuro without an explicit user override. (Dexed=1, MPE=2, Neuro=3,
+    // Acid=4, Supersaw=5, Chip=6 — see resolveAutoTarget in main.ts.)
+    g_neuroSink.setMidiChannel(3);
     applyNeuroVolume(g_neuroVolume);
     applyNeuroSend  (g_neuroSendAmount);
 
