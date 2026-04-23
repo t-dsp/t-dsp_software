@@ -478,12 +478,14 @@ static void applyDexedSend() {
 }
 
 static void applyFxChorus() {
-    // voices(0 or 1) = bypass in this library. Keeping the object
-    // always wired and flipping voices is cheaper than rebuilding
-    // connections. When enabling, clamp voices to [2, 8] — below
-    // 2 is indistinguishable from off, above 8 runs out of delay
-    // line headroom at our 4096-sample buffer.
-    int n = g_fxChorusEnable ? g_fxChorusVoices : 0;
+    // voices(1) = pure passthrough (the library's update() early-exits
+    // through a copy-the-block path when num_chorus <= 1). voices(2..8)
+    // = active chorus. We never set voices(0) because that ALSO works
+    // as passthrough at runtime, but if begin() is ever called with
+    // n_chorus < 1 it returns false and leaves the delay line null —
+    // killing the wet bus permanently. Keeping the runtime value in
+    // [1, 8] avoids any confusion with that init-time landmine.
+    int n = g_fxChorusEnable ? g_fxChorusVoices : 1;
     if (n > 8) n = 8;
     if (g_fxChorusEnable && n < 2) n = 2;
     fxChorus.voices(n);
@@ -1552,12 +1554,11 @@ void setup() {
     // Chorus needs its delay line installed via begin() before any
     // audio block hits it — update() early-returns if the delay line
     // pointer is null, which would mean silence in the wet path.
-    // We init with the currently-configured voice count (0 when the
-    // FX are disabled, in which case begin() is effectively bypass).
-    // Unity gain on the FX send bus mixer: each slot is a per-synth
-    // send (g_dexedSend, future g_mpeSend, etc.) and we don't want to
-    // re-attenuate here.
-    fxChorus.begin(g_fxChorusDelayLine, kFxChorusDelayLen, g_fxChorusEnable ? g_fxChorusVoices : 0);
+    // CRUCIAL: begin() returns false (and leaves the delay line NULL
+    // forever) if n_chorus < 1, regardless of any later voices() call.
+    // Always pass a non-zero count here; applyFxChorus() then flips
+    // between voices(1)=passthrough and voices(2..8)=active.
+    fxChorus.begin(g_fxChorusDelayLine, kFxChorusDelayLen, 2);
     for (int i = 0; i < 4; ++i) fxSendBus.gain(i, 1.0f);
     applyDexedSend();
     applyFxChorus();
