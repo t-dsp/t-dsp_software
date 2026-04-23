@@ -328,6 +328,15 @@ dispatcher.setMidiSink((note, velocity, channel) => {
   // running-status). All channels light the same keyboard — the per-
   // channel breakdown is surfaced via the banner readout in keyboardView.
   keyboard.setNote(note, velocity > 0, channel);
+  // Auto-follow: on note-on, switch the active sub-tab to whichever
+  // synth claims this channel. Lets the user pick up an unknown-channel
+  // keyboard (or an MPE one that spreads notes across channels) without
+  // hunting for the right tab. Resolver + selectSynthSubtab are defined
+  // below; the closure resolves them at call time, post-init.
+  if (velocity > 0 && channel >= 1 && channel <= 16) {
+    const target = resolveAutoTarget(channel);
+    if (target && target !== activeSynthSubtab) selectSynthSubtab(target);
+  }
 });
 
 // Active synth sub-tab dictates which MIDI channel the on-screen
@@ -418,6 +427,25 @@ const enforceMidiAuto = (): void => {
     const want = activeSynthSubtab === 'neuro';
     if (state.neuro.on.get() !== want) dispatcher.setNeuroOn(want);
   }
+};
+
+// Channel → synth resolver for Auto-mode follow-the-keyboard. Priority:
+// explicit per-synth midiChannel matches first (Dexed, Neuro), then MPE
+// as the catch-all so MPE keyboards (notes spread across member channels)
+// and single-channel keyboards on a non-Dexed/Neuro channel both land on
+// MPE. A claimed channel is claimed regardless of that synth's Auto
+// state — turning Dexed Auto off doesn't cause channel 1 traffic to
+// bleed into MPE; it just means we won't switch to Dexed for it.
+const resolveAutoTarget = (channel: number): SynthSubtab | null => {
+  const dexedCh = state.dexed.midiChannel.get();
+  const neuroCh = state.neuro.midiChannel.get();
+  if (dexedCh !== 0 && dexedCh === channel) {
+    return state.dexed.midiAuto.get() ? 'dexed' : null;
+  }
+  if (neuroCh !== 0 && neuroCh === channel) {
+    return state.neuro.midiAuto.get() ? 'neuro' : null;
+  }
+  return state.mpe.midiAuto.get() ? 'mpe' : null;
 };
 
 const selectSynthSubtab = (which: SynthSubtab): void => {
