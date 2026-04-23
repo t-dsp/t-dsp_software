@@ -34,7 +34,9 @@ void MixerModel::reset() {
     for (int n = 1; n <= kChannelCount; ++n) {
         Channel &ch = _channels[n];
         ch.fader     = 1.0f;
-        ch.on        = true;
+        // Mic L/R (5,6) start muted — onboard PDM mics are usually
+        // unwanted at boot (feedback into headphones/monitor).
+        ch.on        = (n != 5 && n != 6);
         ch.solo      = false;
         ch.link      = defaultLink(n);
         ch.hpfOn     = false;
