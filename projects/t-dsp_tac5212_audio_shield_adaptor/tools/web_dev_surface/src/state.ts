@@ -114,14 +114,6 @@ export interface DexedState {
   // preserves the stored volume so turning back on restores the
   // fader position.
   on: Signal<boolean>;
-  // MIDI-Auto mode. The device only ever has one controller
-  // connected at a time, so "which synth plays?" should be implicit.
-  // When true, this synth's on-state tracks whether its sub-tab is
-  // active: switching tabs mutes the outgoing synth and unmutes the
-  // incoming one. Manually toggling the on/off button turns Auto
-  // off so the user's explicit state sticks. Client-side only —
-  // the UI drives /synth/dexed/on across sub-tab changes.
-  midiAuto: Signal<boolean>;
   midiChannel: Signal<number>; // 0 = omni, 1..16
   fxSend: Signal<number>;      // 0..1 send amount into shared FX bus
   bankNames: Signal<string[]>;
@@ -150,7 +142,6 @@ export interface MpeVoiceState {
 export interface MpeState {
   volume:           Signal<number>;  // 0..1
   on:               Signal<boolean>; // X32-style mix on/off
-  midiAuto:         Signal<boolean>; // see DexedState.midiAuto
   attack:           Signal<number>;  // seconds (0..10)
   release:          Signal<number>;  // seconds (0..10)
   waveform:         Signal<number>;  // 0=saw, 1=square, 2=tri, 3=sine
@@ -175,8 +166,7 @@ export interface MpeState {
 export interface NeuroState {
   volume:           Signal<number>;  // 0..1 linear
   on:               Signal<boolean>; // X32-style mix on/off
-  midiAuto:         Signal<boolean>; // see DexedState.midiAuto
-  midiChannel:      Signal<number>;  // 0 = omni, 1..16 (default 3)
+  midiChannel:      Signal<number>;  // 0 = omni, 1..16
   attack:           Signal<number>;  // seconds
   release:          Signal<number>;  // seconds
   detuneCents:      Signal<number>;  // 0..50 (spread between osc1/osc2)
@@ -190,7 +180,81 @@ export interface NeuroState {
   lfoWaveform:      Signal<number>;  // 0=sine, 1=tri, 2=saw, 3=square
   portamentoMs:     Signal<number>;  // 0..2000 (0 = snap)
   fxSend:           Signal<number>;  // 0..1 into shared FX bus
+  // Stink chain — multiband destruction on the neuro bus (Phase 2f).
+  stinkEnable:         Signal<boolean>;
+  stinkDriveLow:       Signal<number>;  // 0..10 pre-shape gain per band
+  stinkDriveMid:       Signal<number>;
+  stinkDriveHigh:      Signal<number>;
+  stinkMixLow:         Signal<number>;  // 0..1 band recombine balance
+  stinkMixMid:         Signal<number>;
+  stinkMixHigh:        Signal<number>;
+  stinkFold:           Signal<number>;  // 0..1 wavefolder intensity
+  stinkCrush:          Signal<number>;  // 0..1 bitcrush intensity
+  stinkMasterCutoffHz: Signal<number>;  // master LP cutoff Hz
+  stinkMasterResonance: Signal<number>; // 0.707..5.0
+  stinkLfo2Rate:       Signal<number>;  // 0..20 Hz
+  stinkLfo2Depth:      Signal<number>;  // 0..1
+  stinkLfo2Dest:       Signal<number>;  // 0=off, 1=fold, 2=crush, 3=master, 4=mid drive
+  stinkLfo2Waveform:   Signal<number>;  // 0=sine, 1=tri, 2=saw, 3=square
   activePresetId:   Signal<string>;  // UI-only preset highlight
+}
+
+// Acid (TB-303 style) synth state. Mono engine — all params scalar.
+export interface AcidState {
+  volume:       Signal<number>;
+  on:           Signal<boolean>;
+  midiAuto:     Signal<boolean>;
+  midiChannel:  Signal<number>;   // 0 = omni, 1..16 (default 4)
+  waveform:     Signal<number>;   // 0 = saw, 1 = square
+  tuning:       Signal<number>;   // -24..+24 semitones
+  cutoffHz:     Signal<number>;   // 20..20000 base cutoff
+  resonance:    Signal<number>;   // 0.707..5.0
+  envMod:       Signal<number>;   // 0..1 filter env depth
+  envDecay:     Signal<number>;   // seconds
+  ampDecay:     Signal<number>;   // seconds
+  accent:       Signal<number>;   // 0..1
+  slideMs:      Signal<number>;   // 0..1000 ms
+  activePresetId: Signal<string>;
+}
+
+// Supersaw (JP-8000 style) synth state.
+export interface SupersawState {
+  volume:       Signal<number>;
+  on:           Signal<boolean>;
+  midiAuto:     Signal<boolean>;
+  midiChannel:  Signal<number>;   // default 5
+  detuneCents:  Signal<number>;   // 0..100
+  mixCenter:    Signal<number>;   // 0..1 — center vs side balance
+  cutoffHz:     Signal<number>;
+  resonance:    Signal<number>;
+  attack:       Signal<number>;
+  decay:        Signal<number>;
+  sustain:      Signal<number>;
+  release:      Signal<number>;
+  chorusDepth:  Signal<number>;   // 0..1
+  portamentoMs: Signal<number>;
+  activePresetId: Signal<string>;
+}
+
+// Chip (NES/Gameboy) synth state.
+export interface ChipState {
+  volume:        Signal<number>;
+  on:            Signal<boolean>;
+  midiAuto:      Signal<boolean>;
+  midiChannel:   Signal<number>;  // default 6
+  pulse1Duty:    Signal<number>;  // 0=12.5%, 1=25%, 2=50%, 3=75%
+  pulse2Duty:    Signal<number>;
+  pulse2Detune:  Signal<number>;  // cents
+  triLevel:      Signal<number>;  // 0..1 triangle sub mix
+  noiseLevel:    Signal<number>;  // 0..1 noise layer mix
+  voicing:       Signal<number>;  // 0=unison, 1=octave, 2=fifth, 3=thirds
+  arpeggio:      Signal<number>;  // 0=off, 1=up, 2=down, 3=random
+  arpRateHz:     Signal<number>;  // 0..40 Hz
+  attack:        Signal<number>;
+  decay:         Signal<number>;
+  sustain:       Signal<number>;
+  release:       Signal<number>;
+  activePresetId: Signal<string>;
 }
 
 // Main-bus processing (Processing tab). Post-hostvol, pre-DAC stages
@@ -287,6 +351,9 @@ export interface MixerState {
   dexed: DexedState;
   mpe: MpeState;
   neuro: NeuroState;
+  acid: AcidState;
+  supersaw: SupersawState;
+  chip: ChipState;
   processing: ProcessingState;
   fx: FxState;
   synthBus: SynthBusState;
@@ -367,8 +434,7 @@ export function createMixerState(channelCount: number): MixerState {
       // selectSynthSubtab('dexed') call at app boot would set this
       // anyway, but matching here keeps the first-paint state sane.
       on: new Signal(true),
-      midiAuto: new Signal(true),    // follow sub-tab by default
-      midiChannel: new Signal(1),    // matches DexedSink default
+      midiChannel: new Signal(0),    // matches DexedSink default (omni)
       fxSend: new Signal(0),         // dry by default, matches firmware
       bankNames: new Signal<string[]>([]),
       voiceNames: new Signal<string[]>([]),
@@ -384,7 +450,6 @@ export function createMixerState(channelCount: number): MixerState {
       // from the current sub-tab (mutes MPE if Dexed is the default
       // tab) without creating a mismatch window before /snapshot.
       on:              new Signal(true),
-      midiAuto:        new Signal(true),   // follow sub-tab by default
       attack:          new Signal(0.005),
       release:         new Signal(0.300),
       waveform:        new Signal(0),
@@ -394,7 +459,7 @@ export function createMixerState(channelCount: number): MixerState {
       lfoDepth:        new Signal(0),
       lfoDest:         new Signal(0),
       lfoWaveform:     new Signal(0),
-      masterChannel:   new Signal(1),
+      masterChannel:   new Signal(0),      // 0 = no master, notes on any channel
       fxSend:          new Signal(0),
       voices: Array.from({ length: 4 }, () => ({
         held:      new Signal(false),
@@ -412,8 +477,7 @@ export function createMixerState(channelCount: number): MixerState {
       // these on connect; matching here keeps the UI sane before then.
       volume:          new Signal(0.7),
       on:              new Signal(true),
-      midiAuto:        new Signal(true),   // follow sub-tab by default
-      midiChannel:     new Signal(3),      // Dexed=1, MPE=2, Neuro=3
+      midiChannel:     new Signal(0),      // matches NeuroSink default (omni)
       attack:          new Signal(0.005),
       release:         new Signal(0.200),
       detuneCents:     new Signal(7.0),
@@ -427,7 +491,77 @@ export function createMixerState(channelCount: number): MixerState {
       lfoWaveform:     new Signal(1),      // triangle
       portamentoMs:    new Signal(0),
       fxSend:          new Signal(0),
+      // Stink chain — defaults match firmware cold-boot (enabled by
+      // default because reese without grit isn't neuro).
+      stinkEnable:          new Signal(true),
+      stinkDriveLow:        new Signal(1.5),
+      stinkDriveMid:        new Signal(3.0),
+      stinkDriveHigh:       new Signal(2.0),
+      stinkMixLow:          new Signal(1.0),
+      stinkMixMid:          new Signal(1.0),
+      stinkMixHigh:         new Signal(0.8),
+      stinkFold:            new Signal(0.0),
+      stinkCrush:           new Signal(0.0),
+      stinkMasterCutoffHz:  new Signal(8000),
+      stinkMasterResonance: new Signal(1.2),
+      stinkLfo2Rate:        new Signal(0),
+      stinkLfo2Depth:       new Signal(0.5),
+      stinkLfo2Dest:        new Signal(0),
+      stinkLfo2Waveform:    new Signal(1),
       activePresetId:  new Signal(''),
+    },
+    acid: {
+      // Defaults match AcidSink firmware cold-boot.
+      volume:       new Signal(0.7),
+      on:           new Signal(true),
+      midiAuto:     new Signal(true),
+      midiChannel:  new Signal(4),
+      waveform:     new Signal(0),
+      tuning:       new Signal(0),
+      cutoffHz:     new Signal(500),
+      resonance:    new Signal(3.8),
+      envMod:       new Signal(0.6),
+      envDecay:     new Signal(0.3),
+      ampDecay:     new Signal(0.4),
+      accent:       new Signal(0.5),
+      slideMs:      new Signal(60),
+      activePresetId: new Signal(''),
+    },
+    supersaw: {
+      volume:       new Signal(0.6),
+      on:           new Signal(true),
+      midiAuto:     new Signal(true),
+      midiChannel:  new Signal(5),
+      detuneCents:  new Signal(18),
+      mixCenter:    new Signal(0.4),
+      cutoffHz:     new Signal(9000),
+      resonance:    new Signal(1.0),
+      attack:       new Signal(0.05),
+      decay:        new Signal(0.3),
+      sustain:      new Signal(0.8),
+      release:      new Signal(0.6),
+      chorusDepth:  new Signal(0.5),
+      portamentoMs: new Signal(0),
+      activePresetId: new Signal(''),
+    },
+    chip: {
+      volume:        new Signal(0.6),
+      on:            new Signal(true),
+      midiAuto:      new Signal(true),
+      midiChannel:   new Signal(6),
+      pulse1Duty:    new Signal(2),   // 50%
+      pulse2Duty:    new Signal(1),   // 25%
+      pulse2Detune:  new Signal(7),
+      triLevel:      new Signal(0.5),
+      noiseLevel:    new Signal(0),
+      voicing:       new Signal(1),   // octave
+      arpeggio:      new Signal(0),   // off
+      arpRateHz:     new Signal(12),
+      attack:        new Signal(0.001),
+      decay:         new Signal(0.08),
+      sustain:       new Signal(0.5),
+      release:       new Signal(0.15),
+      activePresetId: new Signal(''),
     },
     processing: {
       shelfEnable:    new Signal(true),    // matches firmware defaults

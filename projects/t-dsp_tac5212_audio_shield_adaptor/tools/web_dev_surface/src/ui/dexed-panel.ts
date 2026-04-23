@@ -30,32 +30,17 @@ export function dexedPanel(state: MixerState, dispatcher: Dispatcher): HTMLEleme
     onBtn.title = on ? 'Click to mute Dexed output' : 'Click to un-mute Dexed output';
   };
   state.dexed.on.subscribe(updateOnBtn);
+  // Temporary mute-while-on-this-tab. Switching to another synth tab
+  // re-enables Dexed via main.ts's sub-tab enforcer — the "only the
+  // active tab's synth plays" rule is unconditional.
   onBtn.addEventListener('click', () => {
-    // Manual on/off implies the user is overriding Auto — turn it
-    // off so the next sub-tab change doesn't clobber their choice.
-    if (state.dexed.midiAuto.get()) state.dexed.midiAuto.set(false);
     dispatcher.setDexedOn(!state.dexed.on.get());
   });
   const onLabel = document.createElement('span');
   onLabel.className = 'synth-on-label';
   onLabel.textContent = 'Dexed FM';
 
-  // "MIDI Auto" toggle. When on, Dexed's on-state tracks whichever
-  // sub-tab the user is looking at. Handy for quickly A/B-ing synth
-  // engines with a single controller; override via the ON/OFF
-  // button (which auto-turns this off).
-  const autoWrap = document.createElement('label');
-  autoWrap.className = 'synth-auto';
-  const autoBox = document.createElement('input');
-  autoBox.type = 'checkbox';
-  state.dexed.midiAuto.subscribe((a) => { autoBox.checked = a; });
-  autoBox.addEventListener('change', () => state.dexed.midiAuto.set(autoBox.checked));
-  const autoText = document.createElement('span');
-  autoText.textContent = 'MIDI Auto';
-  autoText.title = 'Track sub-tab: mute when another synth is focused';
-  autoWrap.append(autoBox, autoText);
-
-  onRow.append(onBtn, onLabel, autoWrap);
+  onRow.append(onBtn, onLabel);
 
   // ---- Bank row ----
   const bankRow = document.createElement('div');

@@ -89,9 +89,12 @@ public:
     // [0, kMaxVoices]; values above kMaxVoices are truncated silently.
     MpeVaSink(VoicePorts *voices, int voiceCount);
 
-    // Master channel (1..16). Notes on this channel are IGNORED; only
-    // global messages (mod wheel, sustain, program change) are honored
-    // there. Values outside 1..16 are clamped to 1.
+    // Master channel. 1..16 = standard MPE behaviour: notes on this
+    // channel are IGNORED (only global messages — mod wheel, sustain,
+    // program change — are honored there). 0 = no master channel;
+    // notes on every channel 1..16 allocate voices, which is what you
+    // want when a plain non-MPE controller is driving the sink. Values
+    // > 16 are clamped to 0.
     void    setMasterChannel(uint8_t ch);
     uint8_t masterChannel() const { return _masterChannel; }
 

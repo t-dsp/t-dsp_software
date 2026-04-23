@@ -468,6 +468,238 @@ export class Dispatcher {
     this.sendThrottled('/synth/neuro/fx/send', 'f', [v]);
   }
 
+  // ---------- Neuro stink chain (Phase 2f) ----------
+
+  setNeuroStinkEnable(on: boolean): void {
+    this.state.neuro.stinkEnable.set(on);
+    this.sendMsg('/synth/neuro/stink/enable', 'i', [on ? 1 : 0]);
+  }
+  setNeuroStinkDriveLow(v: number): void {
+    this.state.neuro.stinkDriveLow.set(v);
+    this.sendThrottled('/synth/neuro/stink/drive_low', 'f', [v]);
+  }
+  setNeuroStinkDriveMid(v: number): void {
+    this.state.neuro.stinkDriveMid.set(v);
+    this.sendThrottled('/synth/neuro/stink/drive_mid', 'f', [v]);
+  }
+  setNeuroStinkDriveHigh(v: number): void {
+    this.state.neuro.stinkDriveHigh.set(v);
+    this.sendThrottled('/synth/neuro/stink/drive_high', 'f', [v]);
+  }
+  setNeuroStinkMixLow(v: number): void {
+    this.state.neuro.stinkMixLow.set(v);
+    this.sendThrottled('/synth/neuro/stink/mix_low', 'f', [v]);
+  }
+  setNeuroStinkMixMid(v: number): void {
+    this.state.neuro.stinkMixMid.set(v);
+    this.sendThrottled('/synth/neuro/stink/mix_mid', 'f', [v]);
+  }
+  setNeuroStinkMixHigh(v: number): void {
+    this.state.neuro.stinkMixHigh.set(v);
+    this.sendThrottled('/synth/neuro/stink/mix_high', 'f', [v]);
+  }
+  setNeuroStinkFold(v: number): void {
+    this.state.neuro.stinkFold.set(v);
+    this.sendThrottled('/synth/neuro/stink/fold', 'f', [v]);
+  }
+  setNeuroStinkCrush(v: number): void {
+    this.state.neuro.stinkCrush.set(v);
+    this.sendThrottled('/synth/neuro/stink/crush', 'f', [v]);
+  }
+  setNeuroStinkMasterCutoff(hz: number): void {
+    this.state.neuro.stinkMasterCutoffHz.set(hz);
+    this.sendThrottled('/synth/neuro/stink/master_cutoff', 'f', [hz]);
+  }
+  setNeuroStinkMasterResonance(q: number): void {
+    this.state.neuro.stinkMasterResonance.set(q);
+    this.sendThrottled('/synth/neuro/stink/master_resonance', 'f', [q]);
+  }
+  setNeuroStinkLfo2Rate(hz: number): void {
+    this.state.neuro.stinkLfo2Rate.set(hz);
+    this.sendThrottled('/synth/neuro/stink/lfo2/rate', 'f', [hz]);
+  }
+  setNeuroStinkLfo2Depth(d: number): void {
+    this.state.neuro.stinkLfo2Depth.set(d);
+    this.sendThrottled('/synth/neuro/stink/lfo2/depth', 'f', [d]);
+  }
+  setNeuroStinkLfo2Dest(dest: number): void {
+    this.state.neuro.stinkLfo2Dest.set(dest);
+    this.sendMsg('/synth/neuro/stink/lfo2/dest', 'i', [dest]);
+  }
+  setNeuroStinkLfo2Waveform(w: number): void {
+    this.state.neuro.stinkLfo2Waveform.set(w);
+    this.sendMsg('/synth/neuro/stink/lfo2/waveform', 'i', [w]);
+  }
+
+  // ---------- Acid (TB-303) synth controls ----------
+
+  setAcidVolume(v: number): void {
+    this.state.acid.volume.set(v);
+    this.sendThrottled('/synth/acid/volume', 'f', [v]);
+  }
+  setAcidOn(on: boolean): void {
+    this.state.acid.on.set(on);
+    this.sendMsg('/synth/acid/on', 'i', [on ? 1 : 0]);
+  }
+  setAcidMidiChannel(ch: number): void {
+    this.state.acid.midiChannel.set(ch);
+    this.sendMsg('/synth/acid/midi/ch', 'i', [ch]);
+  }
+  setAcidWaveform(w: number): void {
+    this.state.acid.waveform.set(w);
+    this.sendMsg('/synth/acid/waveform', 'i', [w]);
+  }
+  setAcidTuning(semi: number): void {
+    this.state.acid.tuning.set(semi);
+    this.sendMsg('/synth/acid/tuning', 'i', [semi]);
+  }
+  setAcidCutoff(hz: number): void {
+    this.state.acid.cutoffHz.set(hz);
+    this.sendThrottled('/synth/acid/cutoff', 'f', [hz]);
+  }
+  setAcidResonance(q: number): void {
+    this.state.acid.resonance.set(q);
+    this.sendThrottled('/synth/acid/resonance', 'f', [q]);
+  }
+  setAcidEnvMod(v: number): void {
+    this.state.acid.envMod.set(v);
+    this.sendThrottled('/synth/acid/env_mod', 'f', [v]);
+  }
+  setAcidEnvDecay(s: number): void {
+    this.state.acid.envDecay.set(s);
+    this.sendThrottled('/synth/acid/env_decay', 'f', [s]);
+  }
+  setAcidAmpDecay(s: number): void {
+    this.state.acid.ampDecay.set(s);
+    this.sendThrottled('/synth/acid/amp_decay', 'f', [s]);
+  }
+  setAcidAccent(v: number): void {
+    this.state.acid.accent.set(v);
+    this.sendThrottled('/synth/acid/accent', 'f', [v]);
+  }
+  setAcidSlide(ms: number): void {
+    this.state.acid.slideMs.set(ms);
+    this.sendThrottled('/synth/acid/slide', 'f', [ms]);
+  }
+
+  // ---------- Supersaw (JP-8000 style) controls ----------
+
+  setSupersawVolume(v: number): void {
+    this.state.supersaw.volume.set(v);
+    this.sendThrottled('/synth/supersaw/volume', 'f', [v]);
+  }
+  setSupersawOn(on: boolean): void {
+    this.state.supersaw.on.set(on);
+    this.sendMsg('/synth/supersaw/on', 'i', [on ? 1 : 0]);
+  }
+  setSupersawMidiChannel(ch: number): void {
+    this.state.supersaw.midiChannel.set(ch);
+    this.sendMsg('/synth/supersaw/midi/ch', 'i', [ch]);
+  }
+  setSupersawDetune(cents: number): void {
+    this.state.supersaw.detuneCents.set(cents);
+    this.sendThrottled('/synth/supersaw/detune', 'f', [cents]);
+  }
+  setSupersawMixCenter(v: number): void {
+    this.state.supersaw.mixCenter.set(v);
+    this.sendThrottled('/synth/supersaw/mix_center', 'f', [v]);
+  }
+  setSupersawCutoff(hz: number): void {
+    this.state.supersaw.cutoffHz.set(hz);
+    this.sendThrottled('/synth/supersaw/cutoff', 'f', [hz]);
+  }
+  setSupersawResonance(q: number): void {
+    this.state.supersaw.resonance.set(q);
+    this.sendThrottled('/synth/supersaw/resonance', 'f', [q]);
+  }
+  setSupersawAttack(s: number): void {
+    this.state.supersaw.attack.set(s);
+    this.sendThrottled('/synth/supersaw/attack', 'f', [s]);
+  }
+  setSupersawDecay(s: number): void {
+    this.state.supersaw.decay.set(s);
+    this.sendThrottled('/synth/supersaw/decay', 'f', [s]);
+  }
+  setSupersawSustain(v: number): void {
+    this.state.supersaw.sustain.set(v);
+    this.sendThrottled('/synth/supersaw/sustain', 'f', [v]);
+  }
+  setSupersawRelease(s: number): void {
+    this.state.supersaw.release.set(s);
+    this.sendThrottled('/synth/supersaw/release', 'f', [s]);
+  }
+  setSupersawChorusDepth(v: number): void {
+    this.state.supersaw.chorusDepth.set(v);
+    this.sendThrottled('/synth/supersaw/chorus_depth', 'f', [v]);
+  }
+  setSupersawPortamento(ms: number): void {
+    this.state.supersaw.portamentoMs.set(ms);
+    this.sendThrottled('/synth/supersaw/portamento', 'f', [ms]);
+  }
+
+  // ---------- Chip (NES/Gameboy) controls ----------
+
+  setChipVolume(v: number): void {
+    this.state.chip.volume.set(v);
+    this.sendThrottled('/synth/chip/volume', 'f', [v]);
+  }
+  setChipOn(on: boolean): void {
+    this.state.chip.on.set(on);
+    this.sendMsg('/synth/chip/on', 'i', [on ? 1 : 0]);
+  }
+  setChipMidiChannel(ch: number): void {
+    this.state.chip.midiChannel.set(ch);
+    this.sendMsg('/synth/chip/midi/ch', 'i', [ch]);
+  }
+  setChipPulse1Duty(d: number): void {
+    this.state.chip.pulse1Duty.set(d);
+    this.sendMsg('/synth/chip/pulse1_duty', 'i', [d]);
+  }
+  setChipPulse2Duty(d: number): void {
+    this.state.chip.pulse2Duty.set(d);
+    this.sendMsg('/synth/chip/pulse2_duty', 'i', [d]);
+  }
+  setChipPulse2Detune(cents: number): void {
+    this.state.chip.pulse2Detune.set(cents);
+    this.sendThrottled('/synth/chip/pulse2_detune', 'f', [cents]);
+  }
+  setChipTriLevel(v: number): void {
+    this.state.chip.triLevel.set(v);
+    this.sendThrottled('/synth/chip/tri_level', 'f', [v]);
+  }
+  setChipNoiseLevel(v: number): void {
+    this.state.chip.noiseLevel.set(v);
+    this.sendThrottled('/synth/chip/noise_level', 'f', [v]);
+  }
+  setChipVoicing(v: number): void {
+    this.state.chip.voicing.set(v);
+    this.sendMsg('/synth/chip/voicing', 'i', [v]);
+  }
+  setChipArpeggio(v: number): void {
+    this.state.chip.arpeggio.set(v);
+    this.sendMsg('/synth/chip/arpeggio', 'i', [v]);
+  }
+  setChipArpRate(hz: number): void {
+    this.state.chip.arpRateHz.set(hz);
+    this.sendThrottled('/synth/chip/arp_rate', 'f', [hz]);
+  }
+  setChipAttack(s: number): void {
+    this.state.chip.attack.set(s);
+    this.sendThrottled('/synth/chip/attack', 'f', [s]);
+  }
+  setChipDecay(s: number): void {
+    this.state.chip.decay.set(s);
+    this.sendThrottled('/synth/chip/decay', 'f', [s]);
+  }
+  setChipSustain(v: number): void {
+    this.state.chip.sustain.set(v);
+    this.sendThrottled('/synth/chip/sustain', 'f', [v]);
+  }
+  setChipRelease(s: number): void {
+    this.state.chip.release.set(s);
+    this.sendThrottled('/synth/chip/release', 'f', [s]);
+  }
+
   // ---------- Shared FX bus (chorus + reverb) ----------
 
   setFxChorusEnable(on: boolean): void {
@@ -1037,6 +1269,113 @@ export class Dispatcher {
       this.state.neuro.fxSend.set(msg.args[0] as number);
       return;
     }
+    // Stink chain echoes
+    if (a === '/synth/neuro/stink/enable' && msg.types === 'i') {
+      this.state.neuro.stinkEnable.set((msg.args[0] as number) !== 0);
+      return;
+    }
+    if (a === '/synth/neuro/stink/drive_low' && msg.types === 'f') {
+      this.state.neuro.stinkDriveLow.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/stink/drive_mid' && msg.types === 'f') {
+      this.state.neuro.stinkDriveMid.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/stink/drive_high' && msg.types === 'f') {
+      this.state.neuro.stinkDriveHigh.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/stink/mix_low' && msg.types === 'f') {
+      this.state.neuro.stinkMixLow.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/stink/mix_mid' && msg.types === 'f') {
+      this.state.neuro.stinkMixMid.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/stink/mix_high' && msg.types === 'f') {
+      this.state.neuro.stinkMixHigh.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/stink/fold' && msg.types === 'f') {
+      this.state.neuro.stinkFold.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/stink/crush' && msg.types === 'f') {
+      this.state.neuro.stinkCrush.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/stink/master_cutoff' && msg.types === 'f') {
+      this.state.neuro.stinkMasterCutoffHz.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/stink/master_resonance' && msg.types === 'f') {
+      this.state.neuro.stinkMasterResonance.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/stink/lfo2/rate' && msg.types === 'f') {
+      this.state.neuro.stinkLfo2Rate.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/stink/lfo2/depth' && msg.types === 'f') {
+      this.state.neuro.stinkLfo2Depth.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/stink/lfo2/dest' && msg.types === 'i') {
+      this.state.neuro.stinkLfo2Dest.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/neuro/stink/lfo2/waveform' && msg.types === 'i') {
+      this.state.neuro.stinkLfo2Waveform.set(msg.args[0] as number);
+      return;
+    }
+
+    // Acid echoes
+    if (a === '/synth/acid/volume' && msg.types === 'f') { this.state.acid.volume.set(msg.args[0] as number); return; }
+    if (a === '/synth/acid/on' && msg.types === 'i') { this.state.acid.on.set((msg.args[0] as number) !== 0); return; }
+    if (a === '/synth/acid/midi/ch' && msg.types === 'i') { this.state.acid.midiChannel.set(msg.args[0] as number); return; }
+    if (a === '/synth/acid/waveform' && msg.types === 'i') { this.state.acid.waveform.set(msg.args[0] as number); return; }
+    if (a === '/synth/acid/tuning' && msg.types === 'i') { this.state.acid.tuning.set(msg.args[0] as number); return; }
+    if (a === '/synth/acid/cutoff' && msg.types === 'f') { this.state.acid.cutoffHz.set(msg.args[0] as number); return; }
+    if (a === '/synth/acid/resonance' && msg.types === 'f') { this.state.acid.resonance.set(msg.args[0] as number); return; }
+    if (a === '/synth/acid/env_mod' && msg.types === 'f') { this.state.acid.envMod.set(msg.args[0] as number); return; }
+    if (a === '/synth/acid/env_decay' && msg.types === 'f') { this.state.acid.envDecay.set(msg.args[0] as number); return; }
+    if (a === '/synth/acid/amp_decay' && msg.types === 'f') { this.state.acid.ampDecay.set(msg.args[0] as number); return; }
+    if (a === '/synth/acid/accent' && msg.types === 'f') { this.state.acid.accent.set(msg.args[0] as number); return; }
+    if (a === '/synth/acid/slide' && msg.types === 'f') { this.state.acid.slideMs.set(msg.args[0] as number); return; }
+
+    // Supersaw echoes
+    if (a === '/synth/supersaw/volume' && msg.types === 'f') { this.state.supersaw.volume.set(msg.args[0] as number); return; }
+    if (a === '/synth/supersaw/on' && msg.types === 'i') { this.state.supersaw.on.set((msg.args[0] as number) !== 0); return; }
+    if (a === '/synth/supersaw/midi/ch' && msg.types === 'i') { this.state.supersaw.midiChannel.set(msg.args[0] as number); return; }
+    if (a === '/synth/supersaw/detune' && msg.types === 'f') { this.state.supersaw.detuneCents.set(msg.args[0] as number); return; }
+    if (a === '/synth/supersaw/mix_center' && msg.types === 'f') { this.state.supersaw.mixCenter.set(msg.args[0] as number); return; }
+    if (a === '/synth/supersaw/cutoff' && msg.types === 'f') { this.state.supersaw.cutoffHz.set(msg.args[0] as number); return; }
+    if (a === '/synth/supersaw/resonance' && msg.types === 'f') { this.state.supersaw.resonance.set(msg.args[0] as number); return; }
+    if (a === '/synth/supersaw/attack' && msg.types === 'f') { this.state.supersaw.attack.set(msg.args[0] as number); return; }
+    if (a === '/synth/supersaw/decay' && msg.types === 'f') { this.state.supersaw.decay.set(msg.args[0] as number); return; }
+    if (a === '/synth/supersaw/sustain' && msg.types === 'f') { this.state.supersaw.sustain.set(msg.args[0] as number); return; }
+    if (a === '/synth/supersaw/release' && msg.types === 'f') { this.state.supersaw.release.set(msg.args[0] as number); return; }
+    if (a === '/synth/supersaw/chorus_depth' && msg.types === 'f') { this.state.supersaw.chorusDepth.set(msg.args[0] as number); return; }
+    if (a === '/synth/supersaw/portamento' && msg.types === 'f') { this.state.supersaw.portamentoMs.set(msg.args[0] as number); return; }
+
+    // Chip echoes
+    if (a === '/synth/chip/volume' && msg.types === 'f') { this.state.chip.volume.set(msg.args[0] as number); return; }
+    if (a === '/synth/chip/on' && msg.types === 'i') { this.state.chip.on.set((msg.args[0] as number) !== 0); return; }
+    if (a === '/synth/chip/midi/ch' && msg.types === 'i') { this.state.chip.midiChannel.set(msg.args[0] as number); return; }
+    if (a === '/synth/chip/pulse1_duty' && msg.types === 'i') { this.state.chip.pulse1Duty.set(msg.args[0] as number); return; }
+    if (a === '/synth/chip/pulse2_duty' && msg.types === 'i') { this.state.chip.pulse2Duty.set(msg.args[0] as number); return; }
+    if (a === '/synth/chip/pulse2_detune' && msg.types === 'f') { this.state.chip.pulse2Detune.set(msg.args[0] as number); return; }
+    if (a === '/synth/chip/tri_level' && msg.types === 'f') { this.state.chip.triLevel.set(msg.args[0] as number); return; }
+    if (a === '/synth/chip/noise_level' && msg.types === 'f') { this.state.chip.noiseLevel.set(msg.args[0] as number); return; }
+    if (a === '/synth/chip/voicing' && msg.types === 'i') { this.state.chip.voicing.set(msg.args[0] as number); return; }
+    if (a === '/synth/chip/arpeggio' && msg.types === 'i') { this.state.chip.arpeggio.set(msg.args[0] as number); return; }
+    if (a === '/synth/chip/arp_rate' && msg.types === 'f') { this.state.chip.arpRateHz.set(msg.args[0] as number); return; }
+    if (a === '/synth/chip/attack' && msg.types === 'f') { this.state.chip.attack.set(msg.args[0] as number); return; }
+    if (a === '/synth/chip/decay' && msg.types === 'f') { this.state.chip.decay.set(msg.args[0] as number); return; }
+    if (a === '/synth/chip/sustain' && msg.types === 'f') { this.state.chip.sustain.set(msg.args[0] as number); return; }
+    if (a === '/synth/chip/release' && msg.types === 'f') { this.state.chip.release.set(msg.args[0] as number); return; }
 
     // Shared FX bus + per-synth send echoes.
     if (a === '/synth/dexed/fx/send' && msg.types === 'f') {

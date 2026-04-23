@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "categories": {
+    "boss":     { "color": "#e74c3c", "label": "Boss" },
+    "melody":   { "color": "#f39c12", "label": "Melody" },
+    "zap":      { "color": "#1abc9c", "label": "Zap" },
+    "drum":     { "color": "#7f8c8d", "label": "Drum" }
+  },
+  "presets": [
+    {
+      "id": "boss-fight",
+      "name": "Boss Fight",
+      "category": "boss",
+      "description": "Classic NES villain theme. Pulse duet in octaves, fast arpeggio on triangle, short decay.",
+      "params": {
+        "volume": 0.6, "pulse1_duty": 2, "pulse2_duty": 1, "pulse2_detune": 3,
+        "tri_level": 0.6, "noise_level": 0, "voicing": 1, "arpeggio": 1, "arp_rate_hz": 18,
+        "attack_sec": 0.001, "decay_sec": 0.08, "sustain": 0.4, "release_sec": 0.12
+      }
+    },
+    {
+      "id": "princess-theme",
+      "name": "Princess Theme",
+      "category": "melody",
+      "description": "Bright, hopeful melody voicing. Thirds + long sustain + gentle noise.",
+      "params": {
+        "volume": 0.6, "pulse1_duty": 1, "pulse2_duty": 2, "pulse2_detune": 5,
+        "tri_level": 0.5, "noise_level": 0, "voicing": 3, "arpeggio": 0, "arp_rate_hz": 10,
+        "attack_sec": 0.01, "decay_sec": 0.25, "sustain": 0.9, "release_sec": 0.4
+      }
+    },
+    {
+      "id": "coin-pickup",
+      "name": "Coin",
+      "category": "zap",
+      "description": "Short blippy pickup. Octaves, extreme decay, no sustain.",
+      "params": {
+        "volume": 0.6, "pulse1_duty": 2, "pulse2_duty": 2, "pulse2_detune": 0,
+        "tri_level": 0.3, "noise_level": 0, "voicing": 1, "arpeggio": 0, "arp_rate_hz": 10,
+        "attack_sec": 0.001, "decay_sec": 0.04, "sustain": 0, "release_sec": 0.05
+      }
+    },
+    {
+      "id": "laser",
+      "name": "Laser",
+      "category": "zap",
+      "description": "Descending pitch-bend ready laser. Thin pulse + noise crackle.",
+      "params": {
+        "volume": 0.6, "pulse1_duty": 0, "pulse2_duty": 0, "pulse2_detune": -20,
+        "tri_level": 0.1, "noise_level": 0.4, "voicing": 2, "arpeggio": 0, "arp_rate_hz": 10,
+        "attack_sec": 0.001, "decay_sec": 0.06, "sustain": 0.1, "release_sec": 0.08
+      }
+    },
+    {
+      "id": "snare",
+      "name": "Snare",
+      "category": "drum",
+      "description": "Noise-dominant percussive voice. Use with short notes for drum patterns.",
+      "params": {
+        "volume": 0.6, "pulse1_duty": 2, "pulse2_duty": 2, "pulse2_detune": 0,
+        "tri_level": 0, "noise_level": 1.0, "voicing": 0, "arpeggio": 0, "arp_rate_hz": 10,
+        "attack_sec": 0.001, "decay_sec": 0.04, "sustain": 0, "release_sec": 0.05
+      }
+    },
+    {
+      "id": "hihat",
+      "name": "Hi-Hat",
+      "category": "drum",
+      "description": "Fast-decay noise only. No pitched content.",
+      "params": {
+        "volume": 0.55, "pulse1_duty": 2, "pulse2_duty": 2, "pulse2_detune": 0,
+        "tri_level": 0, "noise_level": 0.8, "voicing": 0, "arpeggio": 0, "arp_rate_hz": 10,
+        "attack_sec": 0.0005, "decay_sec": 0.015, "sustain": 0, "release_sec": 0.02
+      }
+    },
+    {
+      "id": "arpeggio",
+      "name": "Arpeggio",
+      "category": "melody",
+      "description": "Fast arpeggio on triangle, sustained pulses — classic NES ornament.",
+      "params": {
+        "volume": 0.6, "pulse1_duty": 2, "pulse2_duty": 1, "pulse2_detune": 0,
+        "tri_level": 0.7, "noise_level": 0, "voicing": 1, "arpeggio": 1, "arp_rate_hz": 24,
+        "attack_sec": 0.005, "decay_sec": 0.2, "sustain": 0.75, "release_sec": 0.25
+      }
+    },
+    {
+      "id": "gameboy-lead",
+      "name": "Game Boy Lead",
+      "category": "melody",
+      "description": "25% duty lead with octave voicing. The Pokémon battle-music tone.",
+      "params": {
+        "volume": 0.6, "pulse1_duty": 1, "pulse2_duty": 1, "pulse2_detune": 0,
+        "tri_level": 0.4, "noise_level": 0, "voicing": 1, "arpeggio": 0, "arp_rate_hz": 12,
+        "attack_sec": 0.002, "decay_sec": 0.12, "sustain": 0.7, "release_sec": 0.2
+      }
+    }
+  ]
+}

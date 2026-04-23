@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "categories": {
+    "trance":    { "color": "#3498db", "label": "Trance" },
+    "lead":      { "color": "#9b59b6", "label": "Lead" },
+    "pad":       { "color": "#2ecc71", "label": "Pad" },
+    "rave":      { "color": "#e74c3c", "label": "Rave" }
+  },
+  "presets": [
+    {
+      "id": "trance-lead",
+      "name": "Trance Lead",
+      "category": "trance",
+      "description": "Wide detune, open filter — the classic wide-open trance anthem lead.",
+      "params": {
+        "volume": 0.6, "detune_cents": 22, "mix_center": 0.35,
+        "cutoff_hz": 12000, "resonance": 0.9,
+        "attack_sec": 0.02, "decay_sec": 0.3, "sustain": 0.85, "release_sec": 0.8,
+        "portamento_ms": 0, "chorus_depth": 0.7
+      }
+    },
+    {
+      "id": "hoover",
+      "name": "Hoover",
+      "category": "rave",
+      "description": "The Dominator. Wide detune + lower cutoff + PW emulation. Old-school rave staple.",
+      "params": {
+        "volume": 0.55, "detune_cents": 35, "mix_center": 0.2,
+        "cutoff_hz": 3500, "resonance": 2.8,
+        "attack_sec": 0.01, "decay_sec": 0.2, "sustain": 0.7, "release_sec": 0.4,
+        "portamento_ms": 30, "chorus_depth": 0.5
+      }
+    },
+    {
+      "id": "anthem",
+      "name": "Anthem",
+      "category": "trance",
+      "description": "Bright euphoric lead, slightly softer detune. Above & Beyond style.",
+      "params": {
+        "volume": 0.6, "detune_cents": 14, "mix_center": 0.5,
+        "cutoff_hz": 14000, "resonance": 0.8,
+        "attack_sec": 0.03, "decay_sec": 0.25, "sustain": 0.9, "release_sec": 1.0,
+        "portamento_ms": 0, "chorus_depth": 0.6
+      }
+    },
+    {
+      "id": "huge-pad",
+      "name": "Huge Pad",
+      "category": "pad",
+      "description": "Slow attack, maximum detune, heavy chorus. A wall of shimmering saws.",
+      "params": {
+        "volume": 0.5, "detune_cents": 45, "mix_center": 0.15,
+        "cutoff_hz": 8000, "resonance": 0.8,
+        "attack_sec": 0.8, "decay_sec": 0.5, "sustain": 1.0, "release_sec": 2.5,
+        "portamento_ms": 0, "chorus_depth": 1.0
+      }
+    },
+    {
+      "id": "pluck-lead",
+      "name": "Pluck Lead",
+      "category": "lead",
+      "description": "Short envelope — plucky attack with supersaw body. Melodic-arp friendly.",
+      "params": {
+        "volume": 0.6, "detune_cents": 16, "mix_center": 0.5,
+        "cutoff_hz": 7000, "resonance": 1.3,
+        "attack_sec": 0.005, "decay_sec": 0.15, "sustain": 0.3, "release_sec": 0.4,
+        "portamento_ms": 0, "chorus_depth": 0.4
+      }
+    },
+    {
+      "id": "portamento-lead",
+      "name": "Slide Lead",
+      "category": "lead",
+      "description": "Mono-slide with fat detune. Daft Punk solo feel.",
+      "params": {
+        "volume": 0.6, "detune_cents": 14, "mix_center": 0.6,
+        "cutoff_hz": 5500, "resonance": 2.0,
+        "attack_sec": 0.01, "decay_sec": 0.2, "sustain": 0.75, "release_sec": 0.5,
+        "portamento_ms": 120, "chorus_depth": 0.3
+      }
+    },
+    {
+      "id": "dark-pad",
+      "name": "Dark Pad",
+      "category": "pad",
+      "description": "Low cutoff, long attack + release. Somber cinematic texture.",
+      "params": {
+        "volume": 0.55, "detune_cents": 25, "mix_center": 0.25,
+        "cutoff_hz": 2000, "resonance": 1.5,
+        "attack_sec": 1.2, "decay_sec": 0.8, "sustain": 1.0, "release_sec": 3.0,
+        "portamento_ms": 0, "chorus_depth": 0.8
+      }
+    }
+  ]
+}

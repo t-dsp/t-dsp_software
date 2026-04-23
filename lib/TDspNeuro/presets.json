@@ -1,114 +1,213 @@
 {
-  "version": 1,
+  "version": 2,
   "categories": {
     "classic":  { "color": "#4a90e2", "label": "Classic" },
     "growl":    { "color": "#d9843a", "label": "Growl" },
     "wobble":   { "color": "#8e44ad", "label": "Wobble" },
-    "sub":      { "color": "#27ae60", "label": "Sub" }
+    "sub":      { "color": "#27ae60", "label": "Sub" },
+    "stink":    { "color": "#c0392b", "label": "Stink" }
   },
   "presets": [
     {
       "id": "clean-reese",
       "name": "Clean Reese",
       "category": "classic",
-      "description": "The canonical Massive-style reese. Detuned saws, moderate cutoff, no movement.",
+      "description": "Canonical Massive-style reese. Detuned saws, moderate cutoff, stink chain disabled.",
       "params": {
         "volume": 0.7, "attack_sec": 0.005, "release_sec": 0.200,
         "detune_cents": 7.0, "sub_level": 0.6, "osc3_level": 0.7,
         "filter_cutoff_hz": 600, "filter_resonance": 2.2,
         "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 1,
-        "portamento_ms": 0
+        "portamento_ms": 0,
+        "stink_enable": 0
       }
     },
     {
       "id": "hollow-reese",
       "name": "Hollow Reese",
       "category": "classic",
-      "description": "Wider detune, sub turned down, osc3 low — the thin/wiry reese flavour.",
+      "description": "Wider detune, sub turned down, osc3 low — the thin/wiry reese flavour. No stink.",
       "params": {
         "volume": 0.7, "attack_sec": 0.003, "release_sec": 0.150,
         "detune_cents": 18.0, "sub_level": 0.25, "osc3_level": 0.15,
         "filter_cutoff_hz": 900, "filter_resonance": 2.8,
         "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0,
-        "portamento_ms": 0
+        "portamento_ms": 0,
+        "stink_enable": 0
       }
     },
     {
       "id": "growler",
       "name": "Growler",
       "category": "growl",
-      "description": "Low cutoff, high Q, tight sub. Menacing floor-dweller bass.",
+      "description": "Low cutoff, high Q, tight sub. Menacing floor-dweller bass with gentle stink.",
       "params": {
         "volume": 0.7, "attack_sec": 0.002, "release_sec": 0.180,
         "detune_cents": 10.0, "sub_level": 0.85, "osc3_level": 0.8,
         "filter_cutoff_hz": 350, "filter_resonance": 3.8,
         "lfo_rate_hz": 0.3, "lfo_depth": 0.2, "lfo_dest": 1, "lfo_waveform": 0,
-        "portamento_ms": 40
+        "portamento_ms": 40,
+        "stink_enable": 1, "stink_drive_low": 1.5, "stink_drive_mid": 2.2,
+        "stink_drive_high": 1.6, "stink_mix_low": 1.0, "stink_mix_mid": 1.0, "stink_mix_high": 0.5,
+        "stink_fold": 0.1, "stink_crush": 0.0,
+        "stink_master_cutoff_hz": 3500, "stink_master_resonance": 1.0
       }
     },
     {
       "id": "screwface",
       "name": "Screwface",
       "category": "growl",
-      "description": "High resonance at ~450 Hz — the self-oscillation sweet spot. Close to pulling that stinky face.",
+      "description": "The stinky face itself. Heavy mid drive, folded, master filter on the edge of resonance.",
       "params": {
         "volume": 0.65, "attack_sec": 0.002, "release_sec": 0.220,
         "detune_cents": 14.0, "sub_level": 0.5, "osc3_level": 0.9,
         "filter_cutoff_hz": 450, "filter_resonance": 4.5,
         "lfo_rate_hz": 0.7, "lfo_depth": 0.35, "lfo_dest": 1, "lfo_waveform": 1,
-        "portamento_ms": 0
+        "portamento_ms": 0,
+        "stink_enable": 1, "stink_drive_low": 1.8, "stink_drive_mid": 4.5,
+        "stink_drive_high": 3.0, "stink_mix_low": 1.0, "stink_mix_mid": 1.0, "stink_mix_high": 0.7,
+        "stink_fold": 0.45, "stink_crush": 0.0,
+        "stink_master_cutoff_hz": 2200, "stink_master_resonance": 3.2
       }
     },
     {
       "id": "wobbler",
       "name": "Wobbler",
       "category": "wobble",
-      "description": "Classic 1/4-note dubstep wobble. Triangle LFO on cutoff, full depth.",
+      "description": "Classic 1/4-note dubstep wobble. Triangle LFO on filter cutoff, full depth.",
       "params": {
         "volume": 0.7, "attack_sec": 0.005, "release_sec": 0.300,
         "detune_cents": 9.0, "sub_level": 0.7, "osc3_level": 0.5,
         "filter_cutoff_hz": 700, "filter_resonance": 3.0,
         "lfo_rate_hz": 2.0, "lfo_depth": 0.8, "lfo_dest": 1, "lfo_waveform": 1,
-        "portamento_ms": 0
+        "portamento_ms": 0,
+        "stink_enable": 1, "stink_drive_low": 1.3, "stink_drive_mid": 2.5,
+        "stink_drive_high": 1.8, "stink_mix_low": 1.0, "stink_mix_mid": 1.0, "stink_mix_high": 0.6,
+        "stink_fold": 0.15, "stink_crush": 0.05,
+        "stink_master_cutoff_hz": 5000, "stink_master_resonance": 1.5
       }
     },
     {
       "id": "ripper",
       "name": "Ripper",
       "category": "wobble",
-      "description": "Fast square-wave LFO on cutoff — gated/chopped pulse feel. Good for one-shot drops.",
+      "description": "Fast square-wave LFO on cutoff + 2nd LFO on crush rate — gated/chopped pulse feel.",
       "params": {
         "volume": 0.7, "attack_sec": 0.001, "release_sec": 0.150,
         "detune_cents": 12.0, "sub_level": 0.4, "osc3_level": 0.7,
         "filter_cutoff_hz": 550, "filter_resonance": 3.5,
         "lfo_rate_hz": 8.0, "lfo_depth": 0.7, "lfo_dest": 1, "lfo_waveform": 3,
-        "portamento_ms": 0
+        "portamento_ms": 0,
+        "stink_enable": 1, "stink_drive_low": 1.2, "stink_drive_mid": 3.5,
+        "stink_drive_high": 2.5, "stink_mix_low": 1.0, "stink_mix_mid": 1.0, "stink_mix_high": 0.8,
+        "stink_fold": 0.1, "stink_crush": 0.3,
+        "stink_master_cutoff_hz": 6000, "stink_master_resonance": 1.0,
+        "stink_lfo2_rate_hz": 16.0, "stink_lfo2_depth": 0.5, "stink_lfo2_dest": 2, "stink_lfo2_waveform": 3
       }
     },
     {
       "id": "deep-sub",
       "name": "Deep Sub",
       "category": "sub",
-      "description": "Sub sine dominant, saws low. Mostly felt, barely heard — the 40 Hz fundamental.",
+      "description": "Sub sine dominant, saws low. Mostly felt. Gentle saturation only.",
       "params": {
         "volume": 0.8, "attack_sec": 0.020, "release_sec": 0.400,
         "detune_cents": 5.0, "sub_level": 1.0, "osc3_level": 0.3,
         "filter_cutoff_hz": 200, "filter_resonance": 1.5,
         "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0,
-        "portamento_ms": 80
+        "portamento_ms": 80,
+        "stink_enable": 1, "stink_drive_low": 1.4, "stink_drive_mid": 1.0,
+        "stink_drive_high": 0.5, "stink_mix_low": 1.0, "stink_mix_mid": 0.7, "stink_mix_high": 0.2,
+        "stink_fold": 0.0, "stink_crush": 0.0,
+        "stink_master_cutoff_hz": 1200, "stink_master_resonance": 0.9
       }
     },
     {
       "id": "glide-bass",
       "name": "Glide Bass",
       "category": "sub",
-      "description": "Slow portamento between notes — TB-style acid bass slides.",
+      "description": "Slow portamento between notes — TB-style slides. Mild grit on the mid band.",
       "params": {
         "volume": 0.7, "attack_sec": 0.003, "release_sec": 0.180,
         "detune_cents": 6.0, "sub_level": 0.7, "osc3_level": 0.5,
         "filter_cutoff_hz": 800, "filter_resonance": 3.5,
         "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0,
-        "portamento_ms": 150
+        "portamento_ms": 150,
+        "stink_enable": 1, "stink_drive_low": 1.2, "stink_drive_mid": 2.0,
+        "stink_drive_high": 1.5, "stink_mix_low": 1.0, "stink_mix_mid": 0.9, "stink_mix_high": 0.5,
+        "stink_fold": 0.08, "stink_crush": 0.0,
+        "stink_master_cutoff_hz": 4500, "stink_master_resonance": 1.3
+      }
+    },
+    {
+      "id": "full-face",
+      "name": "Full Face",
+      "category": "stink",
+      "description": "Maximum neuro: heavy all-band drive, fold on, 4-bit crush, master resonance on 11. Noisia at full stink.",
+      "params": {
+        "volume": 0.55, "attack_sec": 0.002, "release_sec": 0.200,
+        "detune_cents": 16.0, "sub_level": 0.6, "osc3_level": 0.9,
+        "filter_cutoff_hz": 500, "filter_resonance": 4.0,
+        "lfo_rate_hz": 0.5, "lfo_depth": 0.3, "lfo_dest": 1, "lfo_waveform": 1,
+        "portamento_ms": 0,
+        "stink_enable": 1, "stink_drive_low": 2.0, "stink_drive_mid": 6.0,
+        "stink_drive_high": 4.0, "stink_mix_low": 1.0, "stink_mix_mid": 1.0, "stink_mix_high": 0.9,
+        "stink_fold": 0.6, "stink_crush": 0.6,
+        "stink_master_cutoff_hz": 1800, "stink_master_resonance": 4.2,
+        "stink_lfo2_rate_hz": 0.25, "stink_lfo2_depth": 0.4, "stink_lfo2_dest": 4, "stink_lfo2_waveform": 0
+      }
+    },
+    {
+      "id": "talkbox",
+      "name": "Talkbox",
+      "category": "stink",
+      "description": "Formant-ish vowel quality from heavy resonance + mid drive. The 'talking' Mefjus vibe.",
+      "params": {
+        "volume": 0.6, "attack_sec": 0.002, "release_sec": 0.220,
+        "detune_cents": 12.0, "sub_level": 0.5, "osc3_level": 0.8,
+        "filter_cutoff_hz": 700, "filter_resonance": 4.8,
+        "lfo_rate_hz": 0.4, "lfo_depth": 0.5, "lfo_dest": 1, "lfo_waveform": 0,
+        "portamento_ms": 0,
+        "stink_enable": 1, "stink_drive_low": 1.5, "stink_drive_mid": 4.0,
+        "stink_drive_high": 3.2, "stink_mix_low": 0.9, "stink_mix_mid": 1.0, "stink_mix_high": 1.0,
+        "stink_fold": 0.3, "stink_crush": 0.15,
+        "stink_master_cutoff_hz": 1600, "stink_master_resonance": 4.5,
+        "stink_lfo2_rate_hz": 0.3, "stink_lfo2_depth": 0.5, "stink_lfo2_dest": 3, "stink_lfo2_waveform": 0
+      }
+    },
+    {
+      "id": "metallic",
+      "name": "Metallic",
+      "category": "stink",
+      "description": "High crush + high-band drive. Cold robotic neuro — Current Value territory.",
+      "params": {
+        "volume": 0.6, "attack_sec": 0.001, "release_sec": 0.180,
+        "detune_cents": 20.0, "sub_level": 0.4, "osc3_level": 0.7,
+        "filter_cutoff_hz": 1200, "filter_resonance": 3.2,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0,
+        "portamento_ms": 0,
+        "stink_enable": 1, "stink_drive_low": 1.0, "stink_drive_mid": 3.0,
+        "stink_drive_high": 5.5, "stink_mix_low": 0.8, "stink_mix_mid": 1.0, "stink_mix_high": 1.0,
+        "stink_fold": 0.25, "stink_crush": 0.8,
+        "stink_master_cutoff_hz": 6000, "stink_master_resonance": 2.5
+      }
+    },
+    {
+      "id": "subharmonic",
+      "name": "Subharmonic",
+      "category": "stink",
+      "description": "Heavy fold on a clean low-end reese. The fold creates subharmonic partials — sounds an octave down without being one.",
+      "params": {
+        "volume": 0.65, "attack_sec": 0.010, "release_sec": 0.350,
+        "detune_cents": 8.0, "sub_level": 0.8, "osc3_level": 0.5,
+        "filter_cutoff_hz": 300, "filter_resonance": 2.8,
+        "lfo_rate_hz": 0, "lfo_depth": 0, "lfo_dest": 0, "lfo_waveform": 0,
+        "portamento_ms": 60,
+        "stink_enable": 1, "stink_drive_low": 2.5, "stink_drive_mid": 1.8,
+        "stink_drive_high": 0.8, "stink_mix_low": 1.0, "stink_mix_mid": 0.8, "stink_mix_high": 0.3,
+        "stink_fold": 0.75, "stink_crush": 0.0,
+        "stink_master_cutoff_hz": 1400, "stink_master_resonance": 1.5,
+        "stink_lfo2_rate_hz": 0.3, "stink_lfo2_depth": 0.4, "stink_lfo2_dest": 1, "stink_lfo2_waveform": 0
       }
     }
   ]

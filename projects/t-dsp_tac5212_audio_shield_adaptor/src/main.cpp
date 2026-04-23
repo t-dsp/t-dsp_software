@@ -50,6 +50,9 @@
 #include <TDspMidi.h>
 #include <TDspMPE.h>
 #include <TDspNeuro.h>
+#include <TDspAcid.h>
+#include <TDspSupersaw.h>
+#include <TDspChip.h>
 #include <TDspLooper.h>
 #include <TDspClock.h>
 #include <TDspBeats.h>
@@ -190,6 +193,82 @@ AudioEffectEnvelope      neuroEnv;
 AudioAmplifier           g_neuroGain;
 AudioAmplifier           g_neuroSend;
 
+// ---- Neuro stink chain (Phase 2f) -----------------------------------
+//
+// Multiband destruction chain inserted between neuroEnv and g_neuroGain.
+// What makes a "neuro" bass (as opposed to a plain reese) is that the
+// signal is split into frequency bands and processed differently per
+// band, then recombined. Low-band gets gentle saturation to keep the
+// sub intact; mid-band gets heavy waveshape (source of the "stinky
+// face"); high-band gets bitcrush-style harshness. After recombine:
+// master wavefolder → bitcrusher → resonant filter → g_neuroGain.
+//
+// Signal flow:
+//   neuroEnv ──┬──→ stinkLow  → lowDrive  → lowShape  ┐
+//              ├──→ stinkMid  → midDrive  → midShape  ├─→ bandMix
+//              └──→ stinkHigh → highDrive → highShape ┘     ↓
+//                                                     folder → crusher → master
+//                                                                         ↓
+//                                                               stinkOut ──→ g_neuroGain
+//              └─→ stinkBypass ──────────────────────────────────────────┘
+//
+// Bypass: neuroEnv also feeds a dry-bypass amp that sums into g_neuroGain
+// alongside stinkOut. Toggling the stink flips the two gains (1↔0) so
+// the graph shape never changes at runtime — click-free A/B.
+AudioFilterBiquad        neuroStinkLow;      // LP (single stage)
+AudioFilterBiquad        neuroStinkMid;      // HP + LP (two stages)
+AudioFilterBiquad        neuroStinkHigh;     // HP (single stage)
+AudioAmplifier           neuroStinkLowDrive;
+AudioAmplifier           neuroStinkMidDrive;
+AudioAmplifier           neuroStinkHighDrive;
+AudioEffectWaveshaper    neuroStinkLowShape;
+AudioEffectWaveshaper    neuroStinkMidShape;
+AudioEffectWaveshaper    neuroStinkHighShape;
+AudioMixer4              neuroStinkBandMix;  // slots 0/1/2 = low/mid/high
+AudioEffectWaveshaper    neuroStinkFolder;   // wavefolder via LUT (shape)
+AudioEffectBitcrusher    neuroStinkCrusher;
+AudioFilterStateVariable neuroStinkMaster;   // master resonant LP
+
+// Wet/dry summing mixer. slot 0 = stink-master output (processed),
+// slot 1 = direct bypass from neuroEnv. Toggling stink-enable just
+// flips these two slot gains (1↔0); the graph shape never changes
+// at runtime so A/B is click-free.
+AudioMixer4              neuroStinkFinal;
+
+// ---- TDspAcid (TB-303 style mono bass) ------------------------------
+//
+// 1 saw/square osc → resonant LP filter → amp envelope → gain → bus.
+// Filter envelope is purely software (AcidSink::tick writes filter
+// frequency directly). Mono: g_acidGain fans out to both sides of
+// synthDryA slot 3 (dual-mono, same pattern as Dexed).
+AudioSynthWaveform       acidOsc;
+AudioFilterStateVariable acidFilt;
+AudioEffectEnvelope      acidAmpEnv;
+AudioAmplifier           g_acidGain;
+
+// ---- TDspSupersaw (JP-8000 lead) ------------------------------------
+//
+// 5 saws → 2 cascaded mixers (mixAB + mixFinal) → filter → env →
+// gain → synthDryB slot 0. mixFinal has 2 inputs used (4-saw sum +
+// the 5th direct). Mono, dual-mono out.
+AudioSynthWaveform       supersawO1, supersawO2, supersawO3, supersawO4, supersawO5;
+AudioMixer4              supersawMixAB;
+AudioMixer4              supersawMixFinal;
+AudioFilterStateVariable supersawFilt;
+AudioEffectEnvelope      supersawEnv;
+AudioAmplifier           g_supersawGain;
+
+// ---- TDspChip (NES/Gameboy) -----------------------------------------
+//
+// 2 pulse waves + 1 triangle sub + 1 noise → 4-input mixer → envelope
+// → gain → synthDryB slot 1.
+AudioSynthWaveform       chipPulse1, chipPulse2;
+AudioSynthWaveform       chipTriangle;
+AudioSynthNoisePink      chipNoise;
+AudioMixer4              chipMix;
+AudioEffectEnvelope      chipEnv;
+AudioAmplifier           g_chipGain;
+
 // ---- Shared FX bus -------------------------------------------------
 //
 // Every synth taps its post-volume signal through its own send amp
@@ -238,6 +317,21 @@ AudioAmplifier           fxReturnR;
 // knob that also owns the looper tap.
 // DMAMEM — RAM1 budget is tight on this board; these aggregate-bus
 // objects don't need tightly-coupled memory.
+//
+// Two-tier dry bus (Phase 2f+): with 6 engines + FX wet, 4 slots aren't
+// enough. synthDryA carries Dexed/MPE/Neuro/Acid; synthDryB carries
+// Supersaw/Chip (+ 2 reserved). Both feed synthBus, which also still
+// carries the shared-FX wet return.
+//
+// synthBusL/R slot layout:
+//   0 = synthDryA out
+//   1 = synthDryB out
+//   2 = shared-FX wet return (unchanged)
+//   3 = reserved
+DMAMEM AudioMixer4       synthDryAL;
+DMAMEM AudioMixer4       synthDryAR;
+DMAMEM AudioMixer4       synthDryBL;
+DMAMEM AudioMixer4       synthDryBR;
 DMAMEM AudioMixer4       synthBusL;
 DMAMEM AudioMixer4       synthBusR;
 DMAMEM AudioAmplifier    synthAmpL;
@@ -476,8 +570,9 @@ AudioConnection      c_mixR_pre    (mixR, 0, preMixR, 0);
 AudioConnection      c_dexed_gain  (g_dexed,     0, g_dexedGain, 0);
 // Dry path — dual-mono into synthBus slot 0 (Dexed is mono; g_dexedGain
 // fans out to both L and R sides of the bus so it centers in the field).
-AudioConnection      c_dexed_busL  (g_dexedGain, 0, synthBusL,   0);
-AudioConnection      c_dexed_busR  (g_dexedGain, 0, synthBusR,   0);
+// Dexed → synthDryAL/R slot 0 (tier 1 dry-bus).
+AudioConnection      c_dexed_busL  (g_dexedGain, 0, synthDryAL,  0);
+AudioConnection      c_dexed_busR  (g_dexedGain, 0, synthDryAR,  0);
 // FX send path — post-volume tap through the per-synth send amp into
 // the shared FX bus slot 0. Setting g_dexedSend's gain to 0 mutes
 // just this synth's contribution; other synths keep sending.
@@ -507,8 +602,9 @@ AudioConnection      c_mpeEnv3_R    (mpeEnv3,  0, mpeMixR,  3);
 AudioConnection      c_mpeMixL_gain (mpeMixL,  0, mpeGainL, 0);
 AudioConnection      c_mpeMixR_gain (mpeMixR,  0, mpeGainR, 0);
 // Dry path — mpeGainL/R into synthBus slot 1.
-AudioConnection      c_mpeGainL_bus (mpeGainL, 0, synthBusL, 1);
-AudioConnection      c_mpeGainR_bus (mpeGainR, 0, synthBusR, 1);
+// MPE → synthDryAL/R slot 1 (tier 1 dry-bus).
+AudioConnection      c_mpeGainL_bus (mpeGainL, 0, synthDryAL, 1);
+AudioConnection      c_mpeGainR_bus (mpeGainR, 0, synthDryAR, 1);
 // FX send path — L side only (MPE is dual-mono so mpeGainL carries
 // the full mono content). Feeds shared FX bus slot 1.
 AudioConnection      c_mpe_send     (mpeGainL, 0, g_mpeSend, 0);
@@ -524,9 +620,71 @@ AudioConnection      c_neuro_o3_mix (neuroOsc3,     0, neuroVoiceMix, 2);
 AudioConnection      c_neuro_os_mix (neuroOscSub,   0, neuroVoiceMix, 3);
 AudioConnection      c_neuro_mix_f  (neuroVoiceMix, 0, neuroFilt,     0);
 AudioConnection      c_neuro_f_env  (neuroFilt,     0, neuroEnv,      0);
-AudioConnection      c_neuro_env_g  (neuroEnv,      0, g_neuroGain,   0);
-AudioConnection      c_neuro_g_busL (g_neuroGain,   0, synthBusL,     3);
-AudioConnection      c_neuro_g_busR (g_neuroGain,   0, synthBusR,     3);
+// Stink chain: neuroEnv fans into three band-split biquads (low/mid/
+// high) + a dry-bypass tap into neuroStinkFinal slot 1. Each band
+// hits drive → waveshape then recombines in neuroStinkBandMix.
+// Master chain: wavefolder → bitcrusher → resonant LP filter →
+// neuroStinkFinal slot 0. Flipping slot 0/1 gains (1↔0) A/B between
+// processed and dry without changing the graph shape.
+AudioConnection      c_neuro_env_lo (neuroEnv,            0, neuroStinkLow,       0);
+AudioConnection      c_neuro_env_md (neuroEnv,            0, neuroStinkMid,       0);
+AudioConnection      c_neuro_env_hi (neuroEnv,            0, neuroStinkHigh,      0);
+AudioConnection      c_neuro_env_by (neuroEnv,            0, neuroStinkFinal,     1);
+
+AudioConnection      c_neuro_lo_dr  (neuroStinkLow,       0, neuroStinkLowDrive,  0);
+AudioConnection      c_neuro_md_dr  (neuroStinkMid,       0, neuroStinkMidDrive,  0);
+AudioConnection      c_neuro_hi_dr  (neuroStinkHigh,      0, neuroStinkHighDrive, 0);
+
+AudioConnection      c_neuro_lo_sh  (neuroStinkLowDrive,  0, neuroStinkLowShape,  0);
+AudioConnection      c_neuro_md_sh  (neuroStinkMidDrive,  0, neuroStinkMidShape,  0);
+AudioConnection      c_neuro_hi_sh  (neuroStinkHighDrive, 0, neuroStinkHighShape, 0);
+
+AudioConnection      c_neuro_lo_bm  (neuroStinkLowShape,  0, neuroStinkBandMix,   0);
+AudioConnection      c_neuro_md_bm  (neuroStinkMidShape,  0, neuroStinkBandMix,   1);
+AudioConnection      c_neuro_hi_bm  (neuroStinkHighShape, 0, neuroStinkBandMix,   2);
+
+AudioConnection      c_neuro_bm_fo  (neuroStinkBandMix,   0, neuroStinkFolder,    0);
+AudioConnection      c_neuro_fo_cr  (neuroStinkFolder,    0, neuroStinkCrusher,   0);
+AudioConnection      c_neuro_cr_ms  (neuroStinkCrusher,   0, neuroStinkMaster,    0);
+AudioConnection      c_neuro_ms_fi  (neuroStinkMaster,    0, neuroStinkFinal,     0);
+
+AudioConnection      c_neuro_fi_gn  (neuroStinkFinal,     0, g_neuroGain,         0);
+// Neuro → synthDryAL/R slot 2 (tier 1 dry-bus).
+AudioConnection      c_neuro_g_busL (g_neuroGain,   0, synthDryAL,    2);
+AudioConnection      c_neuro_g_busR (g_neuroGain,   0, synthDryAR,    2);
+
+// Acid (TB-303): osc → filter → env → gain → synthDryA slot 3. Mono
+// engine, so g_acidGain fans out to both L+R sides of the dry bus.
+AudioConnection      c_acid_o_f     (acidOsc,      0, acidFilt,      0);
+AudioConnection      c_acid_f_env   (acidFilt,     0, acidAmpEnv,    0);
+AudioConnection      c_acid_env_g   (acidAmpEnv,   0, g_acidGain,    0);
+AudioConnection      c_acid_g_busL  (g_acidGain,   0, synthDryAL,    3);
+AudioConnection      c_acid_g_busR  (g_acidGain,   0, synthDryAR,    3);
+
+// Supersaw: 5 saws → mixAB (4 slots) + direct osc5 → mixFinal → filter
+// → env → gain → synthDryB slot 0. Mono output, dual-monoed into bus.
+AudioConnection      c_ss_o1_mab    (supersawO1,   0, supersawMixAB,   0);
+AudioConnection      c_ss_o2_mab    (supersawO2,   0, supersawMixAB,   1);
+AudioConnection      c_ss_o3_mab    (supersawO3,   0, supersawMixAB,   2);
+AudioConnection      c_ss_o4_mab    (supersawO4,   0, supersawMixAB,   3);
+AudioConnection      c_ss_mab_mf    (supersawMixAB,0, supersawMixFinal,0);
+AudioConnection      c_ss_o5_mf     (supersawO5,   0, supersawMixFinal,1);
+AudioConnection      c_ss_mf_f      (supersawMixFinal,0, supersawFilt, 0);
+AudioConnection      c_ss_f_env     (supersawFilt, 0, supersawEnv,    0);
+AudioConnection      c_ss_env_g     (supersawEnv,  0, g_supersawGain, 0);
+AudioConnection      c_ss_g_busL    (g_supersawGain,0, synthDryBL,    0);
+AudioConnection      c_ss_g_busR    (g_supersawGain,0, synthDryBR,    0);
+
+// Chip (NES/Gameboy): 2 pulse + triangle + noise → mixer → env → gain
+// → synthDryB slot 1.
+AudioConnection      c_ch_p1_m      (chipPulse1,  0, chipMix,     0);
+AudioConnection      c_ch_p2_m      (chipPulse2,  0, chipMix,     1);
+AudioConnection      c_ch_tr_m      (chipTriangle,0, chipMix,     2);
+AudioConnection      c_ch_no_m      (chipNoise,   0, chipMix,     3);
+AudioConnection      c_ch_m_env     (chipMix,     0, chipEnv,     0);
+AudioConnection      c_ch_env_g     (chipEnv,     0, g_chipGain,  0);
+AudioConnection      c_ch_g_busL    (g_chipGain,  0, synthDryBL,  1);
+AudioConnection      c_ch_g_busR    (g_chipGain,  0, synthDryBR,  1);
 AudioConnection      c_neuro_g_send (g_neuroGain,   0, g_neuroSend,   0);
 AudioConnection      c_neuro_fx_bus (g_neuroSend,   0, fxSendBus,     2);
 
@@ -545,6 +703,13 @@ AudioConnection      c_fx_retR_bus (fxReturnR,  0, synthBusR, 2);
 // Synth bus → synth amp (fader/mute) → preMix slot 1 (stereo, one slot
 // per side). preMix slot 2 is now the beats group (below); slot 3 is
 // unused (reserved for future aggregate buses).
+// Tier-1 dry buses cascade into synthBus slots 0 (DryA) and 1 (DryB).
+// Slot 2 = shared-FX wet return (wired separately). Slot 3 reserved.
+AudioConnection      c_dryAL_bus (synthDryAL, 0, synthBusL, 0);
+AudioConnection      c_dryAR_bus (synthDryAR, 0, synthBusR, 0);
+AudioConnection      c_dryBL_bus (synthDryBL, 0, synthBusL, 1);
+AudioConnection      c_dryBR_bus (synthDryBR, 0, synthBusR, 1);
+
 AudioConnection      c_synthBusL_amp (synthBusL, 0, synthAmpL, 0);
 AudioConnection      c_synthBusR_amp (synthBusR, 0, synthAmpR, 0);
 AudioConnection      c_synthAmpL_pre (synthAmpL, 0, preMixL,   1);
@@ -979,6 +1144,318 @@ static void applyNeuroSend(float v) {
     if (v > 1.0f) v = 1.0f;
     g_neuroSendAmount = v;
     g_neuroSend.gain(v);
+}
+
+// --------------------------------------------------------------------
+// Acid (TB-303 style) engine state (Phase 2g)
+//
+// Mono voice, so the sketch just holds the volume fader and
+// channel-trim state; every musical param lives inside AcidSink.
+// Default MIDI channel 4 (Dexed=1, MPE=2, Neuro=3, Acid=4).
+// --------------------------------------------------------------------
+AcidSink::VoicePorts g_acidPorts = {
+    &acidOsc, &acidFilt, &acidAmpEnv,
+};
+AcidSink g_acidSink(g_acidPorts);
+
+static float g_acidVolume = 0.7f;
+static bool  g_acidOn     = true;
+
+static void applyAcidGain() {
+    g_acidGain.gain(g_acidOn ? g_acidVolume : 0.0f);
+}
+static void applyAcidVolume(float v) {
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    g_acidVolume = v;
+    applyAcidGain();
+}
+static void applyAcidOn(bool on) {
+    g_acidOn = on;
+    applyAcidGain();
+}
+
+// --------------------------------------------------------------------
+// Supersaw (JP-8000 style) engine state (Phase 2h)
+// --------------------------------------------------------------------
+SupersawSink::VoicePorts g_supersawPorts = {
+    &supersawO1, &supersawO2, &supersawO3, &supersawO4, &supersawO5,
+    &supersawMixAB, &supersawMixFinal,
+    &supersawFilt, &supersawEnv,
+};
+SupersawSink g_supersawSink(g_supersawPorts);
+
+static float g_supersawVolume = 0.6f;
+static bool  g_supersawOn     = true;
+
+static void applySupersawGain() {
+    g_supersawGain.gain(g_supersawOn ? g_supersawVolume : 0.0f);
+}
+static void applySupersawVolume(float v) {
+    if (v < 0.0f) v = 0.0f; if (v > 1.0f) v = 1.0f;
+    g_supersawVolume = v;
+    applySupersawGain();
+}
+static void applySupersawOn(bool on) {
+    g_supersawOn = on;
+    applySupersawGain();
+}
+
+// --------------------------------------------------------------------
+// Chip (NES/Gameboy) engine state (Phase 2i)
+// --------------------------------------------------------------------
+ChipSink::VoicePorts g_chipPorts = {
+    &chipPulse1, &chipPulse2, &chipTriangle, &chipNoise,
+    &chipMix, &chipEnv,
+};
+ChipSink g_chipSink(g_chipPorts);
+
+static float g_chipVolume = 0.6f;
+static bool  g_chipOn     = true;
+
+static void applyChipGain() {
+    g_chipGain.gain(g_chipOn ? g_chipVolume : 0.0f);
+}
+static void applyChipVolume(float v) {
+    if (v < 0.0f) v = 0.0f; if (v > 1.0f) v = 1.0f;
+    g_chipVolume = v;
+    applyChipGain();
+}
+static void applyChipOn(bool on) {
+    g_chipOn = on;
+    applyChipGain();
+}
+
+// --------------------------------------------------------------------
+// Neuro stink chain state (Phase 2f)
+//
+// Multiband destruction: 3-band split, per-band drive + waveshape,
+// master wavefolder + bitcrusher + resonant LP filter. See audio-object
+// declarations near the top of the file for the signal flow diagram.
+//
+// Defaults are set so that a freshly-booted Neuro with stink_enable=1
+// sounds aggressive but not broken — moderate mid-band drive, gentle
+// fold + crush, master cutoff wide open. Presets dial in the extreme
+// settings that actually produce "the face."
+// --------------------------------------------------------------------
+constexpr int   kNeuroStinkLutLen = 513;   // AudioEffectWaveshaper wants 2^N + 1
+static float    g_neuroStinkShapeLut [kNeuroStinkLutLen];
+static float    g_neuroStinkFolderLut[kNeuroStinkLutLen];
+
+static bool  g_neuroStinkEnable        = true;   // start enabled — shipping a reese synth with its teeth in
+static float g_neuroStinkCrossoverLoHz = 120.0f; // low/mid crossover
+static float g_neuroStinkCrossoverHiHz = 2000.0f;// mid/high crossover
+static float g_neuroStinkDriveLow      = 1.5f;   // pre-shape gain on low band
+static float g_neuroStinkDriveMid      = 3.0f;   // pre-shape gain on mid band (main grit source)
+static float g_neuroStinkDriveHigh     = 2.0f;   // pre-shape gain on high band
+static float g_neuroStinkMixLow        = 1.0f;   // band mix slot 0
+static float g_neuroStinkMixMid        = 1.0f;   // band mix slot 1
+static float g_neuroStinkMixHigh       = 0.8f;   // band mix slot 2 — slightly ducked by default
+static float g_neuroStinkFoldAmount    = 0.0f;   // 0..1 — 0 = clean, 1 = aggressive fold
+static float g_neuroStinkCrushAmount   = 0.0f;   // 0..1 — 0 = clean, 1 = 4-bit crush
+static float g_neuroStinkMasterCutHz   = 8000.0f;// master LP cutoff
+static float g_neuroStinkMasterRes     = 1.2f;   // master LP Q
+
+// LFO2 — separate from NeuroSink's own LFO. Modulates stink params
+// exclusively; composes additively with Sink's LFO so both can run at
+// the same time (one wobbling filter cutoff, the other wobbling
+// crush rate, for example).
+enum NeuroStinkLfoDest {
+    NeuroStinkLfoOff    = 0,
+    NeuroStinkLfoFold   = 1,
+    NeuroStinkLfoCrush  = 2,
+    NeuroStinkLfoMaster = 3,
+    NeuroStinkLfoMidDrive = 4,
+};
+static float   g_neuroStinkLfoRateHz  = 0.0f;
+static float   g_neuroStinkLfoDepth   = 0.5f;
+static uint8_t g_neuroStinkLfoDest    = NeuroStinkLfoOff;
+static uint8_t g_neuroStinkLfoWaveform = 1;  // triangle
+// Running modulation values pushed by tickNeuroStink() into the apply
+// helpers so a live LFO writes the same field as a UI slider.
+static float   g_neuroStinkLfoFoldMod   = 0.0f;  // added to _foldAmount
+static float   g_neuroStinkLfoCrushMod  = 0.0f;  // added to _crushAmount
+static float   g_neuroStinkLfoMasterOct = 0.0f;  // octaves of cutoff offset
+static float   g_neuroStinkLfoMidMod    = 0.0f;  // added to mid drive
+
+// --- Apply helpers --------------------------------------------------
+//
+// Each helper maps the current parameter values (plus LFO contribution
+// when relevant) onto the audio graph. Called whenever UI or LFO writes
+// a new value. Idempotent — can be called any number of times with the
+// same inputs.
+
+// Build the tube-saturation LUT once at startup. Input range is
+// [-1..+1]; output is tanh-shaped with a saturation ceiling that keeps
+// clean headroom at small signals and eases into clipping near the
+// rails. Same curve applied to all three bands; pre-shape drive amps
+// modulate what portion of the curve each band hits.
+static void buildNeuroStinkShapeLut() {
+    constexpr float knee = 2.5f;  // tanh steepness
+    constexpr float ceiling = 0.92f;  // headroom so cascaded saturation doesn't DC-wander
+    for (int i = 0; i < kNeuroStinkLutLen; ++i) {
+        const float x = -1.0f + 2.0f * (float)i / (float)(kNeuroStinkLutLen - 1);
+        const float y = tanhf(knee * x) / tanhf(knee) * ceiling;
+        g_neuroStinkShapeLut[i] = y;
+    }
+}
+
+// Wavefolder LUT. Mapped from _foldAmount 0..1 at build time — 0 is
+// identity (y = x), 1 is full-fold where the signal turns inside out
+// past ±0.5. Built lazily in applyNeuroStinkFold().
+static void buildNeuroStinkFolderLut(float foldAmount) {
+    // fold strength: at 0, identity. At 1, signals outside ±(1 - 0.9×fold)
+    // are folded back. Use sinf-based folder for smooth transitions —
+    // hard-clip folding sounds harsh, sine-based folding is the classic
+    // West Coast (Don Buchla) sound.
+    const float drive = 1.0f + foldAmount * 5.0f;  // 1..6× pre-fold gain
+    for (int i = 0; i < kNeuroStinkLutLen; ++i) {
+        const float x = -1.0f + 2.0f * (float)i / (float)(kNeuroStinkLutLen - 1);
+        // sin(π/2 × drive × x) gives a folder that starts clean at drive=1
+        // and gains progressively more fold cycles as drive climbs.
+        float y;
+        if (foldAmount <= 0.0f) {
+            y = x;
+        } else {
+            y = sinf((float)M_PI * 0.5f * drive * x) * 0.9f;  // 0.9 keeps headroom
+        }
+        g_neuroStinkFolderLut[i] = y;
+    }
+}
+
+static void applyNeuroStinkBandFilters() {
+    // Low band: single LP stage at low-crossover.
+    neuroStinkLow.setLowpass(0, g_neuroStinkCrossoverLoHz, 0.707f);
+    // Mid band: HP at low-crossover, LP at high-crossover — two stages
+    // in the same biquad object.
+    neuroStinkMid.setHighpass(0, g_neuroStinkCrossoverLoHz, 0.707f);
+    neuroStinkMid.setLowpass (1, g_neuroStinkCrossoverHiHz, 0.707f);
+    // High band: single HP stage at high-crossover.
+    neuroStinkHigh.setHighpass(0, g_neuroStinkCrossoverHiHz, 0.707f);
+}
+
+static void applyNeuroStinkDrive() {
+    // Per-band drive — pre-shape gain. Combined with LFO mid-drive
+    // modulation for the mid band (other bands don't take LFO mod in
+    // this pass; a future revision could add per-band LFO targets).
+    neuroStinkLowDrive .gain(g_neuroStinkDriveLow);
+    neuroStinkHighDrive.gain(g_neuroStinkDriveHigh);
+    float midDrive = g_neuroStinkDriveMid + g_neuroStinkLfoMidMod;
+    if (midDrive < 0.0f) midDrive = 0.0f;
+    if (midDrive > 10.0f) midDrive = 10.0f;
+    neuroStinkMidDrive.gain(midDrive);
+}
+
+static void applyNeuroStinkBandMix() {
+    neuroStinkBandMix.gain(0, g_neuroStinkMixLow);
+    neuroStinkBandMix.gain(1, g_neuroStinkMixMid);
+    neuroStinkBandMix.gain(2, g_neuroStinkMixHigh);
+    neuroStinkBandMix.gain(3, 0.0f);
+}
+
+static void applyNeuroStinkFold() {
+    float fold = g_neuroStinkFoldAmount + g_neuroStinkLfoFoldMod;
+    if (fold < 0.0f) fold = 0.0f;
+    if (fold > 1.0f) fold = 1.0f;
+    buildNeuroStinkFolderLut(fold);
+    neuroStinkFolder.shape(g_neuroStinkFolderLut, kNeuroStinkLutLen);
+}
+
+static void applyNeuroStinkCrush() {
+    // Crush amount 0..1 maps onto the bitcrusher's bit depth + sample
+    // rate. At 0: 16-bit / 44.1 kHz (passthrough). At 1: 4-bit / 5 kHz
+    // (aggressive NES-ish crush).
+    float crush = g_neuroStinkCrushAmount + g_neuroStinkLfoCrushMod;
+    if (crush < 0.0f) crush = 0.0f;
+    if (crush > 1.0f) crush = 1.0f;
+    const int   bits = 16 - (int)(crush * 12.0f);              // 16..4
+    const float rate = 44100.0f - crush * (44100.0f - 5000.0f); // 44100..5000
+    neuroStinkCrusher.bits(bits);
+    neuroStinkCrusher.sampleRate(rate);
+}
+
+static void applyNeuroStinkMaster() {
+    float hz = g_neuroStinkMasterCutHz * powf(2.0f, g_neuroStinkLfoMasterOct);
+    if (hz < 20.0f)    hz = 20.0f;
+    if (hz > 20000.0f) hz = 20000.0f;
+    neuroStinkMaster.frequency(hz);
+    neuroStinkMaster.resonance(g_neuroStinkMasterRes);
+}
+
+static void applyNeuroStinkEnable() {
+    // Flip wet/dry. When disabled, slot 0 (wet) = 0 and slot 1 (dry) = 1,
+    // so the signal bypasses every DSP stage in the stink chain. The
+    // stages themselves keep running (cheap), but contribute nothing.
+    const float wet = g_neuroStinkEnable ? 1.0f : 0.0f;
+    const float dry = g_neuroStinkEnable ? 0.0f : 1.0f;
+    neuroStinkFinal.gain(0, wet);
+    neuroStinkFinal.gain(1, dry);
+}
+
+// LFO2 tick — same time-base pattern as NeuroSink's internal LFO but
+// produces scalar modulation values for stink params rather than
+// talking directly to audio objects. Called from loop() alongside
+// g_neuroSink.tick(). Cheap no-op when disabled.
+static float neuroStinkLfoShape(uint8_t wave, float phase01) {
+    static constexpr float kTwoPi = 6.2831853071795864f;
+    switch (wave) {
+        case 0:  return sinf(phase01 * kTwoPi);
+        case 1:  return (phase01 < 0.5f) ? (4.0f * phase01 - 1.0f) : (3.0f - 4.0f * phase01);
+        case 2:  return 2.0f * phase01 - 1.0f;
+        case 3:  return (phase01 < 0.5f) ? 1.0f : -1.0f;
+        default: return 0.0f;
+    }
+}
+
+static void tickNeuroStink(uint32_t nowMs) {
+    bool active = g_neuroStinkEnable
+               && (g_neuroStinkLfoDest != NeuroStinkLfoOff)
+               && (g_neuroStinkLfoDepth  > 0.0f)
+               && (g_neuroStinkLfoRateHz > 0.0f);
+    if (!active) {
+        // Clear any running modulation so the next apply* call sees
+        // stable values. Small cost; runs only when we transition out.
+        if (g_neuroStinkLfoFoldMod   != 0.0f ||
+            g_neuroStinkLfoCrushMod  != 0.0f ||
+            g_neuroStinkLfoMasterOct != 0.0f ||
+            g_neuroStinkLfoMidMod    != 0.0f) {
+            g_neuroStinkLfoFoldMod   = 0.0f;
+            g_neuroStinkLfoCrushMod  = 0.0f;
+            g_neuroStinkLfoMasterOct = 0.0f;
+            g_neuroStinkLfoMidMod    = 0.0f;
+            applyNeuroStinkFold();
+            applyNeuroStinkCrush();
+            applyNeuroStinkMaster();
+            applyNeuroStinkDrive();
+        }
+        return;
+    }
+
+    const float periodMs = 1000.0f / g_neuroStinkLfoRateHz;
+    const float phase01  = fmodf((float)nowMs, periodMs) / periodMs;
+    const float shape    = neuroStinkLfoShape(g_neuroStinkLfoWaveform, phase01);
+    const float scaled   = shape * g_neuroStinkLfoDepth;
+
+    // Clear previous dest's contribution, write new one.
+    g_neuroStinkLfoFoldMod   = 0.0f;
+    g_neuroStinkLfoCrushMod  = 0.0f;
+    g_neuroStinkLfoMasterOct = 0.0f;
+    g_neuroStinkLfoMidMod    = 0.0f;
+    switch (g_neuroStinkLfoDest) {
+        case NeuroStinkLfoFold:    g_neuroStinkLfoFoldMod   = scaled;        break;
+        case NeuroStinkLfoCrush:   g_neuroStinkLfoCrushMod  = scaled;        break;
+        case NeuroStinkLfoMaster:  g_neuroStinkLfoMasterOct = scaled * 2.0f; break; // ±2 octaves
+        case NeuroStinkLfoMidDrive: g_neuroStinkLfoMidMod   = scaled * 3.0f; break; // ±3× drive
+        default: break;
+    }
+
+    switch (g_neuroStinkLfoDest) {
+        case NeuroStinkLfoFold:     applyNeuroStinkFold();   break;
+        case NeuroStinkLfoCrush:    applyNeuroStinkCrush();  break;
+        case NeuroStinkLfoMaster:   applyNeuroStinkMaster(); break;
+        case NeuroStinkLfoMidDrive: applyNeuroStinkDrive();  break;
+        default: break;
+    }
 }
 
 // --------------------------------------------------------------------
@@ -2588,6 +3065,536 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
+    // ------------- /synth/neuro/stink/* — multiband destruction chain
+    //
+    // Same read/write/echo pattern as the rest of /synth/neuro/*. All
+    // params clamp in their apply helpers. Floats use sendThrottled on
+    // the UI side (continuous controls); ints use sendMsg (toggles).
+
+    if (strcmp(address, "/synth/neuro/stink/enable") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/stink/enable"); m.add((int)(g_neuroStinkEnable ? 1 : 0)); reply.add(m);
+        } else if (msg.isInt(0)) {
+            g_neuroStinkEnable = msg.getInt(0) != 0;
+            applyNeuroStinkEnable();
+            OSCMessage m("/synth/neuro/stink/enable"); m.add((int)(g_neuroStinkEnable ? 1 : 0)); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/stink/drive_low") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/stink/drive_low"); m.add(g_neuroStinkDriveLow); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0); if (v < 0.0f) v = 0.0f; if (v > 10.0f) v = 10.0f;
+            g_neuroStinkDriveLow = v; applyNeuroStinkDrive();
+            OSCMessage m("/synth/neuro/stink/drive_low"); m.add(g_neuroStinkDriveLow); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/neuro/stink/drive_mid") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/stink/drive_mid"); m.add(g_neuroStinkDriveMid); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0); if (v < 0.0f) v = 0.0f; if (v > 10.0f) v = 10.0f;
+            g_neuroStinkDriveMid = v; applyNeuroStinkDrive();
+            OSCMessage m("/synth/neuro/stink/drive_mid"); m.add(g_neuroStinkDriveMid); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/neuro/stink/drive_high") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/stink/drive_high"); m.add(g_neuroStinkDriveHigh); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0); if (v < 0.0f) v = 0.0f; if (v > 10.0f) v = 10.0f;
+            g_neuroStinkDriveHigh = v; applyNeuroStinkDrive();
+            OSCMessage m("/synth/neuro/stink/drive_high"); m.add(g_neuroStinkDriveHigh); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/stink/mix_low") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/stink/mix_low"); m.add(g_neuroStinkMixLow); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0); if (v < 0.0f) v = 0.0f; if (v > 1.0f) v = 1.0f;
+            g_neuroStinkMixLow = v; applyNeuroStinkBandMix();
+            OSCMessage m("/synth/neuro/stink/mix_low"); m.add(g_neuroStinkMixLow); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/neuro/stink/mix_mid") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/stink/mix_mid"); m.add(g_neuroStinkMixMid); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0); if (v < 0.0f) v = 0.0f; if (v > 1.0f) v = 1.0f;
+            g_neuroStinkMixMid = v; applyNeuroStinkBandMix();
+            OSCMessage m("/synth/neuro/stink/mix_mid"); m.add(g_neuroStinkMixMid); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/neuro/stink/mix_high") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/stink/mix_high"); m.add(g_neuroStinkMixHigh); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0); if (v < 0.0f) v = 0.0f; if (v > 1.0f) v = 1.0f;
+            g_neuroStinkMixHigh = v; applyNeuroStinkBandMix();
+            OSCMessage m("/synth/neuro/stink/mix_high"); m.add(g_neuroStinkMixHigh); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/stink/fold") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/stink/fold"); m.add(g_neuroStinkFoldAmount); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0); if (v < 0.0f) v = 0.0f; if (v > 1.0f) v = 1.0f;
+            g_neuroStinkFoldAmount = v; applyNeuroStinkFold();
+            OSCMessage m("/synth/neuro/stink/fold"); m.add(g_neuroStinkFoldAmount); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/neuro/stink/crush") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/stink/crush"); m.add(g_neuroStinkCrushAmount); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0); if (v < 0.0f) v = 0.0f; if (v > 1.0f) v = 1.0f;
+            g_neuroStinkCrushAmount = v; applyNeuroStinkCrush();
+            OSCMessage m("/synth/neuro/stink/crush"); m.add(g_neuroStinkCrushAmount); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/stink/master_cutoff") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/stink/master_cutoff"); m.add(g_neuroStinkMasterCutHz); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0); if (v < 20.0f) v = 20.0f; if (v > 20000.0f) v = 20000.0f;
+            g_neuroStinkMasterCutHz = v; applyNeuroStinkMaster();
+            OSCMessage m("/synth/neuro/stink/master_cutoff"); m.add(g_neuroStinkMasterCutHz); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/neuro/stink/master_resonance") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/stink/master_resonance"); m.add(g_neuroStinkMasterRes); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0); if (v < 0.707f) v = 0.707f; if (v > 5.0f) v = 5.0f;
+            g_neuroStinkMasterRes = v; applyNeuroStinkMaster();
+            OSCMessage m("/synth/neuro/stink/master_resonance"); m.add(g_neuroStinkMasterRes); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/synth/neuro/stink/lfo2/rate") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/stink/lfo2/rate"); m.add(g_neuroStinkLfoRateHz); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0); if (v < 0.0f) v = 0.0f; if (v > 20.0f) v = 20.0f;
+            g_neuroStinkLfoRateHz = v;
+            OSCMessage m("/synth/neuro/stink/lfo2/rate"); m.add(g_neuroStinkLfoRateHz); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/neuro/stink/lfo2/depth") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/stink/lfo2/depth"); m.add(g_neuroStinkLfoDepth); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0); if (v < 0.0f) v = 0.0f; if (v > 1.0f) v = 1.0f;
+            g_neuroStinkLfoDepth = v;
+            OSCMessage m("/synth/neuro/stink/lfo2/depth"); m.add(g_neuroStinkLfoDepth); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/neuro/stink/lfo2/dest") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/stink/lfo2/dest"); m.add((int)g_neuroStinkLfoDest); reply.add(m);
+        } else if (msg.isInt(0)) {
+            int d = msg.getInt(0); if (d < 0 || d > NeuroStinkLfoMidDrive) d = NeuroStinkLfoOff;
+            g_neuroStinkLfoDest = (uint8_t)d;
+            OSCMessage m("/synth/neuro/stink/lfo2/dest"); m.add((int)g_neuroStinkLfoDest); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/neuro/stink/lfo2/waveform") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/neuro/stink/lfo2/waveform"); m.add((int)g_neuroStinkLfoWaveform); reply.add(m);
+        } else if (msg.isInt(0)) {
+            int w = msg.getInt(0); if (w < 0 || w > 3) w = 0;
+            g_neuroStinkLfoWaveform = (uint8_t)w;
+            OSCMessage m("/synth/neuro/stink/lfo2/waveform"); m.add((int)g_neuroStinkLfoWaveform); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    // ------------- /synth/acid/* — TB-303 style mono bass ------------
+    if (strcmp(address, "/synth/acid/volume") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/acid/volume"); m.add(g_acidVolume); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            applyAcidVolume(msg.getFloat(0));
+            OSCMessage m("/synth/acid/volume"); m.add(g_acidVolume); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/acid/on") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/acid/on"); m.add((int)(g_acidOn ? 1 : 0)); reply.add(m);
+        } else if (msg.isInt(0)) {
+            applyAcidOn(msg.getInt(0) != 0);
+            OSCMessage m("/synth/acid/on"); m.add((int)(g_acidOn ? 1 : 0)); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/acid/midi/ch") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/acid/midi/ch"); m.add((int)g_acidSink.midiChannel()); reply.add(m);
+        } else if (msg.isInt(0)) {
+            int ch = msg.getInt(0); if (ch < 0 || ch > 16) ch = 0;
+            g_acidSink.onAllNotesOff(0);
+            g_acidSink.setMidiChannel((uint8_t)ch);
+            OSCMessage m("/synth/acid/midi/ch"); m.add((int)g_acidSink.midiChannel()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/acid/waveform") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/acid/waveform"); m.add((int)g_acidSink.waveform()); reply.add(m);
+        } else if (msg.isInt(0)) {
+            int w = msg.getInt(0); if (w < 0 || w > 1) w = 0;
+            g_acidSink.setWaveform((uint8_t)w);
+            OSCMessage m("/synth/acid/waveform"); m.add((int)g_acidSink.waveform()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/acid/tuning") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/acid/tuning"); m.add((int)g_acidSink.tuning()); reply.add(m);
+        } else if (msg.isInt(0)) {
+            g_acidSink.setTuning(msg.getInt(0));
+            OSCMessage m("/synth/acid/tuning"); m.add((int)g_acidSink.tuning()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/acid/cutoff") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/acid/cutoff"); m.add(g_acidSink.cutoff()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_acidSink.setCutoff(msg.getFloat(0));
+            OSCMessage m("/synth/acid/cutoff"); m.add(g_acidSink.cutoff()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/acid/resonance") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/acid/resonance"); m.add(g_acidSink.resonance()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_acidSink.setResonance(msg.getFloat(0));
+            OSCMessage m("/synth/acid/resonance"); m.add(g_acidSink.resonance()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/acid/env_mod") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/acid/env_mod"); m.add(g_acidSink.envModAmount()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_acidSink.setEnvModAmount(msg.getFloat(0));
+            OSCMessage m("/synth/acid/env_mod"); m.add(g_acidSink.envModAmount()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/acid/env_decay") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/acid/env_decay"); m.add(g_acidSink.envDecay()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_acidSink.setEnvDecay(msg.getFloat(0));
+            OSCMessage m("/synth/acid/env_decay"); m.add(g_acidSink.envDecay()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/acid/amp_decay") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/acid/amp_decay"); m.add(g_acidSink.ampDecay()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_acidSink.setAmpDecay(msg.getFloat(0));
+            OSCMessage m("/synth/acid/amp_decay"); m.add(g_acidSink.ampDecay()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/acid/accent") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/acid/accent"); m.add(g_acidSink.accent()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_acidSink.setAccent(msg.getFloat(0));
+            OSCMessage m("/synth/acid/accent"); m.add(g_acidSink.accent()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/acid/slide") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/acid/slide"); m.add(g_acidSink.slideMs()); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            g_acidSink.setSlideMs(msg.getFloat(0));
+            OSCMessage m("/synth/acid/slide"); m.add(g_acidSink.slideMs()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    // ------------- /synth/supersaw/* — JP-8000 lead ------------------
+#define HANDLE_SS_FLOAT(addr, sink_fn, getter) \
+    if (strcmp(address, addr) == 0) { \
+        OSCBundle reply; \
+        if (msg.size() == 0) { \
+            OSCMessage m(addr); m.add((float)(getter)); reply.add(m); \
+        } else if (msg.isFloat(0)) { \
+            g_supersawSink.sink_fn(msg.getFloat(0)); \
+            OSCMessage m(addr); m.add((float)(getter)); reply.add(m); \
+        } \
+        if (reply.size() > 0) g_transport.sendBundle(reply); \
+        return; \
+    }
+
+    if (strcmp(address, "/synth/supersaw/volume") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/supersaw/volume"); m.add(g_supersawVolume); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            applySupersawVolume(msg.getFloat(0));
+            OSCMessage m("/synth/supersaw/volume"); m.add(g_supersawVolume); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/supersaw/on") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/supersaw/on"); m.add((int)(g_supersawOn ? 1 : 0)); reply.add(m);
+        } else if (msg.isInt(0)) {
+            applySupersawOn(msg.getInt(0) != 0);
+            OSCMessage m("/synth/supersaw/on"); m.add((int)(g_supersawOn ? 1 : 0)); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/supersaw/midi/ch") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/supersaw/midi/ch"); m.add((int)g_supersawSink.midiChannel()); reply.add(m);
+        } else if (msg.isInt(0)) {
+            int ch = msg.getInt(0); if (ch < 0 || ch > 16) ch = 0;
+            g_supersawSink.onAllNotesOff(0);
+            g_supersawSink.setMidiChannel((uint8_t)ch);
+            OSCMessage m("/synth/supersaw/midi/ch"); m.add((int)g_supersawSink.midiChannel()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    HANDLE_SS_FLOAT("/synth/supersaw/detune",       setDetuneCents,  g_supersawSink.detuneCents())
+    HANDLE_SS_FLOAT("/synth/supersaw/mix_center",   setMixCenter,    g_supersawSink.mixCenter())
+    HANDLE_SS_FLOAT("/synth/supersaw/cutoff",       setCutoff,       g_supersawSink.cutoff())
+    HANDLE_SS_FLOAT("/synth/supersaw/resonance",    setResonance,    g_supersawSink.resonance())
+    HANDLE_SS_FLOAT("/synth/supersaw/attack",       setAttack,       g_supersawSink.attack())
+    HANDLE_SS_FLOAT("/synth/supersaw/decay",        setDecay,        g_supersawSink.decay())
+    HANDLE_SS_FLOAT("/synth/supersaw/sustain",      setSustain,      g_supersawSink.sustain())
+    HANDLE_SS_FLOAT("/synth/supersaw/release",      setRelease,      g_supersawSink.release())
+    HANDLE_SS_FLOAT("/synth/supersaw/portamento",   setPortamentoMs, g_supersawSink.portamentoMs())
+    // chorus_depth maps onto a sketch-side variable (no chorus insert
+    // yet — Phase 1 ships without; parameter kept live so preset
+    // loads don't error). Will route through fxSend in a follow-on.
+    if (strcmp(address, "/synth/supersaw/chorus_depth") == 0) {
+        static float s_supersawChorus = 0.5f;
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/supersaw/chorus_depth"); m.add(s_supersawChorus); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0); if (v < 0.0f) v = 0.0f; if (v > 1.0f) v = 1.0f;
+            s_supersawChorus = v;
+            OSCMessage m("/synth/supersaw/chorus_depth"); m.add(s_supersawChorus); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+#undef HANDLE_SS_FLOAT
+
+    // ------------- /synth/chip/* — NES/Gameboy chiptune --------------
+    if (strcmp(address, "/synth/chip/volume") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/chip/volume"); m.add(g_chipVolume); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            applyChipVolume(msg.getFloat(0));
+            OSCMessage m("/synth/chip/volume"); m.add(g_chipVolume); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/chip/on") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/chip/on"); m.add((int)(g_chipOn ? 1 : 0)); reply.add(m);
+        } else if (msg.isInt(0)) {
+            applyChipOn(msg.getInt(0) != 0);
+            OSCMessage m("/synth/chip/on"); m.add((int)(g_chipOn ? 1 : 0)); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/chip/midi/ch") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/chip/midi/ch"); m.add((int)g_chipSink.midiChannel()); reply.add(m);
+        } else if (msg.isInt(0)) {
+            int ch = msg.getInt(0); if (ch < 0 || ch > 16) ch = 0;
+            g_chipSink.onAllNotesOff(0);
+            g_chipSink.setMidiChannel((uint8_t)ch);
+            OSCMessage m("/synth/chip/midi/ch"); m.add((int)g_chipSink.midiChannel()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/chip/pulse1_duty") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/synth/chip/pulse1_duty"); m.add((int)g_chipSink.pulse1Duty()); reply.add(m); }
+        else if (msg.isInt(0)) { int d = msg.getInt(0); if (d < 0 || d > 3) d = 0;
+            g_chipSink.setPulse1Duty((uint8_t)d);
+            OSCMessage m("/synth/chip/pulse1_duty"); m.add((int)g_chipSink.pulse1Duty()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/synth/chip/pulse2_duty") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/synth/chip/pulse2_duty"); m.add((int)g_chipSink.pulse2Duty()); reply.add(m); }
+        else if (msg.isInt(0)) { int d = msg.getInt(0); if (d < 0 || d > 3) d = 0;
+            g_chipSink.setPulse2Duty((uint8_t)d);
+            OSCMessage m("/synth/chip/pulse2_duty"); m.add((int)g_chipSink.pulse2Duty()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/synth/chip/pulse2_detune") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/synth/chip/pulse2_detune"); m.add(g_chipSink.pulse2Detune()); reply.add(m); }
+        else if (msg.isFloat(0)) { g_chipSink.setPulse2Detune(msg.getFloat(0));
+            OSCMessage m("/synth/chip/pulse2_detune"); m.add(g_chipSink.pulse2Detune()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/synth/chip/tri_level") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/synth/chip/tri_level"); m.add(g_chipSink.triangleLevel()); reply.add(m); }
+        else if (msg.isFloat(0)) { g_chipSink.setTriangleLevel(msg.getFloat(0));
+            OSCMessage m("/synth/chip/tri_level"); m.add(g_chipSink.triangleLevel()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/synth/chip/noise_level") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/synth/chip/noise_level"); m.add(g_chipSink.noiseLevel()); reply.add(m); }
+        else if (msg.isFloat(0)) { g_chipSink.setNoiseLevel(msg.getFloat(0));
+            OSCMessage m("/synth/chip/noise_level"); m.add(g_chipSink.noiseLevel()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/synth/chip/voicing") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/synth/chip/voicing"); m.add((int)g_chipSink.voicing()); reply.add(m); }
+        else if (msg.isInt(0)) { int v = msg.getInt(0); if (v < 0 || v > 3) v = 0;
+            g_chipSink.setVoicing((uint8_t)v);
+            OSCMessage m("/synth/chip/voicing"); m.add((int)g_chipSink.voicing()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/synth/chip/arpeggio") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/synth/chip/arpeggio"); m.add((int)g_chipSink.arpeggio()); reply.add(m); }
+        else if (msg.isInt(0)) { int a = msg.getInt(0); if (a < 0 || a > 3) a = 0;
+            g_chipSink.setArpeggio((uint8_t)a);
+            OSCMessage m("/synth/chip/arpeggio"); m.add((int)g_chipSink.arpeggio()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/synth/chip/arp_rate") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/synth/chip/arp_rate"); m.add(g_chipSink.arpRate()); reply.add(m); }
+        else if (msg.isFloat(0)) { g_chipSink.setArpRate(msg.getFloat(0));
+            OSCMessage m("/synth/chip/arp_rate"); m.add(g_chipSink.arpRate()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/synth/chip/attack") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/synth/chip/attack"); m.add(g_chipSink.attack()); reply.add(m); }
+        else if (msg.isFloat(0)) { g_chipSink.setAttack(msg.getFloat(0));
+            OSCMessage m("/synth/chip/attack"); m.add(g_chipSink.attack()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/synth/chip/decay") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/synth/chip/decay"); m.add(g_chipSink.decay()); reply.add(m); }
+        else if (msg.isFloat(0)) { g_chipSink.setDecay(msg.getFloat(0));
+            OSCMessage m("/synth/chip/decay"); m.add(g_chipSink.decay()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/synth/chip/sustain") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/synth/chip/sustain"); m.add(g_chipSink.sustain()); reply.add(m); }
+        else if (msg.isFloat(0)) { g_chipSink.setSustain(msg.getFloat(0));
+            OSCMessage m("/synth/chip/sustain"); m.add(g_chipSink.sustain()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/synth/chip/release") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/synth/chip/release"); m.add(g_chipSink.release()); reply.add(m); }
+        else if (msg.isFloat(0)) { g_chipSink.setRelease(msg.getFloat(0));
+            OSCMessage m("/synth/chip/release"); m.add(g_chipSink.release()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+
     // /sub target=/midi/events — subscription for the MIDI visualization
     // broadcast. Intercepted here (not in OscDispatcher) to keep the MIDI
     // path confined to this sketch: OscDispatcher::handleSub only
@@ -2770,7 +3777,25 @@ void setup() {
     // dual-mono fan-out from g_neuroGain into both synthBus sides
     // and an FX-send tap. Conservatively +16 blocks for the whole
     // node including fan-outs → 208.
-    AudioMemory(208);
+    // Phase 2f adds Neuro stink chain: 3 biquads + 3 drive amps +
+    // 3 waveshapers + band mixer + wavefolder + bitcrusher + master
+    // filter + wet/dry mixer = 13 primitives with three fan-outs from
+    // neuroEnv. +16 blocks conservatively → 240.
+    //
+    // Phase 2g adds TDspAcid (mono 303): 1 osc + SVF filter + env +
+    // gain + FX send = 5 primitives → +8 blocks → 248.
+    //
+    // Phase 2h adds TDspSupersaw (mono 5-saw lead): 5 oscs + voice
+    // mixer + SVF + env + chorus insert + gain + FX send = ~12
+    // primitives + stereo fan-out → +16 blocks → 264.
+    //
+    // Phase 2i adds TDspChip (NES/Gameboy): 2 pulse + 1 triangle +
+    // 1 noise + 4-in mixer + env + gain + FX send = ~10 primitives
+    // → +14 blocks → 278.
+    //
+    // Synth-bus 2-tier refactor: 2 more Mixer4s per side = +4 blocks
+    // → 282. Round up to 320 for safety on fan-out depth.
+    AudioMemory(320);
 
     // PDM mic amplitude trim: 32-bit PDM split across two 16-bit slots
     // — high 16 bits need a 16x boost, low 16 bits need a 1/65536
@@ -2845,14 +3870,25 @@ void setup() {
     // slot 2 = FX wet return, slot 3 = Neuro (dual-mono from g_neuroGain).
     // Unity gain on every slot; the fader happens downstream in
     // synthAmpL/R.
+    // Tier-1 dry buses: synthDryA slots 0/1/2/3 = Dexed/MPE/Neuro/Acid,
+    // synthDryB slots 0/1/2/3 = Supersaw/Chip/(reserved)/(reserved).
+    // All slots unity; per-engine volume already applied upstream.
+    for (int i = 0; i < 4; ++i) {
+        synthDryAL.gain(i, 1.0f);
+        synthDryAR.gain(i, 1.0f);
+        synthDryBL.gain(i, 1.0f);
+        synthDryBR.gain(i, 1.0f);
+    }
+    // Tier-2 synth bus: slot 0 = synthDryA, slot 1 = synthDryB,
+    // slot 2 = FX wet return, slot 3 = reserved.
     synthBusL.gain(0, 1.0f);
     synthBusL.gain(1, 1.0f);
     synthBusL.gain(2, 1.0f);
-    synthBusL.gain(3, 1.0f);
+    synthBusL.gain(3, 0.0f);
     synthBusR.gain(0, 1.0f);
     synthBusR.gain(1, 1.0f);
     synthBusR.gain(2, 1.0f);
-    synthBusR.gain(3, 1.0f);
+    synthBusR.gain(3, 0.0f);
     // Push the initial synthAmp gain (on=true × volume=0.8).
     applySynthBusGain();
 
@@ -3080,11 +4116,11 @@ void setup() {
     applyDexedVolume(g_dexedVolume);
 
     // Register the Dexed sink with the router. Default listen channel
-    // is 1 (see DexedSink constructor default), which matches both the
-    // web UI on-screen keyboard (always sends on 1) and the typical
-    // non-MPE hardware keyboard setup. LinnStrument in MPE mode sends
-    // notes on channels 2..16, which Dexed ignores until the user flips
-    // /synth/dexed/midi/ch to 0 (omni).
+    // is 0 (omni) so any hosted keyboard plays Dexed regardless of its
+    // configured channel. The user can narrow to a specific channel
+    // via /synth/dexed/midi/ch if they want Dexed isolated from a
+    // multi-zone controller.
+    g_dexedSink.setListenChannel(0);
     g_midiRouter.addSink(&g_dexedSink);
 
     // --- MPE VA engine init -------------------------------------------
@@ -3128,10 +4164,16 @@ void setup() {
     applyMpeVolume(g_mpeVolume);
     applyMpeSend  (g_mpeSendAmount);
 
-    // Register the MPE sink AFTER Dexed. When a LinnStrument sends a
-    // member-channel note-on (ch 2..16) and Dexed is in omni mode, it
-    // fires first; MPE then also fires. Users who want only MPE on
-    // those notes leave Dexed on channel 1 (default).
+    // Default master channel to 0 (no master) so a plain non-MPE
+    // controller plays MPE on every channel — otherwise a notes-on-ch-1
+    // keyboard produces silence from MPE. Users with an actual MPE
+    // controller can set master to 1 via /synth/mpe/midi/master to
+    // restore standard MPE behaviour.
+    g_mpeSink.setMasterChannel(0);
+
+    // Register the MPE sink AFTER Dexed. All three synths default to
+    // omni, so any note-on from the hosted controller reaches all of
+    // them; the UI's Auto-mute keeps only the active sub-tab audible.
     g_midiRouter.addSink(&g_mpeSink);
 
     // --- Neuro (reese bass) init -------------------------------------
@@ -3142,9 +4184,10 @@ void setup() {
     // other engines). Envelope defaults match a bass patch: fast
     // attack, medium-short release so fast bass runs don't slur.
     //
-    // Listen channel defaults to 3 so Dexed (ch 1), MPE (any), and
-    // Neuro (ch 3) route cleanly to three zones from a split keyboard.
-    // The engine accepts omni mode via /synth/neuro/midi/ch 0.
+    // Listen channel defaults to 0 (omni) so any hosted keyboard plays
+    // Neuro regardless of its configured channel. The user can narrow
+    // to a specific channel via /synth/neuro/midi/ch if they want Neuro
+    // isolated from a multi-zone controller.
     neuroEnv.attack (5.0f);
     neuroEnv.decay  (100.0f);
     neuroEnv.sustain(0.8f);
@@ -3161,11 +4204,82 @@ void setup() {
     g_neuroSink.setLfoDest    (NeuroSink::LfoOff);
     g_neuroSink.setLfoWaveform(1);  // triangle — smoothest wobble
     g_neuroSink.setPortamentoMs(0.0f);
-    g_neuroSink.setMidiChannel(3);
+    g_neuroSink.setMidiChannel(0);
     applyNeuroVolume(g_neuroVolume);
     applyNeuroSend  (g_neuroSendAmount);
 
+    // --- Neuro stink chain init --------------------------------------
+    //
+    // Build shared saturation LUT once, assign it to every band's
+    // waveshaper. The folder LUT is regenerated on demand as
+    // _foldAmount changes (see applyNeuroStinkFold). Bitcrusher bits
+    // and sample rate are set via applyNeuroStinkCrush.
+    //
+    // The stink chain ships ENABLED by default — the whole point of
+    // Neuro is the multiband grit. A dry-only reese is available via
+    // /synth/neuro/stink/enable 0 for A/B comparison.
+    buildNeuroStinkShapeLut();
+    neuroStinkLowShape .shape(g_neuroStinkShapeLut, kNeuroStinkLutLen);
+    neuroStinkMidShape .shape(g_neuroStinkShapeLut, kNeuroStinkLutLen);
+    neuroStinkHighShape.shape(g_neuroStinkShapeLut, kNeuroStinkLutLen);
+    applyNeuroStinkBandFilters();
+    applyNeuroStinkDrive();
+    applyNeuroStinkBandMix();
+    applyNeuroStinkFold();       // builds folder LUT + assigns to shaper
+    applyNeuroStinkCrush();
+    applyNeuroStinkMaster();
+    applyNeuroStinkEnable();     // sets wet/dry mixer slots
+
     g_midiRouter.addSink(&g_neuroSink);
+
+    // --- Acid (303) init --------------------------------------------
+    //
+    // Mono voice — all timbre params inside AcidSink. Default listen
+    // channel 4 (Dexed=1, MPE=2, Neuro=3, Acid=4). Starting preset is
+    // a moderately bright classic acid bass.
+    g_acidSink.setMidiChannel(4);
+    g_acidSink.setWaveform(0);           // saw
+    g_acidSink.setCutoff(500.0f);
+    g_acidSink.setResonance(3.8f);
+    g_acidSink.setEnvModAmount(0.6f);
+    g_acidSink.setEnvDecay(0.3f);
+    g_acidSink.setAmpDecay(0.4f);
+    g_acidSink.setAccent(0.5f);
+    g_acidSink.setAccentThreshold(110);
+    g_acidSink.setSlideMs(60.0f);
+    applyAcidVolume(g_acidVolume);
+    g_midiRouter.addSink(&g_acidSink);
+
+    // --- Supersaw init ----------------------------------------------
+    g_supersawSink.setMidiChannel(5);
+    g_supersawSink.setDetuneCents(18.0f);
+    g_supersawSink.setMixCenter(0.4f);
+    g_supersawSink.setCutoff(9000.0f);
+    g_supersawSink.setResonance(1.0f);
+    g_supersawSink.setAttack(0.05f);
+    g_supersawSink.setDecay(0.3f);
+    g_supersawSink.setSustain(0.8f);
+    g_supersawSink.setRelease(0.6f);
+    g_supersawSink.setPortamentoMs(0.0f);
+    applySupersawVolume(g_supersawVolume);
+    g_midiRouter.addSink(&g_supersawSink);
+
+    // --- Chip init --------------------------------------------------
+    g_chipSink.setMidiChannel(6);
+    g_chipSink.setPulse1Duty(2);      // 50%
+    g_chipSink.setPulse2Duty(1);      // 25%
+    g_chipSink.setPulse2Detune(7.0f);
+    g_chipSink.setTriangleLevel(0.5f);
+    g_chipSink.setNoiseLevel(0.0f);
+    g_chipSink.setVoicing(1);         // octave
+    g_chipSink.setArpeggio(0);        // off
+    g_chipSink.setArpRate(12.0f);
+    g_chipSink.setAttack(0.001f);
+    g_chipSink.setDecay(0.08f);
+    g_chipSink.setSustain(0.5f);
+    g_chipSink.setRelease(0.15f);
+    applyChipVolume(g_chipVolume);
+    g_midiRouter.addSink(&g_chipSink);
 
     Serial.println("\nReady!");
     Serial.println("  6 input channels: USB L/R, Line L/R, Mic L/R");
@@ -3483,6 +4597,52 @@ static void broadcastSnapshot(OSCBundle &reply) {
     {
         OSCMessage m("/synth/neuro/fx/send");          m.add(g_neuroSendAmount); reply.add(m);
     }
+    // Stink chain echo — every param so the UI re-syncs on reconnect.
+    {
+        OSCMessage m("/synth/neuro/stink/enable");           m.add((int)(g_neuroStinkEnable ? 1 : 0)); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/stink/drive_low");        m.add(g_neuroStinkDriveLow); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/stink/drive_mid");        m.add(g_neuroStinkDriveMid); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/stink/drive_high");       m.add(g_neuroStinkDriveHigh); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/stink/mix_low");          m.add(g_neuroStinkMixLow); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/stink/mix_mid");          m.add(g_neuroStinkMixMid); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/stink/mix_high");         m.add(g_neuroStinkMixHigh); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/stink/fold");             m.add(g_neuroStinkFoldAmount); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/stink/crush");            m.add(g_neuroStinkCrushAmount); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/stink/master_cutoff");    m.add(g_neuroStinkMasterCutHz); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/stink/master_resonance"); m.add(g_neuroStinkMasterRes); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/stink/lfo2/rate");        m.add(g_neuroStinkLfoRateHz); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/stink/lfo2/depth");       m.add(g_neuroStinkLfoDepth); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/stink/lfo2/dest");        m.add((int)g_neuroStinkLfoDest); reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/neuro/stink/lfo2/waveform");    m.add((int)g_neuroStinkLfoWaveform); reply.add(m);
+    }
 
     // Shared FX bus (FX tab + per-synth send).
     {
@@ -3651,6 +4811,20 @@ void loop() {
     // tick — a few writes per call when something is modulating, zero
     // cost when both LFO and portamento are idle.
     g_neuroSink.tick(millis());
+
+    // Neuro stink chain LFO2 — modulates fold / crush / master cutoff
+    // separately from NeuroSink's internal LFO, so both can run at
+    // once. Cheap no-op when disabled.
+    tickNeuroStink(millis());
+
+    // Acid (303): filter envelope decay + portamento glide.
+    g_acidSink.tick(millis());
+
+    // Supersaw lead: portamento glide only (no LFO in Phase 1).
+    g_supersawSink.tick(millis());
+
+    // Chip: arpeggio advance on the triangle voice. No-op when arp off.
+    g_chipSink.tick(millis());
 
     // Advance the shared musical clock. Stamps a reference for external
     // tick-interval math and, when Source=Internal, emits catch-up

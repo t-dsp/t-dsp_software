@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "categories": {
+    "classic":  { "color": "#f1c40f", "label": "Classic" },
+    "squelch":  { "color": "#d35400", "label": "Squelch" },
+    "rave":     { "color": "#c0392b", "label": "Rave" },
+    "dub":      { "color": "#16a085", "label": "Dub" }
+  },
+  "presets": [
+    {
+      "id": "classic-303",
+      "name": "Classic 303",
+      "category": "classic",
+      "description": "The canonical TB-303 sound — moderate cutoff, mid resonance, classic decay. Hawtin-style.",
+      "params": {
+        "waveform": 0, "tuning": 0,
+        "cutoff_hz": 500, "resonance": 3.5, "env_mod": 0.55, "env_decay_sec": 0.35, "amp_decay_sec": 0.45,
+        "accent": 0.5, "slide_ms": 60, "volume": 0.7
+      }
+    },
+    {
+      "id": "squelchy",
+      "name": "Squelchy",
+      "category": "squelch",
+      "description": "High resonance at low cutoff — the 'mud' bass where every note has a vocal quality.",
+      "params": {
+        "waveform": 0, "tuning": 0,
+        "cutoff_hz": 300, "resonance": 4.5, "env_mod": 0.75, "env_decay_sec": 0.25, "amp_decay_sec": 0.35,
+        "accent": 0.7, "slide_ms": 80, "volume": 0.7
+      }
+    },
+    {
+      "id": "deep-acid",
+      "name": "Deep Acid",
+      "category": "classic",
+      "description": "Lower tuning + slower decay. Massive underground acid feel.",
+      "params": {
+        "waveform": 0, "tuning": -12,
+        "cutoff_hz": 400, "resonance": 3.8, "env_mod": 0.65, "env_decay_sec": 0.6, "amp_decay_sec": 0.7,
+        "accent": 0.4, "slide_ms": 120, "volume": 0.75
+      }
+    },
+    {
+      "id": "rave-hoover",
+      "name": "Rave Hoover",
+      "category": "rave",
+      "description": "Square wave + high cutoff for a rougher, more aggressive bass. Chemical Brothers territory.",
+      "params": {
+        "waveform": 1, "tuning": 0,
+        "cutoff_hz": 900, "resonance": 3.2, "env_mod": 0.8, "env_decay_sec": 0.4, "amp_decay_sec": 0.5,
+        "accent": 0.8, "slide_ms": 40, "volume": 0.7
+      }
+    },
+    {
+      "id": "acid-stabs",
+      "name": "Acid Stabs",
+      "category": "rave",
+      "description": "Short decay, hard accent — rapid-fire stabs for a rave pattern.",
+      "params": {
+        "waveform": 0, "tuning": 0,
+        "cutoff_hz": 700, "resonance": 3.6, "env_mod": 0.9, "env_decay_sec": 0.18, "amp_decay_sec": 0.22,
+        "accent": 0.9, "slide_ms": 25, "volume": 0.7
+      }
+    },
+    {
+      "id": "dub-acid",
+      "name": "Dub Acid",
+      "category": "dub",
+      "description": "Long slides + low cutoff. Dub techno rolling bass.",
+      "params": {
+        "waveform": 0, "tuning": -7,
+        "cutoff_hz": 350, "resonance": 3.2, "env_mod": 0.4, "env_decay_sec": 0.8, "amp_decay_sec": 1.0,
+        "accent": 0.3, "slide_ms": 250, "volume": 0.75
+      }
+    },
+    {
+      "id": "screamer",
+      "name": "Screamer",
+      "category": "squelch",
+      "description": "Max resonance, rapid envelope — the 303 on the verge of self-oscillation.",
+      "params": {
+        "waveform": 0, "tuning": 0,
+        "cutoff_hz": 250, "resonance": 4.9, "env_mod": 1.0, "env_decay_sec": 0.22, "amp_decay_sec": 0.32,
+        "accent": 0.9, "slide_ms": 50, "volume": 0.65
+      }
+    },
+    {
+      "id": "ambient-303",
+      "name": "Ambient 303",
+      "category": "dub",
+      "description": "Slow envelope, gentle resonance, long slide. The 303 gets introspective.",
+      "params": {
+        "waveform": 0, "tuning": 0,
+        "cutoff_hz": 1200, "resonance": 1.8, "env_mod": 0.3, "env_decay_sec": 1.5, "amp_decay_sec": 2.0,
+        "accent": 0.2, "slide_ms": 350, "volume": 0.7
+      }
+    }
+  ]
+}

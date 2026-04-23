@@ -40,7 +40,13 @@ MpeVaSink::MpeVaSink(VoicePorts *voices, int voiceCount)
 }
 
 void MpeVaSink::setMasterChannel(uint8_t ch) {
-    if (ch < 1 || ch > 16) ch = 1;
+    // 0 means "no master channel" — notes on every channel 1..16 allocate
+    // voices, as if the entire MIDI space were member channels. Useful
+    // when the incoming controller is a plain non-MPE keyboard and the
+    // user just wants MPE to play anything that arrives. 1..16 = standard
+    // MPE behaviour (that channel is global, notes on it are ignored).
+    // Values > 16 are clamped to 0 (no master).
+    if (ch > 16) ch = 0;
     _masterChannel = ch;
 }
 
@@ -226,7 +232,9 @@ void MpeVaSink::onNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
     // allocate a voice. LinnStrument etc. don't send note-on here, but
     // misconfigured controllers might — silently ignore instead of
     // producing a voice that nobody can pitch-bend or release cleanly.
-    if (channel == _masterChannel) return;
+    // _masterChannel == 0 disables this ignore entirely, so a plain
+    // non-MPE controller can play MPE on any channel including 1.
+    if (_masterChannel != 0 && channel == _masterChannel) return;
     if (channel < 1 || channel > 16) return;
     if (_voiceCount <= 0)            return;
 

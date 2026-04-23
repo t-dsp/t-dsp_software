@@ -45,7 +45,7 @@ class MidiSink;
 
 class MidiRouter {
 public:
-    static constexpr int     kMaxSinks       = 4;
+    static constexpr int     kMaxSinks       = 8;
     static constexpr int     kNumChannels    = 16;
 
     // MPE / RPN defaults. LinnStrument ships with 48-semi pitch bend

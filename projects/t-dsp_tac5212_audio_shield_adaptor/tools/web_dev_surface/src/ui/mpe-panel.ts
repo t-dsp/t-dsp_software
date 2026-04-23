@@ -104,10 +104,10 @@ function buildOnRow(state: MixerState, dispatcher: Dispatcher): HTMLElement {
     btn.title = on ? 'Click to mute MPE output' : 'Click to un-mute MPE output';
   };
   state.mpe.on.subscribe(update);
+  // Temporary mute-while-on-this-tab. Switching tabs re-enables via
+  // main.ts's sub-tab enforcer — "only active-tab synth plays" is
+  // unconditional.
   btn.addEventListener('click', () => {
-    // Manual on/off implies the user is overriding Auto — turn it
-    // off so the next sub-tab change doesn't clobber their choice.
-    if (state.mpe.midiAuto.get()) state.mpe.midiAuto.set(false);
     dispatcher.setMpeOn(!state.mpe.on.get());
   });
 
@@ -115,19 +115,7 @@ function buildOnRow(state: MixerState, dispatcher: Dispatcher): HTMLElement {
   label.className = 'synth-on-label';
   label.textContent = 'MPE VA';
 
-  // MIDI Auto — track sub-tab visibility. See DexedState.midiAuto.
-  const autoWrap = document.createElement('label');
-  autoWrap.className = 'synth-auto';
-  const autoBox = document.createElement('input');
-  autoBox.type = 'checkbox';
-  state.mpe.midiAuto.subscribe((a) => { autoBox.checked = a; });
-  autoBox.addEventListener('change', () => state.mpe.midiAuto.set(autoBox.checked));
-  const autoText = document.createElement('span');
-  autoText.textContent = 'MIDI Auto';
-  autoText.title = 'Track sub-tab: mute when another synth is focused';
-  autoWrap.append(autoBox, autoText);
-
-  row.append(btn, label, autoWrap);
+  row.append(btn, label);
   return row;
 }
 
@@ -384,17 +372,10 @@ function buildPresetCard(
 
   // Clicking loads the preset. State signals update optimistically
   // on each setter call; firmware echoes come back and either confirm
-  // or clamp. Then auto-preview plays a short middle-C on channel 2
-  // so the user can immediately hear the patch.
+  // or clamp. No auto-preview — the user plays the keyboard to audition.
   card.addEventListener('click', () => {
     loadPreset(preset, dispatcher);
     state.mpe.activePresetId.set(preset.id);
-    // Auto-preview — channel 2 (a member channel; channel 1 is the
-    // default MPE master so notes there are ignored by MpeVaSink).
-    dispatcher.sendMidiNote(60, 100, 2);
-    window.setTimeout(() => {
-      dispatcher.sendMidiNote(60, 0, 2);
-    }, 400);
   });
 
   // Active-preset highlight — re-checked every time the signal changes.
@@ -711,12 +692,21 @@ function buildMasterChannelPicker(state: MixerState, dispatcher: Dispatcher): HT
   row.className = 'mpe-row';
   const label = document.createElement('label');
   label.textContent = 'Master';
-  label.title = 'MPE master channel — global messages (mod/sustain) go here; notes are ignored';
+  label.title = 'MPE master channel — 1..16: global messages (mod/sustain) go here, notes ignored. None: no master, notes on any channel play the synth (for non-MPE controllers)';
   row.appendChild(label);
 
   const pills = document.createElement('div');
   pills.className = 'mpe-channel-pills';
+  // Pill 0 = "None" (no master channel). Then 1..16 for standard MPE.
   const pillBtns: HTMLButtonElement[] = [];
+  const noneBtn = document.createElement('button');
+  noneBtn.type = 'button';
+  noneBtn.className = 'mpe-channel-pill';
+  noneBtn.textContent = '—';
+  noneBtn.title = 'No master channel — all channels allocate voices';
+  noneBtn.addEventListener('click', () => dispatcher.setMpeMasterChannel(0));
+  pillBtns.push(noneBtn);
+  pills.appendChild(noneBtn);
   for (let ch = 1; ch <= 16; ch++) {
     const b = document.createElement('button');
     b.type = 'button';
@@ -727,7 +717,8 @@ function buildMasterChannelPicker(state: MixerState, dispatcher: Dispatcher): HT
     pills.appendChild(b);
   }
   state.mpe.masterChannel.subscribe((c) => {
-    pillBtns.forEach((b, i) => b.classList.toggle('active', i + 1 === c));
+    // pillBtns[0] is the "None" (0) pill; pillBtns[i] for i>=1 is channel i.
+    pillBtns.forEach((b, i) => b.classList.toggle('active', i === c));
   });
   row.appendChild(pills);
   return row;

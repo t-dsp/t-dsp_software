@@ -31,6 +31,23 @@ interface PresetParams {
   lfo_dest: number;
   lfo_waveform: number;
   portamento_ms: number;
+  // Stink chain (optional — presets authored before Phase 2f omit these
+  // and the loader leaves the current stink state alone).
+  stink_enable?: number;
+  stink_drive_low?: number;
+  stink_drive_mid?: number;
+  stink_drive_high?: number;
+  stink_mix_low?: number;
+  stink_mix_mid?: number;
+  stink_mix_high?: number;
+  stink_fold?: number;
+  stink_crush?: number;
+  stink_master_cutoff_hz?: number;
+  stink_master_resonance?: number;
+  stink_lfo2_rate_hz?: number;
+  stink_lfo2_depth?: number;
+  stink_lfo2_dest?: number;
+  stink_lfo2_waveform?: number;
 }
 interface Preset {
   id: string;
@@ -64,6 +81,7 @@ export function neuroPanel(state: MixerState, dispatcher: Dispatcher): NeuroPane
     buildOnRow(state, dispatcher),
     buildPresetGrid(state, dispatcher),
     buildControls(state, dispatcher),
+    buildStinkControls(state, dispatcher),
   );
 
   // Neuro has no voice telemetry (mono, no subscription needed), so
@@ -88,8 +106,10 @@ function buildOnRow(state: MixerState, dispatcher: Dispatcher): HTMLElement {
     btn.textContent = on ? 'ON' : 'OFF';
     btn.title = on ? 'Click to mute Neuro output' : 'Click to un-mute Neuro output';
   });
+  // Temporary mute-while-on-this-tab. Switching tabs re-enables via
+  // main.ts's sub-tab enforcer — "only active-tab synth plays" is
+  // unconditional.
   btn.addEventListener('click', () => {
-    if (state.neuro.midiAuto.get()) state.neuro.midiAuto.set(false);
     dispatcher.setNeuroOn(!state.neuro.on.get());
   });
 
@@ -97,18 +117,7 @@ function buildOnRow(state: MixerState, dispatcher: Dispatcher): HTMLElement {
   label.className = 'synth-on-label';
   label.textContent = 'Neuro';
 
-  const autoWrap = document.createElement('label');
-  autoWrap.className = 'synth-auto';
-  const autoBox = document.createElement('input');
-  autoBox.type = 'checkbox';
-  state.neuro.midiAuto.subscribe((a) => { autoBox.checked = a; });
-  autoBox.addEventListener('change', () => state.neuro.midiAuto.set(autoBox.checked));
-  const autoText = document.createElement('span');
-  autoText.textContent = 'MIDI Auto';
-  autoText.title = 'Track sub-tab: mute when another synth is focused';
-  autoWrap.append(autoBox, autoText);
-
-  row.append(btn, label, autoWrap);
+  row.append(btn, label);
   return row;
 }
 
@@ -251,6 +260,24 @@ function loadPreset(preset: Preset, dispatcher: Dispatcher): void {
   dispatcher.setNeuroLfoDest        (p.lfo_dest);
   dispatcher.setNeuroLfoWaveform    (p.lfo_waveform);
   dispatcher.setNeuroPortamento     (p.portamento_ms);
+  // Stink fields are optional on presets. Only overwrite the firmware
+  // state if the preset explicitly defines them, so a pre-stink preset
+  // keeps whatever the user has currently dialled in.
+  if (p.stink_enable            !== undefined) dispatcher.setNeuroStinkEnable(p.stink_enable !== 0);
+  if (p.stink_drive_low         !== undefined) dispatcher.setNeuroStinkDriveLow(p.stink_drive_low);
+  if (p.stink_drive_mid         !== undefined) dispatcher.setNeuroStinkDriveMid(p.stink_drive_mid);
+  if (p.stink_drive_high        !== undefined) dispatcher.setNeuroStinkDriveHigh(p.stink_drive_high);
+  if (p.stink_mix_low           !== undefined) dispatcher.setNeuroStinkMixLow(p.stink_mix_low);
+  if (p.stink_mix_mid           !== undefined) dispatcher.setNeuroStinkMixMid(p.stink_mix_mid);
+  if (p.stink_mix_high          !== undefined) dispatcher.setNeuroStinkMixHigh(p.stink_mix_high);
+  if (p.stink_fold              !== undefined) dispatcher.setNeuroStinkFold(p.stink_fold);
+  if (p.stink_crush             !== undefined) dispatcher.setNeuroStinkCrush(p.stink_crush);
+  if (p.stink_master_cutoff_hz  !== undefined) dispatcher.setNeuroStinkMasterCutoff(p.stink_master_cutoff_hz);
+  if (p.stink_master_resonance  !== undefined) dispatcher.setNeuroStinkMasterResonance(p.stink_master_resonance);
+  if (p.stink_lfo2_rate_hz      !== undefined) dispatcher.setNeuroStinkLfo2Rate(p.stink_lfo2_rate_hz);
+  if (p.stink_lfo2_depth        !== undefined) dispatcher.setNeuroStinkLfo2Depth(p.stink_lfo2_depth);
+  if (p.stink_lfo2_dest         !== undefined) dispatcher.setNeuroStinkLfo2Dest(p.stink_lfo2_dest);
+  if (p.stink_lfo2_waveform     !== undefined) dispatcher.setNeuroStinkLfo2Waveform(p.stink_lfo2_waveform);
 }
 
 // ---- glyphs ---------------------------------------------------------
@@ -512,4 +539,165 @@ function formatSeconds(v: number): string {
   if (v < 0.01) return `${Math.round(v * 1000)}ms`;
   if (v < 1) return `${(v * 1000).toFixed(0)}ms`;
   return `${v.toFixed(2)}s`;
+}
+
+// ---- stink chain controls -------------------------------------------
+//
+// Phase 2f — multiband destruction. Distinct section so the UI can
+// visually separate "clean reese" (upper controls) from "the grit"
+// (these controls). On/off toggle at the top lets you A/B the whole
+// chain against the bare reese.
+
+const STINK_LFO_DEST_LABELS = ['Off', 'Fold', 'Crush', 'Master', 'Mid Drive'] as const;
+
+function buildStinkControls(state: MixerState, dispatcher: Dispatcher): HTMLElement {
+  const section = document.createElement('section');
+  section.className = 'mpe-controls';
+
+  const title = document.createElement('h3');
+  title.className = 'mpe-section-title';
+  title.textContent = 'Stink Chain';
+  section.appendChild(title);
+
+  // Enable toggle row — same look as the main on/off button but scoped
+  // to the stink chain only.
+  section.appendChild(buildStinkEnableRow(state, dispatcher));
+
+  // Per-band drive.
+  section.appendChild(buildParamRow('Drive Low',  state.neuro.stinkDriveLow,
+    0, 10, (v) => v.toFixed(2) + '×',
+    (v) => dispatcher.setNeuroStinkDriveLow(v)));
+  section.appendChild(buildParamRow('Drive Mid',  state.neuro.stinkDriveMid,
+    0, 10, (v) => v.toFixed(2) + '×',
+    (v) => dispatcher.setNeuroStinkDriveMid(v)));
+  section.appendChild(buildParamRow('Drive High', state.neuro.stinkDriveHigh,
+    0, 10, (v) => v.toFixed(2) + '×',
+    (v) => dispatcher.setNeuroStinkDriveHigh(v)));
+
+  // Per-band mix (recombine balance).
+  section.appendChild(buildParamRow('Mix Low',   state.neuro.stinkMixLow,
+    0, 1, (v) => v.toFixed(2),
+    (v) => dispatcher.setNeuroStinkMixLow(v)));
+  section.appendChild(buildParamRow('Mix Mid',   state.neuro.stinkMixMid,
+    0, 1, (v) => v.toFixed(2),
+    (v) => dispatcher.setNeuroStinkMixMid(v)));
+  section.appendChild(buildParamRow('Mix High',  state.neuro.stinkMixHigh,
+    0, 1, (v) => v.toFixed(2),
+    (v) => dispatcher.setNeuroStinkMixHigh(v)));
+
+  // Master chain.
+  section.appendChild(buildParamRow('Fold',   state.neuro.stinkFold,
+    0, 1, (v) => v.toFixed(2),
+    (v) => dispatcher.setNeuroStinkFold(v)));
+  section.appendChild(buildParamRow('Crush',  state.neuro.stinkCrush,
+    0, 1, (v) => v.toFixed(2),
+    (v) => dispatcher.setNeuroStinkCrush(v)));
+  section.appendChild(buildParamRow('Master', state.neuro.stinkMasterCutoffHz,
+    50, 20000, (v) => `${Math.round(v)} Hz`,
+    (v) => dispatcher.setNeuroStinkMasterCutoff(v), { log: true }));
+  section.appendChild(buildParamRow('Master Q', state.neuro.stinkMasterResonance,
+    0.707, 5.0, (v) => v.toFixed(2),
+    (v) => dispatcher.setNeuroStinkMasterResonance(v)));
+
+  // LFO2.
+  section.appendChild(buildStinkLfoRow(state, dispatcher));
+
+  return section;
+}
+
+function buildStinkEnableRow(state: MixerState, dispatcher: Dispatcher): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'mpe-row';
+  const label = document.createElement('label');
+  label.textContent = 'Stink';
+  label.title = 'Enable the multiband destruction chain. Off = clean reese only.';
+  row.appendChild(label);
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'synth-on-btn';
+  state.neuro.stinkEnable.subscribe((on) => {
+    btn.classList.toggle('on', on);
+    btn.textContent = on ? 'ON' : 'OFF';
+  });
+  btn.addEventListener('click', () => {
+    dispatcher.setNeuroStinkEnable(!state.neuro.stinkEnable.get());
+  });
+
+  row.appendChild(btn);
+  return row;
+}
+
+function buildStinkLfoRow(state: MixerState, dispatcher: Dispatcher): HTMLElement {
+  const row = document.createElement('div');
+  row.className = 'mpe-row mpe-lfo-row';
+  const label = document.createElement('label');
+  label.textContent = 'LFO2';
+  label.title = 'Second LFO, dedicated to stink chain modulation. Composes with Sink\'s LFO.';
+  row.appendChild(label);
+
+  const rate = document.createElement('input');
+  rate.type = 'range';
+  rate.min = '0';
+  rate.max = '20';
+  rate.step = '0.1';
+  state.neuro.stinkLfo2Rate.subscribe((v) => { rate.value = String(v); });
+  rate.addEventListener('input', () => dispatcher.setNeuroStinkLfo2Rate(parseFloat(rate.value)));
+  const rateReadout = document.createElement('span');
+  rateReadout.className = 'mpe-readout';
+  state.neuro.stinkLfo2Rate.subscribe((v) => { rateReadout.textContent = `${v.toFixed(1)} Hz`; });
+
+  const depth = document.createElement('input');
+  depth.type = 'range';
+  depth.min = '0';
+  depth.max = '1';
+  depth.step = '0.01';
+  state.neuro.stinkLfo2Depth.subscribe((v) => { depth.value = String(v); });
+  depth.addEventListener('input', () => dispatcher.setNeuroStinkLfo2Depth(parseFloat(depth.value)));
+  const depthReadout = document.createElement('span');
+  depthReadout.className = 'mpe-readout';
+  state.neuro.stinkLfo2Depth.subscribe((v) => { depthReadout.textContent = v.toFixed(2); });
+
+  const destGroup = document.createElement('div');
+  destGroup.className = 'mpe-segmented';
+  const destBtns: HTMLButtonElement[] = [];
+  for (let i = 0; i < STINK_LFO_DEST_LABELS.length; i++) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = STINK_LFO_DEST_LABELS[i];
+    b.addEventListener('click', () => dispatcher.setNeuroStinkLfo2Dest(i));
+    destBtns.push(b);
+    destGroup.appendChild(b);
+  }
+  state.neuro.stinkLfo2Dest.subscribe((d) => {
+    destBtns.forEach((b, i) => b.classList.toggle('active', i === d));
+  });
+
+  const waveGroup = document.createElement('div');
+  waveGroup.className = 'mpe-segmented';
+  const waveBtns: HTMLButtonElement[] = [];
+  for (let i = 0; i < LFO_WAVEFORM_LABELS.length; i++) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = LFO_WAVEFORM_LABELS[i];
+    b.addEventListener('click', () => dispatcher.setNeuroStinkLfo2Waveform(i));
+    waveBtns.push(b);
+    waveGroup.appendChild(b);
+  }
+  state.neuro.stinkLfo2Waveform.subscribe((w) => {
+    waveBtns.forEach((b, i) => b.classList.toggle('active', i === w));
+  });
+
+  const sub1 = document.createElement('div');
+  sub1.className = 'mpe-lfo-sub';
+  sub1.append(label, rate, rateReadout, depth, depthReadout);
+
+  const sub2 = document.createElement('div');
+  sub2.className = 'mpe-lfo-sub mpe-lfo-sub-pickers';
+  sub2.append(destGroup, waveGroup);
+
+  row.appendChild(sub1);
+  row.appendChild(sub2);
+  row.classList.add('mpe-row-col');
+  return row;
 }

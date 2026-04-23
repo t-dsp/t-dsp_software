@@ -27,6 +27,9 @@ import { keyboardView } from './ui/keyboard';
 import { dexedPanel } from './ui/dexed-panel';
 import { mpePanel } from './ui/mpe-panel';
 import { neuroPanel } from './ui/neuro-panel';
+import { acidPanel } from './ui/acid-panel';
+import { supersawPanel } from './ui/supersaw-panel';
+import { chipPanel } from './ui/chip-panel';
 import { processingPanel } from './ui/processing-panel';
 import { fxPanel } from './ui/fx-panel';
 import { looperPanel } from './ui/looper-panel';
@@ -328,15 +331,6 @@ dispatcher.setMidiSink((note, velocity, channel) => {
   // running-status). All channels light the same keyboard — the per-
   // channel breakdown is surfaced via the banner readout in keyboardView.
   keyboard.setNote(note, velocity > 0, channel);
-  // Auto-follow: on note-on, switch the active sub-tab to whichever
-  // synth claims this channel. Lets the user pick up an unknown-channel
-  // keyboard (or an MPE one that spreads notes across channels) without
-  // hunting for the right tab. Resolver + selectSynthSubtab are defined
-  // below; the closure resolves them at call time, post-init.
-  if (velocity > 0 && channel >= 1 && channel <= 16) {
-    const target = resolveAutoTarget(channel);
-    if (target && target !== activeSynthSubtab) selectSynthSubtab(target);
-  }
 });
 
 // Active synth sub-tab dictates which MIDI channel the on-screen
@@ -344,14 +338,19 @@ dispatcher.setMidiSink((note, velocity, channel) => {
 // treats channel 1 as its master channel (notes silently dropped per
 // MPE spec) so we send on channel 2, a member channel MpeVaSink will
 // actually allocate a voice for.
-let activeSynthSubtab: 'dexed' | 'mpe' | 'neuro' = 'dexed';
+let activeSynthSubtab: 'dexed' | 'mpe' | 'neuro' | 'acid' | 'supersaw' | 'chip' = 'dexed';
 const keyboardChannelForSubtab = (): number => {
-  // Dexed default ch 1, MPE member ch 2 (ch 1 is its master/ignored
-  // channel per MPE spec), Neuro default ch 3. Keys always reach the
-  // synth the user is currently looking at.
-  if (activeSynthSubtab === 'mpe')   return 2;
-  if (activeSynthSubtab === 'neuro') return 3;
-  return 1;
+  // Per-synth default channels: Dexed=1, MPE member=2 (ch 1 is its
+  // master/ignored channel per MPE spec), Neuro=3, Acid=4, Supersaw=5,
+  // Chip=6. On-screen keys always reach the currently-visible synth.
+  switch (activeSynthSubtab) {
+    case 'mpe':      return 2;
+    case 'neuro':    return 3;
+    case 'acid':     return 4;
+    case 'supersaw': return 5;
+    case 'chip':     return 6;
+    default:         return 1;
+  }
 };
 keyboard.onPress((note, down) => {
   // Fixed velocity 100 for Phase 1 — velocity-from-gesture is a
@@ -392,60 +391,40 @@ const mpeSubtab = makeSubtab('MPE');
 state.mpe.on.subscribe((on) => mpeSubtab.classList.toggle('playing', on));
 const neuroSubtab = makeSubtab('Neuro');
 state.neuro.on.subscribe((on) => neuroSubtab.classList.toggle('playing', on));
-synthSubnav.append(dexedSubtab, mpeSubtab, neuroSubtab);
+const acidSubtab = makeSubtab('Acid');
+state.acid.on.subscribe((on) => acidSubtab.classList.toggle('playing', on));
+const supersawSubtab = makeSubtab('Supersaw');
+state.supersaw.on.subscribe((on) => supersawSubtab.classList.toggle('playing', on));
+const chipSubtab = makeSubtab('Chip');
+state.chip.on.subscribe((on) => chipSubtab.classList.toggle('playing', on));
+synthSubnav.append(dexedSubtab, mpeSubtab, neuroSubtab, acidSubtab, supersawSubtab, chipSubtab);
 
 const synthContent = document.createElement('div');
 synthContent.className = 'synth-content';
 const dexedPanelEl = dexedPanel(state, dispatcher);
 const mpe = mpePanel(state, dispatcher);
 const neuro = neuroPanel(state, dispatcher);
+const acid = acidPanel(state, dispatcher);
+const supersaw = supersawPanel(state, dispatcher);
+const chip = chipPanel(state, dispatcher);
 mpe.element.style.display = 'none';
 neuro.element.style.display = 'none';
-synthContent.append(dexedPanelEl, mpe.element, neuro.element);
+acid.element.style.display = 'none';
+supersaw.element.style.display = 'none';
+chip.element.style.display = 'none';
+synthContent.append(dexedPanelEl, mpe.element, neuro.element, acid.element, supersaw.element, chip.element);
 
-type SynthSubtab = 'dexed' | 'mpe' | 'neuro';
+type SynthSubtab = 'dexed' | 'mpe' | 'neuro' | 'acid' | 'supersaw' | 'chip';
 
-// MIDI-Auto enforcer — called from every place that should "take
-// Auto's opinion": sub-tab changes, connect events, Auto toggles
-// being switched on. For each synth with midiAuto=true, drive its
-// on-state to match "is this synth's sub-tab active right now?".
-//
-// Only fires when state.connected is true — otherwise the OSC
-// writes are thrown away into a disconnected bridge, and the
-// firmware's defaults stay intact.
-const enforceMidiAuto = (): void => {
+// Sub-tab enforcer — "only the active sub-tab's synth is audible."
+const enforceSubtab = (): void => {
   if (!state.connected.get()) return;
-  if (state.dexed.midiAuto.get()) {
-    const want = activeSynthSubtab === 'dexed';
-    if (state.dexed.on.get() !== want) dispatcher.setDexedOn(want);
-  }
-  if (state.mpe.midiAuto.get()) {
-    const want = activeSynthSubtab === 'mpe';
-    if (state.mpe.on.get() !== want) dispatcher.setMpeOn(want);
-  }
-  if (state.neuro.midiAuto.get()) {
-    const want = activeSynthSubtab === 'neuro';
-    if (state.neuro.on.get() !== want) dispatcher.setNeuroOn(want);
-  }
-};
-
-// Channel → synth resolver for Auto-mode follow-the-keyboard. Priority:
-// explicit per-synth midiChannel matches first (Dexed, Neuro), then MPE
-// as the catch-all so MPE keyboards (notes spread across member channels)
-// and single-channel keyboards on a non-Dexed/Neuro channel both land on
-// MPE. A claimed channel is claimed regardless of that synth's Auto
-// state — turning Dexed Auto off doesn't cause channel 1 traffic to
-// bleed into MPE; it just means we won't switch to Dexed for it.
-const resolveAutoTarget = (channel: number): SynthSubtab | null => {
-  const dexedCh = state.dexed.midiChannel.get();
-  const neuroCh = state.neuro.midiChannel.get();
-  if (dexedCh !== 0 && dexedCh === channel) {
-    return state.dexed.midiAuto.get() ? 'dexed' : null;
-  }
-  if (neuroCh !== 0 && neuroCh === channel) {
-    return state.neuro.midiAuto.get() ? 'neuro' : null;
-  }
-  return state.mpe.midiAuto.get() ? 'mpe' : null;
+  if (state.dexed.on.get()    !== (activeSynthSubtab === 'dexed'))    dispatcher.setDexedOn(activeSynthSubtab === 'dexed');
+  if (state.mpe.on.get()      !== (activeSynthSubtab === 'mpe'))      dispatcher.setMpeOn(activeSynthSubtab === 'mpe');
+  if (state.neuro.on.get()    !== (activeSynthSubtab === 'neuro'))    dispatcher.setNeuroOn(activeSynthSubtab === 'neuro');
+  if (state.acid.on.get()     !== (activeSynthSubtab === 'acid'))     dispatcher.setAcidOn(activeSynthSubtab === 'acid');
+  if (state.supersaw.on.get() !== (activeSynthSubtab === 'supersaw')) dispatcher.setSupersawOn(activeSynthSubtab === 'supersaw');
+  if (state.chip.on.get()     !== (activeSynthSubtab === 'chip'))     dispatcher.setChipOn(activeSynthSubtab === 'chip');
 };
 
 const selectSynthSubtab = (which: SynthSubtab): void => {
@@ -453,28 +432,32 @@ const selectSynthSubtab = (which: SynthSubtab): void => {
   dexedSubtab.classList.toggle('active', which === 'dexed');
   mpeSubtab.classList.toggle('active',   which === 'mpe');
   neuroSubtab.classList.toggle('active', which === 'neuro');
-  dexedPanelEl.style.display  = which === 'dexed' ? '' : 'none';
-  mpe.element.style.display   = which === 'mpe'   ? '' : 'none';
-  neuro.element.style.display = which === 'neuro' ? '' : 'none';
-  // Only the MPE panel has telemetry to subscribe to; Dexed/Neuro
-  // panels don't need an active hook (Neuro is mono, no voice orbs).
+  acidSubtab.classList.toggle('active',  which === 'acid');
+  supersawSubtab.classList.toggle('active', which === 'supersaw');
+  chipSubtab.classList.toggle('active',  which === 'chip');
+  dexedPanelEl.style.display  = which === 'dexed'    ? '' : 'none';
+  mpe.element.style.display   = which === 'mpe'      ? '' : 'none';
+  neuro.element.style.display = which === 'neuro'    ? '' : 'none';
+  acid.element.style.display  = which === 'acid'     ? '' : 'none';
+  supersaw.element.style.display = which === 'supersaw' ? '' : 'none';
+  chip.element.style.display  = which === 'chip'     ? '' : 'none';
+  // MPE is the only panel with active-hook telemetry; Acid/Supersaw/
+  // Chip are mono with no voice orbs.
   mpe.setActive(which === 'mpe');
   neuro.setActive(which === 'neuro');
-  // Drive Auto's "only active-tab synth is audible" behaviour.
-  enforceMidiAuto();
+  acid.setActive(which === 'acid');
+  supersaw.setActive(which === 'supersaw');
+  chip.setActive(which === 'chip');
+  enforceSubtab();
 };
 
-// Re-apply Auto on connect so the firmware's cold-boot defaults
-// (all synths on) converge to the UI's sub-tab-follows layout.
-state.connected.subscribe((c) => { if (c) enforceMidiAuto(); });
-// Re-apply Auto whenever the user toggles any synth's midiAuto ON —
-// flipping Auto on should immediately enforce its rule.
-state.dexed.midiAuto.subscribe((on) => { if (on) enforceMidiAuto(); });
-state.mpe.midiAuto.subscribe  ((on) => { if (on) enforceMidiAuto(); });
-state.neuro.midiAuto.subscribe((on) => { if (on) enforceMidiAuto(); });
-dexedSubtab.addEventListener('click', () => selectSynthSubtab('dexed'));
-mpeSubtab  .addEventListener('click', () => selectSynthSubtab('mpe'));
-neuroSubtab.addEventListener('click', () => selectSynthSubtab('neuro'));
+state.connected.subscribe((c) => { if (c) enforceSubtab(); });
+dexedSubtab   .addEventListener('click', () => selectSynthSubtab('dexed'));
+mpeSubtab     .addEventListener('click', () => selectSynthSubtab('mpe'));
+neuroSubtab   .addEventListener('click', () => selectSynthSubtab('neuro'));
+acidSubtab    .addEventListener('click', () => selectSynthSubtab('acid'));
+supersawSubtab.addEventListener('click', () => selectSynthSubtab('supersaw'));
+chipSubtab    .addEventListener('click', () => selectSynthSubtab('chip'));
 
 const synthKeyboardDock = document.createElement('div');
 synthKeyboardDock.className = 'synth-keyboard-dock';
