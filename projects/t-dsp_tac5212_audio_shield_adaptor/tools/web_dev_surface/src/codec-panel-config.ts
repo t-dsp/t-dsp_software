@@ -97,7 +97,7 @@ export const tac5212Panel: Tab[] = [
             label: 'Mode',
             address: '/line/mode',
             options: ['stereo', 'mono'],
-            disableGroup: { value: 'mono', groupName: 'Channel 1' },
+            disableGroup: { value: 'mono', groupName: 'Channel 2' },
           },
         ],
       },

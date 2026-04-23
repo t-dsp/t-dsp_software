@@ -163,8 +163,35 @@ export function makeSolo(
 // A transparent element matching the vertical height of whatever cell
 // class it emulates. Used in rows that would otherwise be empty, to
 // keep the row at the same height as its peers in other wrappers.
-export function makeCellSpacer(kind: 'mute' | 'solo' | 'link' | 'fv' | 'name'): HTMLElement {
+export function makeCellSpacer(kind: 'mute' | 'solo' | 'link' | 'fv' | 'name' | 'rec'): HTMLElement {
   const s = document.createElement('div');
   s.className = `cell cell-spacer spacer-${kind}`;
   return s;
+}
+
+// REC button: per-channel USB record-send toggle. Red when armed.
+// The `loopDisabled` signal is `state.main.loopEnable` — when loop is
+// engaged the Rec button greys out and ignores clicks (firmware also
+// overrides it, but preventing the send keeps the wire traffic clean).
+// The stored recSend state is preserved across loop toggles so the
+// button pops back to its prior state when loop goes off.
+export function makeRec(
+  recSig: Signal<boolean>,
+  loopDisabled: Signal<boolean>,
+  onClick: () => void,
+): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.className = 'rec-btn cell';
+  b.textContent = 'REC';
+  b.title = 'Send this channel to USB capture (record)';
+  recSig.subscribe((on) => b.classList.toggle('active', on));
+  loopDisabled.subscribe((loopOn) => {
+    b.classList.toggle('loop-override', loopOn);
+    b.disabled = loopOn;
+    b.title = loopOn
+      ? 'Loop is armed — main mix is being recorded instead'
+      : 'Send this channel to USB capture (record)';
+  });
+  b.addEventListener('click', onClick);
+  return b;
 }

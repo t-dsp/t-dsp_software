@@ -76,6 +76,11 @@ export function inputHostStrip(bus: BusState): HTMLElement {
   const rowLink = makeRow('row-link');
   rowLink.append(makeCellSpacer('link'));
 
-  root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink);
+  // Row 8: rec spacer — preserves alignment with channel-pair REC and
+  // main-bus LOOP rows. No capture-side control of its own.
+  const rowRec = makeRow('row-rec');
+  rowRec.append(makeCellSpacer('rec'));
+
+  root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink, rowRec);
   return root;
 }

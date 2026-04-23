@@ -44,6 +44,12 @@ struct Channel {
     // Per-channel HPF (single biquad band).
     bool    hpfOn      = false;
     float   hpfFreqHz  = 80.0f;      // default cutoff
+    // Per-channel USB record send. When true, this channel's pre-fader
+    // signal is summed into the USB capture mixer (what the host records).
+    // Defaults are per-source in reset(): Line/Mic ON, USB playback OFF
+    // (feedback risk if a DAW monitors the input). Overridden to 0 in the
+    // binding when Main.loopEnable is true.
+    bool    recSend    = false;
     // User-settable label. Defaults set in reset() below.
     char    name[kChannelNameMax] = {0};
 };
@@ -63,6 +69,11 @@ struct Main {
     // disabled, gain multiplier = 1.0 (bypass).
     bool    hostvolEnable = true;
     float   hostvolValue  = 1.0f;    // last observed usbIn.volume() scaled
+    // Loopback: when true, the post-fader / pre-hostvol main mix is
+    // tapped into USB capture, and per-channel recSend is forced off.
+    // Lets you record whatever is in the headphones (for demo videos,
+    // screen recording). Default false preserves prior behaviour.
+    bool    loopEnable    = false;
 };
 
 // ----- MixerModel -----
@@ -107,6 +118,8 @@ public:
     bool setMainOn(bool on);
     bool setMainHostvolEnable(bool enable);
     bool setMainHostvolValue(float value);
+    bool setMainLoopEnable(bool enable);
+    bool setChannelRecSend(int n, bool send);
 
     // Solo-in-place computation: returns true if ANY channel is soloed.
     // The binding uses this to decide mute-on-non-soloed behavior.

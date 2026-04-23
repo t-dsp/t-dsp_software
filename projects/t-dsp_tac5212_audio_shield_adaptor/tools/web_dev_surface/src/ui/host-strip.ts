@@ -75,6 +75,12 @@ export function hostStrip(bus: BusState, dispatcher: Dispatcher): HTMLElement {
   );
   rowLink.append(enBtn);
 
-  root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink);
+  // Row 8: rec spacer — this strip has no capture control of its own.
+  // The spacer preserves vertical alignment with the channel pairs and
+  // main strip's REC/LOOP rows.
+  const rowRec = makeRow('row-rec');
+  rowRec.append(makeCellSpacer('rec'));
+
+  root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink, rowRec);
   return root;
 }

@@ -32,12 +32,23 @@ void SignalGraphBinding::setMainHostvol(AudioAmplifier *hostvolL, AudioAmplifier
     _hostvolAmpR = hostvolR;
 }
 
+void SignalGraphBinding::setChannelRecAmp(int n, AudioAmplifier *amp) {
+    if (n < 1 || n > kChannelCount) return;
+    _channels[n].recAmp = amp;
+}
+
+void SignalGraphBinding::setMainLoop(AudioAmplifier *loopL, AudioAmplifier *loopR) {
+    _loopAmpL = loopL;
+    _loopAmpR = loopR;
+}
+
 void SignalGraphBinding::applyAll() {
     if (!_model) return;
     for (int n = 1; n <= kChannelCount; ++n) {
         applyChannel(n);
     }
     applyMain();
+    applyMainLoop();  // pushes rec amps + loop tap
 }
 
 void SignalGraphBinding::applyChannel(int n) {
@@ -88,6 +99,31 @@ void SignalGraphBinding::applyMain() {
     const float hv = _model->effectiveHostvolGain();
     if (_hostvolAmpL) _hostvolAmpL->gain(hv);
     if (_hostvolAmpR) _hostvolAmpR->gain(hv);
+}
+
+void SignalGraphBinding::applyChannelRec(int n) {
+    if (!_model) return;
+    if (n < 1 || n > kChannelCount) return;
+    AudioAmplifier *amp = _channels[n].recAmp;
+    if (!amp) return;
+    // Loop is the master override: when engaged, all per-channel rec
+    // sends are forced to 0 so sources already in the main mix don't
+    // double-count in USB capture.
+    const bool loopOn = _model->main().loopEnable;
+    const bool send   = _model->channel(n).recSend;
+    amp->gain((loopOn || !send) ? 0.0f : 1.0f);
+}
+
+void SignalGraphBinding::applyMainLoop() {
+    if (!_model) return;
+    const bool loopOn = _model->main().loopEnable;
+    const float g = loopOn ? 1.0f : 0.0f;
+    if (_loopAmpL) _loopAmpL->gain(g);
+    if (_loopAmpR) _loopAmpR->gain(g);
+    // Loop override affects every channel's rec gain — refresh them all.
+    for (int n = 1; n <= kChannelCount; ++n) {
+        applyChannelRec(n);
+    }
 }
 
 void SignalGraphBinding::setMonoMirror(int srcCh, int muteCh,

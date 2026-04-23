@@ -24,6 +24,13 @@ static const char *kDefaultNames[kChannelCount + 1] = {
 static bool defaultLink(int n) {
     return (n == 1) || (n == 3) || (n == 5);
 }
+
+// Default per-channel USB record send. Preserves pre-feature behaviour:
+// Line L/R (3,4) and Mic L/R (5,6) recorded at unity; USB playback L/R
+// (1,2) explicitly excluded to avoid feedback when a DAW monitors input.
+static bool defaultRecSend(int n) {
+    return (n >= 3 && n <= 6);
+}
 }  // namespace
 
 MixerModel::MixerModel() {
@@ -41,6 +48,7 @@ void MixerModel::reset() {
         ch.link      = defaultLink(n);
         ch.hpfOn     = false;
         ch.hpfFreqHz = 80.0f;
+        ch.recSend   = defaultRecSend(n);
         strncpy(ch.name, kDefaultNames[n], kChannelNameMax - 1);
         ch.name[kChannelNameMax - 1] = '\0';
     }
@@ -50,6 +58,7 @@ void MixerModel::reset() {
     _main.on             = true;
     _main.hostvolEnable  = true;
     _main.hostvolValue   = 1.0f;
+    _main.loopEnable     = false;
 }
 
 Channel &MixerModel::channel(int n) {
@@ -230,6 +239,25 @@ bool MixerModel::setMainHostvolValue(float value) {
     if (value > 1.0f) value = 1.0f;
     bool changed = (_main.hostvolValue != value);
     _main.hostvolValue = value;
+    return changed;
+}
+
+bool MixerModel::setMainLoopEnable(bool enable) {
+    bool changed = (_main.loopEnable != enable);
+    _main.loopEnable = enable;
+    return changed;
+}
+
+bool MixerModel::setChannelRecSend(int n, bool send) {
+    if (n < 1 || n > kChannelCount) return false;
+    Channel &ch = _channels[n];
+    bool changed = (ch.recSend != send);
+    ch.recSend = send;
+    int partner = linkedPartner(*this, n);
+    if (partner) {
+        Channel &pch = _channels[partner];
+        if (pch.recSend != send) { pch.recSend = send; changed = true; }
+    }
     return changed;
 }
 

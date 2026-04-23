@@ -75,6 +75,20 @@ export function mainBus(bus: BusState, dispatcher: Dispatcher): HTMLElement {
   rowLink.append(linkBtn);
   void faderR;  // intentionally live in both unlinked and linked modes
 
-  root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink);
+  // Row 8: LOOP — tap the post-fader main mix into USB capture so the
+  // host can record what's in the headphones. While armed, the per-
+  // channel REC buttons grey out (firmware forces their sends to 0 so
+  // sources already in the main mix don't double-count).
+  const rowRec = makeRow('row-rec');
+  const loopBtn = document.createElement('button');
+  loopBtn.className = 'loop-btn wide cell';
+  loopBtn.textContent = 'LOOP';
+  loopBtn.title =
+    'Loopback: record the main mix over USB (post-fader, pre-Windows-volume).';
+  bus.loopEnable.subscribe((on) => loopBtn.classList.toggle('active', on));
+  loopBtn.addEventListener('click', () => dispatcher.setMainLoop(!bus.loopEnable.get()));
+  rowRec.append(loopBtn);
+
+  root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink, rowRec);
   return root;
 }

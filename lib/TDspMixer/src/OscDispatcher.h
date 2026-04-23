@@ -69,10 +69,12 @@ public:
     void broadcastMainLink(OSCBundle &reply);
     void broadcastMainOn(OSCBundle &reply);
     void broadcastMainHostvolValue(OSCBundle &reply);
+    void broadcastMainLoop(OSCBundle &reply);
     void broadcastChannelFader(int n, OSCBundle &reply);
     void broadcastChannelOn(int n, OSCBundle &reply);
     void broadcastChannelSolo(int n, OSCBundle &reply);
     void broadcastChannelName(int n, OSCBundle &reply);
+    void broadcastChannelRecSend(int n, OSCBundle &reply);
     void broadcastMetersInput(OSCBundle &reply,
                               const float *peakRmsPairs, int pairCount);
     void broadcastMetersOutput(OSCBundle &reply,
@@ -106,6 +108,8 @@ private:
     void handleMainLink(OSCMessage &msg, OSCBundle &reply);
     void handleMainOn(OSCMessage &msg, OSCBundle &reply);
     void handleMainHostvolEnable(OSCMessage &msg, OSCBundle &reply);
+    void handleMainLoop(OSCMessage &msg, OSCBundle &reply);
+    void handleChannelRecSend(int n, OSCMessage &msg, OSCBundle &reply);
     void handleSub(OSCMessage &msg, OSCBundle &reply);
     void handleInfo(OSCMessage &msg, OSCBundle &reply);
 

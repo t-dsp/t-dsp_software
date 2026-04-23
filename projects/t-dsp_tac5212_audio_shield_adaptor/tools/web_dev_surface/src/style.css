@@ -231,6 +231,7 @@ select, input[type="text"] {
 .row-mute   { height: 24px;  }
 .row-solo   { height: 24px;  }
 .row-link   { height: 24px;  }
+.row-rec    { height: 24px;  }
 
 /* Individual cells have a fixed width so columns align across rows
  * and across wrappers. A 26px cell comfortably holds a meter (10px),
@@ -249,7 +250,7 @@ select, input[type="text"] {
 }
 
 .strip-name {
-  font-size: 11px;
+  font-size: 9px;
   color: #aaa;
   text-align: center;
   white-space: nowrap;
@@ -320,7 +321,7 @@ select, input[type="text"] {
   line-height: 14px;
 }
 
-.mute, .solo, .link-btn, .enable-btn {
+.mute, .solo, .link-btn, .enable-btn, .rec-btn, .loop-btn {
   font-size: 11px;
   padding: 0;
   height: 24px;
@@ -342,6 +343,38 @@ select, input[type="text"] {
 .enable-btn.active {
   background: #2d6a3a;
   border-color: #3d8a4a;
+  color: #fff;
+}
+
+/* Per-channel REC toggle. Red-armed when recSend is true. When
+ * main.loopEnable is active the loop-override class greys the button
+ * and disables pointer events so the stored state is preserved but
+ * can't be twiddled while loop is doing the capture. */
+.rec-btn {
+  color: #aaa;
+}
+
+.rec-btn.active {
+  background: #7a2d2d;
+  border-color: #9a3d3d;
+  color: #fff;
+}
+
+.rec-btn.loop-override,
+.rec-btn[disabled] {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* Main LOOP toggle. Amber when armed — distinct from the red per-
+ * channel REC so you can see at a glance which path is recording. */
+.loop-btn {
+  color: #aaa;
+}
+
+.loop-btn.active {
+  background: #a05a1e;
+  border-color: #c27a3a;
   color: #fff;
 }
 
@@ -548,6 +581,375 @@ select, input[type="text"] {
   background: #b86a30;
   border-color: #d68038;
   color: #fff;
+}
+
+/* ---------- synth view ---------- */
+/*
+ * Three-row layout: sub-nav (synth engine picker) on top, active engine's
+ * config panel in the middle, 88-key piano docked at the bottom. The
+ * keyboard is shared across all synth sub-tabs so every engine plays
+ * from the same instrument. Sub-nav and content are placeholders until
+ * the first synth engine (Dexed) lands — they render empty-state text.
+ *
+ * 88-key piano, A0..C8. White keys are flex children filling the full
+ * width; black keys are absolutely positioned as a percentage of the
+ * container so the layout stays correct at any viewport width without
+ * a ResizeObserver. `.active` highlights use the same amber accent
+ * (#b86a30 / #d68038) as the rest of the app's active controls.
+ */
+
+.view.view-synth {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.synth-subnav {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+  background: #1a1a1a;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 6px 10px;
+  min-height: 32px;
+  align-items: center;
+}
+
+.synth-subnav-empty {
+  color: #666;
+  font-size: 12px;
+  font-style: italic;
+}
+
+.synth-subnav-tab {
+  background: #2c2c2c;
+  color: #bbb;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.synth-subnav-tab.active {
+  background: #b86a30;
+  color: #111;
+  border-color: #d68038;
+}
+
+.dexed-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 520px;
+}
+
+.dexed-row {
+  display: grid;
+  grid-template-columns: 80px 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.dexed-row label {
+  color: #bbb;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.dexed-row select,
+.dexed-row input[type="range"] {
+  background: #181818;
+  color: #e0e0e0;
+  border: 1px solid #333;
+  border-radius: 2px;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.dexed-readout {
+  color: #888;
+  font-size: 11px;
+  font-family: monospace;
+  min-width: 40px;
+  text-align: right;
+}
+
+/* Voice row has the dropdown + two step buttons squeezed into one
+ * grid cell via extra columns. Keeps alignment with the rest of the
+ * 80 / 1fr / auto grid rows. */
+.dexed-row-voice {
+  grid-template-columns: 80px 1fr auto auto;
+}
+
+.dexed-step {
+  background: #2c2c2c;
+  color: #d68038;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 14px;
+  padding: 3px 10px;
+  cursor: pointer;
+  min-width: 32px;
+}
+.dexed-step:hover {
+  background: #363636;
+}
+.dexed-step:active {
+  background: #b86a30;
+  color: #111;
+}
+
+/* Processing view — main-bus output treatment. */
+
+.view.view-processing {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.processing-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 560px;
+}
+
+.proc-module {
+  background: #202020;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 14px 16px;
+}
+
+.proc-module h3 {
+  margin: 0 0 10px 0;
+  color: #d68038;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+.proc-module-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.proc-row {
+  display: grid;
+  grid-template-columns: 90px 1fr auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.proc-row label {
+  color: #bbb;
+  font-size: 12px;
+}
+
+.proc-row input[type="range"] {
+  background: #181818;
+  border: 1px solid #333;
+  border-radius: 2px;
+}
+
+.proc-row input[type="range"]:disabled {
+  opacity: 0.4;
+}
+
+.proc-readout {
+  color: #888;
+  font-size: 11px;
+  font-family: monospace;
+  min-width: 60px;
+  text-align: right;
+}
+
+.proc-toggle {
+  width: 16px;
+  height: 16px;
+  accent-color: #d68038;
+}
+
+.proc-note {
+  color: #888;
+  font-size: 11px;
+  line-height: 1.45;
+  margin: 4px 0 0 0;
+}
+
+.proc-preset-row {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  align-items: center;
+  gap: 12px;
+}
+
+.proc-preset-row label {
+  color: #bbb;
+  font-size: 12px;
+}
+
+.proc-preset-buttons {
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.proc-preset {
+  background: #2c2c2c;
+  color: #bbb;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.proc-preset:hover {
+  background: #363636;
+}
+.proc-preset.active {
+  background: #b86a30;
+  color: #111;
+  border-color: #d68038;
+}
+
+.synth-content {
+  background: #202020;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 16px;
+  min-height: 120px;
+}
+
+.synth-content-empty {
+  color: #888;
+  font-size: 13px;
+  margin: 0;
+}
+
+.synth-keyboard-dock {
+  /* Bottom of the Synth view — the keyboard's own .piano-wrap supplies
+   * the background/border/padding so this wrapper is just a positioning
+   * hook in case we later want to add controls alongside the keys. */
+  display: flex;
+  flex-direction: column;
+}
+
+.piano-wrap {
+  background: #202020;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.piano-banner {
+  color: #888;
+  font-size: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.piano-banner-channels {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  color: #b0b0b0;
+  white-space: nowrap;
+}
+
+.piano-keyboard {
+  position: relative;
+  width: 100%;
+  height: 160px;
+  user-select: none;
+}
+
+.piano-whites {
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+  height: 100%;
+}
+
+.piano-blacks {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 62%;
+  pointer-events: none;
+}
+
+.piano-key {
+  box-sizing: border-box;
+  /* Kill the browser default tap-highlight / text-select / touch
+   * behaviors so drag-across-keys feels like a real keyboard, not
+   * a web page selection. */
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  touch-action: none;
+  cursor: pointer;
+}
+
+.piano-key-white {
+  flex: 1 1 0;
+  position: relative;
+  background: linear-gradient(to bottom, #f4f4f4, #d8d8d8);
+  border: 1px solid #555;
+  border-right-width: 0;
+  border-radius: 0 0 3px 3px;
+  transition: background 40ms linear;
+}
+
+.piano-key-white:last-child {
+  border-right-width: 1px;
+}
+
+.piano-key-white.active {
+  background: linear-gradient(to bottom, #d68038, #b86a30);
+}
+
+.piano-key-black {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: linear-gradient(to bottom, #2a2a2a, #0e0e0e);
+  border: 1px solid #000;
+  border-radius: 0 0 3px 3px;
+  box-shadow: 0 2px 3px rgba(0, 0, 0, 0.5);
+  transition: background 40ms linear;
+  /* The containing .piano-blacks layer has pointer-events: none so
+   * the gaps between black keys don't block clicks on the white keys
+   * underneath. Individual black keys need to opt back in to capture
+   * pointerdown. */
+  pointer-events: auto;
+}
+
+.piano-key-black.active {
+  background: linear-gradient(to bottom, #e09048, #b86a30);
+}
+
+.piano-key-label {
+  position: absolute;
+  bottom: 4px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 9px;
+  color: #888;
+  font-family: ui-monospace, Consolas, monospace;
+  pointer-events: none;
 }
 
 /* ---------- console ---------- */

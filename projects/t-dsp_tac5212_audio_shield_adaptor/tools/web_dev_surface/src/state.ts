@@ -43,6 +43,12 @@ export interface ChannelState {
   peak: Signal<number>; // 0..1 from /meters/input blob
   rms: Signal<number>;
   name: Signal<string>;
+  // Per-channel USB record send. When true, this channel's signal
+  // is summed into the USB capture output. Forced to 0 in the firmware
+  // binding when main.loopEnable is true; the UI reflects that by
+  // disabling (greying) the Rec button so the stored state is preserved
+  // and returns when loop goes off.
+  recSend: Signal<boolean>;
 }
 
 export interface BusState {
@@ -83,11 +89,61 @@ export interface BusState {
   // path back: only Windows owns this slider.
   captureHostvolValue: Signal<number>;
   captureHostvolMute: Signal<boolean>;
+  // Loopback: when true, the post-fader / pre-hostvol main mix is
+  // summed into the USB capture output (record what's in the
+  // headphones). While on, the firmware forces per-channel recSend
+  // amps to 0 so nothing double-counts; the UI greys each channel's
+  // Rec button to match.
+  loopEnable: Signal<boolean>;
+}
+
+// Dexed synth state — mirror of the firmware's AudioSynthDexed controls
+// that the Synth tab's Dexed sub-panel renders.
+//
+// bankNames / voiceNames are populated on demand: the client requests
+// /synth/dexed/bank/names once on connect (bank list is compile-time
+// fixed in firmware), and /synth/dexed/voice/names for whatever bank is
+// selected. Switching banks triggers a new voice-names query so the
+// voice dropdown re-populates.
+export interface DexedState {
+  bank: Signal<number>;        // 0..9
+  voice: Signal<number>;       // 0..31
+  voiceName: Signal<string>;   // trimmed 10-char voice name
+  volume: Signal<number>;      // 0..1 linear
+  midiChannel: Signal<number>; // 0 = omni, 1..16
+  fxSend: Signal<number>;      // 0..1 send amount into shared FX bus
+  bankNames: Signal<string[]>;
+  voiceNames: Signal<string[]>; // names for the currently-selected bank
+}
+
+// Main-bus processing (Processing tab). Post-hostvol, pre-DAC stages
+// mirrored here so the UI can render current values without a query.
+export interface ProcessingState {
+  shelfEnable: Signal<boolean>;
+  shelfFreqHz: Signal<number>;
+  shelfGainDb: Signal<number>;
+  limiterEnable: Signal<boolean>;
+}
+
+// Shared FX bus (FX tab). Chorus + reverb chain; every synth taps a
+// mono send amount into this bus and the wet stereo return mixes into
+// the main output. Per-synth send amounts live on the synth's own
+// state block (e.g. DexedState.fxSend), not here.
+export interface FxState {
+  chorusEnable: Signal<boolean>;
+  chorusVoices: Signal<number>;  // 2..8 (quantized "depth")
+  reverbEnable: Signal<boolean>;
+  reverbSize: Signal<number>;    // 0..1 roomsize
+  reverbDamping: Signal<number>; // 0..1
+  reverbReturn: Signal<number>;  // 0..1 wet level into main
 }
 
 export interface MixerState {
   channels: ChannelState[];
   main: BusState;
+  dexed: DexedState;
+  processing: ProcessingState;
+  fx: FxState;
   connected: Signal<boolean>;
   metersOn: Signal<boolean>;
 }
@@ -114,6 +170,11 @@ export function createMixerState(channelCount: number): MixerState {
     // matches so the UI is correctly slave-disabled before the first
     // echo arrives.
     const defaultLink = i === 0 || i === 2 || i === 4;
+    // Firmware defaults recSend per-source to preserve prior USB-out
+    // behaviour: Line (idx 2,3) and Mic (4,5) ON, USB playback (0,1) OFF.
+    // See MixerModel::defaultRecSend. Client mirrors this so the Rec
+    // button renders correctly before the snapshot echo arrives.
+    const defaultRecSend = i >= 2;
     channels.push({
       fader: new Signal(1.0),  // matches firmware default (MixerModel::reset)
       on: new Signal(true),
@@ -123,6 +184,7 @@ export function createMixerState(channelCount: number): MixerState {
       peak: new Signal(0),
       rms: new Signal(0),
       name: new Signal(defaultName),
+      recSend: new Signal(defaultRecSend),
     });
   }
 
@@ -145,6 +207,31 @@ export function createMixerState(channelCount: number): MixerState {
       hostRmsR: new Signal(0),
       captureHostvolValue: new Signal(0),
       captureHostvolMute: new Signal(false),
+      loopEnable: new Signal(false),
+    },
+    dexed: {
+      bank: new Signal(0),
+      voice: new Signal(0),
+      voiceName: new Signal(''),
+      volume: new Signal(0.7),    // matches firmware default
+      midiChannel: new Signal(1), // matches DexedSink default
+      fxSend: new Signal(0),      // dry by default, matches firmware
+      bankNames: new Signal<string[]>([]),
+      voiceNames: new Signal<string[]>([]),
+    },
+    processing: {
+      shelfEnable:    new Signal(true),    // matches firmware defaults
+      shelfFreqHz:    new Signal(5000),
+      shelfGainDb:    new Signal(-4),
+      limiterEnable:  new Signal(true),
+    },
+    fx: {
+      chorusEnable:  new Signal(false),    // matches firmware defaults
+      chorusVoices:  new Signal(3),
+      reverbEnable:  new Signal(false),
+      reverbSize:    new Signal(0.6),
+      reverbDamping: new Signal(0.5),
+      reverbReturn:  new Signal(0.6),
     },
     connected: new Signal(false),
     metersOn: new Signal(true),   // on by default; connect() re-subscribes

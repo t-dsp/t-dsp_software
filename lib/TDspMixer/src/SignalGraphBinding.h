@@ -59,6 +59,19 @@ public:
     // and capture taps come from these amplifiers' outputs.
     void setMainHostvol(AudioAmplifier *hostvolL, AudioAmplifier *hostvolR);
 
+    // Register a per-channel USB record-send amplifier. Sits between the
+    // source and the capture mixer; gain is 1.0 when Channel.recSend is
+    // true AND Main.loopEnable is false, else 0.0. May be nullptr for
+    // channels that don't have a rec amp wired.
+    void setChannelRecAmp(int n, AudioAmplifier *amp);
+
+    // Register the main bus LOOP tap amplifiers (one per L/R). These
+    // sit on the post-mainAmp / pre-hostvolAmp signal and feed the
+    // capture mixer. Gain is 1.0 when Main.loopEnable is true, else 0.0.
+    // When loop is enabled the per-channel rec amps are forced to 0 so
+    // sources that also sit in the main mix don't double-count in USB out.
+    void setMainLoop(AudioAmplifier *loopL, AudioAmplifier *loopR);
+
     // Push all model state into the registered audio objects. Call this
     // after a batch of model changes or once during setup() to initialize
     // the audio graph.
@@ -80,6 +93,14 @@ public:
     // gains at once without rebuilding coefficients.
     void applyAllChannelGains();
 
+    // Push a single channel's record-send state (recSend + loop override).
+    void applyChannelRec(int n);
+
+    // Push the main loop-tap state and refresh every channel's rec gain.
+    // Call whenever Main.loopEnable flips, since the override rule affects
+    // every channel's effective rec gain.
+    void applyMainLoop();
+
     // Mono mirror: when active, applyChannel(srcCh) also sets
     // targetMixer->gain(targetSlot, effectiveChannelGain(srcCh)), and
     // applyChannel(muteCh) forces gain to 0 regardless of the model.
@@ -97,6 +118,7 @@ private:
         int                slot        = 0;
         AudioFilterBiquad *hpf         = nullptr;
         float              sampleRate  = 44100.0f;
+        AudioAmplifier    *recAmp      = nullptr;
     };
     ChannelBinding _channels[kChannelCount + 1];  // 1-indexed; [0] unused
 
@@ -104,6 +126,8 @@ private:
     AudioAmplifier *_mainAmpR    = nullptr;
     AudioAmplifier *_hostvolAmpL = nullptr;
     AudioAmplifier *_hostvolAmpR = nullptr;
+    AudioAmplifier *_loopAmpL    = nullptr;
+    AudioAmplifier *_loopAmpR    = nullptr;
 
     // Mono mirror state
     bool        _mirrorActive    = false;

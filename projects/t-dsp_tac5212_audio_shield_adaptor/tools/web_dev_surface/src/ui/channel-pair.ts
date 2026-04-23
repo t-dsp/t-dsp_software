@@ -21,6 +21,7 @@ import {
   makeFaderValue,
   makeMute,
   makeSolo,
+  makeRec,
 } from './cells';
 
 export function channelPair(
@@ -87,6 +88,23 @@ export function channelPair(
   // they're intentionally live in both unlinked AND linked modes.
   void faderR; void muteR; void soloR;
 
-  root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink);
+  // Row 8: per-channel REC buttons. Each arms the channel's direct send
+  // into USB capture. When main.loopEnable is true the main mix is
+  // already being recorded, so these grey out — firmware forces them
+  // off anyway to prevent double-counting.
+  const rowRec = makeRow('row-rec');
+  const recL = makeRec(
+    chL.recSend,
+    state.main.loopEnable,
+    () => dispatcher.setChannelRecSend(oddIdx, !chL.recSend.get()),
+  );
+  const recR = makeRec(
+    chR.recSend,
+    state.main.loopEnable,
+    () => dispatcher.setChannelRecSend(oddIdx + 1, !chR.recSend.get()),
+  );
+  rowRec.append(recL, recR);
+
+  root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink, rowRec);
   return root;
 }

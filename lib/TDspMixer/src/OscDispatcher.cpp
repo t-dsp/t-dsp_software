@@ -103,6 +103,10 @@ void OscDispatcher::route(OSCMessage &msg, OSCBundle &reply) {
             handleChannelHpfFreq(chNum, msg, reply);
             return;
         }
+        if (strcmp(chSuffix, "/rec/enable") == 0) {
+            handleChannelRecSend(chNum, msg, reply);
+            return;
+        }
     }
 
     // -- /main/st/... --
@@ -124,6 +128,10 @@ void OscDispatcher::route(OSCMessage &msg, OSCBundle &reply) {
     }
     if (strcmp(address, "/main/st/hostvol/enable") == 0) {
         handleMainHostvolEnable(msg, reply);
+        return;
+    }
+    if (strcmp(address, "/main/st/loop") == 0) {
+        handleMainLoop(msg, reply);
         return;
     }
 
@@ -319,6 +327,39 @@ void OscDispatcher::handleMainHostvolEnable(OSCMessage &msg, OSCBundle &reply) {
     reply.add(echo);
 }
 
+void OscDispatcher::handleMainLoop(OSCMessage &msg, OSCBundle &reply) {
+    if (!msg.isInt(0)) return;
+    bool enable = (msg.getInt(0) != 0);
+    _model->setMainLoopEnable(enable);
+    // applyMainLoop refreshes every channel's rec gain too (loop is the
+    // master override), so we don't re-echo per-channel state here — the
+    // UI derives the disabled appearance from its own loopEnable signal.
+    if (_binding) _binding->applyMainLoop();
+    OSCMessage echo("/main/st/loop");
+    echo.add((int32_t)(_model->main().loopEnable ? 1 : 0));
+    reply.add(echo);
+}
+
+void OscDispatcher::handleChannelRecSend(int n, OSCMessage &msg, OSCBundle &reply) {
+    if (!msg.isInt(0)) return;
+    bool send = (msg.getInt(0) != 0);
+    _model->setChannelRecSend(n, send);
+    if (_binding) {
+        _binding->applyChannelRec(n);
+        // Linked-partner: mirror the rec-amp gain too.
+        int partner = ((n & 1) == 1 && n < kChannelCount &&
+                       _model->channel(n).link) ? n + 1 : 0;
+        if (partner == 0 && (n & 1) == 0 && n > 1 &&
+            _model->channel(n - 1).link) partner = n - 1;
+        if (partner) _binding->applyChannelRec(partner);
+    }
+    char addr[32];
+    snprintf(addr, sizeof(addr), "/ch/%02d/rec/enable", n);
+    OSCMessage echo(addr);
+    echo.add((int32_t)(_model->channel(n).recSend ? 1 : 0));
+    reply.add(echo);
+}
+
 void OscDispatcher::handleSub(OSCMessage &msg, OSCBundle &reply) {
     // Pattern the web_dev_surface client sends (see dispatcher.ts):
     //   /sub sis "addSub"      interval_ms   "/meters/input"
@@ -407,6 +448,22 @@ void OscDispatcher::broadcastMainHostvolValue(OSCBundle &reply) {
     if (!_model) return;
     OSCMessage echo("/main/st/hostvol/value");
     echo.add(_model->main().hostvolValue);
+    reply.add(echo);
+}
+
+void OscDispatcher::broadcastMainLoop(OSCBundle &reply) {
+    if (!_model) return;
+    OSCMessage echo("/main/st/loop");
+    echo.add((int32_t)(_model->main().loopEnable ? 1 : 0));
+    reply.add(echo);
+}
+
+void OscDispatcher::broadcastChannelRecSend(int n, OSCBundle &reply) {
+    if (!_model || n < 1 || n > kChannelCount) return;
+    char addr[32];
+    snprintf(addr, sizeof(addr), "/ch/%02d/rec/enable", n);
+    OSCMessage echo(addr);
+    echo.add((int32_t)(_model->channel(n).recSend ? 1 : 0));
     reply.add(echo);
 }
 

@@ -16,9 +16,18 @@
 //   /ch/06 — Mic R           (onboard PDM mic, right channel)
 //
 // Main output goes to the headphone DAC (TAC5212 OUT1/OUT2 in HP driver
-// mode, locked in during Phase 1) AND to USB capture so the host can
-// record the mix. USB inputs are EXCLUDED from the capture path to
-// prevent self-monitoring.
+// mode, locked in during Phase 1) AND to USB capture. The USB capture
+// bus has four switchable sources, each gated by its own unity/zero amp:
+//   slot 0: Line L/R   (Channel.recSend, default ON)
+//   slot 1: Mic L/R    (Channel.recSend, default ON)
+//   slot 2: USB L/R    (Channel.recSend, default OFF — feedback risk
+//                       when a DAW monitors input)
+//   slot 3: Loop tap   (Main.loopEnable, default OFF) — post-mainAmp /
+//                       pre-hostvolAmp, so what's in the headphones
+//                       (minus Windows-volume attenuation) becomes the
+//                       recording. When engaged, all four per-channel
+//                       rec sends are forced to 0 in the binding so
+//                       nothing double-counts.
 //
 // Codec initialization still uses the hand-rolled setupCodec() flow from
 // Phase 1. Migrating to lib/TAC5212's typed API is a follow-on refactor
@@ -28,6 +37,7 @@
 #include <Arduino.h>
 #include <Audio.h>
 #include <Wire.h>
+#include <USBHost_t36.h>
 
 #include <OSCMessage.h>
 #include <OSCBundle.h>
@@ -35,8 +45,12 @@
 #include "tac5212_regs.h"
 #include <TAC5212.h>
 #include <TDspMixer.h>
+#include <TDspMidi.h>
+#include <synth_dexed.h>
 
 #include "Tac5212Panel.h"
+#include "DexedSink.h"
+#include "DexedVoiceBank.h"
 
 // Teensy pin driving EN_HELD_HIGH on the TAC5212 module → enables the LDO
 const int TAC5212_EN_PIN = 35;
@@ -103,20 +117,118 @@ AudioMixer4          pdmMixR;
 AudioMixer4          mixL;
 AudioMixer4          mixR;
 
-// Two-stage main bus chain:
-//   mixL → mainAmpL (faderL × on) → hostvolAmpL (hostvol bypass) → DAC
+// Pre-main summing bus. Slot 0 is the input-channel mix; slots 1-3 are
+// reserved for synth buses (each synth sums its stereo output into the
+// next free slot). All slots are unity gain — per-source level control
+// happens upstream (channel faders on the input side, synth faders on
+// the synth side). Adding this stage here — between mixL/R and mainAmpL/R,
+// rather than at a later point in the chain — means the main fader /
+// mute / meters / FFT / loopback tap see the combined mix of inputs AND
+// synths, which matches the "main bus is everything you hear" mental
+// model. Cost: one extra audio block of latency per side (~2.9 ms at
+// 44.1 kHz).
+AudioMixer4          preMixL;
+AudioMixer4          preMixR;
+
+// Dexed FM synth engine — 8-voice polyphonic, 6-operator FM. Dexed's
+// audio output is mono; g_dexedGain sits between the engine and the
+// preMix bus so /synth/dexed/volume can trim the synth's level without
+// reaching into Dexed's internal voice levels. The same gain amp feeds
+// both preMixL[1] and preMixR[1] (dual-mono), which places Dexed in the
+// center of the stereo field. Sample rate is passed as AUDIO_SAMPLE_RATE
+// so Dexed's internal tuning aligns with Teensy Audio's actual update
+// rate (44.117.6 Hz, not nominal 44.1 kHz) — a ~0.04% pitch correction
+// that avoids a subtle sharp tuning offset.
+AudioSynthDexed      g_dexed((uint8_t)8, (uint16_t)AUDIO_SAMPLE_RATE_EXACT);
+AudioAmplifier       g_dexedGain;
+
+// Per-synth FX send amp — scales the tap that feeds the shared FX
+// send bus. Sits between g_dexedGain and fxSendBus (below). When
+// TDspMPE lands it gets its own g_mpeSend that feeds the same bus
+// on a different slot.
+AudioAmplifier       g_dexedSend;
+
+// ---- Shared FX bus -------------------------------------------------
+//
+// Every synth taps its post-volume signal through its own send amp
+// into this bus, which summed-feeds a single chorus → reverb chain.
+// The wet stereo output returns into preMix slot 3 (left+right) via
+// two "return" amps that control overall wet level.
+//
+// Signal flow (mono until fxReverb, stereo after):
+//   g_dexedGain → g_dexedSend → fxSendBus[0] ┐
+//   g_mpeSend   (future)      → fxSendBus[1] ┤
+//                                            ├→ fxChorus → fxReverb ┬→ fxReturnL → preMixL[3]
+//                                                                   └→ fxReturnR → preMixR[3]
+//
+// Chorus uses the Teensy Audio library's n-voice chorus which needs
+// an externally-allocated int16 delay line. 4096 samples ≈ 93 ms at
+// 44.1 kHz — more than enough for any usable chorus depth.
+// AudioEffectFreeverbStereo is naturally mono-in / stereo-out, so
+// the mono send bus gets a free stereo widening through the reverb.
+//
+// "Disable" on each stage means setting the downstream amp (or the
+// chorus voice count) to a transparent / muted value rather than
+// unwiring anything; the graph shape stays constant at runtime.
+constexpr int kFxChorusDelayLen = 4096;
+short          g_fxChorusDelayLine[kFxChorusDelayLen];
+
+AudioMixer4              fxSendBus;
+AudioEffectChorus        fxChorus;
+AudioEffectFreeverbStereo fxReverb;
+AudioAmplifier           fxReturnL;
+AudioAmplifier           fxReturnR;
+
+// Four-stage main bus chain:
+//   preMixL → mainAmpL (faderL × on) → hostvolAmpL (hostvol bypass)
+//           → procShelfL (tone)      → procLimiterL (peak ceiling) → DAC
 // The meter taps sit at the output of mainAmpL/R, so they see the
-// post-fader / pre-hostvol signal. SignalGraphBinding drives both
-// stages from MixerModel via applyMain().
+// post-fader / pre-hostvol signal. SignalGraphBinding drives mainAmp/
+// hostvolAmp stages from MixerModel via applyMain().
+//
+// procShelfL/R and procLimiterL/R are the "Processing" tab stages: a
+// high-shelf EQ to tame FM harshness and a soft-clip waveshaper to
+// cap peak level for ear safety. Both sit AFTER the hostvol amp, so
+// the USB-capture path (which tees off after mainAmp, pre-hostvol)
+// is unaffected — recordings stay unprocessed while the DAC / head-
+// phone output is protected. When the user toggles either off, the
+// stage is reconfigured to a transparent response (0 dB shelf /
+// identity waveshape) rather than being physically bypassed — the
+// graph shape stays constant at runtime.
 AudioAmplifier       mainAmpL;
 AudioAmplifier       mainAmpR;
 AudioAmplifier       hostvolAmpL;
 AudioAmplifier       hostvolAmpR;
+AudioFilterBiquad    procShelfL;
+AudioFilterBiquad    procShelfR;
+AudioEffectWaveshaper procLimiterL;
+AudioEffectWaveshaper procLimiterR;
 
-// Capture mixers — line + PDM → USB out. USB in intentionally excluded
-// to prevent self-monitoring.
+// Capture mixers — USB out (host recording). Four source slots gated by
+// per-source amps (see the header block above):
+//   slot 0: recLineL/R  → Line
+//   slot 1: recMicL/R   → PDM mic
+//   slot 2: recUsbL/R   → USB playback (default off)
+//   slot 3: loopL/R     → main-mix loopback (default off)
 AudioMixer4          captureL;
 AudioMixer4          captureR;
+
+// Per-source capture-send amplifiers. Gain is 0.0 or 1.0, driven by
+// SignalGraphBinding::applyChannelRec() from Channel.recSend (overridden
+// to 0 when Main.loopEnable is true so loop + direct sends don't
+// double-count in the USB recording).
+AudioAmplifier       recUsbL;
+AudioAmplifier       recUsbR;
+AudioAmplifier       recLineL;
+AudioAmplifier       recLineR;
+AudioAmplifier       recMicL;
+AudioAmplifier       recMicR;
+
+// Main-bus loopback tap amps. Fed from mainAmpL/R output (post-main-fader,
+// pre-hostvol) so the recording tracks the fader but not Windows volume.
+// Gain is 1.0 when Main.loopEnable is true, else 0.0.
+AudioAmplifier       loopL;
+AudioAmplifier       loopR;
 
 // Listenback monitor attenuators — driven by the Windows recording-device
 // volume slider via the FU 0x30 capture-side Feature Unit. Inserted on the
@@ -139,9 +251,9 @@ AudioAmplifier       monLineR;
 AudioAmplifier       monMicL;
 AudioAmplifier       monMicR;
 
-// Mono cross-feed: carries tdmIn ch2 (Line R / ADC CH2) into the L side
+// Mono cross-feed: carries tdmIn ch0 (Line L / ADC CH1) into the R side
 // of the main mixer. In stereo mode gain=0 (silent); in mono/differential
-// mode gain=1 and the binding mirrors ch4's effective gain to mixL[3].
+// mode gain=1 and the binding mirrors ch3's effective gain to mixR[3].
 AudioAmplifier       monoXfeed;
 
 AudioOutputTDM       tdmOut;
@@ -151,36 +263,48 @@ AudioOutputUSB       usbOut;
 // AudioConnections — wire the graph
 // ============================================================================
 
-// USB input → main mixer slot 0 + peak/RMS taps
+// USB input → main mixer slot 0 + peak/RMS taps + capture-send branch
+// (through recUsb* → captureL/R slot 2). The record-send branch is
+// gated by an amp so the USB playback signal normally doesn't loop
+// back into USB capture (feedback risk when a DAW monitors its input);
+// Channel.recSend flips it on if the user explicitly arms it.
 AudioConnection      c_usbL_mix    (usbIn, 0, mixL, 0);
 AudioConnection      c_usbL_peak   (usbIn, 0, peakCh1, 0);
 AudioConnection      c_usbL_rms    (usbIn, 0, rmsCh1, 0);
+AudioConnection      c_usbL_rec    (usbIn, 0, recUsbL, 0);
+AudioConnection      c_recUsbL_cap (recUsbL, 0, captureL, 2);
 AudioConnection      c_usbR_mix    (usbIn, 1, mixR, 0);
 AudioConnection      c_usbR_peak   (usbIn, 1, peakCh2, 0);
 AudioConnection      c_usbR_rms    (usbIn, 1, rmsCh2, 0);
+AudioConnection      c_usbR_rec    (usbIn, 1, recUsbR, 0);
+AudioConnection      c_recUsbR_cap (recUsbR, 0, captureR, 2);
 
-// Line input (ADC) → record send (unity) + peak/RMS taps + listenback
-// monitor branch (through monLine* attenuator → main mixer slot 2). The
-// record send and meter taps draw directly from tdmIn so they're
-// unaffected by the listenback gain — DAW gets full signal regardless
-// of what the user sets the headphone monitor to.
-AudioConnection      c_lineL_cap   (tdmIn, 0, captureL, 0);
+// Line input (ADC) → record send (through recLine* amp → captureL/R
+// slot 0) + peak/RMS taps + listenback monitor branch (through monLine*
+// attenuator → main mixer slot 2). The record send goes through an
+// on/off amp gated by Channel.recSend so it can be muted when the user
+// doesn't want that source in USB capture (e.g. when Main.loopEnable is
+// on and the line signal is already in the loop tap). The meter taps
+// draw directly from tdmIn so they're unaffected by rec state.
+AudioConnection      c_lineL_rec   (tdmIn, 0, recLineL, 0);
+AudioConnection      c_recLineL_cap(recLineL, 0, captureL, 0);
 AudioConnection      c_lineL_peak  (tdmIn, 0, peakCh3, 0);
 AudioConnection      c_lineL_rms   (tdmIn, 0, rmsCh3, 0);
 AudioConnection      c_lineL_mon   (tdmIn, 0, monLineL, 0);
 AudioConnection      c_lineL_mix   (monLineL, 0, mixL, 2);
-AudioConnection      c_lineR_cap   (tdmIn, 2, captureR, 0);
+AudioConnection      c_lineR_rec   (tdmIn, 2, recLineR, 0);
+AudioConnection      c_recLineR_cap(recLineR, 0, captureR, 0);
 AudioConnection      c_lineR_peak  (tdmIn, 2, peakCh4, 0);
 AudioConnection      c_lineR_rms   (tdmIn, 2, rmsCh4, 0);
 AudioConnection      c_lineR_mon   (tdmIn, 2, monLineR, 0);
 AudioConnection      c_lineR_mix   (monLineR, 0, mixR, 2);
 
-// Mono cross-feed: Line R (tdmIn ch2 / ADC CH2) → monoXfeed amp → mixL slot 3.
+// Mono cross-feed: Line L (tdmIn ch0 / ADC CH1) → monoXfeed amp → mixR slot 3.
 // Slot 3 is otherwise unused on both mixers. In stereo mode the amp is
-// at gain 0 so this path is silent. In mono mode CH2's differential
-// signal feeds both mixR[2] (normal path) and mixL[3] (cross-feed).
-AudioConnection      c_lineR_xfeed (tdmIn, 2, monoXfeed, 0);
-AudioConnection      c_xfeed_mixL  (monoXfeed, 0, mixL, 3);
+// at gain 0 so this path is silent. In mono mode CH1's differential
+// signal feeds both mixL[2] (normal path) and mixR[3] (cross-feed).
+AudioConnection      c_lineL_xfeed (tdmIn, 0, monoXfeed, 0);
+AudioConnection      c_xfeed_mixR  (monoXfeed, 0, mixR, 3);
 
 // PDM mic: split across TDM slots 2+3 = Teensy ch 4,5,6,7, then combined
 AudioConnection      c_pdmL0       (tdmIn, 4, pdmMixL, 0);
@@ -188,28 +312,60 @@ AudioConnection      c_pdmL1       (tdmIn, 5, pdmMixL, 1);
 AudioConnection      c_pdmR0       (tdmIn, 6, pdmMixR, 0);
 AudioConnection      c_pdmR1       (tdmIn, 7, pdmMixR, 1);
 
-// PDM combiners → record send (unity) + peak/RMS taps + listenback
-// monitor branch (through monMic* attenuator → main mixer slot 1). Same
-// pattern as the line inputs above: record and meters stay unity, only
-// the headphone-monitor branch is attenuated.
-AudioConnection      c_micL_cap    (pdmMixL, 0, captureL, 1);
+// PDM combiners → record send (through recMic* amp → captureL/R slot 1)
+// + peak/RMS taps + listenback monitor branch. Same pattern as line
+// above: rec send is gated by Channel.recSend, meters are unity.
+AudioConnection      c_micL_rec    (pdmMixL, 0, recMicL, 0);
+AudioConnection      c_recMicL_cap (recMicL, 0, captureL, 1);
 AudioConnection      c_micL_peak   (pdmMixL, 0, peakCh5, 0);
 AudioConnection      c_micL_rms    (pdmMixL, 0, rmsCh5, 0);
 AudioConnection      c_micL_mon    (pdmMixL, 0, monMicL, 0);
 AudioConnection      c_micL_mix    (monMicL, 0, mixL, 1);
-AudioConnection      c_micR_cap    (pdmMixR, 0, captureR, 1);
+AudioConnection      c_micR_rec    (pdmMixR, 0, recMicR, 0);
+AudioConnection      c_recMicR_cap (recMicR, 0, captureR, 1);
 AudioConnection      c_micR_peak   (pdmMixR, 0, peakCh6, 0);
 AudioConnection      c_micR_rms    (pdmMixR, 0, rmsCh6, 0);
 AudioConnection      c_micR_mon    (pdmMixR, 0, monMicR, 0);
 AudioConnection      c_micR_mix    (monMicR, 0, mixR, 1);
 
-// Main mixers → main fader amps → hostvol amps → DAC (TDM out slots 0, 2)
-AudioConnection      c_mainL_amp   (mixL, 0, mainAmpL, 0);
-AudioConnection      c_mainR_amp   (mixR, 0, mainAmpR, 0);
+// Input mixers → preMix bus (slot 0) → main fader amps → hostvol amps → DAC.
+// preMix slot 1 = Dexed (wired below), slots 2..3 = reserved for future
+// synth engines. Unused slots sit at gain 0 and contribute nothing.
+AudioConnection      c_mixL_pre    (mixL, 0, preMixL, 0);
+AudioConnection      c_mixR_pre    (mixR, 0, preMixR, 0);
+
+// Dexed: engine → volume amp → both sides of preMix slot 1 (dual-mono).
+// The single AudioAmplifier output feeds two downstream AudioConnections,
+// which Teensy Audio supports natively (each connection gets the same
+// block, ref-counted internally).
+AudioConnection      c_dexed_gain  (g_dexed,     0, g_dexedGain, 0);
+// Dry path — dual-mono into preMix slot 1.
+AudioConnection      c_dexed_preL  (g_dexedGain, 0, preMixL,     1);
+AudioConnection      c_dexed_preR  (g_dexedGain, 0, preMixR,     1);
+// FX send path — post-volume tap through the per-synth send amp into
+// the shared FX bus slot 0. Setting g_dexedSend's gain to 0 mutes
+// just this synth's contribution; other synths keep sending.
+AudioConnection      c_dexed_send  (g_dexedGain, 0, g_dexedSend, 0);
+AudioConnection      c_dexed_bus   (g_dexedSend, 0, fxSendBus,   0);
+
+// Shared FX chain: send bus → chorus → stereo reverb → return amps → preMix slot 3.
+AudioConnection      c_fx_bus_cho  (fxSendBus,  0, fxChorus,  0);
+AudioConnection      c_fx_cho_rev  (fxChorus,   0, fxReverb,  0);
+AudioConnection      c_fx_rev_retL (fxReverb,   0, fxReturnL, 0);
+AudioConnection      c_fx_rev_retR (fxReverb,   1, fxReturnR, 0);
+AudioConnection      c_fx_retL_pre (fxReturnL,  0, preMixL,   3);
+AudioConnection      c_fx_retR_pre (fxReturnR,  0, preMixR,   3);
+
+AudioConnection      c_mainL_amp   (preMixL, 0, mainAmpL, 0);
+AudioConnection      c_mainR_amp   (preMixR, 0, mainAmpR, 0);
 AudioConnection      c_mainL_hv    (mainAmpL, 0, hostvolAmpL, 0);
 AudioConnection      c_mainR_hv    (mainAmpR, 0, hostvolAmpR, 0);
-AudioConnection      c_mainL_dac   (hostvolAmpL, 0, tdmOut, 0);
-AudioConnection      c_mainR_dac   (hostvolAmpR, 0, tdmOut, 2);
+AudioConnection      c_hvL_shelf   (hostvolAmpL, 0, procShelfL,   0);
+AudioConnection      c_hvR_shelf   (hostvolAmpR, 0, procShelfR,   0);
+AudioConnection      c_shelfL_lim  (procShelfL,  0, procLimiterL, 0);
+AudioConnection      c_shelfR_lim  (procShelfR,  0, procLimiterR, 0);
+AudioConnection      c_limL_dac    (procLimiterL, 0, tdmOut, 0);
+AudioConnection      c_limR_dac    (procLimiterR, 0, tdmOut, 2);
 
 // Main bus meter taps — on the FADER amp output, pre-hostvol. So the
 // meter tracks the main fader but is unaffected by Windows volume.
@@ -225,6 +381,14 @@ AudioConnection      c_mainR_rms   (mainAmpR, 0, rmsMainR, 0);
 // SpectrumEngine is actually polling and emitting blobs.
 AudioConnection      c_mainL_fft   (mainAmpL, 0, fftMainL, 0);
 AudioConnection      c_mainR_fft   (mainAmpR, 0, fftMainR, 0);
+
+// Main bus loopback tap — same node as meter/FFT taps (post-mainAmp,
+// pre-hostvol). Feeds captureL/R slot 3 through loopL/R amps. Gain is
+// 1.0 when Main.loopEnable is true, else 0.0 (bindings update on change).
+AudioConnection      c_mainL_loop  (mainAmpL, 0, loopL, 0);
+AudioConnection      c_loopL_cap   (loopL, 0, captureL, 3);
+AudioConnection      c_mainR_loop  (mainAmpR, 0, loopR, 0);
+AudioConnection      c_loopR_cap   (loopR, 0, captureR, 3);
 
 // Host meter taps — on the hostvol amp output, POST-hostvol. So the
 // meter shows what the DAC actually receives, including Windows volume
@@ -262,6 +426,260 @@ Tac5212Panel              g_codecPanel(g_codec);
 // Line input mode: false = stereo (CH1=L, CH2=R, single-ended),
 // true = mono differential (CH1 differential, mono → both L+R outputs).
 static bool g_lineMonoMode = false;
+
+// Dexed synth output level, 0..1 linear. Stored in the sketch because
+// Teensy Audio's AudioAmplifier exposes no getter — broadcastSnapshot()
+// and any future UI echo needs the last-set value. Applied via
+// applyDexedVolume() which writes g_dexedGain.gain().
+static float g_dexedVolume = 0.7f;
+
+static void applyDexedVolume(float v) {
+    if (v < 0.0f) v = 0.0f;
+    if (v > 1.0f) v = 1.0f;
+    g_dexedVolume = v;
+    g_dexedGain.gain(v);
+}
+
+// Currently-loaded voice within the bundled DX7 bank set. Mirrored
+// here so /synth/dexed/voice read-back and snapshot work without
+// poking the engine. (synth_dexed doesn't expose a "what voice is
+// this?" accessor — it stores VCED bytes, not the source bank/voice.)
+static int g_dexedBank  = 0;
+static int g_dexedVoice = 0;
+
+// --------------------------------------------------------------------
+// Shared FX bus state — chorus + reverb params, per-synth send amounts.
+//
+// Per-synth: g_dexedSendAmt is the 0..1 gain of g_dexedSend. Default
+// 0.0 means "dry by default" so a first-boot user hears the synth
+// unprocessed until they explicitly dial in some send.
+//
+// Global chorus: voice count 0/1 = bypass, 2..8 = progressively
+// thicker chorus. We expose this as an "enable + voices" pair to the
+// UI so a binary toggle maps cleanly onto the single integer the
+// library wants.
+//
+// Global reverb: roomsize and damping map 1:1 to AudioEffectFreeverb-
+// Stereo's internal params (both 0..1). Wet return amount is the
+// shared gain on fxReturnL/R — set to 0 to mute the wet regardless
+// of reverb settings.
+// --------------------------------------------------------------------
+
+static float g_dexedSendAmt       = 0.0f;   // 0..1, default dry
+static bool  g_fxChorusEnable     = false;  // OFF by default
+static int   g_fxChorusVoices     = 3;      // 2..8 when enabled
+static bool  g_fxReverbEnable     = false;  // OFF by default
+static float g_fxReverbRoomSize   = 0.6f;   // medium room
+static float g_fxReverbDamping    = 0.5f;   // balanced
+static float g_fxReverbReturnAmt  = 0.6f;   // 0..1 wet level into main mix
+
+static void applyDexedSend() {
+    g_dexedSend.gain(g_dexedSendAmt);
+}
+
+static void applyFxChorus() {
+    // voices(0 or 1) = bypass in this library. Keeping the object
+    // always wired and flipping voices is cheaper than rebuilding
+    // connections. When enabling, clamp voices to [2, 8] — below
+    // 2 is indistinguishable from off, above 8 runs out of delay
+    // line headroom at our 4096-sample buffer.
+    int n = g_fxChorusEnable ? g_fxChorusVoices : 0;
+    if (n > 8) n = 8;
+    if (g_fxChorusEnable && n < 2) n = 2;
+    fxChorus.voices(n);
+}
+
+static void applyFxReverb() {
+    // "Disable" mutes the wet return so the reverb engine keeps
+    // running (cheap enough — CPU is always on) but contributes
+    // nothing to the mix. This avoids audible tail chops if a user
+    // toggles reverb while notes are ringing.
+    const float ret = g_fxReverbEnable ? g_fxReverbReturnAmt : 0.0f;
+    fxReverb.roomsize(g_fxReverbRoomSize);
+    fxReverb.damping(g_fxReverbDamping);
+    fxReturnL.gain(ret);
+    fxReturnR.gain(ret);
+}
+
+// --------------------------------------------------------------------
+// Main-bus processing stage: high-shelf EQ + peak-limit waveshaper.
+//
+// Tone shelf defaults to -4 dB above 5 kHz — a mild "darken" that
+// takes the hardest edge off FM synth sizzle without making things
+// sound veiled. The limiter uses a tanh soft-clip curve capped at
+// 0.7079 (-3 dBFS), giving a generous peak margin the DAC can't
+// exceed no matter how hot the upstream signal is.
+//
+// Both stages always sit in the audio graph (see the object declara-
+// tions up top). "Disable" reconfigures them to a transparent
+// response rather than bypassing the block — cheaper than rebuilding
+// connections at runtime and keeps meter taps stable.
+//
+// The limiter's lookup table is AUDIO_BLOCK_SAMPLES-independent: it
+// maps input amplitude (via a 513-point lerp) to output amplitude
+// once, and the waveshaper object stores the resulting int16_t table.
+// Rebuilt when enable toggles.
+// --------------------------------------------------------------------
+
+static bool  g_procShelfEnable   = true;
+static float g_procShelfFreqHz   = 5000.0f;
+static float g_procShelfGainDb   = -4.0f;
+static bool  g_procLimiterEnable = true;
+
+constexpr int   kProcLimiterTableLen = 513;      // 2^N + 1 as required by AudioEffectWaveshaper
+constexpr float kProcLimiterCeiling  = 0.7079f;  // ~ -3 dBFS
+constexpr float kProcLimiterKnee     = 2.0f;     // tanh steepness: higher = harder knee
+
+static float g_procLimiterTable[kProcLimiterTableLen];
+
+static void applyProcShelf() {
+    // Biquad setHighShelf gain is in dB. A gain of 0 dB collapses to
+    // an identity filter mathematically (a = 1.0 makes all the
+    // intermediate terms fold to {b0=1, b1=0, b2=0, a1=0, a2=0}), so
+    // "disabled" is just gain=0 on the same stage — no bypass wiring.
+    const float gain = g_procShelfEnable ? g_procShelfGainDb : 0.0f;
+    procShelfL.setHighShelf(0, g_procShelfFreqHz, gain, 1.0f);
+    procShelfR.setHighShelf(0, g_procShelfFreqHz, gain, 1.0f);
+}
+
+static void applyProcLimiter() {
+    // Build the lookup table. Input i in [0, N-1] maps to x in [-1, +1];
+    // output y is either the tanh-soft-clipped value (enabled) or a
+    // straight identity (disabled, i.e. y = x).
+    for (int i = 0; i < kProcLimiterTableLen; ++i) {
+        const float x = -1.0f + 2.0f * (float)i / (float)(kProcLimiterTableLen - 1);
+        float y;
+        if (g_procLimiterEnable) {
+            // tanh(kx) / tanh(k) normalizes so tanh(1) still maps to 1.0
+            // before the ceiling scale; this keeps headroom below the
+            // ceiling clean (1:1 response at low levels) and eases into
+            // saturation near the edges.
+            y = tanhf(kProcLimiterKnee * x) / tanhf(kProcLimiterKnee) * kProcLimiterCeiling;
+        } else {
+            y = x;
+        }
+        g_procLimiterTable[i] = y;
+    }
+    procLimiterL.shape(g_procLimiterTable, kProcLimiterTableLen);
+    procLimiterR.shape(g_procLimiterTable, kProcLimiterTableLen);
+}
+
+// Load the selected bank/voice into the Dexed engine. Clamps to valid
+// ranges; on failure (bad indices) leaves the engine untouched. Kills
+// sounding notes before loading — decodeVoice() calls panic() anyway,
+// but doing it here makes the intent explicit and survives any future
+// library revision that stops auto-panicking on voice change.
+static void applyDexedVoice(int bank, int voice) {
+    if (bank < 0)                                 bank  = 0;
+    if (bank >= tdsp::dexed::kNumBanks)           bank  = tdsp::dexed::kNumBanks - 1;
+    if (voice < 0)                                voice = 0;
+    if (voice >= tdsp::dexed::kVoicesPerBank)     voice = tdsp::dexed::kVoicesPerBank - 1;
+    g_dexed.panic();
+    if (tdsp::dexed::loadVoice(g_dexed, bank, voice)) {
+        g_dexedBank  = bank;
+        g_dexedVoice = voice;
+    }
+}
+
+// ============================================================================
+// USB host — MIDI keyboard input, routed through tdsp::MidiRouter
+// ============================================================================
+//
+// The Teensy 4.1 has a second USB port wired as a host controller. Plug in
+// a USB MIDI keyboard and g_usbHost.Task() enumerates it; g_midiIn.read()
+// drains any queued events and fires the installed callbacks. Those callbacks
+// all forward to g_midiRouter, which dispatches normalized events to
+// every registered MidiSink. Today there's one sink (MidiVizSink below)
+// that broadcasts note on/off to the web dev surface. Phase 2c+ adds
+// synth-engine sinks.
+//
+// MIDIDevice (not _BigBuffer) is sufficient for notes and basic CCs.
+// When we wire Dexed and want SysEx voice dumps, switch to
+// MIDIDevice_BigBuffer — its constructor + setup calls are identical.
+
+USBHost      g_usbHost;
+USBHub       g_usbHub1(g_usbHost);
+USBHub       g_usbHub2(g_usbHost);
+MIDIDevice   g_midiIn(g_usbHost);
+
+tdsp::MidiRouter g_midiRouter;
+DexedSink        g_dexedSink(&g_dexed);
+
+// ============================================================================
+// MidiVizSink — broadcasts /midi/note on each note-on/off for the web
+// keyboard visualization. Subscription-gated: the web UI sends
+// /sub addSub /midi/events when the Synth tab opens, which flips _enabled.
+// When disabled, events are dropped silently so no USB CDC traffic happens
+// if nobody's watching (meters/spectrum follow the same pattern).
+//
+// OSC argument casts use plain `int` — matches CNMAT/OSC's intOSC_t on
+// this gcc-arm toolchain where `int32_t` resolves to `long int` and has
+// no exact OSCData constructor overload.
+// ============================================================================
+
+class MidiVizSink : public tdsp::MidiSink {
+public:
+    void setEnabled(bool on) { _enabled = on; }
+    bool isEnabled() const   { return _enabled; }
+
+    void onNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) override {
+        if (!_enabled) return;
+        broadcastNote(note, velocity, channel);
+    }
+    void onNoteOff(uint8_t channel, uint8_t note, uint8_t /*velocity*/) override {
+        if (!_enabled) return;
+        // Note-off velocity is rarely meaningful for visualization; the
+        // wire format uses velocity==0 as the note-off sentinel so the
+        // web UI can treat (velocity > 0) as "held".
+        broadcastNote(note, 0, channel);
+    }
+
+private:
+    void broadcastNote(uint8_t note, uint8_t velocity, uint8_t channel) {
+        OSCMessage m("/midi/note");
+        m.add((int)note);
+        m.add((int)velocity);
+        m.add((int)channel);
+        OSCBundle b;
+        b.add(m);
+        g_transport.broadcastBundle(b);
+    }
+
+    bool _enabled = false;
+};
+
+MidiVizSink g_midiVizSink;
+
+// ---------------------------------------------------------------------
+// USB host MIDI callbacks — forward to the router. Keep these as plain
+// free functions (USBHost_t36's setHandleXxx takes function pointers,
+// not std::function). Every callback is a one-liner into g_midiRouter.
+// ---------------------------------------------------------------------
+
+static void onUsbHostNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
+    g_midiRouter.handleNoteOn(channel, note, velocity);
+}
+static void onUsbHostNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) {
+    g_midiRouter.handleNoteOff(channel, note, velocity);
+}
+static void onUsbHostControlChange(uint8_t channel, uint8_t cc, uint8_t value) {
+    g_midiRouter.handleControlChange(channel, cc, value);
+}
+static void onUsbHostPitchChange(uint8_t channel, int pitch) {
+    // USBHost_t36 delivers pitch bend as a plain `int` in the range
+    // -8192..+8191. Narrow to int16_t which is what the router expects;
+    // the value range is guaranteed to fit.
+    g_midiRouter.handlePitchBend(channel, (int16_t)pitch);
+}
+static void onUsbHostAfterTouch(uint8_t channel, uint8_t pressure) {
+    g_midiRouter.handleChannelPressure(channel, pressure);
+}
+static void onUsbHostProgramChange(uint8_t channel, uint8_t program) {
+    g_midiRouter.handleProgramChange(channel, program);
+}
+static void onUsbHostSysEx(const uint8_t *data, uint16_t length, bool last) {
+    g_midiRouter.handleSysEx(data, (size_t)length, last);
+}
 
 // ============================================================================
 // Hand-rolled codec init (Phase 1 path, preserved as the working audio config)
@@ -378,46 +796,48 @@ static void pollHostVolume();
 static void pollCaptureHostVolume();
 
 // Apply the line input mode to the codec and audio graph.
-// Mono mode: ADC CH2 differential (board IN1+/IN1-), mono → both L+R.
+// Mono mode: ADC CH1 differential (IN1+/IN1-) reads the balanced mic;
+//            CH2 disabled because IN2+ is tied to the mic's ring/cold
+//            wire and would otherwise load it and buzz.
 // Stereo mode: CH1 = Line L (single-ended), CH2 = Line R (single-ended).
 //
-// Note: the board's physical IN1+/IN1- connector is wired to the TAC5212's
-// ADC CH2 input, which appears as mixer ch4 ("Line R") via tdmIn ch2.
+// Wiring assumption (user TRS cable):
+//   Tip  -> IN1+               (CH1 hot)
+//   Ring -> IN2+ and IN1-      (CH2 hot AND CH1 cold)
+//   CH1 differential reads tip - ring = hot - cold = full mic signal.
 static void applyLineMode(bool mono) {
     g_lineMonoMode = mono;
 
     if (mono) {
-        // ADC CH2 → differential (board IN1+/IN1-)
-        g_codec.adc(2).setMode(tac5212::AdcMode::Differential);
-        // Disable ADC CH1 — its input (board IN2+) is tied to the mic's
-        // ring/cold wire. Leaving CH1 powered on loads that signal and
-        // causes buzz. Read-modify-write CH_EN to clear IN_CH1 (bit 7).
+        // ADC CH1 → differential (IN1+ / IN1-)
+        g_codec.adc(1).setMode(tac5212::AdcMode::Differential);
+        // Disable ADC CH2 — its hot input (IN2+) is tied to the mic's
+        // ring/cold wire. Leaving CH2 powered on loads that signal and
+        // causes buzz. Read-modify-write CH_EN to clear IN_CH2 (bit 6).
         {
             uint8_t chEn = g_codec.readRegister(0, 0x76);
-            g_codec.writeRegister(0, 0x76, chEn & ~0x80);
+            g_codec.writeRegister(0, 0x76, chEn & ~0x40);
         }
-        // Cross-feed: ch4 (Line R) mirrors into mixL[3], ch3 muted
+        // Cross-feed: ch3 (Line L) mirrors into mixR[3], ch4 muted
         monoXfeed.gain(1.0f);
-        g_binding.setMonoMirror(4, 3, &mixL, 3);
+        g_binding.setMonoMirror(3, 4, &mixR, 3);
     } else {
-        // ADC CH2 → single-ended on INxP. INxM is disabled because on this
-        // board it's tied to the other channel's INxP through the TRS ring
-        // (for differential/balanced-input support in mono mode).
-        g_codec.adc(2).setMode(tac5212::AdcMode::SingleEndedInp);
-        // Re-enable ADC CH1
+        // ADC CH1 → single-ended on INxP
+        g_codec.adc(1).setMode(tac5212::AdcMode::SingleEndedInp);
+        // Re-enable ADC CH2
         {
             uint8_t chEn = g_codec.readRegister(0, 0x76);
-            g_codec.writeRegister(0, 0x76, chEn | 0x80);
+            g_codec.writeRegister(0, 0x76, chEn | 0x40);
         }
-        // Cross-feed off, restore ch3
+        // Cross-feed off, restore ch4
         monoXfeed.gain(0.0f);
         g_binding.clearMonoMirror();
         // Clear the cross-feed mixer slot
-        mixL.gain(3, 0.0f);
+        mixR.gain(3, 0.0f);
     }
 
     // Re-apply ch3 + ch4 gains through the binding so the mirror
-    // (or restored ch3) takes effect immediately.
+    // (or restored ch4) takes effect immediately.
     g_binding.applyChannel(3);
     g_binding.applyChannel(4);
 }
@@ -469,6 +889,388 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
+    // /midi/note/in i i i — UI-originated note (synth tab's on-screen
+    // keyboard). Feeds the MidiRouter the same way the USB-host keyboard
+    // does, so downstream consumers (MidiVizSink broadcast, future synth
+    // engines) see UI notes and hardware notes identically. The router
+    // folds velocity==0 into note-off per the standard running-status
+    // rule, so this handler doesn't have to split the cases itself.
+    if (strcmp(address, "/midi/note/in") == 0 && msg.size() >= 3
+        && msg.isInt(0) && msg.isInt(1) && msg.isInt(2)) {
+        uint8_t note     = (uint8_t)msg.getInt(0);
+        uint8_t velocity = (uint8_t)msg.getInt(1);
+        uint8_t channel  = (uint8_t)msg.getInt(2);
+        if (velocity > 0) g_midiRouter.handleNoteOn(channel, note, velocity);
+        else              g_midiRouter.handleNoteOff(channel, note, 0);
+        return;
+    }
+
+    // /synth/dexed/volume f — Dexed output level into preMix slot 1.
+    // 0..1 linear on the g_dexedGain amplifier. No arg = read (echo
+    // current); float arg = write. Echoes on change so cross-client sync
+    // works the same as the codec panel.
+    if (strcmp(address, "/synth/dexed/volume") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/dexed/volume");
+            m.add(g_dexedVolume);
+            reply.add(m);
+        } else if (msg.isFloat(0)) {
+            applyDexedVolume(msg.getFloat(0));
+            OSCMessage m("/synth/dexed/volume");
+            m.add(g_dexedVolume);
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    // /synth/dexed/midi/ch i — which MIDI channel Dexed listens on.
+    // 0 = omni (accept all channels), 1..16 = single-channel. Clamped
+    // to valid range in DexedSink::setListenChannel. Values outside
+    // 0..16 are treated as omni (the safer default).
+    if (strcmp(address, "/synth/dexed/midi/ch") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/dexed/midi/ch");
+            m.add((int)g_dexedSink.listenChannel());
+            reply.add(m);
+        } else if (msg.isInt(0)) {
+            int ch = msg.getInt(0);
+            if (ch < 0) ch = 0;
+            if (ch > 16) ch = 0;
+            // Release any notes currently held on the old channel so a
+            // channel switch mid-performance doesn't leave voices stuck.
+            g_dexed.panic();
+            g_dexedSink.setListenChannel((uint8_t)ch);
+            OSCMessage m("/synth/dexed/midi/ch");
+            m.add((int)g_dexedSink.listenChannel());
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    // --- Shared FX bus: per-synth send + chorus + reverb -------------
+    //
+    // Addresses:
+    //   /synth/dexed/fx/send f   — Dexed's send amount into the bus
+    //   /fx/chorus/enable   i
+    //   /fx/chorus/voices   i   (2..8 when enabled; bypass otherwise)
+    //   /fx/reverb/enable   i
+    //   /fx/reverb/size     f   (0..1 roomsize)
+    //   /fx/reverb/damping  f   (0..1)
+    //   /fx/reverb/return   f   (0..1 wet amount into main mix)
+
+    if (strcmp(address, "/synth/dexed/fx/send") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/synth/dexed/fx/send");
+            m.add(g_dexedSendAmt);
+            reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0);
+            if (v < 0.0f) v = 0.0f;
+            if (v > 1.0f) v = 1.0f;
+            g_dexedSendAmt = v;
+            applyDexedSend();
+            OSCMessage m("/synth/dexed/fx/send");
+            m.add(g_dexedSendAmt);
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/fx/chorus/enable") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/fx/chorus/enable");
+            m.add(g_fxChorusEnable ? 1 : 0);
+            reply.add(m);
+        } else if (msg.isInt(0)) {
+            g_fxChorusEnable = msg.getInt(0) != 0;
+            applyFxChorus();
+            OSCMessage m("/fx/chorus/enable");
+            m.add(g_fxChorusEnable ? 1 : 0);
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/fx/chorus/voices") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/fx/chorus/voices");
+            m.add(g_fxChorusVoices);
+            reply.add(m);
+        } else if (msg.isInt(0)) {
+            int n = msg.getInt(0);
+            if (n < 2) n = 2;
+            if (n > 8) n = 8;
+            g_fxChorusVoices = n;
+            applyFxChorus();
+            OSCMessage m("/fx/chorus/voices");
+            m.add(g_fxChorusVoices);
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/fx/reverb/enable") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/fx/reverb/enable");
+            m.add(g_fxReverbEnable ? 1 : 0);
+            reply.add(m);
+        } else if (msg.isInt(0)) {
+            g_fxReverbEnable = msg.getInt(0) != 0;
+            applyFxReverb();
+            OSCMessage m("/fx/reverb/enable");
+            m.add(g_fxReverbEnable ? 1 : 0);
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/fx/reverb/size") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/fx/reverb/size");
+            m.add(g_fxReverbRoomSize);
+            reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0);
+            if (v < 0.0f) v = 0.0f;
+            if (v > 1.0f) v = 1.0f;
+            g_fxReverbRoomSize = v;
+            applyFxReverb();
+            OSCMessage m("/fx/reverb/size");
+            m.add(g_fxReverbRoomSize);
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/fx/reverb/damping") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/fx/reverb/damping");
+            m.add(g_fxReverbDamping);
+            reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0);
+            if (v < 0.0f) v = 0.0f;
+            if (v > 1.0f) v = 1.0f;
+            g_fxReverbDamping = v;
+            applyFxReverb();
+            OSCMessage m("/fx/reverb/damping");
+            m.add(g_fxReverbDamping);
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/fx/reverb/return") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/fx/reverb/return");
+            m.add(g_fxReverbReturnAmt);
+            reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0);
+            if (v < 0.0f) v = 0.0f;
+            if (v > 1.0f) v = 1.0f;
+            g_fxReverbReturnAmt = v;
+            applyFxReverb();
+            OSCMessage m("/fx/reverb/return");
+            m.add(g_fxReverbReturnAmt);
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    // --- Main-bus processing: high-shelf EQ + peak-limit waveshaper --
+    //
+    // Addresses live under /proc/ so they're clearly separate from the
+    // mixer's /main/st/* tree; the Processing tab in the web UI owns
+    // this namespace. All four fields follow the standard pattern:
+    // no args = echo current, typed args = write-then-echo.
+
+    if (strcmp(address, "/proc/shelf/enable") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/proc/shelf/enable");
+            m.add(g_procShelfEnable ? 1 : 0);
+            reply.add(m);
+        } else if (msg.isInt(0)) {
+            g_procShelfEnable = msg.getInt(0) != 0;
+            applyProcShelf();
+            OSCMessage m("/proc/shelf/enable");
+            m.add(g_procShelfEnable ? 1 : 0);
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/proc/shelf/freq") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/proc/shelf/freq");
+            m.add(g_procShelfFreqHz);
+            reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float f = msg.getFloat(0);
+            // Clamp to a sensible range — the biquad math is stable
+            // well beyond this, but values outside 500..18000 aren't
+            // useful for the "tame harshness" job this shelf does.
+            if (f < 500.0f)   f = 500.0f;
+            if (f > 18000.0f) f = 18000.0f;
+            g_procShelfFreqHz = f;
+            applyProcShelf();
+            OSCMessage m("/proc/shelf/freq");
+            m.add(g_procShelfFreqHz);
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/proc/shelf/gain") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/proc/shelf/gain");
+            m.add(g_procShelfGainDb);
+            reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float g = msg.getFloat(0);
+            // Cut-only semantics by convention: positive shelf gains
+            // add sizzle, which is the opposite of what this control
+            // exists to do. Clamp to [-18, 0] dB.
+            if (g < -18.0f) g = -18.0f;
+            if (g >   0.0f) g =   0.0f;
+            g_procShelfGainDb = g;
+            applyProcShelf();
+            OSCMessage m("/proc/shelf/gain");
+            m.add(g_procShelfGainDb);
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/proc/limiter/enable") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/proc/limiter/enable");
+            m.add(g_procLimiterEnable ? 1 : 0);
+            reply.add(m);
+        } else if (msg.isInt(0)) {
+            g_procLimiterEnable = msg.getInt(0) != 0;
+            applyProcLimiter();
+            OSCMessage m("/proc/limiter/enable");
+            m.add(g_procLimiterEnable ? 1 : 0);
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    // /synth/dexed/voice i i — select bundled DX7 voice (bank, voice).
+    // No args = read (echo current bank, voice, and trimmed name). Two
+    // int args = write. Reply always contains the voice NAME as the
+    // third arg so a UI can label the dropdown without a second
+    // round-trip.
+    if (strcmp(address, "/synth/dexed/voice") == 0) {
+        OSCBundle reply;
+        bool send = false;
+        if (msg.size() == 0) {
+            send = true;
+        } else if (msg.size() >= 2 && msg.isInt(0) && msg.isInt(1)) {
+            applyDexedVoice(msg.getInt(0), msg.getInt(1));
+            send = true;
+        }
+        if (send) {
+            char name[tdsp::dexed::kVoiceNameBufBytes] = {0};
+            tdsp::dexed::copyVoiceName(g_dexedBank, g_dexedVoice, name, sizeof(name));
+            OSCMessage m("/synth/dexed/voice");
+            m.add(g_dexedBank);
+            m.add(g_dexedVoice);
+            m.add(name);
+            reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    // /synth/dexed/voice/names i — return the 32 voice names for the
+    // given bank as a single message carrying 32 string args, in order
+    // (voice 0 first). The UI queries this on bank-select to populate
+    // its voice dropdown. Bank index is clamped; an out-of-range value
+    // gets the first bank's names.
+    if (strcmp(address, "/synth/dexed/voice/names") == 0 && msg.size() >= 1 && msg.isInt(0)) {
+        int bank = msg.getInt(0);
+        if (bank < 0)                           bank = 0;
+        if (bank >= tdsp::dexed::kNumBanks)     bank = tdsp::dexed::kNumBanks - 1;
+        OSCMessage m("/synth/dexed/voice/names");
+        m.add(bank);
+        for (int v = 0; v < tdsp::dexed::kVoicesPerBank; ++v) {
+            char name[tdsp::dexed::kVoiceNameBufBytes] = {0};
+            tdsp::dexed::copyVoiceName(bank, v, name, sizeof(name));
+            m.add(name);
+        }
+        OSCBundle reply;
+        reply.add(m);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    // /synth/dexed/bank/names — return all bank names as a single
+    // message of 10 string args (bank 0 first). Hardcoded on the
+    // firmware side because the bank set is compile-time fixed.
+    if (strcmp(address, "/synth/dexed/bank/names") == 0) {
+        OSCMessage m("/synth/dexed/bank/names");
+        for (int b = 0; b < tdsp::dexed::kNumBanks; ++b) {
+            m.add(tdsp::dexed::bankName(b));
+        }
+        OSCBundle reply;
+        reply.add(m);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    // /sub target=/midi/events — subscription for the MIDI visualization
+    // broadcast. Intercepted here (not in OscDispatcher) to keep the MIDI
+    // path confined to this sketch: OscDispatcher::handleSub only
+    // recognises /meters/ and /spectrum/ target prefixes. For the MIDI
+    // target we toggle g_midiVizSink's enable flag — the sink stays
+    // registered with the router either way, but it only produces output
+    // when enabled, so events still reach future synth sinks regardless
+    // of whether a web client is watching.
+    if (strcmp(address, "/sub") == 0 && msg.size() >= 2 && msg.isString(0)) {
+        const int last = msg.size() - 1;
+        if (msg.isString(last)) {
+            char target[32] = {0};
+            int tl = msg.getString(last, target, sizeof(target));
+            target[(tl < (int)sizeof(target)) ? tl : (int)sizeof(target) - 1] = '\0';
+            if (strcmp(target, "/midi/events") == 0) {
+                char verb[16] = {0};
+                int vl = msg.getString(0, verb, sizeof(verb));
+                verb[(vl < (int)sizeof(verb)) ? vl : (int)sizeof(verb) - 1] = '\0';
+                if (strcmp(verb, "addSub") == 0) g_midiVizSink.setEnabled(true);
+                else if (strcmp(verb, "unsubscribe") == 0) g_midiVizSink.setEnabled(false);
+                return;
+            }
+        }
+    }
+
     OSCBundle reply;
     g_dispatcher.route(msg, reply);
     if (reply.size() > 0) {
@@ -489,6 +1291,7 @@ static void onCliLine(char *line, int length, void *userData) {
     if (strcmp(line, "unsub_all") == 0) {
         g_meters.setEnabled(false);
         g_spectrum.setEnabled(false);
+        g_midiVizSink.setEnabled(false);
         Serial.println("streaming disabled");
         return;
     }
@@ -581,7 +1384,14 @@ void setup() {
     // would SW-reset the chip and wipe the hand-rolled init.
     setupCodecHandRolled();
 
-    AudioMemory(64);
+    // Pool sized for all taps + fan-outs in the graph. Was 96 for the
+    // pre-synth graph; bumped to 144 for Phase 2c when Dexed (8 voices,
+    // each with its own operator mix buffers) and the preMix stage
+    // joined. Dexed alone asks for ~30 blocks peak under full polyphony;
+    // the preMix adds ~4; the existing graph was already near 70 under
+    // load. Monitor via the 's' CLI — AudioMemoryUsageMax() should stay
+    // well below this ceiling.
+    AudioMemory(144);
 
     // PDM mic amplitude trim: 32-bit PDM split across two 16-bit slots
     // — high 16 bits need a 16x boost, low 16 bits need a 1/65536
@@ -592,11 +1402,32 @@ void setup() {
     pdmMixR.gain(0, kPdmGain);
     pdmMixR.gain(1, kPdmGain / 65536.0f);
 
-    // Capture mixers at unity by default.
+    // preMix bus: slot 0 = input-channel mix, slot 1 = Dexed (volume
+    // is controlled by g_dexedGain upstream, so the slot itself is
+    // unity), slot 2 reserved for TDspMPE (future), slot 3 = shared
+    // FX bus wet return (level owned by fxReturnL/R amps upstream,
+    // so the slot is unity here — wet amount is controlled by
+    // g_fxReverbReturnAmt via applyFxReverb()).
+    preMixL.gain(0, 1.0f);
+    preMixL.gain(1, 1.0f);
+    preMixL.gain(2, 0.0f);
+    preMixL.gain(3, 1.0f);
+    preMixR.gain(0, 1.0f);
+    preMixR.gain(1, 1.0f);
+    preMixR.gain(2, 0.0f);
+    preMixR.gain(3, 1.0f);
+
+    // Capture mixers at unity on every slot. The per-source gating is
+    // done by the upstream rec/loop amps (applyChannelRec / applyMainLoop
+    // in the binding), so the mixer itself is just a passive sum.
     captureL.gain(0, 1.0f);
     captureL.gain(1, 1.0f);
+    captureL.gain(2, 1.0f);
+    captureL.gain(3, 1.0f);
     captureR.gain(0, 1.0f);
     captureR.gain(1, 1.0f);
+    captureR.gain(2, 1.0f);
+    captureR.gain(3, 1.0f);
 
     // Listenback monitor amps default to unity. pollCaptureHostVolume()
     // will overwrite them as soon as Windows pushes a SET_CUR for FU 0x30.
@@ -635,6 +1466,15 @@ void setup() {
     g_binding.setChannel(6, &mixR, 1, nullptr);  // Mic R
     g_binding.setMain(&mainAmpL, &mainAmpR);
     g_binding.setMainHostvol(&hostvolAmpL, &hostvolAmpR);
+    // Per-source USB record-send amps and main loop tap. Gain is 0/1,
+    // driven by Channel.recSend / Main.loopEnable (see SignalGraphBinding).
+    g_binding.setChannelRecAmp(1, &recUsbL);
+    g_binding.setChannelRecAmp(2, &recUsbR);
+    g_binding.setChannelRecAmp(3, &recLineL);
+    g_binding.setChannelRecAmp(4, &recLineR);
+    g_binding.setChannelRecAmp(5, &recMicL);
+    g_binding.setChannelRecAmp(6, &recMicR);
+    g_binding.setMainLoop(&loopL, &loopR);
     g_binding.applyAll();  // push initial model defaults into audio objects
 
     g_dispatcher.setModel(&g_model);
@@ -682,6 +1522,86 @@ void setup() {
     pollHostVolume();
     pollCaptureHostVolume();
     g_codecPanel.unmuteOutput();
+
+    // Start the USB host stack. Non-blocking — enumeration happens over
+    // later myusb.Task() calls in loop(). Every USBHost_t36 callback is
+    // a thin forwarder into g_midiRouter, which fans out to registered
+    // sinks. MidiVizSink is registered below; it's the only consumer
+    // for Phase 2b. Synth-engine sinks get added in Phase 2c+.
+    g_usbHost.begin();
+    g_midiIn.setHandleNoteOn        (onUsbHostNoteOn);
+    g_midiIn.setHandleNoteOff       (onUsbHostNoteOff);
+    g_midiIn.setHandleControlChange (onUsbHostControlChange);
+    g_midiIn.setHandlePitchChange   (onUsbHostPitchChange);
+    g_midiIn.setHandleAfterTouch    (onUsbHostAfterTouch);
+    g_midiIn.setHandleProgramChange (onUsbHostProgramChange);
+    g_midiIn.setHandleSysEx         (onUsbHostSysEx);
+
+    // Seed pitch bend range for the LinnStrument master + members.
+    // LinnStrument factory default is 48 semi; it will re-assert this
+    // via RPN 0 at power-on, but seeding up front means the very first
+    // bend that arrives (before any RPN traffic) is scaled correctly.
+    for (uint8_t ch = 1; ch <= tdsp::MidiRouter::kNumChannels; ++ch) {
+        g_midiRouter.setPitchBendRange(ch, tdsp::MidiRouter::kDefaultPitchBendRange);
+    }
+
+    g_midiRouter.addSink(&g_midiVizSink);
+
+    // --- Shared FX bus init -------------------------------------------
+    //
+    // Chorus needs its delay line installed via begin() before any
+    // audio block hits it — update() early-returns if the delay line
+    // pointer is null, which would mean silence in the wet path.
+    // We init with the currently-configured voice count (0 when the
+    // FX are disabled, in which case begin() is effectively bypass).
+    // Unity gain on the FX send bus mixer: each slot is a per-synth
+    // send (g_dexedSend, future g_mpeSend, etc.) and we don't want to
+    // re-attenuate here.
+    fxChorus.begin(g_fxChorusDelayLine, kFxChorusDelayLen, g_fxChorusEnable ? g_fxChorusVoices : 0);
+    for (int i = 0; i < 4; ++i) fxSendBus.gain(i, 1.0f);
+    applyDexedSend();
+    applyFxChorus();
+    applyFxReverb();
+
+    // --- Main-bus processing init -------------------------------------
+    //
+    // Configure the shelf biquad and limiter waveshaper before the
+    // first audio block is produced. If we left them untouched, the
+    // biquad would pass a silent (all-zero coefficients) default and
+    // the waveshaper would skip its update() entirely (null table) —
+    // both of those collapse the output to silence on the DAC path.
+    // Calling these APIs here guarantees the graph is audibly valid
+    // from block 0.
+    applyProcShelf();
+    applyProcLimiter();
+
+    // --- Dexed engine init --------------------------------------------
+    //
+    // synth_dexed's default state after construction is silent — the
+    // engine needs a voice loaded and a handful of controllers seeded
+    // before it will produce sound on keydown. applyDexedVoice(0, 0)
+    // loads bank 0 voice 0 ("FM-Rhodes" from RitChie 1) which is more
+    // interesting than the library's built-in sine init voice and
+    // tells the user immediately that the bank system works. Mod wheel,
+    // pitch bend, sustain default to neutral positions.
+    //
+    // Volume starts at 0.7 (about -3 dB) — loud enough that "does it
+    // work?" is obvious on first note-on, quiet enough that an
+    // accidental all-voices-playing burst doesn't pin the DAC.
+    applyDexedVoice(g_dexedBank, g_dexedVoice);
+    g_dexed.setPitchbendRange(1);
+    g_dexed.setPitchbend((int16_t)0);
+    g_dexed.setModWheel(0);
+    g_dexed.setSustain(false);
+    applyDexedVolume(g_dexedVolume);
+
+    // Register the Dexed sink with the router. Default listen channel
+    // is 1 (see DexedSink constructor default), which matches both the
+    // web UI on-screen keyboard (always sends on 1) and the typical
+    // non-MPE hardware keyboard setup. LinnStrument in MPE mode sends
+    // notes on channels 2..16, which Dexed ignores until the user flips
+    // /synth/dexed/midi/ch to 0 (omni).
+    g_midiRouter.addSink(&g_dexedSink);
 
     Serial.println("\nReady!");
     Serial.println("  6 input channels: USB L/R, Line L/R, Mic L/R");
@@ -834,6 +1754,7 @@ static void broadcastSnapshot(OSCBundle &reply) {
         g_dispatcher.broadcastChannelOn(n, reply);
         g_dispatcher.broadcastChannelSolo(n, reply);
         g_dispatcher.broadcastChannelName(n, reply);
+        g_dispatcher.broadcastChannelRecSend(n, reply);
     }
 
     // Main bus state.
@@ -842,6 +1763,7 @@ static void broadcastSnapshot(OSCBundle &reply) {
     g_dispatcher.broadcastMainLink(reply);
     g_dispatcher.broadcastMainOn(reply);
     g_dispatcher.broadcastMainHostvolValue(reply);
+    g_dispatcher.broadcastMainLoop(reply);
 
     // /main/st/hostvol/enable has no broadcast helper in the dispatcher
     // yet, emit it inline so clients can render the ENABLE button
@@ -876,6 +1798,88 @@ static void broadcastSnapshot(OSCBundle &reply) {
         reply.add(m);
     }
 
+    // Dexed synth state — volume, MIDI listen channel, and current
+    // voice (with name, so UIs don't need a second round-trip to
+    // label the dropdown).
+    {
+        OSCMessage m("/synth/dexed/volume");
+        m.add(g_dexedVolume);
+        reply.add(m);
+    }
+    {
+        OSCMessage m("/synth/dexed/midi/ch");
+        m.add((int)g_dexedSink.listenChannel());
+        reply.add(m);
+    }
+    {
+        char name[tdsp::dexed::kVoiceNameBufBytes] = {0};
+        tdsp::dexed::copyVoiceName(g_dexedBank, g_dexedVoice, name, sizeof(name));
+        OSCMessage m("/synth/dexed/voice");
+        m.add(g_dexedBank);
+        m.add(g_dexedVoice);
+        m.add(name);
+        reply.add(m);
+    }
+
+    // Shared FX bus (FX tab + per-synth send).
+    {
+        OSCMessage m("/synth/dexed/fx/send");
+        m.add(g_dexedSendAmt);
+        reply.add(m);
+    }
+    {
+        OSCMessage m("/fx/chorus/enable");
+        m.add(g_fxChorusEnable ? 1 : 0);
+        reply.add(m);
+    }
+    {
+        OSCMessage m("/fx/chorus/voices");
+        m.add(g_fxChorusVoices);
+        reply.add(m);
+    }
+    {
+        OSCMessage m("/fx/reverb/enable");
+        m.add(g_fxReverbEnable ? 1 : 0);
+        reply.add(m);
+    }
+    {
+        OSCMessage m("/fx/reverb/size");
+        m.add(g_fxReverbRoomSize);
+        reply.add(m);
+    }
+    {
+        OSCMessage m("/fx/reverb/damping");
+        m.add(g_fxReverbDamping);
+        reply.add(m);
+    }
+    {
+        OSCMessage m("/fx/reverb/return");
+        m.add(g_fxReverbReturnAmt);
+        reply.add(m);
+    }
+
+    // Main-bus processing (Processing tab).
+    {
+        OSCMessage m("/proc/shelf/enable");
+        m.add(g_procShelfEnable ? 1 : 0);
+        reply.add(m);
+    }
+    {
+        OSCMessage m("/proc/shelf/freq");
+        m.add(g_procShelfFreqHz);
+        reply.add(m);
+    }
+    {
+        OSCMessage m("/proc/shelf/gain");
+        m.add(g_procShelfGainDb);
+        reply.add(m);
+    }
+    {
+        OSCMessage m("/proc/limiter/enable");
+        m.add(g_procLimiterEnable ? 1 : 0);
+        reply.add(m);
+    }
+
     // Codec panel state.
     g_codecPanel.snapshot(reply);
 }
@@ -900,6 +1904,13 @@ void loop() {
 
     pollHostVolume();
     pollCaptureHostVolume();
+
+    // USB host: service enumeration + drain all queued MIDI events. Each
+    // midi1.read() returns true if it dispatched one event to the installed
+    // handler; the while loop keeps draining so a fast-running arpeggio
+    // doesn't back up across loop() ticks.
+    g_usbHost.Task();
+    while (g_midiIn.read()) {}
 
     g_transport.poll();
 

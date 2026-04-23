@@ -23,6 +23,10 @@ import { codecPanel } from './ui/codec-panel';
 import { serialConsole } from './ui/serial-console';
 import { rawOsc } from './ui/raw-osc';
 import { spectrumView } from './ui/spectrum';
+import { keyboardView } from './ui/keyboard';
+import { dexedPanel } from './ui/dexed-panel';
+import { processingPanel } from './ui/processing-panel';
+import { fxPanel } from './ui/fx-panel';
 
 // Channel count for the small mixer v1 — 6 channels (USB L/R, Line L/R,
 // Mic L/R) matching tdsp::kChannelCount in lib/TDspMixer/src/MixerModel.h.
@@ -145,11 +149,20 @@ async function connect(): Promise<void> {
     // all commands at once — they'll be processed with natural spacing.
     setTimeout(() => {
       dispatcher.requestSnapshot();
+      // Dexed bank list is compile-time fixed; one-shot query on connect.
+      // Voice names are bank-scoped — fetch for the currently-selected
+      // bank so the dropdown is populated on first Synth tab open
+      // (bank signal defaults to 0, which is what the firmware boots to).
+      dispatcher.queryDexedBankNames();
+      dispatcher.queryDexedVoiceNames(state.dexed.bank.get());
       if (state.metersOn.get()) {
         dispatcher.subscribeMeters();
       }
       if (spectrum.isRunning()) {
         dispatcher.subscribeSpectrum();
+      }
+      if (keyboard.isRunning()) {
+        dispatcher.subscribeMidi();
       }
     }, 150);
   } catch (e) {
@@ -214,7 +227,19 @@ const spectrumTab = document.createElement('button');
 spectrumTab.className = 'view-tab';
 spectrumTab.dataset.view = 'spectrum';
 spectrumTab.textContent = 'Spectrum';
-viewTabs.append(mixerTab, spectrumTab);
+const synthTab = document.createElement('button');
+synthTab.className = 'view-tab';
+synthTab.dataset.view = 'synth';
+synthTab.textContent = 'Synth';
+const fxTab = document.createElement('button');
+fxTab.className = 'view-tab';
+fxTab.dataset.view = 'fx';
+fxTab.textContent = 'FX';
+const processingTab = document.createElement('button');
+processingTab.className = 'view-tab';
+processingTab.dataset.view = 'processing';
+processingTab.textContent = 'Processing';
+viewTabs.append(mixerTab, spectrumTab, synthTab, fxTab, processingTab);
 
 // --- Mixer view section (wraps existing mixer content) ------------
 
@@ -260,36 +285,128 @@ spectrumSection.className = 'view view-spectrum';
 spectrumSection.style.display = 'none';
 spectrumSection.appendChild(spectrum.element);
 
+// --- Synth view section -------------------------------------------
+//
+// Three stacked rows inside the Synth view:
+//   1. synth-subnav    — sub-tab bar for individual synth engines
+//                        (empty placeholder; Dexed + future synths land here).
+//   2. synth-content   — active engine's config panel (voice select,
+//                        volume, MIDI channel, etc). Empty placeholder
+//                        until Phase 4 wires Dexed in.
+//   3. synth-keyboard  — the 88-key piano, shared across all synth
+//                        sub-tabs so every engine plays from the same
+//                        keyboard. Clicking a key sends /midi/note/in;
+//                        the firmware echoes back /midi/note which
+//                        lights the same key up (round-trip proof).
+
+const keyboard = keyboardView();
+dispatcher.setMidiSink((note, velocity, channel) => {
+  // velocity > 0 → note-on; velocity == 0 → note-off (standard MIDI
+  // running-status). All channels light the same keyboard — the per-
+  // channel breakdown is surfaced via the banner readout in keyboardView.
+  keyboard.setNote(note, velocity > 0, channel);
+});
+keyboard.onPress((note, down) => {
+  // Fixed velocity 100 for Phase 1 — velocity-from-gesture is a
+  // follow-on. Channel 1 is the default; once per-synth MIDI channel
+  // filtering exists, the currently-focused synth sub-tab can override.
+  dispatcher.sendMidiNote(note, down ? 100 : 0, 1);
+});
+
+const synthSection = document.createElement('section');
+synthSection.className = 'view view-synth';
+synthSection.style.display = 'none';
+
+const synthSubnav = document.createElement('nav');
+synthSubnav.className = 'synth-subnav';
+const dexedSubtab = document.createElement('button');
+dexedSubtab.className = 'synth-subnav-tab active';
+dexedSubtab.textContent = 'Dexed';
+synthSubnav.appendChild(dexedSubtab);
+
+const synthContent = document.createElement('div');
+synthContent.className = 'synth-content';
+synthContent.appendChild(dexedPanel(state, dispatcher));
+
+const synthKeyboardDock = document.createElement('div');
+synthKeyboardDock.className = 'synth-keyboard-dock';
+synthKeyboardDock.appendChild(keyboard.element);
+
+synthSection.append(synthSubnav, synthContent, synthKeyboardDock);
+
+// --- FX view section ----------------------------------------------
+//
+// Shared send-bus FX (chorus + reverb). Sibling of the per-synth
+// tabs — any synth routes into this bus via its own FX Send slider.
+// Lives next to Processing (also an audio-processing tab) so the two
+// stay visually grouped in the nav.
+
+const fxSection = document.createElement('section');
+fxSection.className = 'view view-fx';
+fxSection.style.display = 'none';
+fxSection.appendChild(fxPanel(state, dispatcher));
+
+// --- Processing view section --------------------------------------
+//
+// Main-bus output processing: high-shelf EQ + peak limiter. Both
+// default to ON in the firmware (g_procShelfEnable / g_procLimiter-
+// Enable = true) so that a first-time user isn't fatigued by raw
+// DX7 sizzle or an accidentally-loud transient before they've found
+// this tab. Toggles here flip the firmware state via OSC.
+
+const processingSection = document.createElement('section');
+processingSection.className = 'view view-processing';
+processingSection.style.display = 'none';
+processingSection.appendChild(processingPanel(state, dispatcher));
+
 // --- Tab switching -------------------------------------------------
 
-function selectView(name: 'mixer' | 'spectrum'): void {
-  const onMixer = name === 'mixer';
-  mixerTab.classList.toggle('active', onMixer);
-  spectrumTab.classList.toggle('active', !onMixer);
-  mixerView.style.display    = onMixer ? '' : 'none';
-  spectrumSection.style.display = onMixer ? 'none' : '';
+type ViewName = 'mixer' | 'spectrum' | 'synth' | 'fx' | 'processing';
+
+function selectView(name: ViewName): void {
+  mixerTab.classList.toggle('active',      name === 'mixer');
+  spectrumTab.classList.toggle('active',   name === 'spectrum');
+  synthTab.classList.toggle('active',      name === 'synth');
+  fxTab.classList.toggle('active',         name === 'fx');
+  processingTab.classList.toggle('active', name === 'processing');
+  mixerView.style.display         = name === 'mixer'      ? '' : 'none';
+  spectrumSection.style.display   = name === 'spectrum'   ? '' : 'none';
+  synthSection.style.display      = name === 'synth'      ? '' : 'none';
+  fxSection.style.display         = name === 'fx'         ? '' : 'none';
+  processingSection.style.display = name === 'processing' ? '' : 'none';
 
   // Toggle the body-level class that makes #app break out of its
-  // 1200px max-width and go full viewport in spectrum mode. The CSS
-  // rules in body.spectrum-active do the layout work; we just flip
-  // the class. spectrum.start() below calls resize() which reads the
-  // new layout via getBoundingClientRect, so the canvas picks up the
-  // bigger dimensions on its first frame.
-  document.body.classList.toggle('spectrum-active', !onMixer);
+  // 1200px max-width and go full viewport in spectrum mode. Only the
+  // spectrum tab uses this full-bleed layout; the synth view happily
+  // fits inside the normal column.
+  document.body.classList.toggle('spectrum-active', name === 'spectrum');
 
-  if (onMixer) {
-    // Leaving the spectrum view — stop the render loop AND
-    // unsubscribe so the firmware stops computing FFTs nobody
-    // will see. Same pattern as the Meters ON/OFF toggle.
+  // Leaving spectrum: stop the render loop + unsubscribe so the
+  // firmware stops computing FFTs nobody will see.
+  if (name !== 'spectrum' && spectrum.isRunning()) {
     spectrum.stop();
     dispatcher.unsubscribeSpectrum();
-  } else {
-    // Entering the spectrum view — start render loop and sub.
+  }
+  // Leaving synth: clear keyboard state, unsubscribe so the firmware
+  // stops forwarding MIDI events over USB CDC.
+  if (name !== 'synth' && keyboard.isRunning()) {
+    keyboard.stop();
+    dispatcher.unsubscribeMidi();
+  }
+
+  if (name === 'spectrum' && !spectrum.isRunning()) {
     dispatcher.subscribeSpectrum();
     spectrum.start();
   }
+  if (name === 'synth' && !keyboard.isRunning()) {
+    dispatcher.subscribeMidi();
+    keyboard.start();
+  }
 }
-mixerTab.addEventListener('click', () => selectView('mixer'));
-spectrumTab.addEventListener('click', () => selectView('spectrum'));
+mixerTab.addEventListener('click',      () => selectView('mixer'));
+spectrumTab.addEventListener('click',   () => selectView('spectrum'));
+synthTab.addEventListener('click',      () => selectView('synth'));
+fxTab.addEventListener('click',         () => selectView('fx'));
+processingTab.addEventListener('click', () => selectView('processing'));
 
-app.append(header, viewTabs, mixerView, spectrumSection, console_.element);
+app.append(header, viewTabs, mixerView, spectrumSection, synthSection, fxSection, processingSection, console_.element);

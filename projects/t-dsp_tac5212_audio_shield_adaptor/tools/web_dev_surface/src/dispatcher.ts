@@ -34,6 +34,13 @@ export class Dispatcher {
   // for no gain.
   private spectrumSink: ((bytes: Uint8Array) => void) | null = null;
 
+  // Callback sink for /midi/note events from the firmware's USB host
+  // MIDI bridge. Same pattern as spectrumSink — the keyboard view
+  // sets this and toggles its key highlights directly. MIDI state is
+  // ephemeral (no "what's the current note?" to mirror), so there's
+  // no point routing it through a Signal.
+  private midiSink: ((note: number, velocity: number, channel: number) => void) | null = null;
+
   constructor(
     private state: MixerState,
     private send: (packet: Uint8Array) => void,
@@ -54,6 +61,10 @@ export class Dispatcher {
 
   setSpectrumSink(fn: ((bytes: Uint8Array) => void) | null): void {
     this.spectrumSink = fn;
+  }
+
+  setMidiSink(fn: ((note: number, velocity: number, channel: number) => void) | null): void {
+    this.midiSink = fn;
   }
 
   // ---------- outbound (UI -> firmware) ----------
@@ -94,6 +105,18 @@ export class Dispatcher {
     const p = this.linkedPartner(idx);
     if (p >= 0) this.state.channels[p].solo.set(solo);
     this.sendMsg(`/ch/${pad2(idx + 1)}/mix/solo`, 'i', [solo ? 1 : 0]);
+  }
+
+  // Per-channel USB record send. Linked-partner propagation mirrors the
+  // firmware model so the UI pair stays in sync before the echo arrives.
+  // The Rec button is still clickable while main.loopEnable is on — the
+  // firmware stores the state and applies it when loop is disengaged —
+  // but the UI visually disables the button; enforcement lives there.
+  setChannelRecSend(idx: number, on: boolean): void {
+    this.state.channels[idx].recSend.set(on);
+    const p = this.linkedPartner(idx);
+    if (p >= 0) this.state.channels[p].recSend.set(on);
+    this.sendMsg(`/ch/${pad2(idx + 1)}/rec/enable`, 'i', [on ? 1 : 0]);
   }
 
   // Toggle stereo link on a channel pair. The address only accepts an
@@ -142,6 +165,15 @@ export class Dispatcher {
     this.sendMsg('/main/st/hostvol/enable', 'i', [enable ? 1 : 0]);
   }
 
+  // Main loopback. When on, the post-fader / pre-hostvol main mix is
+  // summed into USB capture and per-channel Rec sends are overridden
+  // off in the firmware. UI subscribers to loopEnable handle the
+  // disabled-styling of the per-channel Rec buttons.
+  setMainLoop(enable: boolean): void {
+    this.state.main.loopEnable.set(enable);
+    this.sendMsg('/main/st/loop', 'i', [enable ? 1 : 0]);
+  }
+
   // /sub addSub i i s — interval ms, lifetime ms, address pattern
   // (per 02-osc-protocol.md "Subscriptions follow the X32 /xremote idiom").
   // The exact wire format will be confirmed when M8 SubscriptionMgr lands;
@@ -186,6 +218,117 @@ export class Dispatcher {
 
   unsubscribeSpectrum(): void {
     this.sendMsg('/sub', 'ss', ['unsubscribe', '/spectrum/main']);
+  }
+
+  // MIDI events from the firmware's USB host port (a keyboard plugged
+  // into the Teensy's USB host). Interval is unused — the firmware
+  // forwards each note-on / note-off as it arrives rather than sampling
+  // on a timer — but we still send the 'sis' pattern so the wire format
+  // matches meters/spectrum and main.cpp can peek at just the target.
+  subscribeMidi(): void {
+    this.sendMsg('/sub', 'sis', ['addSub', 0, '/midi/events']);
+  }
+
+  unsubscribeMidi(): void {
+    this.sendMsg('/sub', 'ss', ['unsubscribe', '/midi/events']);
+  }
+
+  // ---------- Dexed synth controls ----------
+
+  // Select a voice from the firmware's bundled DX7 banks. Two ints
+  // (bank, voice). The firmware echoes back with the voice name as
+  // the third arg, which handleIncoming routes into voiceName. We
+  // optimistically update the signals so the dropdown doesn't snap
+  // back during the round trip.
+  setDexedVoice(bank: number, voice: number): void {
+    this.state.dexed.bank.set(bank);
+    this.state.dexed.voice.set(voice);
+    this.sendMsg('/synth/dexed/voice', 'ii', [bank, voice]);
+  }
+
+  setDexedVolume(v: number): void {
+    this.state.dexed.volume.set(v);
+    this.sendMsg('/synth/dexed/volume', 'f', [v]);
+  }
+
+  setDexedMidiChannel(ch: number): void {
+    this.state.dexed.midiChannel.set(ch);
+    this.sendMsg('/synth/dexed/midi/ch', 'i', [ch]);
+  }
+
+  // Fetch the 32 voice names for a bank. Reply lands in handleIncoming
+  // and populates state.dexed.voiceNames for the dropdown.
+  queryDexedVoiceNames(bank: number): void {
+    this.sendMsg('/synth/dexed/voice/names', 'i', [bank]);
+  }
+
+  // Fetch the 10 bank names. Called once on connect — bank list is
+  // compile-time fixed so no need to re-query.
+  queryDexedBankNames(): void {
+    this.sendMsg('/synth/dexed/bank/names', '', []);
+  }
+
+  // Per-synth FX send into the shared bus. 0..1 linear.
+  setDexedFxSend(v: number): void {
+    this.state.dexed.fxSend.set(v);
+    this.sendMsg('/synth/dexed/fx/send', 'f', [v]);
+  }
+
+  // ---------- Shared FX bus (chorus + reverb) ----------
+
+  setFxChorusEnable(on: boolean): void {
+    this.state.fx.chorusEnable.set(on);
+    this.sendMsg('/fx/chorus/enable', 'i', [on ? 1 : 0]);
+  }
+  setFxChorusVoices(n: number): void {
+    this.state.fx.chorusVoices.set(n);
+    this.sendMsg('/fx/chorus/voices', 'i', [n]);
+  }
+  setFxReverbEnable(on: boolean): void {
+    this.state.fx.reverbEnable.set(on);
+    this.sendMsg('/fx/reverb/enable', 'i', [on ? 1 : 0]);
+  }
+  setFxReverbSize(v: number): void {
+    this.state.fx.reverbSize.set(v);
+    this.sendMsg('/fx/reverb/size', 'f', [v]);
+  }
+  setFxReverbDamping(v: number): void {
+    this.state.fx.reverbDamping.set(v);
+    this.sendMsg('/fx/reverb/damping', 'f', [v]);
+  }
+  setFxReverbReturn(v: number): void {
+    this.state.fx.reverbReturn.set(v);
+    this.sendMsg('/fx/reverb/return', 'f', [v]);
+  }
+
+  // ---------- Main-bus processing (Processing tab) ----------
+
+  setProcShelfEnable(on: boolean): void {
+    this.state.processing.shelfEnable.set(on);
+    this.sendMsg('/proc/shelf/enable', 'i', [on ? 1 : 0]);
+  }
+  setProcShelfFreq(hz: number): void {
+    this.state.processing.shelfFreqHz.set(hz);
+    this.sendMsg('/proc/shelf/freq', 'f', [hz]);
+  }
+  setProcShelfGain(db: number): void {
+    this.state.processing.shelfGainDb.set(db);
+    this.sendMsg('/proc/shelf/gain', 'f', [db]);
+  }
+  setProcLimiterEnable(on: boolean): void {
+    this.state.processing.limiterEnable.set(on);
+    this.sendMsg('/proc/limiter/enable', 'i', [on ? 1 : 0]);
+  }
+
+  // UI-originated note from the on-screen keyboard in the Synth tab.
+  // Firmware injects this into the same onMidiNoteOn/Off path as the
+  // USB-host keyboard, so the echo comes back as /midi/note and the
+  // piano viz lights up identically to a hardware key press. velocity
+  // == 0 is the standard note-off sentinel. Default channel 1 is fine
+  // for Phase 1 — once per-synth MIDI channel filtering lands, callers
+  // can override to target a specific engine.
+  sendMidiNote(note: number, velocity: number, channel: number = 1): void {
+    this.sendMsg('/midi/note/in', 'iii', [note, velocity, channel]);
   }
 
   // Used by the raw OSC input field. Bypasses the typed setters above.
@@ -248,6 +391,14 @@ export class Dispatcher {
       return;
     }
 
+    m = a.match(/^\/ch\/(\d+)\/rec\/enable$/);
+    if (m && msg.types === 'i') {
+      const idx = parseInt(m[1], 10) - 1;
+      const ch = this.state.channels[idx];
+      if (ch) ch.recSend.set((msg.args[0] as number) !== 0);
+      return;
+    }
+
     if (a === '/main/st/mix/faderL' && msg.types === 'f') {
       this.state.main.faderL.set(msg.args[0] as number);
       return;
@@ -270,6 +421,11 @@ export class Dispatcher {
 
     if (a === '/main/st/hostvol/enable' && msg.types === 'i') {
       this.state.main.hostvolEnable.set((msg.args[0] as number) !== 0);
+      return;
+    }
+
+    if (a === '/main/st/loop' && msg.types === 'i') {
+      this.state.main.loopEnable.set((msg.args[0] as number) !== 0);
       return;
     }
 
@@ -332,6 +488,95 @@ export class Dispatcher {
         this.state.main.hostPeakR.set(dv.getFloat32(8,  false));
         this.state.main.hostRmsR.set( dv.getFloat32(12, false));
       }
+      return;
+    }
+
+    // /midi/note i i i — note, velocity, channel. Velocity 0 means
+    // note-off (standard MIDI running-status idiom). Forwarded to the
+    // Keyboard tab's sink callback; no Signal mirror needed since the
+    // visualization is purely driven by the event stream.
+    if (a === '/midi/note' && msg.types === 'iii') {
+      const note     = msg.args[0] as number;
+      const velocity = msg.args[1] as number;
+      const channel  = msg.args[2] as number;
+      if (this.midiSink) this.midiSink(note, velocity, channel);
+      return;
+    }
+
+    // Dexed synth echoes.
+    if (a === '/synth/dexed/voice' && msg.types === 'iis') {
+      this.state.dexed.bank.set(msg.args[0] as number);
+      this.state.dexed.voice.set(msg.args[1] as number);
+      this.state.dexed.voiceName.set(msg.args[2] as string);
+      return;
+    }
+    if (a === '/synth/dexed/volume' && msg.types === 'f') {
+      this.state.dexed.volume.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/dexed/midi/ch' && msg.types === 'i') {
+      this.state.dexed.midiChannel.set(msg.args[0] as number);
+      return;
+    }
+    // /synth/dexed/voice/names — first arg is bank index, remaining 32
+    // are voice names. We don't use the bank index (the firmware only
+    // sends in response to a query, so we trust the reply matches the
+    // current bank selection).
+    if (a === '/synth/dexed/voice/names' && msg.args.length >= 33 && msg.types.startsWith('i')) {
+      const names = msg.args.slice(1).map((x) => String(x));
+      this.state.dexed.voiceNames.set(names);
+      return;
+    }
+    if (a === '/synth/dexed/bank/names' && msg.args.length >= 1) {
+      this.state.dexed.bankNames.set(msg.args.map((x) => String(x)));
+      return;
+    }
+
+    // Main-bus processing echoes.
+    if (a === '/proc/shelf/enable' && msg.types === 'i') {
+      this.state.processing.shelfEnable.set((msg.args[0] as number) !== 0);
+      return;
+    }
+    if (a === '/proc/shelf/freq' && msg.types === 'f') {
+      this.state.processing.shelfFreqHz.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/proc/shelf/gain' && msg.types === 'f') {
+      this.state.processing.shelfGainDb.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/proc/limiter/enable' && msg.types === 'i') {
+      this.state.processing.limiterEnable.set((msg.args[0] as number) !== 0);
+      return;
+    }
+
+    // Shared FX bus + per-synth send echoes.
+    if (a === '/synth/dexed/fx/send' && msg.types === 'f') {
+      this.state.dexed.fxSend.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/fx/chorus/enable' && msg.types === 'i') {
+      this.state.fx.chorusEnable.set((msg.args[0] as number) !== 0);
+      return;
+    }
+    if (a === '/fx/chorus/voices' && msg.types === 'i') {
+      this.state.fx.chorusVoices.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/fx/reverb/enable' && msg.types === 'i') {
+      this.state.fx.reverbEnable.set((msg.args[0] as number) !== 0);
+      return;
+    }
+    if (a === '/fx/reverb/size' && msg.types === 'f') {
+      this.state.fx.reverbSize.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/fx/reverb/damping' && msg.types === 'f') {
+      this.state.fx.reverbDamping.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/fx/reverb/return' && msg.types === 'f') {
+      this.state.fx.reverbReturn.set(msg.args[0] as number);
       return;
     }
 
