@@ -35,6 +35,7 @@ import { fxPanel } from './ui/fx-panel';
 import { looperPanel } from './ui/looper-panel';
 import { clockPanel } from './ui/clock-panel';
 import { beatsPanel } from './ui/beats-panel';
+import { arpPanel } from './ui/arp-panel';
 import { synthBusStrip } from './ui/synth-bus';
 
 // Channel count for the small mixer v1 — 6 channels (USB L/R, Line L/R,
@@ -260,7 +261,11 @@ const clockTab = document.createElement('button');
 clockTab.className = 'view-tab';
 clockTab.dataset.view = 'clock';
 clockTab.textContent = 'Clock';
-viewTabs.append(mixerTab, spectrumTab, synthTab, fxTab, processingTab, loopTab, beatsTab, clockTab);
+const arpTab = document.createElement('button');
+arpTab.className = 'view-tab';
+arpTab.dataset.view = 'arp';
+arpTab.textContent = 'Arp';
+viewTabs.append(mixerTab, spectrumTab, synthTab, fxTab, processingTab, loopTab, beatsTab, clockTab, arpTab);
 
 // --- Mixer view section (wraps existing mixer content) ------------
 
@@ -520,9 +525,21 @@ clockSection.className = 'view view-clock';
 clockSection.style.display = 'none';
 clockSection.appendChild(clockPanel(state, dispatcher));
 
+// --- Arp view section ---------------------------------------------
+//
+// Top-level tab (not a Synth sub-tab) because the arp is a MIDI
+// processor that sits between the router and the synth sinks — it
+// intercepts keystrokes bound for Dexed/MPE/Neuro/Acid/Supersaw/Chip
+// alike, so it doesn't belong under any one engine's subnav.
+const arp = arpPanel(state, dispatcher);
+const arpSection = document.createElement('section');
+arpSection.className = 'view view-arp';
+arpSection.style.display = 'none';
+arpSection.appendChild(arp.element);
+
 // --- Tab switching -------------------------------------------------
 
-type ViewName = 'mixer' | 'spectrum' | 'synth' | 'fx' | 'processing' | 'loop' | 'beats' | 'clock';
+type ViewName = 'mixer' | 'spectrum' | 'synth' | 'fx' | 'processing' | 'loop' | 'beats' | 'clock' | 'arp';
 
 function selectView(name: ViewName): void {
   mixerTab.classList.toggle('active',      name === 'mixer');
@@ -533,6 +550,7 @@ function selectView(name: ViewName): void {
   loopTab.classList.toggle('active',       name === 'loop');
   beatsTab.classList.toggle('active',      name === 'beats');
   clockTab.classList.toggle('active',      name === 'clock');
+  arpTab.classList.toggle('active',        name === 'arp');
   mixerView.style.display         = name === 'mixer'      ? '' : 'none';
   spectrumSection.style.display   = name === 'spectrum'   ? '' : 'none';
   synthSection.style.display      = name === 'synth'      ? '' : 'none';
@@ -541,6 +559,7 @@ function selectView(name: ViewName): void {
   loopSection.style.display       = name === 'loop'       ? '' : 'none';
   beatsSection.style.display      = name === 'beats'      ? '' : 'none';
   clockSection.style.display      = name === 'clock'      ? '' : 'none';
+  arpSection.style.display        = name === 'arp'        ? '' : 'none';
 
   // Toggle the body-level class that makes #app break out of its
   // 1200px max-width and go full viewport in spectrum mode. Only the
@@ -584,5 +603,6 @@ processingTab.addEventListener('click', () => selectView('processing'));
 loopTab.addEventListener('click',       () => selectView('loop'));
 beatsTab.addEventListener('click',      () => selectView('beats'));
 clockTab.addEventListener('click',      () => selectView('clock'));
+arpTab.addEventListener('click',        () => selectView('arp'));
 
-app.append(header, viewTabs, mixerView, spectrumSection, synthSection, fxSection, processingSection, loopSection, beatsSection, clockSection, console_.element);
+app.append(header, viewTabs, mixerView, spectrumSection, synthSection, fxSection, processingSection, loopSection, beatsSection, clockSection, arpSection, console_.element);

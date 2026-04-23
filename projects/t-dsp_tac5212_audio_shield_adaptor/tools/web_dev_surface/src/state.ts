@@ -345,6 +345,35 @@ export interface SynthBusState {
   on:     Signal<boolean>;  // X32-style mix-on
 }
 
+// Arpeggiator filter state — mirror of firmware tdsp::ArpFilter. All
+// enums encoded as ints matching the C++ enum values.
+// See lib/TDspArp/src/ArpFilter.h for the canonical definitions.
+export interface ArpState {
+  on:             Signal<boolean>;  // enabled (false = bypass)
+  pattern:        Signal<number>;   // 0..PatCount-1
+  rate:           Signal<number>;   // 0..Rate_Count-1 (musical division)
+  gate:           Signal<number>;   // 0.05..1.5 of step length
+  swing:          Signal<number>;   // 0.5 (straight) .. 0.85
+  octaveRange:    Signal<number>;   // 1..4
+  octaveMode:     Signal<number>;   // 0=up 1=down 2=updown 3=random
+  latch:          Signal<boolean>;
+  hold:           Signal<boolean>;
+  velMode:        Signal<number>;   // 0..VelCount-1
+  velFixed:       Signal<number>;   // 0..127
+  velAccent:      Signal<number>;   // 0..127
+  stepMask:       Signal<number>;   // uint32; bit N = step N enabled
+  stepLength:     Signal<number>;   // 1..32
+  mpeMode:        Signal<number>;   // 0=mono 1=scatter 2=exprFollow 3=perNote
+  outputChannel:  Signal<number>;   // 1..16
+  scatterBase:    Signal<number>;   // 1..16
+  scatterCount:   Signal<number>;   // 1..8
+  scale:          Signal<number>;   // 0..ScaleCount-1 (0 = off)
+  scaleRoot:      Signal<number>;   // 0..11 (C..B)
+  transpose:      Signal<number>;   // -24..+24 semitones
+  repeat:         Signal<number>;   // 1..8 — repeat each step N times
+  activePresetId: Signal<string>;
+}
+
 export interface MixerState {
   channels: ChannelState[];
   main: BusState;
@@ -360,6 +389,7 @@ export interface MixerState {
   looper: LooperState;
   clock: ClockState;
   beats: BeatsState;
+  arp: ArpState;
   connected: Signal<boolean>;
   metersOn: Signal<boolean>;
 }
@@ -602,6 +632,35 @@ export function createMixerState(channelCount: number): MixerState {
       beatsPerBar:  new Signal(4),
     },
     beats: createBeatsState(),
+    arp: {
+      // Defaults match tdsp::ArpFilter cold-boot: bypass enabled, classic
+      // up-pattern at 1/16, one octave, 50% gate, straight timing, source
+      // velocity passthrough, full-step mask, mono output on ch 1. The
+      // first /snapshot echo will overwrite these on connect anyway.
+      on:             new Signal(false),
+      pattern:        new Signal(0),         // PatUp
+      rate:           new Signal(11),        // Rate_1_16
+      gate:           new Signal(0.5),
+      swing:          new Signal(0.5),
+      octaveRange:    new Signal(1),
+      octaveMode:     new Signal(0),         // OctUp
+      latch:          new Signal(false),
+      hold:           new Signal(false),
+      velMode:        new Signal(0),         // VelFromSource
+      velFixed:       new Signal(100),
+      velAccent:      new Signal(127),
+      stepMask:       new Signal(-1),        // 0xFFFFFFFF (all on)
+      stepLength:     new Signal(16),
+      mpeMode:        new Signal(0),         // MpeMono
+      outputChannel:  new Signal(1),
+      scatterBase:    new Signal(2),
+      scatterCount:   new Signal(4),
+      scale:          new Signal(0),         // Off
+      scaleRoot:      new Signal(0),
+      transpose:      new Signal(0),
+      repeat:         new Signal(1),
+      activePresetId: new Signal(''),
+    },
     connected: new Signal(false),
     metersOn: new Signal(true),   // on by default; connect() re-subscribes
   };

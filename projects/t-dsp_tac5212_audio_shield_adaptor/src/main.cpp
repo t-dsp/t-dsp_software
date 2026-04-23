@@ -48,6 +48,7 @@
 #include <TAC5212.h>
 #include <TDspMixer.h>
 #include <TDspMidi.h>
+#include <TDspArp.h>
 #include <TDspMPE.h>
 #include <TDspNeuro.h>
 #include <TDspAcid.h>
@@ -1042,7 +1043,7 @@ tdsp::MidiRouter g_midiRouter;
 DexedSink        g_dexedSink(&g_dexed);
 
 // Shared musical-time clock. Drives any module that wants tempo-sync
-// (looper quantize, future arpeggiators / tempo-synced LFOs). Defaults
+// (looper quantize, arpeggiator step advance, tempo-synced LFOs). Defaults
 // to External source — it slaves to an upstream sequencer's MIDI clock
 // as soon as one starts sending 0xF8. Switching to Internal runs a
 // free-running 120 BPM tick so LFOs can sync even without an upstream.
@@ -1050,6 +1051,13 @@ DexedSink        g_dexedSink(&g_dexed);
 // there and get folded into g_clock.
 tdsp::Clock     g_clock;
 tdsp::ClockSink g_clockSink(&g_clock);
+
+// Arp filter. Sits between MidiRouter and the synth sinks: the router
+// fans raw MIDI into the arp, the arp either forwards verbatim (bypass)
+// or captures note-on/off into a held-note set and emits its own step
+// pattern to the downstream synth sinks. MidiVizSink + ClockSink stay
+// on the router directly so they always see raw MIDI.
+tdsp::ArpFilter g_arpFilter;
 
 // Quantize flag for looper transport. When on, /looper/record /play
 // /stop are deferred to the next beat boundary instead of firing
@@ -3595,6 +3603,207 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         if (reply.size() > 0) g_transport.sendBundle(reply); return;
     }
 
+    // --- Arpeggiator (TDspArp) --------------------------------------------
+    //
+    // The arp filter intercepts MIDI between g_midiRouter and the synth
+    // sinks. Every parameter here is a simple get/set. Enums are encoded
+    // as ints matching the tdsp::ArpFilter enum values; the web UI uses
+    // identical numeric mappings. Step mask is carried as a 32-bit int,
+    // with step 0 in the LSB. The browser sends it as OSC int (which is
+    // 32-bit signed) and we reinterpret as uint32 on ingress / echo.
+
+    if (strcmp(address, "/arp/on") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/on"); m.add((int)g_arpFilter.enabled()); reply.add(m); }
+        else if (msg.isInt(0)) { g_arpFilter.setEnabled(msg.getInt(0) != 0);
+            OSCMessage m("/arp/on"); m.add((int)g_arpFilter.enabled()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/pattern") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/pattern"); m.add((int)g_arpFilter.pattern()); reply.add(m); }
+        else if (msg.isInt(0)) {
+            int p = msg.getInt(0);
+            if (p < 0) p = 0;
+            if (p >= (int)tdsp::ArpFilter::PatCount) p = (int)tdsp::ArpFilter::PatCount - 1;
+            g_arpFilter.setPattern((tdsp::ArpFilter::Pattern)p);
+            OSCMessage m("/arp/pattern"); m.add((int)g_arpFilter.pattern()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/rate") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/rate"); m.add((int)g_arpFilter.rate()); reply.add(m); }
+        else if (msg.isInt(0)) {
+            int r = msg.getInt(0);
+            if (r < 0) r = 0;
+            if (r >= (int)tdsp::ArpFilter::Rate_Count) r = (int)tdsp::ArpFilter::Rate_Count - 1;
+            g_arpFilter.setRate((tdsp::ArpFilter::Rate)r);
+            OSCMessage m("/arp/rate"); m.add((int)g_arpFilter.rate()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/gate") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/gate"); m.add(g_arpFilter.gate()); reply.add(m); }
+        else if (msg.isFloat(0)) { g_arpFilter.setGate(msg.getFloat(0));
+            OSCMessage m("/arp/gate"); m.add(g_arpFilter.gate()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/swing") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/swing"); m.add(g_arpFilter.swing()); reply.add(m); }
+        else if (msg.isFloat(0)) { g_arpFilter.setSwing(msg.getFloat(0));
+            OSCMessage m("/arp/swing"); m.add(g_arpFilter.swing()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/octaveRange") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/octaveRange"); m.add((int)g_arpFilter.octaveRange()); reply.add(m); }
+        else if (msg.isInt(0)) { g_arpFilter.setOctaveRange((uint8_t)msg.getInt(0));
+            OSCMessage m("/arp/octaveRange"); m.add((int)g_arpFilter.octaveRange()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/octaveMode") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/octaveMode"); m.add((int)g_arpFilter.octaveMode()); reply.add(m); }
+        else if (msg.isInt(0)) {
+            int m = msg.getInt(0);
+            if (m < 0) m = 0;
+            if (m >= (int)tdsp::ArpFilter::OctCount) m = (int)tdsp::ArpFilter::OctCount - 1;
+            g_arpFilter.setOctaveMode((tdsp::ArpFilter::OctaveMode)m);
+            OSCMessage msgOut("/arp/octaveMode"); msgOut.add((int)g_arpFilter.octaveMode()); reply.add(msgOut);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/latch") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/latch"); m.add((int)g_arpFilter.latch()); reply.add(m); }
+        else if (msg.isInt(0)) { g_arpFilter.setLatch(msg.getInt(0) != 0);
+            OSCMessage m("/arp/latch"); m.add((int)g_arpFilter.latch()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/hold") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/hold"); m.add((int)g_arpFilter.hold()); reply.add(m); }
+        else if (msg.isInt(0)) { g_arpFilter.setHold(msg.getInt(0) != 0);
+            OSCMessage m("/arp/hold"); m.add((int)g_arpFilter.hold()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/velMode") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/velMode"); m.add((int)g_arpFilter.velMode()); reply.add(m); }
+        else if (msg.isInt(0)) {
+            int m = msg.getInt(0);
+            if (m < 0) m = 0;
+            if (m >= (int)tdsp::ArpFilter::VelCount) m = (int)tdsp::ArpFilter::VelCount - 1;
+            g_arpFilter.setVelMode((tdsp::ArpFilter::VelMode)m);
+            OSCMessage msgOut("/arp/velMode"); msgOut.add((int)g_arpFilter.velMode()); reply.add(msgOut);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/velFixed") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/velFixed"); m.add((int)g_arpFilter.fixedVelocity()); reply.add(m); }
+        else if (msg.isInt(0)) { g_arpFilter.setFixedVelocity((uint8_t)msg.getInt(0));
+            OSCMessage m("/arp/velFixed"); m.add((int)g_arpFilter.fixedVelocity()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/velAccent") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/velAccent"); m.add((int)g_arpFilter.accentVelocity()); reply.add(m); }
+        else if (msg.isInt(0)) { g_arpFilter.setAccentVelocity((uint8_t)msg.getInt(0));
+            OSCMessage m("/arp/velAccent"); m.add((int)g_arpFilter.accentVelocity()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/stepMask") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/stepMask"); m.add((int)g_arpFilter.stepMask()); reply.add(m); }
+        else if (msg.isInt(0)) { g_arpFilter.setStepMask((uint32_t)msg.getInt(0));
+            OSCMessage m("/arp/stepMask"); m.add((int)g_arpFilter.stepMask()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/stepLength") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/stepLength"); m.add((int)g_arpFilter.stepLength()); reply.add(m); }
+        else if (msg.isInt(0)) { g_arpFilter.setStepLength((uint8_t)msg.getInt(0));
+            OSCMessage m("/arp/stepLength"); m.add((int)g_arpFilter.stepLength()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/mpeMode") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/mpeMode"); m.add((int)g_arpFilter.mpeMode()); reply.add(m); }
+        else if (msg.isInt(0)) {
+            int m = msg.getInt(0);
+            if (m < 0) m = 0;
+            if (m >= (int)tdsp::ArpFilter::MpeCount) m = (int)tdsp::ArpFilter::MpeCount - 1;
+            g_arpFilter.setMpeMode((tdsp::ArpFilter::MpeMode)m);
+            OSCMessage msgOut("/arp/mpeMode"); msgOut.add((int)g_arpFilter.mpeMode()); reply.add(msgOut);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/outputChannel") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/outputChannel"); m.add((int)g_arpFilter.outputChannel()); reply.add(m); }
+        else if (msg.isInt(0)) { g_arpFilter.setOutputChannel((uint8_t)msg.getInt(0));
+            OSCMessage m("/arp/outputChannel"); m.add((int)g_arpFilter.outputChannel()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/scatterBase") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/scatterBase"); m.add((int)g_arpFilter.scatterBaseChannel()); reply.add(m); }
+        else if (msg.isInt(0)) { g_arpFilter.setScatterBaseChannel((uint8_t)msg.getInt(0));
+            OSCMessage m("/arp/scatterBase"); m.add((int)g_arpFilter.scatterBaseChannel()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/scatterCount") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/scatterCount"); m.add((int)g_arpFilter.scatterCount()); reply.add(m); }
+        else if (msg.isInt(0)) { g_arpFilter.setScatterCount((uint8_t)msg.getInt(0));
+            OSCMessage m("/arp/scatterCount"); m.add((int)g_arpFilter.scatterCount()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/scale") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/scale"); m.add((int)g_arpFilter.scale()); reply.add(m); }
+        else if (msg.isInt(0)) {
+            int s = msg.getInt(0);
+            if (s < 0) s = 0;
+            if (s >= (int)tdsp::ArpFilter::ScaleCount) s = (int)tdsp::ArpFilter::ScaleCount - 1;
+            g_arpFilter.setScale((tdsp::ArpFilter::Scale)s);
+            OSCMessage msgOut("/arp/scale"); msgOut.add((int)g_arpFilter.scale()); reply.add(msgOut);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/scaleRoot") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/scaleRoot"); m.add((int)g_arpFilter.scaleRoot()); reply.add(m); }
+        else if (msg.isInt(0)) { g_arpFilter.setScaleRoot((uint8_t)msg.getInt(0));
+            OSCMessage m("/arp/scaleRoot"); m.add((int)g_arpFilter.scaleRoot()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/transpose") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/transpose"); m.add((int)g_arpFilter.transpose()); reply.add(m); }
+        else if (msg.isInt(0)) { g_arpFilter.setTranspose((int8_t)msg.getInt(0));
+            OSCMessage m("/arp/transpose"); m.add((int)g_arpFilter.transpose()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/repeat") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) { OSCMessage m("/arp/repeat"); m.add((int)g_arpFilter.repeat()); reply.add(m); }
+        else if (msg.isInt(0)) { g_arpFilter.setRepeat((uint8_t)msg.getInt(0));
+            OSCMessage m("/arp/repeat"); m.add((int)g_arpFilter.repeat()); reply.add(m); }
+        if (reply.size() > 0) g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/arp/panic") == 0) {
+        g_arpFilter.panic();
+        OSCBundle reply;
+        OSCMessage m("/arp/panic"); m.add(1); reply.add(m);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
     // /sub target=/midi/events — subscription for the MIDI visualization
     // broadcast. Intercepted here (not in OscDispatcher) to keep the MIDI
     // path confined to this sketch: OscDispatcher::handleSub only
@@ -4059,6 +4268,16 @@ void setup() {
     g_midiRouter.addSink(&g_midiVizSink);
     g_midiRouter.addSink(&g_clockSink);
 
+    // Arp filter registers as the THIRD router sink, positioned AFTER
+    // viz + clock so those always see raw MIDI regardless of arp state.
+    // Synth sinks below (Dexed, MPE, Neuro, Acid, Supersaw, Chip) register
+    // as the arp's downstream — the arp forwards every event verbatim
+    // when disabled and re-synthesizes note events when active. Clock
+    // reference enables tempo-aware behaviour (currently bookkeeping
+    // only; step timing comes from the router's 24-PPQN onClock tick).
+    g_midiRouter.addSink(&g_arpFilter);
+    g_arpFilter.setClock(&g_clock);
+
     // --- Shared FX bus init -------------------------------------------
     //
     // Chorus needs its delay line installed via begin() before any
@@ -4121,7 +4340,7 @@ void setup() {
     // via /synth/dexed/midi/ch if they want Dexed isolated from a
     // multi-zone controller.
     g_dexedSink.setListenChannel(0);
-    g_midiRouter.addSink(&g_dexedSink);
+    g_arpFilter.addDownstream(&g_dexedSink);
 
     // --- MPE VA engine init -------------------------------------------
     //
@@ -4171,10 +4390,11 @@ void setup() {
     // restore standard MPE behaviour.
     g_mpeSink.setMasterChannel(0);
 
-    // Register the MPE sink AFTER Dexed. All three synths default to
-    // omni, so any note-on from the hosted controller reaches all of
-    // them; the UI's Auto-mute keeps only the active sub-tab audible.
-    g_midiRouter.addSink(&g_mpeSink);
+    // Register the MPE sink AFTER Dexed. All synths default to omni, so
+    // any note-on reaches all of them; the UI's Auto-mute keeps only the
+    // active sub-tab audible. Downstream of g_arpFilter — when the arp
+    // is bypassed this is identical to registering on g_midiRouter.
+    g_arpFilter.addDownstream(&g_mpeSink);
 
     // --- Neuro (reese bass) init -------------------------------------
     //
@@ -4230,7 +4450,7 @@ void setup() {
     applyNeuroStinkMaster();
     applyNeuroStinkEnable();     // sets wet/dry mixer slots
 
-    g_midiRouter.addSink(&g_neuroSink);
+    g_arpFilter.addDownstream(&g_neuroSink);
 
     // --- Acid (303) init --------------------------------------------
     //
@@ -4248,7 +4468,7 @@ void setup() {
     g_acidSink.setAccentThreshold(110);
     g_acidSink.setSlideMs(60.0f);
     applyAcidVolume(g_acidVolume);
-    g_midiRouter.addSink(&g_acidSink);
+    g_arpFilter.addDownstream(&g_acidSink);
 
     // --- Supersaw init ----------------------------------------------
     g_supersawSink.setMidiChannel(5);
@@ -4262,7 +4482,7 @@ void setup() {
     g_supersawSink.setRelease(0.6f);
     g_supersawSink.setPortamentoMs(0.0f);
     applySupersawVolume(g_supersawVolume);
-    g_midiRouter.addSink(&g_supersawSink);
+    g_arpFilter.addDownstream(&g_supersawSink);
 
     // --- Chip init --------------------------------------------------
     g_chipSink.setMidiChannel(6);
@@ -4279,7 +4499,7 @@ void setup() {
     g_chipSink.setSustain(0.5f);
     g_chipSink.setRelease(0.15f);
     applyChipVolume(g_chipVolume);
-    g_midiRouter.addSink(&g_chipSink);
+    g_arpFilter.addDownstream(&g_chipSink);
 
     Serial.println("\nReady!");
     Serial.println("  6 input channels: USB L/R, Line L/R, Mic L/R");
@@ -4776,6 +4996,32 @@ static void broadcastSnapshot(OSCBundle &reply) {
         }
     }
 
+    // Arp filter state — every parameter echoed so a reconnecting client
+    // paints the Arp panel without per-address round-trips. Enums are
+    // emitted as ints matching the tdsp::ArpFilter enum values.
+    { OSCMessage m("/arp/on");            m.add((int)g_arpFilter.enabled());            reply.add(m); }
+    { OSCMessage m("/arp/pattern");       m.add((int)g_arpFilter.pattern());            reply.add(m); }
+    { OSCMessage m("/arp/rate");          m.add((int)g_arpFilter.rate());               reply.add(m); }
+    { OSCMessage m("/arp/gate");          m.add(g_arpFilter.gate());                    reply.add(m); }
+    { OSCMessage m("/arp/swing");         m.add(g_arpFilter.swing());                   reply.add(m); }
+    { OSCMessage m("/arp/octaveRange");   m.add((int)g_arpFilter.octaveRange());        reply.add(m); }
+    { OSCMessage m("/arp/octaveMode");    m.add((int)g_arpFilter.octaveMode());         reply.add(m); }
+    { OSCMessage m("/arp/latch");         m.add((int)g_arpFilter.latch());              reply.add(m); }
+    { OSCMessage m("/arp/hold");          m.add((int)g_arpFilter.hold());               reply.add(m); }
+    { OSCMessage m("/arp/velMode");       m.add((int)g_arpFilter.velMode());            reply.add(m); }
+    { OSCMessage m("/arp/velFixed");      m.add((int)g_arpFilter.fixedVelocity());      reply.add(m); }
+    { OSCMessage m("/arp/velAccent");     m.add((int)g_arpFilter.accentVelocity());     reply.add(m); }
+    { OSCMessage m("/arp/stepMask");      m.add((int)g_arpFilter.stepMask());           reply.add(m); }
+    { OSCMessage m("/arp/stepLength");    m.add((int)g_arpFilter.stepLength());         reply.add(m); }
+    { OSCMessage m("/arp/mpeMode");       m.add((int)g_arpFilter.mpeMode());            reply.add(m); }
+    { OSCMessage m("/arp/outputChannel"); m.add((int)g_arpFilter.outputChannel());      reply.add(m); }
+    { OSCMessage m("/arp/scatterBase");   m.add((int)g_arpFilter.scatterBaseChannel()); reply.add(m); }
+    { OSCMessage m("/arp/scatterCount");  m.add((int)g_arpFilter.scatterCount());       reply.add(m); }
+    { OSCMessage m("/arp/scale");         m.add((int)g_arpFilter.scale());              reply.add(m); }
+    { OSCMessage m("/arp/scaleRoot");     m.add((int)g_arpFilter.scaleRoot());          reply.add(m); }
+    { OSCMessage m("/arp/transpose");     m.add((int)g_arpFilter.transpose());          reply.add(m); }
+    { OSCMessage m("/arp/repeat");        m.add((int)g_arpFilter.repeat());             reply.add(m); }
+
     // Codec panel state.
     g_codecPanel.snapshot(reply);
 }
@@ -4825,6 +5071,13 @@ void loop() {
 
     // Chip: arpeggio advance on the triangle voice. No-op when arp off.
     g_chipSink.tick(millis());
+
+    // Arp filter: drain the pending gate-off queue. Note step triggering
+    // is driven by onClock() through the router — this tick only handles
+    // the gate-off timing. nowMicros argument is reserved for a future
+    // micros-based gate path; the queue today compares against the clock
+    // tick counter and is safe to call at any cadence.
+    g_arpFilter.tick(micros());
 
     // Advance the shared musical clock. Stamps a reference for external
     // tick-interval math and, when Source=Internal, emits catch-up
