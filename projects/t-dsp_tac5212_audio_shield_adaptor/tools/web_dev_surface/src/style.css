@@ -712,6 +712,24 @@ select, input[type="text"] {
   letter-spacing: 0.03em;
 }
 
+.synth-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;      /* push to the right end of the header row */
+  color: #888;
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+.synth-auto:hover {
+  color: #ccc;
+}
+.synth-auto input[type="checkbox"] {
+  accent-color: #b86a30;  /* match the "active" accent used elsewhere */
+  cursor: pointer;
+}
+
 .dexed-panel {
   display: flex;
   flex-direction: column;

@@ -114,6 +114,14 @@ export interface DexedState {
   // preserves the stored volume so turning back on restores the
   // fader position.
   on: Signal<boolean>;
+  // MIDI-Auto mode. The device only ever has one controller
+  // connected at a time, so "which synth plays?" should be implicit.
+  // When true, this synth's on-state tracks whether its sub-tab is
+  // active: switching tabs mutes the outgoing synth and unmutes the
+  // incoming one. Manually toggling the on/off button turns Auto
+  // off so the user's explicit state sticks. Client-side only —
+  // the UI drives /synth/dexed/on across sub-tab changes.
+  midiAuto: Signal<boolean>;
   midiChannel: Signal<number>; // 0 = omni, 1..16
   fxSend: Signal<number>;      // 0..1 send amount into shared FX bus
   bankNames: Signal<string[]>;
@@ -142,6 +150,7 @@ export interface MpeVoiceState {
 export interface MpeState {
   volume:           Signal<number>;  // 0..1
   on:               Signal<boolean>; // X32-style mix on/off
+  midiAuto:         Signal<boolean>; // see DexedState.midiAuto
   attack:           Signal<number>;  // seconds (0..10)
   release:          Signal<number>;  // seconds (0..10)
   waveform:         Signal<number>;  // 0=saw, 1=square, 2=tri, 3=sine
@@ -258,10 +267,14 @@ export function createMixerState(channelCount: number): MixerState {
       bank: new Signal(0),
       voice: new Signal(0),
       voiceName: new Signal(''),
-      volume: new Signal(0.7),    // matches firmware default
-      on: new Signal(true),       // firmware defaults on=true
-      midiChannel: new Signal(1), // matches DexedSink default
-      fxSend: new Signal(0),      // dry by default, matches firmware
+      volume: new Signal(0.7),       // matches firmware default
+      // On by default because Dexed is the default sub-tab; the
+      // selectSynthSubtab('dexed') call at app boot would set this
+      // anyway, but matching here keeps the first-paint state sane.
+      on: new Signal(true),
+      midiAuto: new Signal(true),    // follow sub-tab by default
+      midiChannel: new Signal(1),    // matches DexedSink default
+      fxSend: new Signal(0),         // dry by default, matches firmware
       bankNames: new Signal<string[]>([]),
       voiceNames: new Signal<string[]>([]),
     },
@@ -271,7 +284,12 @@ export function createMixerState(channelCount: number): MixerState {
       // running, but matching here keeps the UI sensible before
       // connect.
       volume:          new Signal(0.7),
-      on:              new Signal(true),   // firmware defaults on=true
+      // Matches firmware default (g_mpeOn=true). On app connect, the
+      // Auto-mode enforcer in main.ts re-derives the correct on-state
+      // from the current sub-tab (mutes MPE if Dexed is the default
+      // tab) without creating a mismatch window before /snapshot.
+      on:              new Signal(true),
+      midiAuto:        new Signal(true),   // follow sub-tab by default
       attack:          new Signal(0.005),
       release:         new Signal(0.300),
       waveform:        new Signal(0),

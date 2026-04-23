@@ -364,6 +364,27 @@ mpe.element.style.display = 'none';
 synthContent.append(dexedPanelEl, mpe.element);
 
 type SynthSubtab = 'dexed' | 'mpe';
+
+// MIDI-Auto enforcer — called from every place that should "take
+// Auto's opinion": sub-tab changes, connect events, Auto toggles
+// being switched on. For each synth with midiAuto=true, drive its
+// on-state to match "is this synth's sub-tab active right now?".
+//
+// Only fires when state.connected is true — otherwise the OSC
+// writes are thrown away into a disconnected bridge, and the
+// firmware's defaults stay intact.
+const enforceMidiAuto = (): void => {
+  if (!state.connected.get()) return;
+  if (state.dexed.midiAuto.get()) {
+    const want = activeSynthSubtab === 'dexed';
+    if (state.dexed.on.get() !== want) dispatcher.setDexedOn(want);
+  }
+  if (state.mpe.midiAuto.get()) {
+    const want = activeSynthSubtab === 'mpe';
+    if (state.mpe.on.get() !== want) dispatcher.setMpeOn(want);
+  }
+};
+
 const selectSynthSubtab = (which: SynthSubtab): void => {
   activeSynthSubtab = which;
   dexedSubtab.classList.toggle('active', which === 'dexed');
@@ -373,7 +394,17 @@ const selectSynthSubtab = (which: SynthSubtab): void => {
   // Only the MPE panel has telemetry to subscribe to; Dexed panel
   // doesn't need an active hook.
   mpe.setActive(which === 'mpe');
+  // Drive Auto's "only active-tab synth is audible" behaviour.
+  enforceMidiAuto();
 };
+
+// Re-apply Auto on connect so the firmware's cold-boot defaults
+// (both synths on) converge to the UI's sub-tab-follows layout.
+state.connected.subscribe((c) => { if (c) enforceMidiAuto(); });
+// Re-apply Auto whenever the user toggles either synth's midiAuto
+// ON — flipping Auto on should immediately enforce its rule.
+state.dexed.midiAuto.subscribe((on) => { if (on) enforceMidiAuto(); });
+state.mpe.midiAuto.subscribe  ((on) => { if (on) enforceMidiAuto(); });
 dexedSubtab.addEventListener('click', () => selectSynthSubtab('dexed'));
 mpeSubtab  .addEventListener('click', () => selectSynthSubtab('mpe'));
 

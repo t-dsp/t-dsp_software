@@ -104,13 +104,30 @@ function buildOnRow(state: MixerState, dispatcher: Dispatcher): HTMLElement {
     btn.title = on ? 'Click to mute MPE output' : 'Click to un-mute MPE output';
   };
   state.mpe.on.subscribe(update);
-  btn.addEventListener('click', () => dispatcher.setMpeOn(!state.mpe.on.get()));
+  btn.addEventListener('click', () => {
+    // Manual on/off implies the user is overriding Auto — turn it
+    // off so the next sub-tab change doesn't clobber their choice.
+    if (state.mpe.midiAuto.get()) state.mpe.midiAuto.set(false);
+    dispatcher.setMpeOn(!state.mpe.on.get());
+  });
 
   const label = document.createElement('span');
   label.className = 'synth-on-label';
   label.textContent = 'MPE VA';
 
-  row.append(btn, label);
+  // MIDI Auto — track sub-tab visibility. See DexedState.midiAuto.
+  const autoWrap = document.createElement('label');
+  autoWrap.className = 'synth-auto';
+  const autoBox = document.createElement('input');
+  autoBox.type = 'checkbox';
+  state.mpe.midiAuto.subscribe((a) => { autoBox.checked = a; });
+  autoBox.addEventListener('change', () => state.mpe.midiAuto.set(autoBox.checked));
+  const autoText = document.createElement('span');
+  autoText.textContent = 'MIDI Auto';
+  autoText.title = 'Track sub-tab: mute when another synth is focused';
+  autoWrap.append(autoBox, autoText);
+
+  row.append(btn, label, autoWrap);
   return row;
 }
 
