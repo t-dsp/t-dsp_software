@@ -700,6 +700,108 @@ export class Dispatcher {
     this.sendThrottled('/synth/chip/release', 'f', [s]);
   }
 
+  // ---------- Arpeggiator (TDspArp) ----------
+  //
+  // Outbound setters mirror the /arp/* OSC address scheme. Continuous
+  // values (gate, swing) throttle like any other slider; discrete
+  // ints / bools fire immediately so preset loads apply together. The
+  // firmware echoes every write; incoming handlers below re-set the
+  // state signal (idempotent if local optimistic set already matched).
+
+  setArpOn(on: boolean): void {
+    this.state.arp.on.set(on);
+    this.sendMsg('/arp/on', 'i', [on ? 1 : 0]);
+  }
+  setArpPattern(p: number): void {
+    this.state.arp.pattern.set(p);
+    this.sendMsg('/arp/pattern', 'i', [p]);
+  }
+  setArpRate(r: number): void {
+    this.state.arp.rate.set(r);
+    this.sendMsg('/arp/rate', 'i', [r]);
+  }
+  setArpGate(v: number): void {
+    this.state.arp.gate.set(v);
+    this.sendThrottled('/arp/gate', 'f', [v]);
+  }
+  setArpSwing(v: number): void {
+    this.state.arp.swing.set(v);
+    this.sendThrottled('/arp/swing', 'f', [v]);
+  }
+  setArpOctaveRange(n: number): void {
+    this.state.arp.octaveRange.set(n);
+    this.sendMsg('/arp/octaveRange', 'i', [n]);
+  }
+  setArpOctaveMode(m: number): void {
+    this.state.arp.octaveMode.set(m);
+    this.sendMsg('/arp/octaveMode', 'i', [m]);
+  }
+  setArpLatch(on: boolean): void {
+    this.state.arp.latch.set(on);
+    this.sendMsg('/arp/latch', 'i', [on ? 1 : 0]);
+  }
+  setArpHold(on: boolean): void {
+    this.state.arp.hold.set(on);
+    this.sendMsg('/arp/hold', 'i', [on ? 1 : 0]);
+  }
+  setArpVelMode(m: number): void {
+    this.state.arp.velMode.set(m);
+    this.sendMsg('/arp/velMode', 'i', [m]);
+  }
+  setArpVelFixed(v: number): void {
+    this.state.arp.velFixed.set(v);
+    this.sendMsg('/arp/velFixed', 'i', [v]);
+  }
+  setArpVelAccent(v: number): void {
+    this.state.arp.velAccent.set(v);
+    this.sendMsg('/arp/velAccent', 'i', [v]);
+  }
+  // stepMask is a 32-bit pattern; we send as signed int (OSC i is 32-bit)
+  // and reinterpret in firmware. Bit N = step N enabled.
+  setArpStepMask(mask: number): void {
+    this.state.arp.stepMask.set(mask | 0);   // force int32
+    this.sendMsg('/arp/stepMask', 'i', [mask | 0]);
+  }
+  setArpStepLength(n: number): void {
+    this.state.arp.stepLength.set(n);
+    this.sendMsg('/arp/stepLength', 'i', [n]);
+  }
+  setArpMpeMode(m: number): void {
+    this.state.arp.mpeMode.set(m);
+    this.sendMsg('/arp/mpeMode', 'i', [m]);
+  }
+  setArpOutputChannel(ch: number): void {
+    this.state.arp.outputChannel.set(ch);
+    this.sendMsg('/arp/outputChannel', 'i', [ch]);
+  }
+  setArpScatterBase(ch: number): void {
+    this.state.arp.scatterBase.set(ch);
+    this.sendMsg('/arp/scatterBase', 'i', [ch]);
+  }
+  setArpScatterCount(n: number): void {
+    this.state.arp.scatterCount.set(n);
+    this.sendMsg('/arp/scatterCount', 'i', [n]);
+  }
+  setArpScale(s: number): void {
+    this.state.arp.scale.set(s);
+    this.sendMsg('/arp/scale', 'i', [s]);
+  }
+  setArpScaleRoot(r: number): void {
+    this.state.arp.scaleRoot.set(r);
+    this.sendMsg('/arp/scaleRoot', 'i', [r]);
+  }
+  setArpTranspose(s: number): void {
+    this.state.arp.transpose.set(s);
+    this.sendMsg('/arp/transpose', 'i', [s]);
+  }
+  setArpRepeat(n: number): void {
+    this.state.arp.repeat.set(n);
+    this.sendMsg('/arp/repeat', 'i', [n]);
+  }
+  arpPanic(): void {
+    this.sendMsg('/arp/panic', '', []);
+  }
+
   // ---------- Shared FX bus (chorus + reverb) ----------
 
   setFxChorusEnable(on: boolean): void {
@@ -1546,6 +1648,31 @@ export class Dispatcher {
       if (this.spectrumSink && blob.length >= 1024) this.spectrumSink(blob);
       return;
     }
+
+    // ---------- Arpeggiator echoes ----------
+    if (a === '/arp/on'            && msg.types === 'i') { this.state.arp.on           .set((msg.args[0] as number) !== 0); return; }
+    if (a === '/arp/pattern'       && msg.types === 'i') { this.state.arp.pattern      .set(msg.args[0] as number); return; }
+    if (a === '/arp/rate'          && msg.types === 'i') { this.state.arp.rate         .set(msg.args[0] as number); return; }
+    if (a === '/arp/gate'          && msg.types === 'f') { this.state.arp.gate         .set(msg.args[0] as number); return; }
+    if (a === '/arp/swing'         && msg.types === 'f') { this.state.arp.swing        .set(msg.args[0] as number); return; }
+    if (a === '/arp/octaveRange'   && msg.types === 'i') { this.state.arp.octaveRange  .set(msg.args[0] as number); return; }
+    if (a === '/arp/octaveMode'    && msg.types === 'i') { this.state.arp.octaveMode   .set(msg.args[0] as number); return; }
+    if (a === '/arp/latch'         && msg.types === 'i') { this.state.arp.latch        .set((msg.args[0] as number) !== 0); return; }
+    if (a === '/arp/hold'          && msg.types === 'i') { this.state.arp.hold         .set((msg.args[0] as number) !== 0); return; }
+    if (a === '/arp/velMode'       && msg.types === 'i') { this.state.arp.velMode      .set(msg.args[0] as number); return; }
+    if (a === '/arp/velFixed'      && msg.types === 'i') { this.state.arp.velFixed     .set(msg.args[0] as number); return; }
+    if (a === '/arp/velAccent'     && msg.types === 'i') { this.state.arp.velAccent    .set(msg.args[0] as number); return; }
+    if (a === '/arp/stepMask'      && msg.types === 'i') { this.state.arp.stepMask     .set(msg.args[0] as number); return; }
+    if (a === '/arp/stepLength'    && msg.types === 'i') { this.state.arp.stepLength   .set(msg.args[0] as number); return; }
+    if (a === '/arp/mpeMode'       && msg.types === 'i') { this.state.arp.mpeMode      .set(msg.args[0] as number); return; }
+    if (a === '/arp/outputChannel' && msg.types === 'i') { this.state.arp.outputChannel.set(msg.args[0] as number); return; }
+    if (a === '/arp/scatterBase'   && msg.types === 'i') { this.state.arp.scatterBase  .set(msg.args[0] as number); return; }
+    if (a === '/arp/scatterCount'  && msg.types === 'i') { this.state.arp.scatterCount .set(msg.args[0] as number); return; }
+    if (a === '/arp/scale'         && msg.types === 'i') { this.state.arp.scale        .set(msg.args[0] as number); return; }
+    if (a === '/arp/scaleRoot'     && msg.types === 'i') { this.state.arp.scaleRoot    .set(msg.args[0] as number); return; }
+    if (a === '/arp/transpose'     && msg.types === 'i') { this.state.arp.transpose    .set(msg.args[0] as number); return; }
+    if (a === '/arp/repeat'        && msg.types === 'i') { this.state.arp.repeat       .set(msg.args[0] as number); return; }
+    if (a === '/arp/panic') return;  // firmware echo of a triggered panic — nothing to mirror
   }
 
   private sendMsg(address: string, types: string, args: OscArg[]): void {

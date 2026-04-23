@@ -1856,3 +1856,179 @@ select, input[type="text"] {
   padding: 4px 6px;
   width: 64px;
 }
+
+/* ======================================================================
+   Arp panel — top-level tab styles. Builds on .mpe-* for rows and
+   preset cards; adds Arp-specific layout (step-mask grid, wrapping
+   segmented pickers for pattern/rate/scale with 15–25 options each).
+   ====================================================================== */
+
+.arp-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.arp-toggle {
+  background: #1a1a1a;
+  color: #bbb;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 6px 12px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.arp-toggle:hover { background: #222; }
+.arp-toggle.on {
+  background: #2c2c2c;
+  color: #fff;
+  border-color: #4a4a4a;
+  box-shadow: 0 0 0 1px #b86a30;
+}
+
+.arp-panic {
+  background: #2a1818;
+  color: #e89090;
+  border: 1px solid #552626;
+  border-radius: 3px;
+  padding: 6px 12px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  margin-left: auto;
+}
+.arp-panic:hover { background: #3a1e1e; color: #fff; }
+
+/* preset grid tweaks — we have 230+ presets, so the filter strip can
+   wrap, and the search field earns its keep. */
+.arp-preset-filter { flex-wrap: wrap; }
+
+.arp-preset-search {
+  margin-top: 6px;
+}
+.arp-preset-search input {
+  width: 100%;
+  background: #181818;
+  color: #e0e0e0;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12px;
+}
+.arp-preset-search input:focus {
+  outline: none;
+  border-color: #4a4a4a;
+}
+
+.arp-preset-grid {
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+}
+
+.arp-preset-glyphs { flex-wrap: wrap; gap: 4px; }
+
+.arp-glyph {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: #222;
+  color: #999;
+  letter-spacing: 0.2px;
+}
+.arp-glyph-pat    { background: #26323f; color: #9fbbd7; }
+.arp-glyph-rate   { background: #322a26; color: #d7af9f; }
+.arp-glyph-oct    { background: #2a3226; color: #b0d79f; }
+.arp-glyph-mpe    { background: #26322f; color: #9fd7c8; }
+.arp-glyph-scale  { background: #322632; color: #d79fd0; }
+
+/* Wrap the long segmented pickers (pattern, rate, scale) so they don't
+   push the panel wider than the viewport. */
+.arp-patterns .mpe-segmented,
+.arp-rates    .mpe-segmented,
+.arp-scale    .mpe-segmented,
+.arp-root     .mpe-segmented,
+.arp-velmode  .mpe-segmented,
+.arp-mpemode  .mpe-segmented,
+.arp-octmode  .mpe-segmented,
+.arp-octrange .mpe-segmented {
+  flex-wrap: wrap;
+  gap: 2px;
+}
+.arp-patterns .mpe-segmented button,
+.arp-rates    .mpe-segmented button,
+.arp-scale    .mpe-segmented button,
+.arp-velmode  .mpe-segmented button,
+.arp-mpemode  .mpe-segmented button {
+  min-width: 52px;
+  padding: 4px 6px;
+  font-size: 10px;
+}
+.arp-root .mpe-segmented button {
+  min-width: 28px;
+  padding: 4px 4px;
+  font-size: 11px;
+  font-family: monospace;
+}
+.arp-octrange .mpe-segmented button {
+  min-width: 36px;
+}
+
+/* 32-cell step mask grid */
+.arp-mask-row { gap: 6px; }
+
+.arp-mask-quick {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.arp-mask-quick button {
+  background: #1a1a1a;
+  color: #bbb;
+  border: 1px solid #2c2c2c;
+  border-radius: 2px;
+  padding: 3px 8px;
+  font-family: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.arp-mask-quick button:hover { background: #222; color: #fff; }
+
+.arp-mask-grid {
+  display: grid;
+  grid-template-columns: repeat(16, minmax(0, 1fr));
+  gap: 2px;
+}
+.arp-mask-cell {
+  aspect-ratio: 1 / 1;
+  background: #181818;
+  color: #555;
+  border: 1px solid #2c2c2c;
+  border-radius: 2px;
+  padding: 0;
+  font-family: inherit;
+  font-size: 9px;
+  cursor: pointer;
+  transition: background 0.06s;
+}
+.arp-mask-cell:hover { background: #222; }
+.arp-mask-cell.on {
+  background: #b86a30;
+  color: #181818;
+  border-color: #d17d3a;
+}
+.arp-mask-cell.on:hover { background: #d17d3a; }
+.arp-mask-cell.out-of-range {
+  opacity: 0.25;
+  pointer-events: none;
+}
+
+.arp-channel-pills .mpe-channel-pill {
+  min-width: 28px;
+  padding: 2px 6px;
+  font-size: 11px;
+}

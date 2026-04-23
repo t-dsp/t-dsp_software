@@ -1,0 +1,12 @@
+{
+  "name": "TDspArp",
+  "version": "0.1.0",
+  "description": "MIDI arpeggiator filter — sits between MidiRouter and synth sinks, consumes raw MIDI in active mode and emits arpeggiated patterns to downstream sinks. MPE-aware, clock-synced at 24 PPQN.",
+  "keywords": ["midi", "arpeggiator", "mpe", "t-dsp"],
+  "frameworks": "arduino",
+  "platforms": "teensy",
+  "dependencies": {
+    "TDspMidi": "*",
+    "TDspClock": "*"
+  }
+}
