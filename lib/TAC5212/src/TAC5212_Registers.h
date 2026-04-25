@@ -462,21 +462,27 @@ namespace dac_biquad {
 }
 
 // =============================================================================
-// DAC digital volume control (§8.2.8)
+// DAC digital volume control (§8.1.1.89, §8.1.1.91, §8.1.1.96, §8.1.1.98)
 // =============================================================================
 //
-// Encoding (extended range vs. ADC DVOL):
+// The TAC5212 has TWO DAC volume controls:
+//   1. Page 0 single-byte DVOL per sub-channel (this is what we wrap)
+//   2. Page 18 32-bit programmable coefficient DVOL (used internally by
+//      the chip's soft-step engine; not exposed in v1)
+//
+// Encoding for the single-byte form (matches ADC DVOL):
 //   0       = mute
 //   1..200  = -100.0 dB to -0.5 dB (0.5 dB steps)
-//   201     = 0.0 dB unity (POR default)
+//   201     = 0.0 dB unity (POR default 0xC9)
 //   202..255= +0.5 dB to +27.0 dB (0.5 dB steps)
 
 namespace dac_dvol {
-    constexpr uint8_t PAGE      = 18;
-    constexpr uint8_t CH1A_BASE = 0x0C;
-    constexpr uint8_t CH1B_BASE = 0x10;
-    constexpr uint8_t CH2A_BASE = 0x14;
-    constexpr uint8_t CH2B_BASE = 0x18;
+    // Page 0, single-byte addresses (datasheet §8.1.1.89/91/96/98).
+    constexpr uint8_t PAGE   = 0;
+    constexpr uint8_t CH1A   = 0x67;
+    constexpr uint8_t CH1B   = 0x69;
+    constexpr uint8_t CH2A   = 0x6E;
+    constexpr uint8_t CH2B   = 0x70;
 
     constexpr uint8_t MUTE        = 0;
     constexpr uint8_t UNITY_0DB   = 201;

@@ -625,15 +625,15 @@ Result TAC5212::setDacSoftStep(bool enabled) {
 
 namespace {
 
-// Map physical Out N to the DVOL register bases for sub-channels A/B
-// (page 18). Output 1 spans CH1A + CH1B; output 2 spans CH2A + CH2B.
-// In differential modes both sub-channels need the same volume to keep
-// DC offset at zero on the line outputs.
+// Map physical Out N to the DVOL register addresses for sub-channels A/B
+// (page 0, single-byte). Output 1 spans CH1A + CH1B; output 2 spans
+// CH2A + CH2B. In differential modes both sub-channels need the same
+// volume to keep DC offset at zero on the line outputs.
 struct DvolRegs { uint8_t a; uint8_t b; };
 constexpr DvolRegs dvolRegsFor(uint8_t n) {
     return (n == 2)
-        ? DvolRegs{reg::dac_dvol::CH2A_BASE, reg::dac_dvol::CH2B_BASE}
-        : DvolRegs{reg::dac_dvol::CH1A_BASE, reg::dac_dvol::CH1B_BASE};
+        ? DvolRegs{reg::dac_dvol::CH2A, reg::dac_dvol::CH2B}
+        : DvolRegs{reg::dac_dvol::CH1A, reg::dac_dvol::CH1B};
 }
 
 // Pack a 32-bit two's-complement big-endian into 4 bytes.
@@ -661,17 +661,15 @@ Result TAC5212::Out::setDvol(float dB) {
         return Result::error("DAC dvol exceeds +27 dB max");
     const uint8_t code = reg::dac_dvol::fromDb(dB);
     const DvolRegs r = dvolRegsFor(_n);
-    // The DVOL registers are 4 bytes wide per the datasheet's auto-increment
-    // protocol — only the MSB carries the encoded code, the remaining 3 are
-    // zero. Ship as a single 4-byte burst per sub-channel.
-    uint8_t bytes[4] = { code, 0, 0, 0 };
-    Result rA = _codec->writeBurst(reg::dac_dvol::PAGE, r.a, bytes, sizeof(bytes));
+    // Single-byte writes per sub-channel. Both sub-channels track each
+    // other so differential output mode preserves DC balance.
+    Result rA = _codec->_write(reg::dac_dvol::PAGE, r.a, code);
     if (rA.isError()) return rA;
-    return _codec->writeBurst(reg::dac_dvol::PAGE, r.b, bytes, sizeof(bytes));
+    return _codec->_write(reg::dac_dvol::PAGE, r.b, code);
 }
 
 Result TAC5212::Out::getDvol(float &dB) {
-    // Read sub-channel A's MSB; A and B are kept in sync by setDvol.
+    // Read sub-channel A; A and B are kept in sync by setDvol.
     const DvolRegs r = dvolRegsFor(_n);
     const uint8_t code = _codec->_read(reg::dac_dvol::PAGE, r.a);
     dB = reg::dac_dvol::toDb(code);
