@@ -1,22 +1,22 @@
 // Declarative descriptor for the TLV320ADC6140 codec settings panel.
 //
-// Mirrors codec-panel-config.ts (TAC5212) — same Tab/Section/Control shape so
+// Mirrors codec-panel-config.ts (TAC5212) — same Tab/Group/Control shape so
 // the existing renderer in ui/codec-panel.ts can paint it. Address tree
 // matches Adc6140Panel::route() in src/Adc6140Panel.cpp.
 //
 // Hierarchy:
-//   Tabs (top-level sections) → Sections (section headers) → Controls (sub-settings)
+//   Tabs (top-level sections) → Groups (section headers) → Controls (sub-settings)
 //
 // Tabs:
-//   - Channels        per-channel front-end + gain (one section per ch)
+//   - Channels        per-channel front-end + gain (one group per ch)
 //   - Reference       chip-global VREF / full-scale / MICBIAS
 //   - Signal Chain    HPF / decimation / channel-sum
 //   - Dynamic Range   DRE vs AGC mode select + their parameters
 //   - System          info / status / raw register access
 
-import type { Tab, Section } from './codec-panel-config';
+import type { Tab, Group } from './codec-panel-config';
 
-const xlrChannel = (n: number): Section => ({
+const xlrChannel = (n: number): Group => ({
   name: `XLR Channel ${n}`,
   controls: [
     {
@@ -81,7 +81,7 @@ const xlrChannel = (n: number): Section => ({
 export const adc6140Panel: Tab[] = [
   {
     name: 'Channels',
-    sections: [
+    groups: [
       xlrChannel(1),
       xlrChannel(2),
       xlrChannel(3),
@@ -90,7 +90,7 @@ export const adc6140Panel: Tab[] = [
   },
   {
     name: 'Reference',
-    sections: [
+    groups: [
       {
         name: 'ADC full-scale',
         controls: [
@@ -117,7 +117,7 @@ export const adc6140Panel: Tab[] = [
   },
   {
     name: 'Signal Chain',
-    sections: [
+    groups: [
       {
         name: 'High-pass filter',
         controls: [
@@ -155,7 +155,7 @@ export const adc6140Panel: Tab[] = [
   },
   {
     name: 'Dynamic Range',
-    sections: [
+    groups: [
       {
         name: 'Mode',
         controls: [
@@ -217,7 +217,7 @@ export const adc6140Panel: Tab[] = [
   },
   {
     name: 'System',
-    sections: [
+    groups: [
       {
         name: 'Chip',
         controls: [

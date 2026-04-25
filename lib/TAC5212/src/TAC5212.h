@@ -131,44 +131,6 @@ enum class PdmClkPin : uint8_t {
     // the PDM clock function. Add after datasheet check.
 };
 
-// DAC interpolation filter response (chip-global, all outputs).
-// Linear-phase = cleanest frequency response but ~1 ms latency and pre-ringing.
-// Lower-latency modes ring less but allow more aliasing.
-enum class InterpFilter : uint8_t {
-    LinearPhase,
-    LowLatency,
-    UltraLowLatency,
-    LowPower,
-};
-
-// DAC high-pass filter (chip-global). Programmable mode loads the POR
-// default all-pass coefs (HPF off); the three fixed cutoffs are
-// hardware-set -3 dB points.
-enum class DacHpf : uint8_t {
-    Programmable,
-    Cut1Hz,
-    Cut12Hz,
-    Cut96Hz,
-};
-
-// Biquad coefficients in TAC5212's 5.27 fixed-point format. The chip
-// pre-doubles N1 and D1 in the transfer function (datasheet §7.3.9.1.6),
-// so coefs stored here are textbook N1/D1 divided by two. Designers in
-// TAC5212_Biquad.h handle the halving; callers feeding raw coefs must
-// do it themselves.
-struct BiquadCoeffs {
-    int32_t n0;
-    int32_t n1;
-    int32_t n2;
-    int32_t d1;
-    int32_t d2;
-
-    // POR all-pass: y[n] = x[n].
-    static constexpr BiquadCoeffs bypass() {
-        return BiquadCoeffs{0x7FFFFFFF, 0, 0, 0, 0};
-    }
-};
-
 // -----------------------------------------------------------------------------
 // DeviceInfo / Status — read-only structs returned by info() / readStatus()
 // -----------------------------------------------------------------------------
@@ -266,25 +228,6 @@ public:
     // adc/hpf i 0|1`.
     Result setAdcHpf(bool on);
 
-    // --- Chip-global DAC DSP -------------------------------------------------
-    //
-    // DSP_CFG1 (page 0, 0x73) packs interpolation filter, HPF mode, biquad
-    // count, soft-step disable, and DVOL gang in one byte. All read-modifywrite to preserve unrelated fields.
-    //
-    //   biquadsPerChannel: 0..3. Hardware allocates the same count to every
-    //   active DAC channel. Setting > what was set before requires the new
-    //   bands' coefficients to already be programmed (or they get the POR
-    //   bypass coefs by default, which is fine).
-
-    Result setDacInterpolationFilter(InterpFilter);
-    Result getDacInterpolationFilter(InterpFilter &out);
-    Result setDacHpf(DacHpf);
-    Result getDacHpf(DacHpf &out);
-    Result setDacBiquadsPerChannel(uint8_t n);
-    Result getDacBiquadsPerChannel(uint8_t &n);
-    Result setDacDvolGang(bool ganged);
-    Result setDacSoftStep(bool enabled);  // true = enabled (default)
-
     // --- Per-channel accessors ------------------------------------------------
     //
     // `adc(1)` / `adc(2)` return a lightweight value-type handle that holds a
@@ -303,12 +246,6 @@ public:
 
     Result  writeRegister(uint8_t page, uint8_t reg, uint8_t value);
     uint8_t readRegister(uint8_t page, uint8_t reg);
-
-    // Burst write — writes `n` consecutive bytes starting at (page, startReg).
-    // Handles the auto-increment-across-page boundary case (after reg 0x7F
-    // the next byte lands at 0x08 of the next page). Used internally by the
-    // biquad coefficient writer to ship 20 bytes per band in one transaction.
-    Result writeBurst(uint8_t page, uint8_t startReg, const uint8_t *bytes, size_t n);
 
     // --- Boot-time bulk setup (NOT on OSC tree) ------------------------------
     //
@@ -403,35 +340,6 @@ public:
     // out-param holds the decoded value. Used by /snapshot to populate
     // a freshly-connected client's codec panel without a write round-trip.
     Result getMode(OutMode &out);
-
-    // Per-DAC digital volume. Range -100.0 .. +27.0 dB in 0.5 dB steps
-    // (POR default 0.0 dB). Values below -100 dB are interpreted as mute.
-    //
-    // Differential output mode (DiffLine, FdReceiver) writes the same
-    // volume to both sub-channels (1A+1B for output 1, 2A+2B for output 2)
-    // so that DC offset on the output remains zero. Mono / pseudo-diff
-    // modes write only the active sub-channel.
-    Result setDvol(float dB);
-    Result getDvol(float &dB);
-
-    // Per-output biquad coefficient programming. `idx` is 1..3 (the chip
-    // exposes up to 3 biquads per channel via DSP_CFG1[3:2]). Coefficients
-    // are written MSB-first as 5 × 4 bytes burst, taking advantage of the
-    // codec's auto-increment register addressing.
-    //
-    // The (channel, idx) pair maps to a global biquad slot 1..12 per the
-    // hardware allocation in datasheet Table 7-48:
-    //   With BQ_CFG = 1: BQ_n = ch_n
-    //   With BQ_CFG = 2: BQ_n = ch_n,            BQ_(n+4) = ch_n
-    //   With BQ_CFG = 3: BQ_n = ch_n, BQ_(n+4) = ch_n, BQ_(n+8) = ch_n
-    //
-    // Caller is responsible for ensuring DSP_CFG1[3:2] (set via
-    // `setDacBiquadsPerChannel`) is large enough for the requested idx.
-    // Setting a band that's beyond the current allocation succeeds at the
-    // I²C level (writes the coefficients) but the chip ignores them.
-    Result setBiquad(uint8_t idx, const BiquadCoeffs &coeffs);
-    Result clearBiquad(uint8_t idx);   // writes BiquadCoeffs::bypass()
-    Result getBiquad(uint8_t idx, BiquadCoeffs &out);
 
 private:
     friend class TAC5212;

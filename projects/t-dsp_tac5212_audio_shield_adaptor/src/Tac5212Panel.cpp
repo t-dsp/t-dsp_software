@@ -3,7 +3,6 @@
 #include <Arduino.h>
 #include <OSCMessage.h>
 #include <OSCBundle.h>
-#include <TAC5212_Biquad.h>
 
 #include "tac5212_regs.h"
 
@@ -108,32 +107,6 @@ void Tac5212Panel::route(OSCMessage &msg, int addrOffset, OSCBundle &reply) {
             while (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); ++p; }
             if (strcmp(p, "/mode") == 0) { handleOutMode(n, msg, reply); return; }
         }
-    }
-
-    // Per-output DAC DSP: /dac/N/<leaf>
-    if (strncmp(sub, "/dac/", 5) == 0) {
-        const char *p = sub + 5;
-        if (*p >= '0' && *p <= '9') {
-            int n = 0;
-            while (*p >= '0' && *p <= '9') { n = n * 10 + (*p - '0'); ++p; }
-            if (strcmp(p, "/dvol") == 0) { handleDacDvol(n, msg, reply); return; }
-            // /dac/N/bq/I/{coeffs|design}
-            if (strncmp(p, "/bq/", 4) == 0) {
-                const char *q = p + 4;
-                if (*q >= '0' && *q <= '9') {
-                    int idx = 0;
-                    while (*q >= '0' && *q <= '9') { idx = idx * 10 + (*q - '0'); ++q; }
-                    if (strcmp(q, "/coeffs") == 0) { handleDacBiquadCoeffs(n, idx, msg, reply); return; }
-                    if (strcmp(q, "/design") == 0) { handleDacBiquadDesign(n, idx, msg, reply); return; }
-                }
-            }
-        }
-        // Chip-global DAC DSP leaves
-        if (strcmp(sub, "/dac/interp")     == 0) { handleDacInterp(msg, reply); return; }
-        if (strcmp(sub, "/dac/hpf")        == 0) { handleDacHpf(msg, reply); return; }
-        if (strcmp(sub, "/dac/biquads")    == 0) { handleDacBiquadCount(msg, reply); return; }
-        if (strcmp(sub, "/dac/dvol_gang")  == 0) { handleDacDvolGang(msg, reply); return; }
-        if (strcmp(sub, "/dac/soft_step")  == 0) { handleDacSoftStep(msg, reply); return; }
     }
 
     if (strcmp(sub, "/pdm/enable") == 0) { handlePdmEnable(msg, reply); return; }
@@ -375,157 +348,6 @@ void Tac5212Panel::handleOutMode(int n, OSCMessage &msg, OSCBundle &reply) {
     else             echoEnumReply(reply, addr, val);
 }
 
-// ----- DAC DSP handlers (per-output) -----
-
-void Tac5212Panel::handleDacDvol(int n, OSCMessage &msg, OSCBundle &reply) {
-    char addr[56];
-    snprintf(addr, sizeof(addr), "/codec/tac5212/dac/%d/dvol", n);
-    if (msgIsRead(msg)) {
-        float dB = 0.0f;
-        tac5212::Result r = _codec.out(n).getDvol(dB);
-        if (r.isError()) echoErrorReply(reply, addr, r.message ? r.message : "getDvol failed");
-        else             echoFloatReply(reply, addr, dB);
-        return;
-    }
-    float dB = 0.0f;
-    if (msg.isFloat(0))    dB = msg.getFloat(0);
-    else if (msg.isInt(0)) dB = (float)msg.getInt(0);
-    else { echoErrorReply(reply, addr, "expected float arg"); return; }
-    tac5212::Result r = _codec.out(n).setDvol(dB);
-    if (r.isError()) echoErrorReply(reply, addr, r.message ? r.message : "setDvol failed");
-    else             echoFloatReply(reply, addr, dB);
-}
-
-void Tac5212Panel::handleDacBiquadCoeffs(int n, int idx, OSCMessage &msg, OSCBundle &reply) {
-    // Args: 5 × int32 (n0, n1, n2, d1, d2). Five separate `i` args rather
-    // than a blob keeps wire format simple and lets the dev surface debug
-    // the coefficients in the raw OSC log.
-    char addr[64];
-    snprintf(addr, sizeof(addr), "/codec/tac5212/dac/%d/bq/%d/coeffs", n, idx);
-    if (msg.size() < 5) { echoErrorReply(reply, addr, "expected 5 int args"); return; }
-    tac5212::BiquadCoeffs c;
-    c.n0 = (int32_t)argAsInt(msg, 0);
-    c.n1 = (int32_t)argAsInt(msg, 1);
-    c.n2 = (int32_t)argAsInt(msg, 2);
-    c.d1 = (int32_t)argAsInt(msg, 3);
-    c.d2 = (int32_t)argAsInt(msg, 4);
-    tac5212::Result r = _codec.out(n).setBiquad((uint8_t)idx, c);
-    if (r.isError()) {
-        echoErrorReply(reply, addr, r.message ? r.message : "setBiquad failed");
-        return;
-    }
-    OSCMessage echo(addr);
-    echo.add(c.n0); echo.add(c.n1); echo.add(c.n2); echo.add(c.d1); echo.add(c.d2);
-    reply.add(echo);
-}
-
-void Tac5212Panel::handleDacBiquadDesign(int n, int idx, OSCMessage &msg, OSCBundle &reply) {
-    // Convenience leaf: type-string + freqHz + gainDb + Q. The host could
-    // do this math itself and POST coeffs, but keeping a designer here lets
-    // factory-preset paths and snapshot-replay use the same input format.
-    // Args: s f f f.
-    char addr[64];
-    snprintf(addr, sizeof(addr), "/codec/tac5212/dac/%d/bq/%d/design", n, idx);
-    if (msg.size() < 4) { echoErrorReply(reply, addr, "expected (type, freqHz, gainDb, Q)"); return; }
-    char typeStr[24];
-    if (argAsString(msg, 0, typeStr, sizeof(typeStr)) == 0) {
-        echoErrorReply(reply, addr, "expected type string at arg 0");
-        return;
-    }
-    const float freqHz = msg.isFloat(1) ? msg.getFloat(1) : (float)argAsInt(msg, 1);
-    const float gainDb = msg.isFloat(2) ? msg.getFloat(2) : (float)argAsInt(msg, 2);
-    const float Q      = msg.isFloat(3) ? msg.getFloat(3) : (float)argAsInt(msg, 3);
-
-    // Sample rate — assume 48 kHz for now. A future enhancement reads the
-    // actual fS from the audio serial interface configuration.
-    constexpr float kFs = 48000.0f;
-
-    tac5212::BiquadCoeffs c;
-    if      (strcmp(typeStr, "off")        == 0) c = tac5212::bqBypass();
-    else if (strcmp(typeStr, "peak")       == 0) c = tac5212::bqPeak(kFs, freqHz, gainDb, Q);
-    else if (strcmp(typeStr, "low_shelf")  == 0) c = tac5212::bqLowShelf(kFs, freqHz, gainDb, Q);
-    else if (strcmp(typeStr, "high_shelf") == 0) c = tac5212::bqHighShelf(kFs, freqHz, gainDb, Q);
-    else if (strcmp(typeStr, "low_pass")   == 0) c = tac5212::bqLowpass(kFs, freqHz, Q);
-    else if (strcmp(typeStr, "high_pass")  == 0) c = tac5212::bqHighpass(kFs, freqHz, Q);
-    else if (strcmp(typeStr, "band_pass")  == 0) c = tac5212::bqBandpass(kFs, freqHz, Q);
-    else if (strcmp(typeStr, "notch")      == 0) c = tac5212::bqNotch(kFs, freqHz, Q);
-    else { echoErrorReply(reply, addr, "unknown biquad type"); return; }
-
-    tac5212::Result r = _codec.out(n).setBiquad((uint8_t)idx, c);
-    if (r.isError()) {
-        echoErrorReply(reply, addr, r.message ? r.message : "setBiquad failed");
-        return;
-    }
-    // Echo back the design params (round-trip-friendly) plus the resulting
-    // coeffs on the /coeffs leaf so the UI can refresh its preview without
-    // recomputing.
-    OSCMessage echo(addr);
-    echo.add(typeStr); echo.add(freqHz); echo.add(gainDb); echo.add(Q);
-    reply.add(echo);
-    char coefAddr[64];
-    snprintf(coefAddr, sizeof(coefAddr), "/codec/tac5212/dac/%d/bq/%d/coeffs", n, idx);
-    OSCMessage coefEcho(coefAddr);
-    coefEcho.add(c.n0); coefEcho.add(c.n1); coefEcho.add(c.n2); coefEcho.add(c.d1); coefEcho.add(c.d2);
-    reply.add(coefEcho);
-}
-
-// ----- DAC DSP handlers (chip-global) -----
-
-void Tac5212Panel::handleDacInterp(OSCMessage &msg, OSCBundle &reply) {
-    const char *addr = "/codec/tac5212/dac/interp";
-    char val[24];
-    if (argAsString(msg, 0, val, sizeof(val)) == 0) { echoErrorReply(reply, addr, "expected enum string"); return; }
-    tac5212::InterpFilter f;
-    if      (strcmp(val, "linear_phase")      == 0) f = tac5212::InterpFilter::LinearPhase;
-    else if (strcmp(val, "low_latency")       == 0) f = tac5212::InterpFilter::LowLatency;
-    else if (strcmp(val, "ultra_low_latency") == 0) f = tac5212::InterpFilter::UltraLowLatency;
-    else if (strcmp(val, "low_power")         == 0) f = tac5212::InterpFilter::LowPower;
-    else { echoErrorReply(reply, addr, "unknown interp filter"); return; }
-    tac5212::Result r = _codec.setDacInterpolationFilter(f);
-    if (r.isError()) echoErrorReply(reply, addr, r.message ? r.message : "setDacInterpolationFilter failed");
-    else             echoEnumReply(reply, addr, val);
-}
-
-void Tac5212Panel::handleDacHpf(OSCMessage &msg, OSCBundle &reply) {
-    const char *addr = "/codec/tac5212/dac/hpf";
-    char val[16];
-    if (argAsString(msg, 0, val, sizeof(val)) == 0) { echoErrorReply(reply, addr, "expected enum string"); return; }
-    tac5212::DacHpf h;
-    if      (strcmp(val, "off")  == 0) h = tac5212::DacHpf::Programmable;  // POR coefs are all-pass
-    else if (strcmp(val, "1hz")  == 0) h = tac5212::DacHpf::Cut1Hz;
-    else if (strcmp(val, "12hz") == 0) h = tac5212::DacHpf::Cut12Hz;
-    else if (strcmp(val, "96hz") == 0) h = tac5212::DacHpf::Cut96Hz;
-    else { echoErrorReply(reply, addr, "unknown hpf cutoff"); return; }
-    tac5212::Result r = _codec.setDacHpf(h);
-    if (r.isError()) echoErrorReply(reply, addr, r.message ? r.message : "setDacHpf failed");
-    else             echoEnumReply(reply, addr, val);
-}
-
-void Tac5212Panel::handleDacBiquadCount(OSCMessage &msg, OSCBundle &reply) {
-    const char *addr = "/codec/tac5212/dac/biquads";
-    int32_t v = argAsInt(msg, 0);
-    if (v < 0 || v > 3) { echoErrorReply(reply, addr, "expected 0..3"); return; }
-    tac5212::Result r = _codec.setDacBiquadsPerChannel((uint8_t)v);
-    if (r.isError()) echoErrorReply(reply, addr, r.message ? r.message : "setDacBiquadsPerChannel failed");
-    else             echoIntReply(reply, addr, v);
-}
-
-void Tac5212Panel::handleDacDvolGang(OSCMessage &msg, OSCBundle &reply) {
-    const char *addr = "/codec/tac5212/dac/dvol_gang";
-    int32_t v = argAsInt(msg, 0);
-    tac5212::Result r = _codec.setDacDvolGang(v != 0);
-    if (r.isError()) echoErrorReply(reply, addr, r.message ? r.message : "setDacDvolGang failed");
-    else             echoIntReply(reply, addr, v != 0 ? 1 : 0);
-}
-
-void Tac5212Panel::handleDacSoftStep(OSCMessage &msg, OSCBundle &reply) {
-    const char *addr = "/codec/tac5212/dac/soft_step";
-    int32_t v = argAsInt(msg, 0);
-    tac5212::Result r = _codec.setDacSoftStep(v != 0);
-    if (r.isError()) echoErrorReply(reply, addr, r.message ? r.message : "setDacSoftStep failed");
-    else             echoIntReply(reply, addr, v != 0 ? 1 : 0);
-}
-
 // ----- PDM (stubbed at library level) -----
 
 void Tac5212Panel::handlePdmEnable(OSCMessage &msg, OSCBundle &reply) {
@@ -650,26 +472,6 @@ static const char *outModeToString(tac5212::OutMode m) {
     return "diff_line";
 }
 
-static const char *interpToString(tac5212::InterpFilter f) {
-    switch (f) {
-        case tac5212::InterpFilter::LinearPhase:     return "linear_phase";
-        case tac5212::InterpFilter::LowLatency:      return "low_latency";
-        case tac5212::InterpFilter::UltraLowLatency: return "ultra_low_latency";
-        case tac5212::InterpFilter::LowPower:        return "low_power";
-    }
-    return "linear_phase";
-}
-
-static const char *dacHpfToString(tac5212::DacHpf h) {
-    switch (h) {
-        case tac5212::DacHpf::Programmable: return "off";
-        case tac5212::DacHpf::Cut1Hz:       return "1hz";
-        case tac5212::DacHpf::Cut12Hz:      return "12hz";
-        case tac5212::DacHpf::Cut96Hz:      return "96hz";
-    }
-    return "off";
-}
-
 void Tac5212Panel::snapshot(OSCBundle &reply) {
     for (int n = 1; n <= 2; ++n) {
         tac5212::OutMode mode;
@@ -687,49 +489,6 @@ void Tac5212Panel::snapshot(OSCBundle &reply) {
         char addr[56];
         snprintf(addr, sizeof(addr), "/codec/tac5212/adc/%d/dvol", n);
         echoFloatReply(reply, addr, dB);
-    }
-    // DAC DVOL (per-output)
-    for (int n = 1; n <= 2; ++n) {
-        float dB = 0.0f;
-        tac5212::Result r = _codec.out(n).getDvol(dB);
-        if (r.isError()) continue;
-        char addr[56];
-        snprintf(addr, sizeof(addr), "/codec/tac5212/dac/%d/dvol", n);
-        echoFloatReply(reply, addr, dB);
-    }
-    // Chip-global DAC DSP
-    {
-        tac5212::InterpFilter f;
-        if (_codec.getDacInterpolationFilter(f).isOk()) {
-            echoEnumReply(reply, "/codec/tac5212/dac/interp", interpToString(f));
-        }
-        tac5212::DacHpf h;
-        if (_codec.getDacHpf(h).isOk()) {
-            echoEnumReply(reply, "/codec/tac5212/dac/hpf", dacHpfToString(h));
-        }
-        uint8_t bqCount = 0;
-        if (_codec.getDacBiquadsPerChannel(bqCount).isOk()) {
-            echoIntReply(reply, "/codec/tac5212/dac/biquads", (int32_t)bqCount);
-        }
-    }
-    // DAC biquad coefficients (per output × bands).
-    // Read coefficients from chip and emit on /coeffs leaves so the UI can
-    // restore both the slider values (via /design — designed by caller, we
-    // don't try to reverse-engineer type/freq/Q from coefs) and the curve.
-    // Note: the UI keeps a local cache of design params and only consults
-    // these coefs to seed the response curve before user interaction.
-    uint8_t bqCount = 0;
-    _codec.getDacBiquadsPerChannel(bqCount);
-    for (int n = 1; n <= 2; ++n) {
-        for (uint8_t idx = 1; idx <= bqCount; ++idx) {
-            tac5212::BiquadCoeffs c;
-            if (_codec.out(n).getBiquad(idx, c).isError()) continue;
-            char addr[64];
-            snprintf(addr, sizeof(addr), "/codec/tac5212/dac/%d/bq/%d/coeffs", n, idx);
-            OSCMessage echo(addr);
-            echo.add(c.n0); echo.add(c.n1); echo.add(c.n2); echo.add(c.d1); echo.add(c.d2);
-            reply.add(echo);
-        }
     }
 }
 

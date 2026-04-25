@@ -92,18 +92,6 @@ private:
 
     void handleOutMode(int n, OSCMessage &msg, OSCBundle &reply);
 
-    // DAC DSP handlers (per-output)
-    void handleDacDvol(int n, OSCMessage &msg, OSCBundle &reply);
-    void handleDacBiquadCoeffs(int n, int idx, OSCMessage &msg, OSCBundle &reply);
-    void handleDacBiquadDesign(int n, int idx, OSCMessage &msg, OSCBundle &reply);
-
-    // DAC DSP handlers (chip-global)
-    void handleDacInterp(OSCMessage &msg, OSCBundle &reply);
-    void handleDacHpf(OSCMessage &msg, OSCBundle &reply);
-    void handleDacBiquadCount(OSCMessage &msg, OSCBundle &reply);
-    void handleDacDvolGang(OSCMessage &msg, OSCBundle &reply);
-    void handleDacSoftStep(OSCMessage &msg, OSCBundle &reply);
-
     void handlePdmEnable(OSCMessage &msg, OSCBundle &reply);
     void handlePdmSource(OSCMessage &msg, OSCBundle &reply);
 
