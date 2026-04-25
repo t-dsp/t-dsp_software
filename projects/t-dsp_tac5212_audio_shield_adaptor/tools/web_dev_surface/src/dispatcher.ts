@@ -22,10 +22,12 @@ const pad2 = (n: number): string => n.toString().padStart(2, '0');
 export type CodecListener = (msg: OscMessage) => void;
 
 export class Dispatcher {
-  // Address -> listener for /codec/... echoes. Populated by codec-panel.ts
+  // Address -> listeners for /codec/... echoes. Populated by codec-panel.ts
   // at construction time. The dispatcher matches by exact address; the
-  // panel doesn't get pattern matching for free.
-  private codecListeners = new Map<string, CodecListener>();
+  // panel doesn't get pattern matching for free. Multiple listeners per
+  // address are allowed so an XLR strip's analog-gain knob can mirror the
+  // same /codec/adc6140/ch/N/gain echo as the System tab's settings panel.
+  private codecListeners = new Map<string, Set<CodecListener>>();
 
   // Callback sink for /spectrum/main b blobs. Set by the spectrum
   // view's owner so the 1024-byte payload can bypass MixerState and
@@ -67,10 +69,17 @@ export class Dispatcher {
   // signal automatically. Returns an unsubscribe function for symmetry,
   // though the panel currently never tears down.
   registerCodecListener(address: string, cb: CodecListener): () => void {
-    this.codecListeners.set(address, cb);
+    let set = this.codecListeners.get(address);
+    if (!set) {
+      set = new Set();
+      this.codecListeners.set(address, set);
+    }
+    set.add(cb);
     return () => {
       const cur = this.codecListeners.get(address);
-      if (cur === cb) this.codecListeners.delete(address);
+      if (!cur) return;
+      cur.delete(cb);
+      if (cur.size === 0) this.codecListeners.delete(address);
     };
   }
 
@@ -1043,6 +1052,14 @@ export class Dispatcher {
     this.sendMsg(address, types, args);
   }
 
+  // Throttled raw send — for continuous-value codec controls (biquad EQ
+  // sliders, DRC parameter sliders) that would otherwise saturate the
+  // serial bridge at slider-drag rate. Coalesces repeated sends to the
+  // same address; trailing-edge fire guarantees the final release lands.
+  sendRawThrottled(address: string, types: string, args: OscArg[]): void {
+    this.sendThrottled(address, types, args);
+  }
+
   // ---------- inbound (firmware -> UI) ----------
 
   handleIncoming(msg: OscMessage): void {
@@ -1052,9 +1069,9 @@ export class Dispatcher {
     // listener registry first. Keyed by exact address (no patterns).
     // Also handles non-/codec/ addresses explicitly registered by UI
     // components (e.g. /line/mode).
-    const codecCb = this.codecListeners.get(a);
-    if (codecCb) {
-      codecCb(msg);
+    const codecCbs = this.codecListeners.get(a);
+    if (codecCbs) {
+      for (const cb of codecCbs) cb(msg);
       if (a.startsWith('/codec/')) return;  // codec-only: don't double-match
     }
 

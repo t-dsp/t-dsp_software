@@ -46,6 +46,7 @@
 
 #include "tac5212_regs.h"
 #include <TAC5212.h>
+#include <TAC5212_Biquad.h>
 #include <TLV320ADC6140.h>
 #include <TDspMixer.h>
 #include <TDspMidi.h>
@@ -2077,6 +2078,39 @@ static void codecPowerUp() {
     delay(100);
 }
 
+// P1 R0x2D MISC_CFG0 bit 1 = DSP_AVDD_SEL. POR is "Reserved" (0); must be 1
+// for the DSP Limiter, BOP, and DRC blocks to receive valid SAR AVDD data.
+// Leaving it at POR is what causes the high-pitched squeal when the user
+// flips the distortion limiter on. (Bit 7 EN_DISTORTION is touched by the
+// limiter enable RMW elsewhere; bit 1 is set once here at init.)
+static void codecEnableDspAvddSel() {
+    constexpr uint8_t MISC_CFG0_PAGE = 1;
+    constexpr uint8_t MISC_CFG0_REG  = 0x2D;
+    constexpr uint8_t DSP_AVDD_SEL   = 0x02;
+    uint8_t v = g_codec.readRegister(MISC_CFG0_PAGE, MISC_CFG0_REG);
+    g_codec.writeRegister(MISC_CFG0_PAGE, MISC_CFG0_REG,
+                          v | DSP_AVDD_SEL);
+}
+
+// Apply a gentle "smooth" three-band EQ to both DAC outputs at boot so the
+// device produces ear-fatigue-treated audio without requiring the user to
+// open the dev surface. Same recipe as the EQ_PRESETS.smooth defaults in
+// tools/web_dev_surface/src/codec-panel-config.ts:
+//   Band 1: low-shelf  120 Hz +1.5 dB Q 0.7
+//   Band 2: peak       3 kHz  -2.5 dB Q 1.2  (presence-band tame)
+//   Band 3: high-shelf 7 kHz  -3.0 dB Q 0.7  (fatigue zone roll-off)
+// Uses fs=48000 to match the JS-side biquad designer in biquad-design.ts
+// so the UI's preview curve matches the chip's actual response.
+static void codecApplyEarFatigueDefaults() {
+    constexpr float kFs = 48000.0f;
+    g_codec.setDacBiquadsPerChannel(3);
+    for (uint8_t out = 1; out <= 2; ++out) {
+        g_codec.out(out).setBiquad(1, tac5212::bqLowShelf (kFs,  120.0f,  1.5f, 0.7f));
+        g_codec.out(out).setBiquad(2, tac5212::bqPeak     (kFs, 3000.0f, -2.5f, 1.2f));
+        g_codec.out(out).setBiquad(3, tac5212::bqHighShelf(kFs, 7000.0f, -3.0f, 0.7f));
+    }
+}
+
 static void setupCodecHandRolled() {
     Serial.println("Initializing TAC5212 (Phase 1 hand-rolled path)...");
     codecResetAndWake();
@@ -2087,6 +2121,8 @@ static void setupCodecHandRolled() {
     codecConfigureDacOutputs();
     codecMuteDacVolume();  // boot gate: DAC powers up muted (volume == 0)
     codecPowerUp();
+    codecEnableDspAvddSel();  // arm DSP block input select before any DSP enable
+    codecApplyEarFatigueDefaults();  // smooth EQ on both outputs at boot
     Serial.print("DEV_STS0: 0x");
     Serial.println(readReg(REG_DEV_STS0), HEX);
     Serial.println("Codec ready: TDM + PDM + ADC");
@@ -4398,8 +4434,20 @@ static void onCliLine(char *line, int length, void *userData) {
 // ============================================================================
 
 void setup() {
+    // Hardware-reset both codecs at boot. SHDNZ is active-low and shared
+    // between the TAC5212 and the TLV320ADC6140 on this board, so a single
+    // LOW→HIGH edge here re-initialises both chips' analog and digital
+    // sections from a known cold state — fixes the "stuck after soft
+    // reboot" mode where the chip retains a half-configured DSP image.
+    // Per the SHDNZ-shared rule (memory: project_shdnz_pin) this is the
+    // ONLY place we may toggle this pin; codec drivers must use SW_RESET
+    // from here on.
     pinMode(TAC5212_EN_PIN, OUTPUT);
+    digitalWrite(TAC5212_EN_PIN, LOW);
+    delay(5);                            // > 100 µs SHDNZ low spec, generous
     digitalWrite(TAC5212_EN_PIN, HIGH);
+    delay(10);                           // let internal supplies settle
+                                          // before I²C bring-up touches them
 
     Serial.begin(115200);
     pinMode(LED_BUILTIN, OUTPUT);
@@ -4674,6 +4722,11 @@ void setup() {
     postMixL.gain(2, 1.0f);
     postMixR.gain(2, 1.0f);
 
+    // postMix slot 3 = TLV320ADC6140 XLR bus. Unity; per-channel faders
+    // are applied earlier inside adcMixL/R via SignalGraphBinding.
+    postMixL.gain(3, 1.0f);
+    postMixR.gain(3, 1.0f);
+
     // --- Beats drum machine init --------------------------------------
     //
     // SD card: used for sample tracks (2 = HAT.WAV, 3 = CLAP.WAV by
@@ -4782,6 +4835,10 @@ void setup() {
     g_dispatcher.setSpectrumEngine(&g_spectrum);
     g_dispatcher.registerCodecPanel(&g_codecPanel);
     g_dispatcher.registerCodecPanel(&g_adc6140Panel);
+
+    // Wire the panel's "Initialize" action to the full bring-up function
+    // so the user can re-run it from the System tab without rebooting.
+    g_codecPanel.setInitializeCallback(&setupCodecHandRolled);
 
     g_transport.begin(115200);
     g_transport.setOscMessageHandler(&onOscMessage, nullptr);

@@ -11,8 +11,9 @@
 // firmware model propagates writes to the partner automatically, so
 // moving the L fader moves the R fader via echo.
 
-import { MixerState } from '../state';
+import { MixerState, Signal } from '../state';
 import { Dispatcher } from '../dispatcher';
+import { OscMessage } from '../osc';
 import {
   makeRow,
   makeName,
@@ -22,7 +23,38 @@ import {
   makeMute,
   makeSolo,
   makeRec,
+  makeCellSpacer,
+  makeGainKnob,
 } from './cells';
+
+// XLR channel indices (0-based) on the mixer map to TLV320ADC6140
+// physical channels (1-based): idx 6 = XLR 1, idx 7 = XLR 2, etc.
+// Used to wire the per-strip analog-gain knob to /codec/adc6140/ch/N/gain.
+function xlrAdcChannel(channelIdx: number): number | null {
+  if (channelIdx >= 6 && channelIdx <= 9) return channelIdx - 5;
+  return null;
+}
+
+// Build the analog-gain knob cell for one channel, registering a
+// firmware-echo listener on /codec/adc6140/ch/N/gain. The knob is the
+// authoritative local mirror — both this knob and the System tab's
+// ADC6140 settings panel subscribe to the same address (multi-listener
+// registry in dispatcher.ts), so dragging either one updates the other.
+function makeXlrGainKnob(adcCh: number, dispatcher: Dispatcher): HTMLElement {
+  // 0-42 dB / 1 dB step matches adc6140-panel-config.ts. Default 0 dB
+  // matches firmware POR (Adc6140Panel applies 0 dB on init).
+  const value = new Signal<number>(0);
+  const address = `/codec/adc6140/ch/${adcCh}/gain`;
+  dispatcher.registerCodecListener(address, (msg: OscMessage) => {
+    if (msg.types === 'f' && typeof msg.args[0] === 'number') value.set(msg.args[0]);
+    else if (msg.types === 'i' && typeof msg.args[0] === 'number') value.set(msg.args[0]);
+  });
+  return makeGainKnob({
+    value, min: 0, max: 42, step: 1, unit: 'dB',
+    label: `XLR ${adcCh} analog gain`,
+    onChange: (v) => dispatcher.sendRaw(address, 'f', [v]),
+  });
+}
 
 export function channelPair(
   oddIdx: number,
@@ -42,6 +74,18 @@ export function channelPair(
   // Row 2: meters
   const rowMeter = makeRow('row-meter');
   rowMeter.append(makeMeter(chL.peak, chL.rms), makeMeter(chR.peak, chR.rms));
+
+  // Row 2.5: analog-gain knobs (XLR strips only). Sits above the fader
+  // because that's where a console's input-trim pot lives. Non-XLR pairs
+  // (USB / Line / Mic) get spacer cells so row alignment holds across
+  // the whole mixer row.
+  const rowGain = makeRow('row-gain');
+  const adcL = xlrAdcChannel(oddIdx);
+  const adcR = xlrAdcChannel(oddIdx + 1);
+  rowGain.append(
+    adcL !== null ? makeXlrGainKnob(adcL, dispatcher) : makeCellSpacer('gain'),
+    adcR !== null ? makeXlrGainKnob(adcR, dispatcher) : makeCellSpacer('gain'),
+  );
 
   // Row 3: faders
   const rowFader = makeRow('row-fader');
@@ -105,6 +149,6 @@ export function channelPair(
   );
   rowRec.append(recL, recR);
 
-  root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink, rowRec);
+  root.append(rowName, rowMeter, rowGain, rowFader, rowFv, rowMute, rowSolo, rowLink, rowRec);
   return root;
 }

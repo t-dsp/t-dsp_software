@@ -37,6 +37,13 @@ export function synthBusStrip(bus: SynthBusState, dispatcher: Dispatcher): HTMLE
   const rowMeter = makeRow('row-meter');
   rowMeter.append(makeMeterSpacer(), makeMeterSpacer());
 
+  // Row 2.5: gain spacer — synth bus has no analog-input gain, but the
+  // row exists so XLR-strip knobs align with the fader row.
+  const rowGain = makeRow('row-gain');
+  const gainSp = makeCellSpacer('gain');
+  gainSp.classList.add('span-2');
+  rowGain.append(gainSp);
+
   // Row 3: single fader, visually spanning both slots. The strip-row
   // rule already centers its children, so one wide fader sits in the
   // middle of the wrapper.
@@ -87,6 +94,6 @@ export function synthBusStrip(bus: SynthBusState, dispatcher: Dispatcher): HTMLE
   recSp.classList.add('span-2');
   rowRec.append(recSp);
 
-  root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink, rowRec);
+  root.append(rowName, rowMeter, rowGain, rowFader, rowFv, rowMute, rowSolo, rowLink, rowRec);
   return root;
 }

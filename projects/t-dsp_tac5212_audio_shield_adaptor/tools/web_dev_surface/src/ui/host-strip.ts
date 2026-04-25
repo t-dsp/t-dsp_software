@@ -41,6 +41,11 @@ export function hostStrip(bus: BusState, dispatcher: Dispatcher): HTMLElement {
     makeMeter(bus.hostPeakR, bus.hostRmsR),
   );
 
+  // Row 2.5: gain spacer — keeps XLR analog-gain knobs aligned with the
+  // fader row across the mixer.
+  const rowGain = makeRow('row-gain');
+  rowGain.append(makeCellSpacer('gain'));
+
   // Row 3: fader (disabled, read-only reflection of usbIn.volume())
   const rowFader = makeRow('row-fader');
   const fader = makeDisabledFader(bus.hostvolValue);
@@ -81,6 +86,6 @@ export function hostStrip(bus: BusState, dispatcher: Dispatcher): HTMLElement {
   const rowRec = makeRow('row-rec');
   rowRec.append(makeCellSpacer('rec'));
 
-  root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink, rowRec);
+  root.append(rowName, rowMeter, rowGain, rowFader, rowFv, rowMute, rowSolo, rowLink, rowRec);
   return root;
 }

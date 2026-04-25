@@ -1,11 +1,11 @@
 // Declarative descriptor for the TLV320ADC6140 codec settings panel.
 //
-// Mirrors codec-panel-config.ts (TAC5212) — same Tab/Group/Control shape so
+// Mirrors codec-panel-config.ts (TAC5212) — same Tab/Section/Control shape so
 // the existing renderer in ui/codec-panel.ts can paint it. Address tree
 // matches Adc6140Panel::route() in src/Adc6140Panel.cpp.
 //
 // Hierarchy:
-//   Tabs (top-level sections) → Groups (section headers) → Controls (sub-settings)
+//   Tabs (top-level sections) → Sections (section headers) → Controls (sub-settings)
 //
 // Tabs:
 //   - Channels        per-channel front-end + gain (one group per ch)
@@ -14,9 +14,9 @@
 //   - Dynamic Range   DRE vs AGC mode select + their parameters
 //   - System          info / status / raw register access
 
-import type { Tab, Group } from './codec-panel-config';
+import type { Tab, Section } from './codec-panel-config';
 
-const xlrChannel = (n: number): Group => ({
+const xlrChannel = (n: number): Section => ({
   name: `XLR Channel ${n}`,
   controls: [
     {
@@ -81,7 +81,7 @@ const xlrChannel = (n: number): Group => ({
 export const adc6140Panel: Tab[] = [
   {
     name: 'Channels',
-    groups: [
+    sections: [
       xlrChannel(1),
       xlrChannel(2),
       xlrChannel(3),
@@ -90,7 +90,7 @@ export const adc6140Panel: Tab[] = [
   },
   {
     name: 'Reference',
-    groups: [
+    sections: [
       {
         name: 'ADC full-scale',
         controls: [
@@ -117,7 +117,7 @@ export const adc6140Panel: Tab[] = [
   },
   {
     name: 'Signal Chain',
-    groups: [
+    sections: [
       {
         name: 'High-pass filter',
         controls: [
@@ -155,7 +155,7 @@ export const adc6140Panel: Tab[] = [
   },
   {
     name: 'Dynamic Range',
-    groups: [
+    sections: [
       {
         name: 'Mode',
         controls: [
@@ -217,7 +217,7 @@ export const adc6140Panel: Tab[] = [
   },
   {
     name: 'System',
-    groups: [
+    sections: [
       {
         name: 'Chip',
         controls: [

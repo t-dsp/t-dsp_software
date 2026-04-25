@@ -226,6 +226,7 @@ select, input[type="text"] {
 
 .row-name   { height: 14px;  }
 .row-meter  { height: 130px; align-items: flex-end; }
+.row-gain   { height: 40px;  }
 .row-fader  { height: 160px; }
 .row-fv     { height: 14px;  }
 .row-mute   { height: 24px;  }
@@ -310,6 +311,70 @@ select, input[type="text"] {
   height: 160px;
   margin: 0;
   padding: 0;
+}
+
+/* Round trim/gain knob — sits in row-gain just above the fader on each
+ * XLR input strip. Click+drag vertically to change value (Shift = fine);
+ * scroll wheel nudges by one step. The wrapper stacks the dial above a
+ * small dB readout so the current value is always visible without
+ * having to hover. The dial is a separately-rotated inner div carrying
+ * the indicator pip, so transform: rotate() only touches the inner
+ * element (no layout, just compositor work). */
+.gain-knob-wrap {
+  width: 26px;
+  height: 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 1px;
+}
+
+.gain-knob {
+  width: 24px;
+  height: 24px;
+  position: relative;
+  cursor: ns-resize;
+  touch-action: none;        /* claim the gesture so the page doesn't scroll */
+}
+
+.gain-knob-dial {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #5a5a5a 0%, #303030 60%, #1c1c1c 100%);
+  border: 1px solid #444;
+  box-shadow: inset 0 -1px 2px rgba(0,0,0,0.5);
+  will-change: transform;
+}
+
+.gain-knob-indicator {
+  position: absolute;
+  top: 1px;
+  left: 50%;
+  width: 2px;
+  height: 7px;
+  margin-left: -1px;
+  background: #d68a3a;
+  border-radius: 1px;
+}
+
+.gain-knob:hover .gain-knob-dial {
+  border-color: #6a6a6a;
+}
+
+.gain-knob-value {
+  font-size: 9px;
+  line-height: 12px;
+  color: #aaa;
+  font-family: monospace;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  width: 100%;
+}
+
+.spacer-gain {
+  height: 40px;
 }
 
 .fader-value {
@@ -420,23 +485,6 @@ select, input[type="text"] {
   border-radius: 3px;
 }
 
-/* Hierarchy header above each codec panel inside the codec section.
- * Visually separates the TAC5212 panel from the TLV320ADC6140 panel. */
-.codec-section-header {
-  margin: 0;
-  padding: 10px 16px 8px 16px;
-  font-size: 12px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: #d8d8d8;
-  background: #1a1a1a;
-  border-bottom: 1px solid #2c2c2c;
-}
-.codec-section-header + .codec-panel {
-  margin-bottom: 8px;
-}
-
 .codec-panel {
   display: flex;
   flex-direction: column;
@@ -503,7 +551,8 @@ select, input[type="text"] {
   min-width: 80px;
 }
 
-.group-disabled {
+.group-disabled,
+.section-disabled {
   opacity: 0.35;
   pointer-events: none;
 }
@@ -514,6 +563,205 @@ select, input[type="text"] {
   color: #aef;
   min-width: 56px;
   text-align: right;
+}
+
+/* ---------- codec view (top-level Codec tab) ---------- */
+
+.view-codec {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 0;
+}
+
+/* The codec-panel inside view-codec stretches to fit. */
+.view-codec .codec-panel {
+  background: transparent;
+  border: none;
+}
+
+/* Sub-tab bar inside the Codec view. Hierarchical layer 2. */
+.view-codec .tab-bar {
+  border-bottom: 1px solid #2c2c2c;
+  padding: 0 4px;
+}
+
+/* Tab-content lays sections out in a single column for readable scanning. */
+.view-codec .tab-content {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  padding: 16px 0 0;
+  gap: 14px;
+}
+
+/* ---------- section cards (hierarchical layer 3) ---------- */
+
+.codec-section-card {
+  background: #1f1f1f;
+  border: 1px solid #2c2c2c;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.codec-section-card-disabled .codec-section-body {
+  opacity: 0.4;
+}
+.codec-section-card-disabled .codec-section-header {
+  cursor: help;
+}
+
+.codec-section-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #252525;
+  border-bottom: 1px solid #2c2c2c;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 12px;
+  color: #f0f0f0;
+  cursor: pointer;
+  user-select: none;
+}
+.codec-section-header.collapsed {
+  border-bottom-color: transparent;
+}
+.codec-section-header .title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1;
+}
+.codec-section-header .chevron {
+  font-size: 10px;
+  color: #888;
+  transition: transform 0.15s;
+}
+.codec-section-header.collapsed .chevron {
+  transform: rotate(-90deg);
+}
+.codec-section-subtitle {
+  font-weight: 400;
+  font-size: 11px;
+  color: #888;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.codec-section-presets {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.codec-section-presets .codec-preset-btn {
+  font-size: 10px;
+  padding: 2px 8px;
+  background: #2c2c2c;
+  border: 1px solid #383838;
+  border-radius: 2px;
+  cursor: pointer;
+  color: #ccc;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.codec-section-presets .codec-preset-btn:hover {
+  background: #3a3a3a;
+  color: #fff;
+}
+
+/* Section body — sub-settings layer (layer 4). */
+.codec-section-body {
+  padding: 10px 14px 12px;
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) 2fr;
+  row-gap: 8px;
+  column-gap: 16px;
+  align-items: center;
+}
+.codec-section-body .codec-row-label {
+  font-size: 12px;
+  color: #ccc;
+}
+.codec-section-body .codec-row-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.codec-section-body .codec-row-control .control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  width: 100%;
+}
+.codec-section-body .codec-row-control input[type="range"] {
+  flex: 1;
+}
+.codec-section-body .codec-control-help {
+  grid-column: 2;
+  font-size: 10.5px;
+  color: #888;
+  margin-top: -4px;
+}
+
+/* Biquad rows span both grid columns and host the EQ widget controls. */
+.codec-curve-row {
+  grid-column: 1 / -1;
+  margin-bottom: 4px;
+}
+.codec-biquad-row {
+  grid-column: 1 / -1;
+}
+
+/* ---------- biquad EQ widget ---------- */
+
+.biquad-curve-wrap {
+  background: #161616;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 4px;
+}
+.biquad-curve {
+  display: block;
+  width: 100%;
+  height: 140px;
+}
+
+.biquad-band {
+  display: grid;
+  grid-template-columns: 70px 90px 1fr 60px 1fr 60px 1fr 56px;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  border-top: 1px dashed #2a2a2a;
+}
+.biquad-band-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #ddd;
+}
+.biquad-type {
+  font-size: 11px;
+  background: #1d1d1d;
+  border: 1px solid #2c2c2c;
+  color: #ccc;
+  padding: 2px 4px;
+}
+.biquad-band input[type="range"] {
+  width: 100%;
+}
+.biquad-readout {
+  font-size: 10.5px;
+  font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  color: #aef;
+  text-align: right;
+  white-space: nowrap;
+}
+.biquad-band input[type="range"]:disabled,
+.biquad-band input[type="range"]:disabled + .biquad-readout {
+  opacity: 0.4;
 }
 
 /* ---------- raw OSC ---------- */
@@ -936,65 +1184,6 @@ select, input[type="text"] {
   border-radius: 3px;
   padding: 16px;
   min-height: 120px;
-}
-
-/* ---------- system view (chip configuration) ---------- */
-/*
- * Two-column layout: a left rail of chip selector buttons, and the
- * active chip's panel on the right. The right side reuses the existing
- * .codec-section-header + .codec-panel styling so the chip controls
- * look identical to how they did when they sat under the mixer.
- */
-.view.view-system {
-  display: flex;
-  flex-direction: row;
-  gap: 12px;
-  align-items: flex-start;
-}
-
-.system-subnav {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  background: #1a1a1a;
-  border: 1px solid #2c2c2c;
-  border-radius: 3px;
-  padding: 8px;
-  min-width: 160px;
-  flex: 0 0 auto;
-}
-
-.system-subnav-tab {
-  background: #2c2c2c;
-  color: #bbb;
-  border: 1px solid #3a3a3a;
-  border-radius: 3px;
-  font-family: inherit;
-  font-size: 12px;
-  padding: 8px 12px;
-  text-align: left;
-  cursor: pointer;
-}
-.system-subnav-tab:hover {
-  background: #363636;
-}
-.system-subnav-tab.active {
-  background: #b86a30;
-  color: #111;
-  border-color: #d68038;
-}
-
-.system-content {
-  flex: 1 1 auto;
-  min-width: 0;
-  background: #202020;
-  border: 1px solid #2c2c2c;
-  border-radius: 3px;
-}
-
-.system-chip-panel {
-  display: flex;
-  flex-direction: column;
 }
 
 .synth-content-empty {

@@ -54,7 +54,11 @@ public:
     void setBinding(SignalGraphBinding *binding)     { _binding = binding; }
     void setMeterEngine(MeterEngine *engine)         { _meterEngine = engine; }
     void setSpectrumEngine(SpectrumEngine *engine)   { _spectrumEngine = engine; }
-    void registerCodecPanel(CodecPanel *panel)       { _codecPanel = panel; }
+    // Append a codec panel. Each panel claims the /codec/<modelName>/...
+    // subtree. Up to kMaxCodecPanels panels can coexist (one per chip).
+    // Re-registration of the same pointer is a no-op; otherwise the
+    // call is dropped if the table is full.
+    void registerCodecPanel(CodecPanel *panel);
 
     // Route an incoming OSCMessage. Called from SlipOscTransport's OSC
     // handler callback. The reply bundle accumulates echoes and is
@@ -88,9 +92,11 @@ public:
                                const uint8_t *bytes, int byteCount);
 
 private:
+    static constexpr int kMaxCodecPanels = 4;
     MixerModel         *_model          = nullptr;
     SignalGraphBinding *_binding        = nullptr;
-    CodecPanel         *_codecPanel     = nullptr;
+    CodecPanel         *_codecPanels[kMaxCodecPanels] = {};
+    int                 _codecPanelCount = 0;
     MeterEngine        *_meterEngine    = nullptr;
     SpectrumEngine     *_spectrumEngine = nullptr;
 

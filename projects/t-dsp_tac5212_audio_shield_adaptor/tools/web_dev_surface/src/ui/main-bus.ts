@@ -37,6 +37,12 @@ export function mainBus(bus: BusState, dispatcher: Dispatcher): HTMLElement {
   const rowMeter = makeRow('row-meter');
   rowMeter.append(makeMeter(bus.peakL, bus.rmsL), makeMeter(bus.peakR, bus.rmsR));
 
+  // Row 2.5: gain spacers — main bus has no analog input gain stage,
+  // but the row exists so XLR-strip knobs line up with the rest of the
+  // mixer's fader row.
+  const rowGain = makeRow('row-gain');
+  rowGain.append(makeCellSpacer('gain'), makeCellSpacer('gain'));
+
   // Row 3: L + R faders
   const rowFader = makeRow('row-fader');
   const faderL = makeFader(bus.faderL, (v) => dispatcher.setMainFaderL(v));
@@ -89,6 +95,6 @@ export function mainBus(bus: BusState, dispatcher: Dispatcher): HTMLElement {
   loopBtn.addEventListener('click', () => dispatcher.setMainLoop(!bus.loopEnable.get()));
   rowRec.append(loopBtn);
 
-  root.append(rowName, rowMeter, rowFader, rowFv, rowMute, rowSolo, rowLink, rowRec);
+  root.append(rowName, rowMeter, rowGain, rowFader, rowFv, rowMute, rowSolo, rowLink, rowRec);
   return root;
 }

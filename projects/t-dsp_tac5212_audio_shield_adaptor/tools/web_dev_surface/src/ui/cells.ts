@@ -163,10 +163,98 @@ export function makeSolo(
 // A transparent element matching the vertical height of whatever cell
 // class it emulates. Used in rows that would otherwise be empty, to
 // keep the row at the same height as its peers in other wrappers.
-export function makeCellSpacer(kind: 'mute' | 'solo' | 'link' | 'fv' | 'name' | 'rec'): HTMLElement {
+export function makeCellSpacer(kind: 'mute' | 'solo' | 'link' | 'fv' | 'name' | 'rec' | 'gain'): HTMLElement {
   const s = document.createElement('div');
   s.className = `cell cell-spacer spacer-${kind}`;
   return s;
+}
+
+// Round gain knob — the small pot that sits above the fader on each
+// XLR input strip. Click+vertical-drag to change value (Shift = fine).
+// Mouse wheel also nudges by one step. The dial rotates -135°..+135°
+// across the value range so the indicator's vertical position roughly
+// matches the underlying fader gesture. Returns a wrapper cell that
+// stacks the dial above a small dB readout.
+export function makeGainKnob(opts: {
+  value: Signal<number>;
+  min: number;
+  max: number;
+  step: number;
+  unit: string;
+  label: string;          // tooltip prefix, e.g. "XLR 1 analog gain"
+  onChange: (v: number) => void;
+}): HTMLElement {
+  const { value, min, max, step, unit, label, onChange } = opts;
+  const wrap = document.createElement('div');
+  wrap.className = 'gain-knob-wrap cell';
+
+  const knob = document.createElement('div');
+  knob.className = 'gain-knob';
+
+  const dial = document.createElement('div');
+  dial.className = 'gain-knob-dial';
+  const ind = document.createElement('div');
+  ind.className = 'gain-knob-indicator';
+  dial.appendChild(ind);
+  knob.appendChild(dial);
+
+  const readout = document.createElement('div');
+  readout.className = 'gain-knob-value';
+
+  wrap.append(knob, readout);
+
+  const decimals = step >= 1 ? 0 : 1;
+  const fmt = (v: number): string => v.toFixed(decimals);
+  const apply = (v: number): void => {
+    const t = (v - min) / (max - min);
+    const angle = -135 + t * 270;
+    dial.style.transform = `rotate(${angle}deg)`;
+    readout.textContent = fmt(v);
+    wrap.title = `${label}: ${fmt(v)} ${unit}`;
+  };
+  value.subscribe(apply);
+
+  const clamp = (v: number): number => {
+    if (v < min) return min;
+    if (v > max) return max;
+    return Math.round(v / step) * step;
+  };
+  const commit = (v: number): void => {
+    const c = clamp(v);
+    if (c === value.get()) return;
+    value.set(c);
+    onChange(c);
+  };
+
+  let dragStartY = 0;
+  let dragStartV = 0;
+  knob.addEventListener('pointerdown', (e) => {
+    e.preventDefault();
+    knob.setPointerCapture(e.pointerId);
+    dragStartY = e.clientY;
+    dragStartV = value.get();
+  });
+  knob.addEventListener('pointermove', (e) => {
+    if (!knob.hasPointerCapture(e.pointerId)) return;
+    const dy = dragStartY - e.clientY;
+    const range = max - min;
+    // 100px of drag covers the full range; Shift = 4× finer for precision.
+    const sensitivity = (e.shiftKey ? range / 400 : range / 100);
+    commit(dragStartV + dy * sensitivity);
+  });
+  const release = (e: PointerEvent): void => {
+    if (knob.hasPointerCapture(e.pointerId)) knob.releasePointerCapture(e.pointerId);
+  };
+  knob.addEventListener('pointerup', release);
+  knob.addEventListener('pointercancel', release);
+
+  knob.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    const dir = e.deltaY < 0 ? 1 : -1;
+    commit(value.get() + dir * step);
+  }, { passive: false });
+
+  return wrap;
 }
 
 // REC button: per-channel USB record-send toggle. Red when armed.

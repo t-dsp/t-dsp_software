@@ -114,6 +114,17 @@ const send = (packet: Uint8Array): void => {
     log('! not connected');
     return;
   }
+  // Diagnostic: log outgoing /codec/* traffic so we can tell whether the
+  // client side actually hands a packet to the bridge. Silence per-control
+  // chatter (mix/fader, sliders) so we don't drown the console.
+  // Decoding the address out of the OSC packet: address is a NUL-padded
+  // string at offset 0, ending at the first 0x00 byte.
+  let end = 0;
+  while (end < packet.length && packet[end] !== 0) end++;
+  const addr = new TextDecoder().decode(packet.subarray(0, end));
+  if (addr.startsWith('/codec/')) {
+    log(`> ${addr}`);
+  }
   ws.send(slipEncode(packet));
 };
 

@@ -131,6 +131,44 @@ enum class PdmClkPin : uint8_t {
     // the PDM clock function. Add after datasheet check.
 };
 
+// DAC interpolation filter response (chip-global, all outputs).
+// Linear-phase = cleanest frequency response but ~1 ms latency and pre-ringing.
+// Lower-latency modes ring less but allow more aliasing.
+enum class InterpFilter : uint8_t {
+    LinearPhase,
+    LowLatency,
+    UltraLowLatency,
+    LowPower,
+};
+
+// DAC high-pass filter (chip-global). Programmable mode loads the POR
+// default all-pass coefs (HPF off); the three fixed cutoffs are
+// hardware-set -3 dB points.
+enum class DacHpf : uint8_t {
+    Programmable,
+    Cut1Hz,
+    Cut12Hz,
+    Cut96Hz,
+};
+
+// Biquad coefficients in TAC5212's 5.27 fixed-point format. The chip
+// pre-doubles N1 and D1 in the transfer function (datasheet §7.3.9.1.6),
+// so coefs stored here are textbook N1/D1 divided by two. Designers in
+// TAC5212_Biquad.h handle the halving; callers feeding raw coefs must
+// do it themselves.
+struct BiquadCoeffs {
+    int32_t n0;
+    int32_t n1;
+    int32_t n2;
+    int32_t d1;
+    int32_t d2;
+
+    // POR all-pass: y[n] = x[n].
+    static constexpr BiquadCoeffs bypass() {
+        return BiquadCoeffs{0x7FFFFFFF, 0, 0, 0, 0};
+    }
+};
+
 // -----------------------------------------------------------------------------
 // DeviceInfo / Status — read-only structs returned by info() / readStatus()
 // -----------------------------------------------------------------------------
@@ -148,6 +186,77 @@ struct Status {
     bool     micBiasActive;         // derived: DEV_STS1 bit 3
     bool     faultActive;           // derived: DEV_STS1 bit 1
     bool     micBiasGpioOverride;   // derived: EN_MBIAS_GPIO != 0
+};
+
+// -----------------------------------------------------------------------------
+// DAC dynamics: distortion limiter and DRC coefficients
+// -----------------------------------------------------------------------------
+//
+// Both the limiter (page 25) and DRC (page 28) are 8 × 32-bit programmable
+// coefficient blocks. The chip's POR defaults are pre-tuned and immediately
+// usable — see `LimiterCoeffs::chipDefault()` and `DrcCoeffs::chipDefault()`.
+//
+// For ear-fatigue treatment, scope is intentionally limited: the driver lets
+// callers ship raw 32-bit coefficients (so a host or PPC3-derived tuning
+// can be loaded verbatim) and exposes a small set of presets. Closed-form
+// time-constant / threshold derivation is NOT in v1 because the datasheet
+// does not document the precise encoding formulas, and incorrect dynamics
+// coefficients can produce loud transients. Add a designer header later
+// once a known-good encoding is verified by ear.
+
+struct DrcCoeffs {
+    int32_t maxGain;        // P28 R0x1C — max post-DRC gain (dB-encoded, chip-specific)
+    int32_t minGain;        // P28 R0x20 — min post-DRC gain (dB-encoded)
+    int32_t attackTc;       // P28 R0x24 — attack time constant
+    int32_t releaseTc;      // P28 R0x28 — release time constant
+    int32_t releaseHoldCount; // P28 R0x2C — samples to hold before releasing
+    int32_t releaseHyst;    // P28 R0x30 — release hysteresis
+    int32_t invRatio;       // P28 R0x34 — inverse ratio (1/N)
+    int32_t inflectionPt;   // P28 R0x38 — knee inflection point
+
+    // Datasheet POR defaults (§8.2.13). Verified safe.
+    static constexpr DrcCoeffs chipDefault() {
+        return DrcCoeffs{
+            (int32_t)0x00006000,  // maxGain
+            (int32_t)0xFFFF8200,  // minGain
+            (int32_t)0x67ED87BB,  // attackTc
+            (int32_t)0x7EAC7034,  // releaseTc
+            (int32_t)0x000004B0,  // releaseHoldCount
+            (int32_t)0x00000C00,  // releaseHyst
+            (int32_t)0xF8000000,  // invRatio
+            (int32_t)0xFFFFA000,  // inflectionPt
+        };
+    }
+};
+
+struct LimiterCoeffs {
+    int32_t attackCoeff;    // P25 R0x60
+    int32_t releaseCoeff;   // P25 R0x64
+    int32_t envDecay;       // P25 R0x68
+    int32_t thresholdMax;   // P25 R0x6C
+    int32_t thresholdMin;   // P25 R0x70
+    int32_t inflectionPt;   // P25 R0x74
+    int32_t slope;          // P25 R0x78
+    int32_t resetCounter;   // P25 R0x7C
+
+    // Datasheet POR defaults (§8.2.10). Verified safe.
+    static constexpr LimiterCoeffs chipDefault() {
+        return LimiterCoeffs{
+            (int32_t)0x78D6FC9F,  // attackCoeff
+            (int32_t)0x40BDB7C0,  // releaseCoeff
+            (int32_t)0x7FFC3A48,  // envDecay
+            (int32_t)0x01699C10,  // thresholdMax
+            (int32_t)0x007259DB,  // thresholdMin
+            (int32_t)0x0000199A,  // inflectionPt
+            (int32_t)0x10000000,  // slope
+            (int32_t)0x00000960,  // resetCounter
+        };
+    }
+};
+
+enum class LimiterInputSel : uint8_t {
+    Max,   // max(ch0, ch1) — most defensive, default
+    Avg,   // avg(ch0, ch1) — gentler, follows averaged level
 };
 
 // -----------------------------------------------------------------------------
@@ -228,6 +337,43 @@ public:
     // adc/hpf i 0|1`.
     Result setAdcHpf(bool on);
 
+    // --- Chip-global DAC DSP -------------------------------------------------
+    //
+    // DSP_CFG1 (page 0, 0x73) packs interpolation filter, HPF mode, biquad
+    // count, soft-step disable, and DVOL gang in one byte. All read-modifywrite to preserve unrelated fields.
+    //
+    //   biquadsPerChannel: 0..3. Hardware allocates the same count to every
+    //   active DAC channel. Setting > what was set before requires the new
+    //   bands' coefficients to already be programmed (or they get the POR
+    //   bypass coefs by default, which is fine).
+
+    Result setDacInterpolationFilter(InterpFilter);
+    Result getDacInterpolationFilter(InterpFilter &out);
+    Result setDacHpf(DacHpf);
+    Result getDacHpf(DacHpf &out);
+    Result setDacBiquadsPerChannel(uint8_t n);
+    Result getDacBiquadsPerChannel(uint8_t &n);
+    Result setDacDvolGang(bool ganged);
+    Result setDacSoftStep(bool enabled);  // true = enabled (default)
+
+    // --- DAC dynamics: distortion limiter + DRC (chip-global) ----------------
+    //
+    // Limiter and DRC are pre-DAC dynamics processors. The chip ships with
+    // sensible POR coefficients; load them with `LimiterCoeffs::chipDefault()`
+    // / `DrcCoeffs::chipDefault()` and just toggle the enable bits.
+    //
+    // DRC is per-channel (4 enable bits in P1.AGC_DRC_CFG). For ear-fatigue
+    // applications, treat it as an all-channels-or-nothing toggle — the
+    // coefficient block is shared across channels regardless.
+
+    Result setDacLimiterCoeffs(const LimiterCoeffs&);
+    Result setDacLimiterEnable(bool on);
+    Result setDacLimiterInputSel(LimiterInputSel sel);
+
+    Result setDacDrcCoeffs(const DrcCoeffs&);
+    // Enable DRC on all 4 DAC sub-channels at once (CH1A/1B/2A/2B).
+    Result setDacDrcEnable(bool on);
+
     // --- Per-channel accessors ------------------------------------------------
     //
     // `adc(1)` / `adc(2)` return a lightweight value-type handle that holds a
@@ -246,6 +392,12 @@ public:
 
     Result  writeRegister(uint8_t page, uint8_t reg, uint8_t value);
     uint8_t readRegister(uint8_t page, uint8_t reg);
+
+    // Burst write — writes `n` consecutive bytes starting at (page, startReg).
+    // Handles the auto-increment-across-page boundary case (after reg 0x7F
+    // the next byte lands at 0x08 of the next page). Used internally by the
+    // biquad coefficient writer to ship 20 bytes per band in one transaction.
+    Result writeBurst(uint8_t page, uint8_t startReg, const uint8_t *bytes, size_t n);
 
     // --- Boot-time bulk setup (NOT on OSC tree) ------------------------------
     //
@@ -340,6 +492,35 @@ public:
     // out-param holds the decoded value. Used by /snapshot to populate
     // a freshly-connected client's codec panel without a write round-trip.
     Result getMode(OutMode &out);
+
+    // Per-DAC digital volume. Range -100.0 .. +27.0 dB in 0.5 dB steps
+    // (POR default 0.0 dB). Values below -100 dB are interpreted as mute.
+    //
+    // Differential output mode (DiffLine, FdReceiver) writes the same
+    // volume to both sub-channels (1A+1B for output 1, 2A+2B for output 2)
+    // so that DC offset on the output remains zero. Mono / pseudo-diff
+    // modes write only the active sub-channel.
+    Result setDvol(float dB);
+    Result getDvol(float &dB);
+
+    // Per-output biquad coefficient programming. `idx` is 1..3 (the chip
+    // exposes up to 3 biquads per channel via DSP_CFG1[3:2]). Coefficients
+    // are written MSB-first as 5 × 4 bytes burst, taking advantage of the
+    // codec's auto-increment register addressing.
+    //
+    // The (channel, idx) pair maps to a global biquad slot 1..12 per the
+    // hardware allocation in datasheet Table 7-48:
+    //   With BQ_CFG = 1: BQ_n = ch_n
+    //   With BQ_CFG = 2: BQ_n = ch_n,            BQ_(n+4) = ch_n
+    //   With BQ_CFG = 3: BQ_n = ch_n, BQ_(n+4) = ch_n, BQ_(n+8) = ch_n
+    //
+    // Caller is responsible for ensuring DSP_CFG1[3:2] (set via
+    // `setDacBiquadsPerChannel`) is large enough for the requested idx.
+    // Setting a band that's beyond the current allocation succeeds at the
+    // I²C level (writes the coefficients) but the chip ignores them.
+    Result setBiquad(uint8_t idx, const BiquadCoeffs &coeffs);
+    Result clearBiquad(uint8_t idx);   // writes BiquadCoeffs::bypass()
+    Result getBiquad(uint8_t idx, BiquadCoeffs &out);
 
 private:
     friend class TAC5212;
