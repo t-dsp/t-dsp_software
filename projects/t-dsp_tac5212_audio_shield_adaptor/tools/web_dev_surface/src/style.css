@@ -16,6 +16,17 @@ body {
   font: 13px/1.4 -apple-system, "Segoe UI", system-ui, sans-serif;
 }
 
+/* #app is now an exact-viewport-height flex column. Header and the
+ * workspace tab bar sit at the top in their natural sizes; the active
+ * workspace flex-grows in the middle and scrolls internally; the
+ * bottom dock sits at the bottom in its natural size. With this
+ * layout the tab bar and the dock are always visible without any
+ * position: sticky / fixed gymnastics — they're just at the top and
+ * bottom of a non-scrolling root.
+ *
+ * Per planning/ui-rebuild/02-hierarchy.md: the persistent bottom
+ * strip is the key navigation primitive for the rebuild, so making
+ * sure it never scrolls out of view is load-bearing. */
 #app {
   padding: 16px;
   display: flex;
@@ -23,7 +34,8 @@ body {
   gap: 16px;
   max-width: 1200px;
   margin: 0 auto;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
 }
 
 /* Spectrum-active mode: the body gets `.spectrum-active` added by
@@ -53,6 +65,16 @@ body.spectrum-active .view.view-spectrum {
   overflow: hidden;
 }
 
+/* Suppress workspace internal scroll in spectrum-active mode — the
+ * spectrum view fills the workspace exactly and shouldn't show a
+ * scrollbar even if the canvas math is a fraction of a pixel off.
+ * Otherwise the new flex: 1 / overflow-y: auto on .workspace would
+ * stack on top of the full-bleed spectrum layout. */
+body.spectrum-active .workspace-fx {
+  overflow: hidden;
+  gap: 4px;
+}
+
 body.spectrum-active .spectrum-wrap {
   /* Override the normal min-height and border so the canvas
    * goes edge-to-edge. Position and size are driven by the
@@ -77,6 +99,9 @@ body.spectrum-active .spectrum-wrap {
   border: 1px solid #2c2c2c;
   border-radius: 3px;
   overflow: hidden;
+  /* Explicit flex sizing so the workspace tab bar is never the one
+   * that gives up space when the workspace below is content-heavy. */
+  flex: 0 0 auto;
 }
 
 .view-tab {
@@ -127,6 +152,7 @@ h4 {
   display: flex;
   align-items: center;
   gap: 12px;
+  flex: 0 0 auto;
 }
 
 .header h1 {
@@ -2356,16 +2382,13 @@ select, input[type="text"] {
   background: #6a4d9a;
 }
 
-/* Persistent bottom dock — sticky to the visible bottom so the user
- * can ride levels (Engineer) or play notes (Musician) from any tab
- * without leaving the current view. Sticky rather than fixed so
- * the rest of the page reflows around it normally and the serial
- * console below it (which is already a permanent fixture) sits at
- * the very bottom. */
+/* Persistent bottom dock — pinned at the bottom of #app's flex
+ * column. #app is exactly 100vh tall and the workspace flex-grows
+ * above, so the dock naturally sits at viewport bottom without
+ * needing position: sticky or fixed. flex: 0 0 auto holds its
+ * natural height; the workspace shrinks if the dock is taller. */
 .bottom-dock {
-  position: sticky;
-  bottom: 0;
-  z-index: 5;
+  flex: 0 0 auto;
   background: #1a1a1a;
   border-top: 1px solid #2c2c2c;
   border-bottom: 1px solid #2c2c2c;
@@ -2627,14 +2650,22 @@ body.spectrum-active .bottom-dock { display: none !important; }
   color: #f0f0f0;
 }
 
-/* Workspace container — minimal wrapper. Lets each workspace control
- * its own internal layout via the inner sections (which kept their
- * existing classes like .view-mixer / .view-synth / .view-spectrum
- * so all of those styles still apply). */
+/* Workspace container — flex-grows to fill the space between the top
+ * tab bar and the bottom dock, with internal scrolling for tall
+ * panels (e.g. neuro, mpe). min-height: 0 is the standard incantation
+ * to let a flex child shrink below its content size so overflow can
+ * actually engage.
+ *
+ * Hidden workspaces (display: none from applyVisibility) drop out of
+ * the flex layout entirely, so only the active workspace fights for
+ * the middle space. */
 .workspace {
   display: flex;
   flex-direction: column;
-  gap: 0;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 
 /* TUNE stub layout shell — the inner content was ported to Solid +
