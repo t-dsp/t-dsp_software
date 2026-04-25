@@ -16,10 +16,42 @@ See [planning/osc-mixer-foundation/README.md](../../../../planning/osc-mixer-fou
 
 ## Quickstart
 
+Three ways to run this: **desktop app** (one command, recommended for day-to-day
+bench work), **browser + bridge** (two terminals, useful when the dev surface
+should share a host with OSC clients), or **static build** (for CI/preview).
+
+### Desktop app (Electron)
+
 ```bash
 cd projects/t-dsp_tac5212_audio_shield_adaptor/tools/web_dev_surface
 pnpm install
 
+pnpm app:dev       # dev — Vite + bridge + window, devtools open
+pnpm app:build     # packaged app in release/win-unpacked/
+```
+
+`app:build` produces `release/win-unpacked/T-DSP Dev Surface.exe` (181 MB)
+alongside its supporting DLLs/paks — the standard Electron distribution
+shape. Double-click to launch; the whole `win-unpacked/` folder is
+self-contained and can be copied anywhere.
+
+The Electron main process boots the serial bridge in-process and opens a
+window on the Vite dev server (dev) or the packaged `dist/` (prod). The
+bridge auto-reconnects after a firmware upload, so no manual restart.
+
+Build notes (for future changes):
+- `npmRebuild: false` in the electron-builder config — `@serialport/bindings-cpp`
+  ships N-API prebuilts that are ABI-stable across Node and Electron, so the
+  native-module rebuild is unnecessary and only runs into Python 3.12+ /
+  `node-gyp@9` / missing `distutils` on Windows.
+- `win.target: "dir"` (not `portable` / `nsis`) because `makensis.exe` can't
+  resolve `!include` paths longer than 260 chars, and pnpm's nested
+  `.pnpm/app-builder-lib@.../...` layout blows past that limit. The unpacked
+  directory is the distributable.
+
+### Browser + bridge (two terminals)
+
+```bash
 # Terminal 1 — serial bridge (Node.js ↔ COM port)
 pnpm bridge
 
@@ -35,7 +67,7 @@ live — the bridge handles the serial port, so there's no WebSerial picker.
 drops the bridge's COM handle. Restart the bridge (`Ctrl+C`, then `pnpm bridge`)
 before reconnecting in the browser.
 
-For a static build:
+### Static build
 
 ```bash
 pnpm build      # → dist/

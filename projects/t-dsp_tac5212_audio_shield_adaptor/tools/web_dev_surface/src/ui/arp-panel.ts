@@ -316,8 +316,12 @@ function loadPreset(preset: Preset, dispatcher: Dispatcher): void {
   dispatcher.setArpSwing        (p.swing);
   dispatcher.setArpOctaveRange  (p.octaveRange);
   dispatcher.setArpOctaveMode   (p.octaveMode);
-  dispatcher.setArpLatch        (p.latch);
-  dispatcher.setArpHold         (p.hold);
+  // Latch and Hold are intentionally NOT loaded from the preset — they
+  // are performance state (what the player's fingers are doing right
+  // now), not sound-design state. Preserving them across preset swaps
+  // lets you latch a chord once and audition every preset against it
+  // without having to re-latch each time. Toggle them from the header
+  // buttons when you actually want to change their state.
   dispatcher.setArpVelMode      (p.velMode);
   dispatcher.setArpVelFixed     (p.velFixed);
   dispatcher.setArpVelAccent    (p.velAccent);

@@ -156,9 +156,6 @@ function buildPresetCard(preset: Preset, state: MixerState, dispatcher: Dispatch
     dispatcher.setChipSustain(p.sustain);
     dispatcher.setChipRelease(p.release_sec);
     state.chip.activePresetId.set(preset.id);
-    const ch = state.chip.midiChannel.get() || 1;
-    dispatcher.sendMidiNote(60, 100, ch);  // C4
-    window.setTimeout(() => dispatcher.sendMidiNote(60, 0, ch), 400);
   });
   state.chip.activePresetId.subscribe((id) => card.classList.toggle('active', id === preset.id));
   return card;

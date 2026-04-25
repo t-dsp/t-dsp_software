@@ -153,10 +153,6 @@ function buildPresetCard(preset: Preset, state: MixerState, dispatcher: Dispatch
     dispatcher.setSupersawPortamento(p.portamento_ms);
     dispatcher.setSupersawChorusDepth(p.chorus_depth);
     state.supersaw.activePresetId.set(preset.id);
-    // Preview: quick lead note on channel 5.
-    const ch = state.supersaw.midiChannel.get() || 1;
-    dispatcher.sendMidiNote(72, 100, ch);  // C5
-    window.setTimeout(() => dispatcher.sendMidiNote(72, 0, ch), 600);
   });
   state.supersaw.activePresetId.subscribe((id) => card.classList.toggle('active', id === preset.id));
   return card;

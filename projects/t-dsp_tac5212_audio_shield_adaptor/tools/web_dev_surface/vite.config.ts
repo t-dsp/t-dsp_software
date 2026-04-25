@@ -7,9 +7,13 @@ import { resolve } from 'node:path';
 const repoRoot = resolve(__dirname, '..', '..', '..', '..');
 
 export default defineConfig({
+  // Relative asset paths so the build works under both http:// (dev
+  // server) and file:// (Electron packaged app loadFile).
+  base: './',
   server: {
     host: 'localhost',
     port: 5173,
+    strictPort: true,
     fs: {
       allow: [repoRoot],
     },

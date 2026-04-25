@@ -226,16 +226,6 @@ function buildPresetCard(
   card.addEventListener('click', () => {
     loadPreset(preset, dispatcher);
     state.neuro.activePresetId.set(preset.id);
-    // Auto-preview on the configured MIDI channel. Neuro defaults to
-    // ch 3; in omni (0) mode we preview on ch 1 since omni accepts
-    // anything and ch 1 is the most common default for a web keyboard.
-    const ch = state.neuro.midiChannel.get();
-    const previewCh = ch === 0 ? 1 : ch;
-    // C2 (MIDI 36) — bass register, not middle-C; shows off the sub.
-    dispatcher.sendMidiNote(36, 100, previewCh);
-    window.setTimeout(() => {
-      dispatcher.sendMidiNote(36, 0, previewCh);
-    }, 500);
   });
 
   state.neuro.activePresetId.subscribe((id) => {

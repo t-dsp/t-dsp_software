@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "PowerShell(pio --version)"
+      "PowerShell(pio --version)",
+      "PowerShell(Get-NetTCPConnection -LocalPort 5173 -ErrorAction SilentlyContinue | Select-Object -First 3 LocalPort, State, OwningProcess; Get-NetTCPConnection -LocalPort 5173 -ErrorAction SilentlyContinue | ForEach-Object { Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue } | Select-Object -Unique Id, ProcessName)"
     ]
   }
 }

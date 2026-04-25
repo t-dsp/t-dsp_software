@@ -157,10 +157,6 @@ function buildPresetCard(preset: Preset, state: MixerState, dispatcher: Dispatch
     dispatcher.setAcidSlide(p.slide_ms);
     dispatcher.setAcidVolume(p.volume);
     state.acid.activePresetId.set(preset.id);
-    // Preview: short acid stab on channel-set channel (or 1 if omni).
-    const ch = state.acid.midiChannel.get() || 1;
-    dispatcher.sendMidiNote(40, 120, ch);  // E2, accented
-    window.setTimeout(() => dispatcher.sendMidiNote(40, 0, ch), 400);
   });
   state.acid.activePresetId.subscribe((id) => card.classList.toggle('active', id === preset.id));
   return card;

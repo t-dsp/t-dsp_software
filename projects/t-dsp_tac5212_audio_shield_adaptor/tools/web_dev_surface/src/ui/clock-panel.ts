@@ -201,6 +201,41 @@ export function clockPanel(state: MixerState, dispatcher: Dispatcher): HTMLEleme
 
   meter.body.append(row('Beats/bar', bpb));
 
+  // ---- Metronome module ----------------------------------------------
+  //
+  // Audible click on each beat edge with an accent on beat 1 of the
+  // bar. Fires only while the clock is running. Use it to arm a looper
+  // take in time — hit REC on the downbeat click, PLAY on the click
+  // that closes out your bar, and Sync keeps the recording boundary
+  // on the grid.
+
+  const metro = module_('Metronome');
+
+  const metroOn = document.createElement('input');
+  metroOn.type = 'checkbox';
+  metroOn.className = 'metro-on';
+  state.clock.metroOn.subscribe((on) => { metroOn.checked = on; });
+  metroOn.addEventListener('change', () => {
+    dispatcher.setMetroOn(metroOn.checked);
+  });
+
+  const metroLevel = document.createElement('input');
+  metroLevel.type = 'range';
+  metroLevel.min = '0';
+  metroLevel.max = '1';
+  metroLevel.step = '0.01';
+  const metroLevelRO = document.createElement('span');
+  metroLevelRO.className = 'proc-readout';
+  state.clock.metroLevel.subscribe((v) => {
+    metroLevel.value = String(v);
+    metroLevelRO.textContent = v.toFixed(2);
+  });
+  metroLevel.addEventListener('input', () => {
+    dispatcher.setMetroLevel(parseFloat(metroLevel.value));
+  });
+
+  metro.body.append(row('Click', metroOn), row('Level', metroLevel, metroLevelRO));
+
   // ---- Help text ------------------------------------------------------
 
   const note = document.createElement('p');
@@ -213,7 +248,7 @@ export function clockPanel(state: MixerState, dispatcher: Dispatcher): HTMLEleme
     'Internal and this device is master — the slider BPM is what ' +
     'everything downstream locks to.';
 
-  root.append(status.section, src.section, tempo.section, meter.section, note);
+  root.append(status.section, src.section, tempo.section, meter.section, metro.section, note);
 
   // Seed: on first render, ask the firmware where it is. The snapshot
   // reply at connect time covers the main params, but /clock/running

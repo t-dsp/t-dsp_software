@@ -887,9 +887,29 @@ export class Dispatcher {
   looperStop():   void { this.sendMsg('/loop/stop',   '', []); }
   looperClear():  void { this.sendMsg('/loop/clear',  '', []); }
 
+  // Cue/Go — stages an action without firing. Action codes match the
+  // firmware's armed encoding: 1=rec, 2=play, 3=stop, 4=clear, 0=clear
+  // the cue. GO promotes the cued slot to armed (or fires if the clock
+  // isn't running). Typical flow: looperCue(1), wait for musical moment,
+  // looperGo() — recording then starts on the next beat.
+  looperCue(action: number): void {
+    this.state.looper.cued.set(action);
+    this.sendMsg('/loop/cue', 'i', [action]);
+  }
+  looperGo(): void {
+    // Optimistic local clear — the firmware echo will set armed.
+    this.state.looper.cued.set(0);
+    this.sendMsg('/loop/go', '', []);
+  }
+
   setLooperQuantize(on: boolean): void {
     this.state.looper.quantize.set(on);
     this.sendMsg('/loop/quantize', 'i', [on ? 1 : 0]);
+  }
+
+  setLooperClockFollow(on: boolean): void {
+    this.state.looper.clockFollow.set(on);
+    this.sendMsg('/loop/clockFollow', 'i', [on ? 1 : 0]);
   }
 
   // ---------- Clock (shared musical time) ----------
@@ -915,6 +935,15 @@ export class Dispatcher {
   // when the Clock tab first opens so the UI doesn't show stale data.
   queryClockRunning(): void {
     this.sendMsg('/clock/running', '', []);
+  }
+
+  setMetroOn(on: boolean): void {
+    this.state.clock.metroOn.set(on);
+    this.sendMsg('/metro/on', 'i', [on ? 1 : 0]);
+  }
+  setMetroLevel(v: number): void {
+    this.state.clock.metroLevel.set(v);
+    this.sendThrottled('/metro/level', 'f', [v]);
   }
 
   // ---------- Beats drum machine ----------
@@ -1539,12 +1568,28 @@ export class Dispatcher {
       this.state.looper.length.set(msg.args[0] as number);
       return;
     }
+    if (a === '/loop/lengthBeats' && msg.types === 'f') {
+      this.state.looper.lengthBeats.set(msg.args[0] as number);
+      return;
+    }
     if (a === '/loop/quantize' && msg.types === 'i') {
       this.state.looper.quantize.set((msg.args[0] as number) !== 0);
       return;
     }
     if (a === '/loop/armed' && msg.types === 'i') {
       this.state.looper.armed.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/loop/cued' && msg.types === 'i') {
+      this.state.looper.cued.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/loop/clockFollow' && msg.types === 'i') {
+      this.state.looper.clockFollow.set((msg.args[0] as number) !== 0);
+      return;
+    }
+    if (a === '/loop/recordedBpm' && msg.types === 'f') {
+      this.state.looper.recordedBpm.set(msg.args[0] as number);
       return;
     }
 
@@ -1566,6 +1611,14 @@ export class Dispatcher {
     }
     if (a === '/clock/beatsPerBar' && msg.types === 'i') {
       this.state.clock.beatsPerBar.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/metro/on' && msg.types === 'i') {
+      this.state.clock.metroOn.set((msg.args[0] as number) !== 0);
+      return;
+    }
+    if (a === '/metro/level' && msg.types === 'f') {
+      this.state.clock.metroLevel.set(msg.args[0] as number);
       return;
     }
 

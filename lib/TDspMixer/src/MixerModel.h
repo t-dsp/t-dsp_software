@@ -26,10 +26,20 @@ namespace tdsp {
 
 // ----- Compile-time configuration -----
 
-// Number of input channels for the small mixer. 6 = USB L/R, Line L/R,
-// Mic L/R (onboard stereo PDM mic). Each channel is 1-indexed in OSC
-// (/ch/01, /ch/02, ...) but 0-indexed in this array.
-constexpr int kChannelCount = 6;
+// Number of input channels for the small mixer.
+//   1  USB L
+//   2  USB R
+//   3  Line L        (TAC5212 ADC CH1)
+//   4  Line R        (TAC5212 ADC CH2)
+//   5  Mic L         (onboard TAC5212 PDM, left)
+//   6  Mic R         (onboard TAC5212 PDM, right)
+//   7  XLR 1         (TLV320ADC6140 CH1 — external XLR preamp)
+//   8  XLR 2
+//   9  XLR 3
+//   10 XLR 4
+// Each channel is 1-indexed in OSC (/ch/01, /ch/02, ...) but 0-indexed
+// in this array.
+constexpr int kChannelCount = 10;
 
 // Maximum length of a channel name including null terminator.
 constexpr int kChannelNameMax = 16;

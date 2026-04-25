@@ -3,22 +3,46 @@
   "private": true,
   "version": "0.1.0",
   "type": "module",
+  "main": "electron/main.js",
   "description": "Chromium-only WebSerial dev surface for the TAC5212 audio shield adaptor",
   "packageManager": "pnpm@9.12.0",
   "scripts": {
     "bridge": "node serial-bridge.mjs",
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "app:dev": "concurrently -k -n vite,electron -c blue,magenta \"vite\" \"wait-on http://localhost:5173 && node electron/launch.js .\"",
+    "app:build": "vite build && electron-builder"
   },
   "devDependencies": {
     "@types/w3c-web-serial": "^1.0.6",
     "@types/ws": "^8.18.1",
+    "concurrently": "^9.0.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0",
     "typescript": "^5.4.0",
-    "vite": "^5.2.0"
+    "vite": "^5.2.0",
+    "wait-on": "^8.0.0"
   },
   "dependencies": {
     "serialport": "^13.0.0",
     "ws": "^8.20.0"
+  },
+  "build": {
+    "appId": "dev.t-dsp.web-surface",
+    "productName": "T-DSP Dev Surface",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "serial-bridge.mjs",
+      "dist/**/*",
+      "package.json"
+    ],
+    "npmRebuild": false,
+    "win": {
+      "target": "dir"
+    }
   }
 }

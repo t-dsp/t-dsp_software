@@ -10,9 +10,15 @@
 //
 // White keys are flex-1 items in a row; black keys are absolutely
 // positioned as a percentage of keyboard width, so the layout scales
-// with the viewport without needing a ResizeObserver. Click handling
-// uses pointer events with setPointerCapture so a press-then-drag-off
-// still fires note-off on the originally pressed key.
+// with the viewport without needing a ResizeObserver.
+//
+// Pointer handling lives on the keyboard container (not per-key) so a
+// press-and-drag glides across keys like a glissando — each key the
+// pointer enters is pressed, each key it leaves is released. We capture
+// the pointer on the keyboard and resolve "which key is under the
+// cursor" via document.elementFromPoint, which respects z-order so
+// black keys (absolutely stacked on top) win over the white key behind
+// them when the cursor is in their footprint.
 
 export interface KeyboardView {
   element: HTMLElement;
@@ -101,38 +107,122 @@ export function keyboardView(): KeyboardView {
 
   let pressCb: ((note: number, down: boolean) => void) | null = null;
 
-  // Attach pointer handlers so a press fires onPress(n, true) and any
-  // release path — pointerup, pointercancel, or the pointer leaving the
-  // key after setPointerCapture expires — fires onPress(n, false). The
-  // local key is lit immediately on pointerdown so the UI feels snappy;
-  // the echoed /midi/note event just reinforces it through setNote().
-  function bindKey(el: HTMLElement, note: number): void {
-    el.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-      pointerHeld.add(note);
-      syncVisual(note);
-      if (pressCb) pressCb(note, true);
-    });
-    const release = (e: PointerEvent) => {
-      pointerHeld.delete(note);
-      syncVisual(note);
-      if (pressCb) pressCb(note, false);
-      try {
-        (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
-      } catch { /* already released */ }
-    };
-    el.addEventListener('pointerup',     release);
-    el.addEventListener('pointercancel', release);
-    // Safety net in case setPointerCapture isn't honored (older iOS,
-    // mouse dragged out of viewport, etc.) — still clear the note.
-    el.addEventListener('pointerleave', (e) => {
-      if ((e.buttons & 1) === 0) return;  // only if still pressed
-      pointerHeld.delete(note);
-      syncVisual(note);
-      if (pressCb) pressCb(note, false);
-    });
+  function pressNote(note: number): void {
+    if (pointerHeld.has(note)) return;
+    pointerHeld.add(note);
+    syncVisual(note);
+    if (pressCb) pressCb(note, true);
   }
+  function releaseNote(note: number): void {
+    if (!pointerHeld.has(note)) return;
+    pointerHeld.delete(note);
+    syncVisual(note);
+    if (pressCb) pressCb(note, false);
+  }
+
+  // Resolve which piano key is under a given viewport point, or null if
+  // the cursor is off the keyboard or between the keyboard and a key's
+  // hit area. elementFromPoint returns the topmost painted element, so
+  // black keys correctly win over the white key they visually cover.
+  function noteAtPoint(clientX: number, clientY: number): number | null {
+    const el = document.elementFromPoint(clientX, clientY) as HTMLElement | null;
+    if (!el) return null;
+    const key = el.closest('.piano-key') as HTMLElement | null;
+    if (!key) return null;
+    const noteStr = key.dataset.note;
+    if (!noteStr) return null;
+    const n = parseInt(noteStr, 10);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  // Single active pointer drives the drag. Multitouch presses beyond
+  // the first are ignored for now — the drag model is a single glide.
+  let activePointerId: number | null = null;
+  // activeKey is the note we've currently emitted a note-on for (the
+  // wire/visual state). `pointermove` keeps this in sync with the key
+  // under the cursor, subject to the rate limit below.
+  let activeKey: number | null = null;
+  let latestX = 0;
+  let latestY = 0;
+
+  // Rate-limit drag transitions to stay comfortably under the
+  // serial-bridge throttle (serial-bridge.mjs TX_GAP_MS = 20 ms, i.e.
+  // 50 msg/sec). Each transition is two OSC messages (note-off old +
+  // note-on new), so the bridge can sustain 25 transitions/sec. We emit
+  // at 80 ms per transition (~12 tx/sec = 25 msg/sec) — half the drain
+  // rate, so the queue stays near-empty and there's no tail after the
+  // user stops moving. Windows setTimeout resolution is ~15 ms, so any
+  // value closer to the drain rate causes jitter-driven queue growth.
+  // Intermediate keys that fall inside the gap are skipped — the drag
+  // becomes a sparser glissando rather than a queued replay.
+  const DRAG_MIN_GAP_MS = 80;
+  let lastEmitAt = 0;
+  let resolveTimer = 0;
+
+  function cancelResolveTimer(): void {
+    if (resolveTimer !== 0) {
+      clearTimeout(resolveTimer);
+      resolveTimer = 0;
+    }
+  }
+
+  function resolveNow(): void {
+    resolveTimer = 0;
+    if (activePointerId === null) return;
+    const target = noteAtPoint(latestX, latestY);
+    if (target === activeKey) return;
+    const now = performance.now();
+    const since = now - lastEmitAt;
+    if (since < DRAG_MIN_GAP_MS) {
+      // Too soon — try again when the gap elapses. If the pointer keeps
+      // moving before we fire, the next `resolveNow` just reads the
+      // newest latestX/Y, so any keys we skip over never become events.
+      resolveTimer = window.setTimeout(resolveNow, DRAG_MIN_GAP_MS - since);
+      return;
+    }
+    if (activeKey !== null) releaseNote(activeKey);
+    activeKey = target;
+    if (target !== null) pressNote(target);
+    lastEmitAt = performance.now();
+  }
+
+  keyboard.addEventListener('pointerdown', (e) => {
+    if (activePointerId !== null) return;
+    const note = noteAtPoint(e.clientX, e.clientY);
+    if (note === null) return;
+    e.preventDefault();
+    try { keyboard.setPointerCapture(e.pointerId); } catch { /* ignore */ }
+    activePointerId = e.pointerId;
+    activeKey = note;
+    latestX = e.clientX;
+    latestY = e.clientY;
+    pressNote(note);
+    lastEmitAt = performance.now();
+  });
+
+  keyboard.addEventListener('pointermove', (e) => {
+    if (activePointerId !== e.pointerId) return;
+    latestX = e.clientX;
+    latestY = e.clientY;
+    if (resolveTimer === 0) resolveNow();
+  });
+
+  const endDrag = (e: PointerEvent): void => {
+    if (activePointerId !== e.pointerId) return;
+    cancelResolveTimer();
+    if (activeKey !== null) releaseNote(activeKey);
+    activeKey = null;
+    activePointerId = null;
+    try { keyboard.releasePointerCapture(e.pointerId); } catch { /* already released */ }
+  };
+  keyboard.addEventListener('pointerup',     endDrag);
+  keyboard.addEventListener('pointercancel', endDrag);
+
+  // Prevent the browser from treating a drag across keys as a page
+  // pan/scroll on touch devices. Also kills native text selection of
+  // key labels when the pointer is mouse-dragged.
+  keyboard.style.touchAction = 'none';
+  keyboard.style.userSelect  = 'none';
 
   for (let i = 0; i < whites.length; i++) {
     const n = whites[i];
@@ -146,7 +236,6 @@ export function keyboardView(): KeyboardView {
       label.textContent = `C${Math.floor(n / 12) - 1}`;
       el.appendChild(label);
     }
-    bindKey(el, n);
     whitesRow.appendChild(el);
     keyByNote.set(n, el);
   }
@@ -167,7 +256,6 @@ export function keyboardView(): KeyboardView {
     el.dataset.note = String(n);
     el.style.left  = `${leftPct}%`;
     el.style.width = `${blackWidthPct}%`;
-    bindKey(el, n);
     blacksLayer.appendChild(el);
     keyByNote.set(n, el);
   }

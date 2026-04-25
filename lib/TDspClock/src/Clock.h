@@ -113,6 +113,23 @@ public:
     bool consumeBeatEdge();
     bool consumeBarEdge();
 
+    // -------- Internal-tick fan-out --------
+    //
+    // Fired once per 24-PPQN tick emitted by the Internal source. The
+    // External path already delivers ticks through whatever MIDI
+    // dispatch fed onMidiTick(), so this hook is deliberately scoped
+    // to the Internal case — otherwise downstream consumers would
+    // double-fire.
+    //
+    // Typical wiring: main.cpp hooks this to a MidiRouter::handleClock()
+    // so the arpeggiator (and any other onClock()-driven sink) sees
+    // the same 24 PPQN it would get from external 0xF8.
+    using TickCallback = void (*)(void *user);
+    void setInternalTickHook(TickCallback cb, void *user) {
+        _internalTickCb   = cb;
+        _internalTickUser = user;
+    }
+
 private:
     // Core state
     Source   _source       = External;
@@ -141,6 +158,10 @@ private:
     // Edge latches. Set by the tick path, consumed by foreground.
     bool _beatEdge = false;
     bool _barEdge  = false;
+
+    // Internal-tick fan-out. See setInternalTickHook().
+    TickCallback _internalTickCb   = nullptr;
+    void *       _internalTickUser = nullptr;
 
     // Advance the counter by one tick and update edge latches. The
     // `nowMicros` argument is the time at which the tick "happened"

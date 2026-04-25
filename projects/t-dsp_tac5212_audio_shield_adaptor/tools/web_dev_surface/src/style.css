@@ -420,6 +420,23 @@ select, input[type="text"] {
   border-radius: 3px;
 }
 
+/* Hierarchy header above each codec panel inside the codec section.
+ * Visually separates the TAC5212 panel from the TLV320ADC6140 panel. */
+.codec-section-header {
+  margin: 0;
+  padding: 10px 16px 8px 16px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #d8d8d8;
+  background: #1a1a1a;
+  border-bottom: 1px solid #2c2c2c;
+}
+.codec-section-header + .codec-panel {
+  margin-bottom: 8px;
+}
+
 .codec-panel {
   display: flex;
   flex-direction: column;
@@ -919,6 +936,65 @@ select, input[type="text"] {
   border-radius: 3px;
   padding: 16px;
   min-height: 120px;
+}
+
+/* ---------- system view (chip configuration) ---------- */
+/*
+ * Two-column layout: a left rail of chip selector buttons, and the
+ * active chip's panel on the right. The right side reuses the existing
+ * .codec-section-header + .codec-panel styling so the chip controls
+ * look identical to how they did when they sat under the mixer.
+ */
+.view.view-system {
+  display: flex;
+  flex-direction: row;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.system-subnav {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #1a1a1a;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 8px;
+  min-width: 160px;
+  flex: 0 0 auto;
+}
+
+.system-subnav-tab {
+  background: #2c2c2c;
+  color: #bbb;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 8px 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.system-subnav-tab:hover {
+  background: #363636;
+}
+.system-subnav-tab.active {
+  background: #b86a30;
+  color: #111;
+  border-color: #d68038;
+}
+
+.system-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: #202020;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+}
+
+.system-chip-panel {
+  display: flex;
+  flex-direction: column;
 }
 
 .synth-content-empty {

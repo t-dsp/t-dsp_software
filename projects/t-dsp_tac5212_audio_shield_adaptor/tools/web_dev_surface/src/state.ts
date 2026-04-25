@@ -296,13 +296,32 @@ export interface LooperState {
   level:     Signal<number>;  // 0..1 return level
   transport: Signal<string>;  // idle | rec | play | stopped
   length:    Signal<number>;  // seconds
+  // Length in beats at the clock's current tempo. 0 when no take /
+  // clock stopped / BPM unknown. Non-quantized takes are fractional
+  // (e.g. 3.73); quantized takes land on whole numbers because the
+  // firmware snaps the recorded length to a multiple of the current
+  // samples-per-beat on the record->play transition.
+  lengthBeats: Signal<number>;
   // Quantize-to-beat: when true, the firmware defers transport actions
   // (rec/play/stop/clear) to the next clock beat edge instead of firing
-  // immediately. `armed` echoes which action is pending (0=none,
-  // 1=rec, 2=play, 3=stop, 4=clear). Used by the Loop panel to show
-  // a pending-action indicator.
+  // immediately, AND snaps the recorded length to a whole number of
+  // beats on record->play. `armed` echoes which action is pending
+  // (0=none, 1=rec, 2=play, 3=stop, 4=clear).
   quantize:  Signal<boolean>;
   armed:     Signal<number>;
+  // Cued action — two-stage arm. Pressing CUE REC (etc.) stages an
+  // action here without firing or beat-arming it; pressing GO moves
+  // it into `armed`, which then fires on the next beat edge. Same
+  // encoding as `armed` (0=none, 1=rec, 2=play, 3=stop, 4=clear).
+  cued:      Signal<number>;
+  // Clock-follow: when true, playback rate = currentBpm / recordedBpm
+  // so the loop stays in sync if the clock tempo changes. Pitch shifts
+  // with tempo (sample-rate scaling, no time-stretch). recordedBpm is
+  // 0 until the first record-finalize; after that it's the clock's BPM
+  // at the moment the take was finalized and serves as the reference
+  // denominator for the rate calculation.
+  clockFollow: Signal<boolean>;
+  recordedBpm: Signal<number>;
 }
 
 // Beats drum machine state (Beats tab). 4 tracks × 16 steps, per-step
@@ -342,6 +361,14 @@ export interface ClockState {
   bpm:          Signal<number>;     // 20..300; last-measured in ext, set point in int
   running:      Signal<boolean>;    // transport running / stopped
   beatsPerBar:  Signal<number>;     // 1..16
+  // Metronome — short tone burst on each beat edge, with an accent on
+  // beat 1 of the bar. Used as an audible reference while arming a
+  // looper take (record on the downbeat, stop on the last beat of the
+  // bar). Keyed off the same clock that drives the looper, so it stays
+  // in sync. Lives under the clock tree because conceptually it's a
+  // clock output, not a mixer feature.
+  metroOn:     Signal<boolean>;
+  metroLevel:  Signal<number>;      // 0..1 oscillator amplitude
 }
 
 // Synth bus — group fader + mute sitting downstream of every per-synth
@@ -413,6 +440,10 @@ const DEFAULT_CHANNEL_NAMES = [
   'Line R',
   'Mic L',
   'Mic R',
+  'XLR 1',  // 7  TLV320ADC6140 CH1 — external XLR preamp
+  'XLR 2',  // 8
+  'XLR 3',  // 9
+  'XLR 4',  // 10
 ];
 
 export function createMixerState(channelCount: number): MixerState {
@@ -420,14 +451,15 @@ export function createMixerState(channelCount: number): MixerState {
   for (let i = 0; i < channelCount; i++) {
     const defaultName =
       DEFAULT_CHANNEL_NAMES[i] ?? `Ch ${String(i + 1).padStart(2, '0')}`;
-    // Firmware defaults odd channels (1, 3, 5) to link=true. Client
-    // matches so the UI is correctly slave-disabled before the first
-    // echo arrives.
+    // Firmware defaults odd channels (1, 3, 5) to link=true. XLR pairs
+    // (7-8, 9-10) default unlinked because they're individual mono mics,
+    // not natural L/R pairs. Client matches so the UI is correctly slave-
+    // disabled before the first echo arrives.
     const defaultLink = i === 0 || i === 2 || i === 4;
     // Firmware defaults recSend per-source to preserve prior USB-out
-    // behaviour: Line (idx 2,3) and Mic (4,5) ON, USB playback (0,1) OFF.
-    // See MixerModel::defaultRecSend. Client mirrors this so the Rec
-    // button renders correctly before the snapshot echo arrives.
+    // behaviour: Line (idx 2,3), Mic (4,5), and XLR (6..9) ON; USB playback
+    // (0,1) OFF. See MixerModel::defaultRecSend. Client mirrors this so
+    // the Rec button renders correctly before the snapshot echo arrives.
     const defaultRecSend = i >= 2;
     channels.push({
       fader: new Signal(1.0),  // matches firmware default (MixerModel::reset)
@@ -473,7 +505,7 @@ export function createMixerState(channelCount: number): MixerState {
       // anyway, but matching here keeps the first-paint state sane.
       on: new Signal(true),
       midiAuto: new Signal(true),    // follow sub-tab by default
-      midiChannel: new Signal(1),    // matches DexedSink default — ch 1 for auto-follow
+      midiChannel: new Signal(0),    // matches firmware — omni; active-tab enforcer routes
       fxSend: new Signal(0),         // dry by default, matches firmware
       bankNames: new Signal<string[]>([]),
       voiceNames: new Signal<string[]>([]),
@@ -518,7 +550,7 @@ export function createMixerState(channelCount: number): MixerState {
       volume:          new Signal(0.7),
       on:              new Signal(true),
       midiAuto:        new Signal(true),   // follow sub-tab by default
-      midiChannel:     new Signal(3),      // Dexed=1, MPE=2, Neuro=3, Acid=4, Supersaw=5, Chip=6
+      midiChannel:     new Signal(0),      // omni — active-tab enforcer routes
       attack:          new Signal(0.005),
       release:         new Signal(0.200),
       detuneCents:     new Signal(7.0),
@@ -556,7 +588,7 @@ export function createMixerState(channelCount: number): MixerState {
       volume:       new Signal(0.7),
       on:           new Signal(true),
       midiAuto:     new Signal(true),
-      midiChannel:  new Signal(4),
+      midiChannel:  new Signal(0),
       waveform:     new Signal(0),
       tuning:       new Signal(0),
       cutoffHz:     new Signal(500),
@@ -572,7 +604,7 @@ export function createMixerState(channelCount: number): MixerState {
       volume:       new Signal(0.6),
       on:           new Signal(true),
       midiAuto:     new Signal(true),
-      midiChannel:  new Signal(5),
+      midiChannel:  new Signal(0),
       detuneCents:  new Signal(18),
       mixCenter:    new Signal(0.4),
       cutoffHz:     new Signal(9000),
@@ -589,7 +621,7 @@ export function createMixerState(channelCount: number): MixerState {
       volume:        new Signal(0.6),
       on:            new Signal(true),
       midiAuto:      new Signal(true),
-      midiChannel:   new Signal(6),
+      midiChannel:   new Signal(0),
       pulse1Duty:    new Signal(2),   // 50%
       pulse2Duty:    new Signal(1),   // 25%
       pulse2Detune:  new Signal(7),
@@ -626,12 +658,16 @@ export function createMixerState(channelCount: number): MixerState {
     looper: {
       // Defaults match main.cpp cold-boot (g_looperSource=0, g_looperLevel=1.0,
       // Looper::state()=Idle, length=0). /snapshot echoes overwrite on connect.
-      source:    new Signal(0),
-      level:     new Signal(1.0),
-      transport: new Signal('idle'),
-      length:    new Signal(0),
-      quantize:  new Signal(false),
-      armed:     new Signal(0),
+      source:      new Signal(0),
+      level:       new Signal(1.0),
+      transport:   new Signal('idle'),
+      length:      new Signal(0),
+      lengthBeats: new Signal(0),
+      quantize:    new Signal(false),
+      armed:       new Signal(0),
+      cued:        new Signal(0),
+      clockFollow: new Signal(true),
+      recordedBpm: new Signal(0),
     },
     clock: {
       // Defaults match tdsp::Clock cold-boot: External source, 120 BPM
@@ -641,6 +677,9 @@ export function createMixerState(channelCount: number): MixerState {
       bpm:          new Signal(120),
       running:      new Signal(false),
       beatsPerBar:  new Signal(4),
+      // Matches main.cpp cold-boot (g_metroOn=false, g_metroLevel=0.4).
+      metroOn:      new Signal(false),
+      metroLevel:   new Signal(0.4),
     },
     beats: createBeatsState(),
     arp: {

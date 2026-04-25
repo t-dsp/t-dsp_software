@@ -30,8 +30,42 @@ void Looper::play() {
     if (_lengthSamples == 0) {
         _state = Idle;
     } else {
-        _playPos = 0;
-        _state   = Playing;
+        _playPos  = 0;
+        _playFrac = 0.0f;
+        _state    = Playing;
+    }
+    __enable_irq();
+}
+
+void Looper::play(uint32_t snapSamples, uint32_t minSamples) {
+    __disable_irq();
+    if (_state == Recording) {
+        uint32_t len = _writePos;
+        if (snapSamples > 0) {
+            // Round to nearest multiple of snapSamples. Half-up: anything
+            // past the midpoint bumps to the next beat — feels natural
+            // when the user releases slightly after a beat edge.
+            const uint32_t half = snapSamples / 2;
+            uint32_t snapped = ((len + half) / snapSamples) * snapSamples;
+            if (snapped < minSamples) snapped = minSamples;
+            if (snapped > _capacity)  snapped = (_capacity / snapSamples) * snapSamples;
+            // Zero-pad any extension so the tail of the loop isn't
+            // uninitialized buffer contents. (Truncation is free — we
+            // just advertise a smaller length; the extra samples sit
+            // past _lengthSamples and are never read.)
+            for (uint32_t i = len; i < snapped && i < _capacity; ++i) {
+                _buffer[i] = 0;
+            }
+            len = snapped;
+        }
+        _lengthSamples = len;
+    }
+    if (_lengthSamples == 0) {
+        _state = Idle;
+    } else {
+        _playPos  = 0;
+        _playFrac = 0.0f;
+        _state    = Playing;
     }
     __enable_irq();
 }
@@ -59,6 +93,12 @@ void Looper::setReturnLevel(float g01) {
     if (g01 > 1.0f) g01 = 1.0f;
     _returnLevel    = g01;
     _returnScaleQ15 = (int32_t)(g01 * 32767.0f + 0.5f);
+}
+
+void Looper::setPlaybackRate(float rate) {
+    if (rate < 0.25f) rate = 0.25f;
+    if (rate > 4.0f)  rate = 4.0f;
+    _playbackRate = rate;
 }
 
 float Looper::lengthSeconds() const {
@@ -98,18 +138,42 @@ void Looper::update() {
         _writePos = wp;
         for (uint32_t i = 0; i < AUDIO_BLOCK_SAMPLES; ++i) out->data[i] = 0;
     } else if (st == Playing && length > 0) {
-        uint32_t pp = _playPos;
+        // Variable-rate playback with linear interpolation. _playFrac
+        // is the fractional sample position between _buffer[pp] and
+        // _buffer[pp+1]; each output sample we advance by _playbackRate
+        // and wrap the integer part at the loop boundary.
+        //
+        // Rate == 1.0 is the common case (no clock-follow scaling); the
+        // interp still runs but _playFrac stays 0 so the read is a
+        // plain _buffer[pp]. The extra cost is a multiply-add and a
+        // branch per sample — cheap even at 44.1 kHz on Cortex-M7.
+        uint32_t pp   = _playPos;
+        float    frac = _playFrac;
         const int32_t scale = _returnScaleQ15;
+        const float   rate  = _playbackRate;
         for (uint32_t i = 0; i < AUDIO_BLOCK_SAMPLES; ++i) {
             if (pp >= length) pp = 0;
-            int32_t s = (int32_t)_buffer[pp] * scale;
+            const uint32_t pnext = (pp + 1 >= length) ? 0 : pp + 1;
+            // Linear interp between pp and pnext. Both samples are int16,
+            // fits comfortably in a float for the mix.
+            const float a = (float)_buffer[pp];
+            const float b = (float)_buffer[pnext];
+            const float m = a + (b - a) * frac;
+            int32_t s = (int32_t)m * scale;
             s >>= 15;
             if (s >  32767) s =  32767;
             if (s < -32768) s = -32768;
             out->data[i] = (int16_t)s;
-            pp++;
+
+            frac += rate;
+            while (frac >= 1.0f) {
+                pp++;
+                if (pp >= length) pp = 0;
+                frac -= 1.0f;
+            }
         }
-        _playPos = pp;
+        _playPos  = pp;
+        _playFrac = frac;
     } else {
         for (uint32_t i = 0; i < AUDIO_BLOCK_SAMPLES; ++i) out->data[i] = 0;
     }

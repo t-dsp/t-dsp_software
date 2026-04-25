@@ -99,14 +99,53 @@ export function looperPanel(state: MixerState, dispatcher: Dispatcher): HTMLElem
   stopBtn.addEventListener('click',  () => dispatcher.looperStop());
   clearBtn.addEventListener('click', () => dispatcher.looperClear());
 
-  // ---- Status readout (state + length) ----
+  // ---- Cue/Go row ----
+  //
+  // CUE REC stages a record without firing; GO commits whichever action
+  // is cued (rec/play/stop/clear), and the firmware aligns to the next
+  // beat edge if the clock is running. Clicking CUE REC a second time
+  // with REC already cued cancels the cue.
+  const cueBar = document.createElement('div');
+  cueBar.className = 'looper-transport looper-cue-bar';
+  const cueRecBtn = mkBtn('CUE REC', 'cue-rec');
+  const cuePlayBtn = mkBtn('CUE PLAY', 'cue-play');
+  const goBtn    = mkBtn('GO',      'go');
+  cueBar.append(cueRecBtn, cuePlayBtn, goBtn);
+  cueRecBtn.addEventListener('click', () => {
+    // Toggle — if REC is already cued, clicking CUE REC cancels.
+    const current = state.looper.cued.get();
+    dispatcher.looperCue(current === 1 ? 0 : 1);
+  });
+  cuePlayBtn.addEventListener('click', () => {
+    const current = state.looper.cued.get();
+    dispatcher.looperCue(current === 2 ? 0 : 2);
+  });
+  goBtn.addEventListener('click', () => dispatcher.looperGo());
+
+  // Highlight the currently-cued action; disable GO when nothing is cued
+  // (visual cue that the button is a no-op in that state).
+  state.looper.cued.subscribe((c) => {
+    cueRecBtn.classList.toggle('active',  c === 1);
+    cuePlayBtn.classList.toggle('active', c === 2);
+    goBtn.classList.toggle('ready', c !== 0);
+    goBtn.disabled = c === 0;
+  });
+
+  // ---- Status readout (state + length in seconds + length in beats) ----
+  //
+  // Beats readout uses the clock's live BPM — shows "—" when there's no
+  // take or the clock isn't running. With Sync on, quantized loops should
+  // land on a whole-number count (e.g. "4 beats"); free-recorded loops
+  // read fractional.
   const status = document.createElement('div');
   status.className = 'looper-status';
   const stateLabel = document.createElement('span');
   stateLabel.className = 'looper-state';
   const lengthLabel = document.createElement('span');
   lengthLabel.className = 'looper-length';
-  status.append(stateLabel, lengthLabel);
+  const beatsLabel = document.createElement('span');
+  beatsLabel.className = 'looper-beats';
+  status.append(stateLabel, lengthLabel, beatsLabel);
 
   state.looper.transport.subscribe((st) => {
     stateLabel.textContent = st.toUpperCase();
@@ -117,6 +156,89 @@ export function looperPanel(state: MixerState, dispatcher: Dispatcher): HTMLElem
   state.looper.length.subscribe((s) => {
     lengthLabel.textContent = s > 0 ? `${s.toFixed(2)} s` : '—';
   });
+  state.looper.lengthBeats.subscribe((b) => {
+    if (b <= 0) {
+      beatsLabel.textContent = '';
+      return;
+    }
+    // Whole-number beats render without decimals — nicer to read when
+    // the loop is snapped. Fractional beats get one decimal.
+    const rounded = Math.round(b);
+    const isWhole = Math.abs(b - rounded) < 0.02;
+    beatsLabel.textContent = isWhole
+      ? `${rounded} beat${rounded === 1 ? '' : 's'}`
+      : `${b.toFixed(1)} beats`;
+  });
+
+  // ---- Sync (beat-aware) toggle ----
+  //
+  // When on, the firmware (1) arms REC/PLAY/STOP/CLEAR to fire on the
+  // next beat edge, and (2) snaps the recorded length to a whole number
+  // of beats on the record->play transition. Both behaviors require the
+  // MIDI clock to be running; if it's stopped the firmware falls through
+  // to immediate fire so the UI still responds.
+  const sync = document.createElement('input');
+  sync.type = 'checkbox';
+  sync.className = 'looper-sync';
+  state.looper.quantize.subscribe((on) => { sync.checked = on; });
+  sync.addEventListener('change', () => {
+    dispatcher.setLooperQuantize(sync.checked);
+  });
+
+  const armedLabel = document.createElement('span');
+  armedLabel.className = 'looper-armed';
+  const ARMED_NAMES: Record<number, string> = {
+    1: 'REC', 2: 'PLAY', 3: 'STOP', 4: 'CLEAR',
+  };
+  // Show whichever of cued/armed is active. Armed wins if both are set
+  // (shouldn't normally happen — GO moves cued -> armed — but if it does
+  // the armed action is the more imminent one to surface).
+  const refreshArmedLabel = () => {
+    const armed = state.looper.armed.get();
+    const cued  = state.looper.cued.get();
+    if (armed > 0) {
+      armedLabel.textContent = `armed: ${ARMED_NAMES[armed] ?? '?'}`;
+    } else if (cued > 0) {
+      armedLabel.textContent = `cued: ${ARMED_NAMES[cued] ?? '?'}`;
+    } else {
+      armedLabel.textContent = '';
+    }
+  };
+  state.looper.armed.subscribe(refreshArmedLabel);
+  state.looper.cued.subscribe(refreshArmedLabel);
+
+  // ---- Clock-follow toggle ----
+  //
+  // When on and the clock tempo changes, playback rate scales so the
+  // loop stays in sync with the new tempo. Pitch shifts with it (no
+  // time-stretch — this is sample-rate scaling). The readout shows the
+  // BPM at which the take was recorded so you can see what the current
+  // ratio is relative to.
+  const follow = document.createElement('input');
+  follow.type = 'checkbox';
+  follow.className = 'looper-follow';
+  state.looper.clockFollow.subscribe((on) => { follow.checked = on; });
+  follow.addEventListener('change', () => {
+    dispatcher.setLooperClockFollow(follow.checked);
+  });
+
+  const recordedLabel = document.createElement('span');
+  recordedLabel.className = 'looper-recorded';
+  const updateRecordedLabel = () => {
+    const rec = state.looper.recordedBpm.get();
+    const cur = state.clock.bpm.get();
+    if (rec <= 0) {
+      recordedLabel.textContent = '';
+      return;
+    }
+    const ratio = cur > 0 ? cur / rec : 1;
+    const isUnity = Math.abs(ratio - 1) < 0.005;
+    recordedLabel.textContent = isUnity
+      ? `rec @ ${rec.toFixed(0)} BPM`
+      : `rec @ ${rec.toFixed(0)} · ${ratio.toFixed(2)}×`;
+  };
+  state.looper.recordedBpm.subscribe(updateRecordedLabel);
+  state.clock.bpm.subscribe(updateRecordedLabel);
 
   // ---- Return level slider ----
   const level = document.createElement('input');
@@ -140,12 +262,21 @@ export function looperPanel(state: MixerState, dispatcher: Dispatcher): HTMLElem
     'Pre-fader source tap — the loop plays independently of the channel fader, ' +
     'so bringing the strip down leaves only the recorded take audible. ' +
     'Buffer caps around 2 s on the stock Teensy 4.1; soldering an APS6404L ' +
-    'PSRAM into the first footprint unlocks tens of seconds.';
+    'PSRAM into the first footprint unlocks tens of seconds. ' +
+    'Sync quantizes REC/PLAY to beat edges and snaps the recorded length ' +
+    'to a whole number of beats (needs a running MIDI clock). ' +
+    'CUE REC stages a record without firing; press GO at the musical ' +
+    'moment and recording starts on the next beat. ' +
+    'Follow clock scales playback rate with tempo changes — pitch shifts ' +
+    'with it (like a DJ turntable; no time-stretch).';
 
   mod.body.append(
     row('Source', sel),
     bar,
+    cueBar,
     status,
+    row('Sync', sync, armedLabel),
+    row('Follow clock', follow, recordedLabel),
     row('Return', level, levelRO),
     note,
   );

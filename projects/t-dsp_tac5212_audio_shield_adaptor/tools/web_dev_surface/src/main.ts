@@ -13,6 +13,7 @@ import { slipEncode, StreamDemuxer } from './transport';
 import { createMixerState } from './state';
 import { Dispatcher } from './dispatcher';
 import { tac5212Panel } from './codec-panel-config';
+import { adc6140Panel } from './adc6140-panel-config';
 
 import { connectButton } from './ui/connect';
 import { channelPair } from './ui/channel-pair';
@@ -38,10 +39,18 @@ import { beatsPanel } from './ui/beats-panel';
 import { arpPanel } from './ui/arp-panel';
 import { synthBusStrip } from './ui/synth-bus';
 
-// Channel count for the small mixer v1 — 6 channels (USB L/R, Line L/R,
-// Mic L/R) matching tdsp::kChannelCount in lib/TDspMixer/src/MixerModel.h.
-// Stereo-linked pairs by default: (1,2), (3,4), (5,6).
-const CHANNEL_COUNT = 6;
+// Channel count — 10 channels matching tdsp::kChannelCount in firmware.
+//   1  USB L         } stereo-linked by default
+//   2  USB R         }
+//   3  Line L        } stereo-linked by default
+//   4  Line R        }
+//   5  Mic L         } stereo-linked by default
+//   6  Mic R         }
+//   7  XLR 1         } shown as a pair purely for layout (firmware
+//   8  XLR 2         } defaults link=false so they behave as independent
+//   9  XLR 3         } mono channels — each XLR strip's fader/mute/solo
+//  10  XLR 4         } moves on its own).
+const CHANNEL_COUNT = 10;
 
 const state = createMixerState(CHANNEL_COUNT);
 const console_ = serialConsole({ onSubmit: (line) => sendText(line) });
@@ -265,7 +274,11 @@ const arpTab = document.createElement('button');
 arpTab.className = 'view-tab';
 arpTab.dataset.view = 'arp';
 arpTab.textContent = 'Arp';
-viewTabs.append(mixerTab, spectrumTab, synthTab, fxTab, processingTab, loopTab, beatsTab, clockTab, arpTab);
+const systemTab = document.createElement('button');
+systemTab.className = 'view-tab';
+systemTab.dataset.view = 'system';
+systemTab.textContent = 'System';
+viewTabs.append(mixerTab, spectrumTab, synthTab, fxTab, processingTab, loopTab, beatsTab, clockTab, arpTab, systemTab);
 
 // --- Mixer view section (wraps existing mixer content) ------------
 
@@ -294,17 +307,13 @@ outputDock.append(
 );
 mixerRow.appendChild(outputDock);
 
-const codecSection = document.createElement('section');
-codecSection.className = 'codec-section';
-codecSection.appendChild(codecPanel(tac5212Panel, dispatcher));
-
 const rawSection = document.createElement('section');
 rawSection.className = 'raw-section';
 const rawLabel = document.createElement('h4');
 rawLabel.textContent = 'Raw OSC';
 rawSection.append(rawLabel, rawOsc(dispatcher, log));
 
-mixerView.append(mixerRow, codecSection, rawSection);
+mixerView.append(mixerRow, rawSection);
 
 // --- Spectrum view section ----------------------------------------
 
@@ -335,16 +344,11 @@ dispatcher.setMidiSink((note, velocity, channel) => {
   // velocity > 0 → note-on; velocity == 0 → note-off (standard MIDI
   // running-status). All channels light the same keyboard — the per-
   // channel breakdown is surfaced via the banner readout in keyboardView.
+  // The active sub-tab is sticky: whichever synth tab the user has open
+  // receives the MIDI (via midiAuto muting the others). We deliberately
+  // do NOT auto-switch tabs on note-on — that fought the user's explicit
+  // selection when a fixed-channel keyboard didn't match the open tab.
   keyboard.setNote(note, velocity > 0, channel);
-  // Auto-follow: on note-on, switch the active sub-tab to whichever
-  // synth claims this channel. Lets the user pick up an unknown-channel
-  // keyboard (or an MPE one that spreads notes across channels) without
-  // hunting for the right tab. Resolver + selectSynthSubtab are defined
-  // below; the closure resolves them at call time, post-init.
-  if (velocity > 0 && channel >= 1 && channel <= 16) {
-    const target = resolveAutoTarget(channel);
-    if (target && target !== activeSynthSubtab) selectSynthSubtab(target);
-  }
 });
 
 // Active synth sub-tab dictates which MIDI channel the on-screen
@@ -439,52 +443,21 @@ type SynthSubtab = 'dexed' | 'mpe' | 'neuro' | 'acid' | 'supersaw' | 'chip';
 // bridge and the firmware's defaults stay intact.
 const enforceMidiAuto = (): void => {
   if (!state.connected.get()) return;
-  if (state.dexed.midiAuto.get()) {
-    const want = activeSynthSubtab === 'dexed';
-    if (state.dexed.on.get() !== want) dispatcher.setDexedOn(want);
-  }
-  if (state.mpe.midiAuto.get()) {
-    const want = activeSynthSubtab === 'mpe';
-    if (state.mpe.on.get() !== want) dispatcher.setMpeOn(want);
-  }
-  if (state.neuro.midiAuto.get()) {
-    const want = activeSynthSubtab === 'neuro';
-    if (state.neuro.on.get() !== want) dispatcher.setNeuroOn(want);
-  }
-  if (state.acid.midiAuto.get()) {
-    const want = activeSynthSubtab === 'acid';
-    if (state.acid.on.get() !== want) dispatcher.setAcidOn(want);
-  }
-  if (state.supersaw.midiAuto.get()) {
-    const want = activeSynthSubtab === 'supersaw';
-    if (state.supersaw.on.get() !== want) dispatcher.setSupersawOn(want);
-  }
-  if (state.chip.midiAuto.get()) {
-    const want = activeSynthSubtab === 'chip';
-    if (state.chip.on.get() !== want) dispatcher.setChipOn(want);
-  }
-};
-
-// Channel → synth resolver for the auto-follow-the-keyboard behaviour.
-// Priority: explicit per-synth midiChannel matches first (Dexed 1,
-// Neuro 3, Acid 4, Supersaw 5, Chip 6), then MPE as the catch-all so
-// MPE keyboards (notes spread across member channels 2..16) and
-// single-channel keyboards on an unclaimed channel both land on MPE.
-// A claimed channel is claimed regardless of that synth's Auto state
-// — turning Dexed Auto off doesn't cause channel 1 traffic to bleed
-// into MPE; it just means we won't switch to Dexed for it.
-const resolveAutoTarget = (channel: number): SynthSubtab | null => {
-  const dexedCh    = state.dexed.midiChannel.get();
-  const neuroCh    = state.neuro.midiChannel.get();
-  const acidCh     = state.acid.midiChannel.get();
-  const supersawCh = state.supersaw.midiChannel.get();
-  const chipCh     = state.chip.midiChannel.get();
-  if (dexedCh    !== 0 && dexedCh    === channel) return state.dexed.midiAuto.get()    ? 'dexed'    : null;
-  if (neuroCh    !== 0 && neuroCh    === channel) return state.neuro.midiAuto.get()    ? 'neuro'    : null;
-  if (acidCh     !== 0 && acidCh     === channel) return state.acid.midiAuto.get()     ? 'acid'     : null;
-  if (supersawCh !== 0 && supersawCh === channel) return state.supersaw.midiAuto.get() ? 'supersaw' : null;
-  if (chipCh     !== 0 && chipCh     === channel) return state.chip.midiAuto.get()     ? 'chip'     : null;
-  return state.mpe.midiAuto.get() ? 'mpe' : null;
+  // Always force the active tab's synth ON and every other synth with
+  // midiAuto=true OFF. Send unconditionally (no local on-state diff check)
+  // so firmware reboots, snapshot races, or any other UI/firmware drift
+  // can't leave a stale synth audible. midiAuto=false opts a synth out
+  // of the enforcer entirely — that's the layering escape hatch.
+  const force = (which: SynthSubtab, midiAuto: boolean, set: (on: boolean) => void) => {
+    if (which === activeSynthSubtab) { set(true); return; }
+    if (midiAuto) set(false);
+  };
+  force('dexed',    state.dexed.midiAuto.get(),    (v) => dispatcher.setDexedOn(v));
+  force('mpe',      state.mpe.midiAuto.get(),      (v) => dispatcher.setMpeOn(v));
+  force('neuro',    state.neuro.midiAuto.get(),    (v) => dispatcher.setNeuroOn(v));
+  force('acid',     state.acid.midiAuto.get(),     (v) => dispatcher.setAcidOn(v));
+  force('supersaw', state.supersaw.midiAuto.get(), (v) => dispatcher.setSupersawOn(v));
+  force('chip',     state.chip.midiAuto.get(),     (v) => dispatcher.setChipOn(v));
 };
 
 const selectSynthSubtab = (which: SynthSubtab): void => {
@@ -603,9 +576,65 @@ arpSection.className = 'view view-arp';
 arpSection.style.display = 'none';
 arpSection.appendChild(arp.element);
 
+// --- System view section ------------------------------------------
+//
+// Hardware-level chip configuration. Two codec chips live on this
+// board — TAC5212 (DAC + onboard line/PDM ADC) and TLV320ADC6140
+// (external XLR mic preamp × 4). Each gets its own panel rendered
+// from a panel-config descriptor. A left-rail submenu switches
+// between them so the chip-level controls don't crowd the mixer.
+
+const systemSection = document.createElement('section');
+systemSection.className = 'view view-system';
+systemSection.style.display = 'none';
+
+const systemSubnav = document.createElement('nav');
+systemSubnav.className = 'system-subnav';
+
+const tacSubtab = document.createElement('button');
+tacSubtab.className = 'system-subnav-tab active';
+tacSubtab.textContent = 'TAC5212';
+
+const adcSubtab = document.createElement('button');
+adcSubtab.className = 'system-subnav-tab';
+adcSubtab.textContent = 'TLV320ADC6140';
+
+systemSubnav.append(tacSubtab, adcSubtab);
+
+const systemContent = document.createElement('div');
+systemContent.className = 'system-content';
+
+const tacChipPanel = document.createElement('div');
+tacChipPanel.className = 'system-chip-panel';
+const tacChipHeader = document.createElement('h3');
+tacChipHeader.className = 'codec-section-header';
+tacChipHeader.textContent = 'TAC5212 (DAC + Line/PDM ADC)';
+tacChipPanel.append(tacChipHeader, codecPanel(tac5212Panel, dispatcher));
+
+const adcChipPanel = document.createElement('div');
+adcChipPanel.className = 'system-chip-panel';
+adcChipPanel.style.display = 'none';
+const adcChipHeader = document.createElement('h3');
+adcChipHeader.className = 'codec-section-header';
+adcChipHeader.textContent = 'TLV320ADC6140 (XLR Mic Preamp × 4)';
+adcChipPanel.append(adcChipHeader, codecPanel(adc6140Panel, dispatcher));
+
+systemContent.append(tacChipPanel, adcChipPanel);
+systemSection.append(systemSubnav, systemContent);
+
+type SystemSubtab = 'tac5212' | 'adc6140';
+const selectSystemSubtab = (which: SystemSubtab): void => {
+  tacSubtab.classList.toggle('active', which === 'tac5212');
+  adcSubtab.classList.toggle('active', which === 'adc6140');
+  tacChipPanel.style.display = which === 'tac5212' ? '' : 'none';
+  adcChipPanel.style.display = which === 'adc6140' ? '' : 'none';
+};
+tacSubtab.addEventListener('click', () => selectSystemSubtab('tac5212'));
+adcSubtab.addEventListener('click', () => selectSystemSubtab('adc6140'));
+
 // --- Tab switching -------------------------------------------------
 
-type ViewName = 'mixer' | 'spectrum' | 'synth' | 'fx' | 'processing' | 'loop' | 'beats' | 'clock' | 'arp';
+type ViewName = 'mixer' | 'spectrum' | 'synth' | 'fx' | 'processing' | 'loop' | 'beats' | 'clock' | 'arp' | 'system';
 
 function selectView(name: ViewName): void {
   mixerTab.classList.toggle('active',      name === 'mixer');
@@ -617,6 +646,7 @@ function selectView(name: ViewName): void {
   beatsTab.classList.toggle('active',      name === 'beats');
   clockTab.classList.toggle('active',      name === 'clock');
   arpTab.classList.toggle('active',        name === 'arp');
+  systemTab.classList.toggle('active',     name === 'system');
   mixerView.style.display         = name === 'mixer'      ? '' : 'none';
   spectrumSection.style.display   = name === 'spectrum'   ? '' : 'none';
   synthSection.style.display      = name === 'synth'      ? '' : 'none';
@@ -626,6 +656,7 @@ function selectView(name: ViewName): void {
   beatsSection.style.display      = name === 'beats'      ? '' : 'none';
   clockSection.style.display      = name === 'clock'      ? '' : 'none';
   arpSection.style.display        = name === 'arp'        ? '' : 'none';
+  systemSection.style.display     = name === 'system'     ? '' : 'none';
 
   // Toggle the body-level class that makes #app break out of its
   // 1200px max-width and go full viewport in spectrum mode. Only the
@@ -670,5 +701,6 @@ loopTab.addEventListener('click',       () => selectView('loop'));
 beatsTab.addEventListener('click',      () => selectView('beats'));
 clockTab.addEventListener('click',      () => selectView('clock'));
 arpTab.addEventListener('click',        () => selectView('arp'));
+systemTab.addEventListener('click',     () => selectView('system'));
 
-app.append(header, viewTabs, mixerView, spectrumSection, synthSection, fxSection, processingSection, loopSection, beatsSection, clockSection, arpSection, console_.element);
+app.append(header, viewTabs, mixerView, spectrumSection, synthSection, fxSection, processingSection, loopSection, beatsSection, clockSection, arpSection, systemSection, console_.element);
