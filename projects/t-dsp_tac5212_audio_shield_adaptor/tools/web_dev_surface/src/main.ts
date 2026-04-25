@@ -301,6 +301,18 @@ const fxWsTab    = makeWorkspaceTab('FX',    'fx');
 const setupWsTab = makeWorkspaceTab('SETUP', 'setup');
 viewTabs.append(mixWsTab, playWsTab, tuneWsTab, fxWsTab, setupWsTab);
 
+// Mode-driven tab order: in Musician mode, PLAY moves first and TUNE
+// drops to the end (musicians don't typically use the per-channel
+// processing surface). The DOM children of viewTabs are re-ordered
+// via successive appendChild() calls — appendChild moves an existing
+// child rather than duplicating, so this is just a reorder.
+state.mode.subscribe((m) => {
+  const order = m === 'musician'
+    ? [playWsTab, mixWsTab, fxWsTab, setupWsTab, tuneWsTab]
+    : [mixWsTab, playWsTab, tuneWsTab, fxWsTab, setupWsTab];
+  for (const t of order) viewTabs.appendChild(t);
+});
+
 // Helper for inner sub-tab buttons (PLAY / FX / SETUP).
 function makeSubnavTab(label: string, key: string): HTMLButtonElement {
   const b = document.createElement('button');
