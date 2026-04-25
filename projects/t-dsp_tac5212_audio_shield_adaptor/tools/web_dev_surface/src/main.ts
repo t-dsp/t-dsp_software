@@ -233,6 +233,10 @@ const mixerTab = document.createElement('button');
 mixerTab.className = 'view-tab active';
 mixerTab.dataset.view = 'mixer';
 mixerTab.textContent = 'Mixer';
+const codecTab = document.createElement('button');
+codecTab.className = 'view-tab';
+codecTab.dataset.view = 'codec';
+codecTab.textContent = 'Codec';
 const spectrumTab = document.createElement('button');
 spectrumTab.className = 'view-tab';
 spectrumTab.dataset.view = 'spectrum';
@@ -265,7 +269,7 @@ const arpTab = document.createElement('button');
 arpTab.className = 'view-tab';
 arpTab.dataset.view = 'arp';
 arpTab.textContent = 'Arp';
-viewTabs.append(mixerTab, spectrumTab, synthTab, fxTab, processingTab, loopTab, beatsTab, clockTab, arpTab);
+viewTabs.append(mixerTab, codecTab, spectrumTab, synthTab, fxTab, processingTab, loopTab, beatsTab, clockTab, arpTab);
 
 // --- Mixer view section (wraps existing mixer content) ------------
 
@@ -294,17 +298,23 @@ outputDock.append(
 );
 mixerRow.appendChild(outputDock);
 
-const codecSection = document.createElement('section');
-codecSection.className = 'codec-section';
-codecSection.appendChild(codecPanel(tac5212Panel, dispatcher));
-
 const rawSection = document.createElement('section');
 rawSection.className = 'raw-section';
 const rawLabel = document.createElement('h4');
 rawLabel.textContent = 'Raw OSC';
 rawSection.append(rawLabel, rawOsc(dispatcher, log));
 
-mixerView.append(mixerRow, codecSection, rawSection);
+mixerView.append(mixerRow, rawSection);
+
+// --- Codec view section ---------------------------------------------
+//
+// Hierarchical codec configuration. Sub-tabs cover DAC EQ, DAC Filter
+// & Volume, ADC, Routing & Reference, and System. See codec-panel-config.ts
+// for the section/control descriptor and ui/codec-panel.ts for rendering.
+const codecView = document.createElement('section');
+codecView.className = 'view view-codec';
+codecView.style.display = 'none';
+codecView.appendChild(codecPanel(tac5212Panel, dispatcher));
 
 // --- Spectrum view section ----------------------------------------
 
@@ -605,10 +615,11 @@ arpSection.appendChild(arp.element);
 
 // --- Tab switching -------------------------------------------------
 
-type ViewName = 'mixer' | 'spectrum' | 'synth' | 'fx' | 'processing' | 'loop' | 'beats' | 'clock' | 'arp';
+type ViewName = 'mixer' | 'codec' | 'spectrum' | 'synth' | 'fx' | 'processing' | 'loop' | 'beats' | 'clock' | 'arp';
 
 function selectView(name: ViewName): void {
   mixerTab.classList.toggle('active',      name === 'mixer');
+  codecTab.classList.toggle('active',      name === 'codec');
   spectrumTab.classList.toggle('active',   name === 'spectrum');
   synthTab.classList.toggle('active',      name === 'synth');
   fxTab.classList.toggle('active',         name === 'fx');
@@ -618,6 +629,7 @@ function selectView(name: ViewName): void {
   clockTab.classList.toggle('active',      name === 'clock');
   arpTab.classList.toggle('active',        name === 'arp');
   mixerView.style.display         = name === 'mixer'      ? '' : 'none';
+  codecView.style.display         = name === 'codec'      ? '' : 'none';
   spectrumSection.style.display   = name === 'spectrum'   ? '' : 'none';
   synthSection.style.display      = name === 'synth'      ? '' : 'none';
   fxSection.style.display         = name === 'fx'         ? '' : 'none';
@@ -662,6 +674,7 @@ function selectView(name: ViewName): void {
   }
 }
 mixerTab.addEventListener('click',      () => selectView('mixer'));
+codecTab.addEventListener('click',      () => selectView('codec'));
 spectrumTab.addEventListener('click',   () => selectView('spectrum'));
 synthTab.addEventListener('click',      () => selectView('synth'));
 fxTab.addEventListener('click',         () => selectView('fx'));
@@ -671,4 +684,4 @@ beatsTab.addEventListener('click',      () => selectView('beats'));
 clockTab.addEventListener('click',      () => selectView('clock'));
 arpTab.addEventListener('click',        () => selectView('arp'));
 
-app.append(header, viewTabs, mixerView, spectrumSection, synthSection, fxSection, processingSection, loopSection, beatsSection, clockSection, arpSection, console_.element);
+app.append(header, viewTabs, mixerView, codecView, spectrumSection, synthSection, fxSection, processingSection, loopSection, beatsSection, clockSection, arpSection, console_.element);

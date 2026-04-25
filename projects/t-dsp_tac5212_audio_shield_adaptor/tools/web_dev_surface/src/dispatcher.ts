@@ -1014,6 +1014,14 @@ export class Dispatcher {
     this.sendMsg(address, types, args);
   }
 
+  // Throttled raw send — for continuous-value codec controls (biquad EQ
+  // sliders, DRC parameter sliders, etc.) that would otherwise saturate the
+  // serial bridge at slider-drag rate. Coalesces repeated sends to the same
+  // address; trailing-edge fire guarantees the final release value lands.
+  sendRawThrottled(address: string, types: string, args: OscArg[]): void {
+    this.sendThrottled(address, types, args);
+  }
+
   // ---------- inbound (firmware -> UI) ----------
 
   handleIncoming(msg: OscMessage): void {
