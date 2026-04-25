@@ -24,3 +24,6 @@ Thumbs.db
 projects/t-dsp_tac5212_audio_shield_adaptor/tools/web_dev_surface/release/
 projects/t-dsp_tac5212_audio_shield_adaptor/tools/web_dev_surface/dist/
 projects/t-dsp_tac5212_audio_shield_adaptor/tools/web_dev_surface/node_modules/
+
+# Vendor datasheets (large PDFs — kept locally, not tracked)
+projects/*/docs/*.pdf
