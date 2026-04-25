@@ -1,15 +1,13 @@
-// Declarative descriptor for the TAC5212 codec settings panel.
+// Proposed extension of codec-panel-config.ts.
 //
-// The leaves and enum options here mirror the canonical /codec/tac5212/...
-// address tree. When that subtree changes, update this file in lockstep —
-// there is no other source of truth in the browser surface for codec leaves.
+// Scaffolding only. When this branch ships, this file gets folded into the
+// existing tools/web_dev_surface/src/codec-panel-config.ts so there's one
+// declarative source of truth. Kept separate here for review.
 //
-// Hierarchy (matches planning/tac5212-hw-dsp/PLAN.md §5):
-//   Tab → Section → Control
-// Each Section renders as a bordered card with a bold uppercase header,
-// optional one-line subtitle, optional preset buttons, and optional
-// collapse/expand. Controls are simple sliders/selects/toggles plus the
-// composite `biquad` kind that renders 3 sliders + a live response curve.
+// Renames `Group` to `Section` (existing places that reference Group get
+// migrated), adds `subtitle?`, `collapsible?`, `defaultCollapsed?`, and
+// `presets?` to support the hierarchical UX. Adds three new control kinds:
+// `biquad`, `drc`, `limiter`. Adds optional `help?` to all controls.
 
 export type BiquadType =
   | 'off'
@@ -33,17 +31,23 @@ export type Control =
       disableSection?: { value: string; sectionName: string } }
   | { kind: 'toggle'; label: string; help?: string; address: string }
   | { kind: 'action'; label: string; help?: string; address: string }
-  | { kind: 'range'; label: string; help?: string; address: string;
-      min: number; max: number; step: number; unit: string }
+  | { kind: 'range'; label: string; help?: string; address: string; min: number; max: number; step: number; unit: string }
+  // NEW — multi-control composites:
   | { kind: 'biquad'; label: string; help?: string;
-      // Address base: per-band root, e.g. /codec/tac5212/dac/1/bq/2.
-      // Widget sends `<base>/design s f f f` on slider change and
-      // listens for echoes on both `<base>/design` and `<base>/coeffs`.
-      addressBase: string;
-      defaults: BiquadDesign };
+      addressBase: string;       // e.g. /codec/tac5212/dac/1/bq/2 (band 2 of output 1)
+      defaults: BiquadDesign }
+  | { kind: 'drc'; label: string; help?: string;
+      addressBase: string;       // e.g. /codec/tac5212/dac/1/drc
+      defaults: { thresholdDb: number; ratio: number; attackMs: number; releaseMs: number; maxGainDb: number; kneeDb: number } }
+  | { kind: 'limiter'; label: string; help?: string;
+      addressBase: string;       // e.g. /codec/tac5212/dac/1/limiter
+      defaults: { thresholdDb: number; attackMs: number; releaseMs: number; kneeDb: number } };
 
 export interface PresetButton {
   label: string;
+  // Each preset emits a named action address; firmware expands to the
+  // corresponding parameter writes. Keeps the wire format simple.
+  // Address example: /codec/tac5212/dac/1/eq/preset s "smooth"
   address: string;
   arg: string;
 }
@@ -59,7 +63,7 @@ export interface Section {
 
 export interface Tab {
   name: string;
-  sections: Section[];
+  sections: Section[];     // renamed from `groups`
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +90,31 @@ const dacEqSection = (n: 1 | 2): Section => ({
   ],
 });
 
+const dacDrcSection = (n: 1 | 2): Section => ({
+  name: `Output ${n} — DRC (compressor)`,
+  subtitle: 'Tames loud transients smoothly. The "ear-fatigue fix".',
+  collapsible: true,
+  controls: [
+    { kind: 'toggle', label: 'Enable',  address: `/codec/tac5212/dac/${n}/drc/enable` },
+    { kind: 'drc', label: 'Settings',
+      addressBase: `/codec/tac5212/dac/${n}/drc`,
+      defaults: { thresholdDb: -20, ratio: 2, attackMs: 10, releaseMs: 200, maxGainDb: 12, kneeDb: 6 } },
+  ],
+});
+
+const dacLimiterSection = (n: 1 | 2): Section => ({
+  name: `Output ${n} — Limiter (peak protection)`,
+  subtitle: 'Hard ceiling that prevents clipping at any cost.',
+  collapsible: true,
+  defaultCollapsed: true,
+  controls: [
+    { kind: 'toggle', label: 'Enable', address: `/codec/tac5212/dac/${n}/limiter/enable` },
+    { kind: 'limiter', label: 'Settings',
+      addressBase: `/codec/tac5212/dac/${n}/limiter`,
+      defaults: { thresholdDb: -1, attackMs: 0.1, releaseMs: 50, kneeDb: 2 } },
+  ],
+});
+
 const adcChannelSection = (n: 1 | 2): Section => ({
   name: `Channel ${n}`,
   collapsible: true,
@@ -98,7 +127,7 @@ const adcChannelSection = (n: 1 | 2): Section => ({
       help: 'Differential rejects board noise; single-ended uses one pin.' },
     { kind: 'enum', label: 'Impedance', address: `/codec/tac5212/adc/${n}/impedance`,
       options: ['5k', '10k', '40k'],
-      help: 'Higher impedance loads the source less; lower has less noise.' },
+      help: 'Higher impedance loads the source less; lower has lower noise.' },
     { kind: 'enum', label: 'Full scale', address: `/codec/tac5212/adc/${n}/fullscale`,
       options: ['2vrms', '4vrms'] },
     { kind: 'enum', label: 'Coupling', address: `/codec/tac5212/adc/${n}/coupling`,
@@ -109,10 +138,25 @@ const adcChannelSection = (n: 1 | 2): Section => ({
 });
 
 // ---------------------------------------------------------------------------
-// The Tab[] tree — fed straight to codec-panel.ts to render.
+// The proposed Tab[] — fed straight to codec-panel.ts to render.
 // ---------------------------------------------------------------------------
 
 export const tac5212Panel: Tab[] = [
+  {
+    name: 'Signal Chain',
+    sections: [
+      {
+        name: 'Audio path overview',
+        subtitle: 'Click any block below to jump to its sub-tab.',
+        // Special section: rendered as a flow diagram, not a control grid.
+        // Implementation: codec-panel.ts checks for an empty controls[] +
+        // a `flowDiagram?: true` flag (added later) to render the SVG
+        // pipeline. For v1 this is just a banner panel with text.
+        controls: [],
+      },
+    ],
+  },
+
   {
     name: 'DAC EQ',
     sections: [
@@ -120,13 +164,23 @@ export const tac5212Panel: Tab[] = [
       dacEqSection(2),
       {
         name: 'EQ allocation (chip-wide)',
-        subtitle: 'How many EQ bands per output. More bands = more shaping.',
+        subtitle: 'How many EQ bands per output. Trades flexibility for CPU.',
         controls: [
-          { kind: 'range', label: 'Bands per channel',
+          { kind: 'enum', label: 'Bands per channel',
             address: '/codec/tac5212/dac/biquads',
-            min: 0, max: 3, step: 1, unit: 'bands' },
+            options: ['0', '1', '2', '3'] },
         ],
       },
+    ],
+  },
+
+  {
+    name: 'Dynamics',
+    sections: [
+      dacDrcSection(1),
+      dacLimiterSection(1),
+      dacDrcSection(2),
+      dacLimiterSection(2),
     ],
   },
 
@@ -153,7 +207,7 @@ export const tac5212Panel: Tab[] = [
         controls: [
           { kind: 'enum', label: 'Mode', address: '/codec/tac5212/dac/interp',
             options: ['linear_phase', 'low_latency', 'ultra_low_latency', 'low_power'],
-            help: 'Linear phase = best tone. Low-latency = best for live monitoring.' },
+            help: 'Linear phase is best for tone; low-latency is best for live monitoring.' },
         ],
       },
       {
@@ -183,7 +237,8 @@ export const tac5212Panel: Tab[] = [
         name: 'ADC high-pass filter (chip-wide)',
         subtitle: 'Removes mic rumble and DC offset.',
         controls: [
-          { kind: 'toggle', label: 'Enable', address: '/codec/tac5212/adc/hpf' },
+          { kind: 'enum', label: 'Cutoff', address: '/codec/tac5212/adc/hpf',
+            options: ['off', '1hz', '12hz', '96hz'] },
         ],
       },
     ],
@@ -218,8 +273,6 @@ export const tac5212Panel: Tab[] = [
       },
       {
         name: 'PDM mic',
-        collapsible: true,
-        defaultCollapsed: true,
         controls: [
           { kind: 'toggle', label: 'Enable', address: '/codec/tac5212/pdm/enable' },
           { kind: 'enum', label: 'Source', address: '/codec/tac5212/pdm/source',
@@ -241,6 +294,9 @@ export const tac5212Panel: Tab[] = [
           { kind: 'action', label: 'Status', address: '/codec/tac5212/status' },
         ],
       },
+      // Diagnostics: raw register set/get is wired through the existing
+      // raw-osc pane in the Mixer tab; no UI here, but the firmware leaves
+      // /codec/tac5212/reg/{set,get} exposed.
     ],
   },
 ];

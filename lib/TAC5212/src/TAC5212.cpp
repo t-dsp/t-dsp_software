@@ -510,6 +510,230 @@ Result TAC5212::Pdm::setClkPin(PdmClkPin) {
 }
 
 // -----------------------------------------------------------------------------
+// Chip-global DAC DSP (DSP_CFG1, page 0, 0x73)
+// -----------------------------------------------------------------------------
+
+namespace {
+
+constexpr uint8_t interpToField(InterpFilter f) {
+    switch (f) {
+        case InterpFilter::LinearPhase:     return reg::dsp_cfg1::INTX_LINEAR_PHASE;
+        case InterpFilter::LowLatency:      return reg::dsp_cfg1::INTX_LOW_LATENCY;
+        case InterpFilter::UltraLowLatency: return reg::dsp_cfg1::INTX_ULTRA_LOW_LATENCY;
+        case InterpFilter::LowPower:        return reg::dsp_cfg1::INTX_LOW_POWER;
+    }
+    return reg::dsp_cfg1::INTX_LINEAR_PHASE;
+}
+
+constexpr InterpFilter fieldToInterp(uint8_t field) {
+    switch (field) {
+        case reg::dsp_cfg1::INTX_LINEAR_PHASE:      return InterpFilter::LinearPhase;
+        case reg::dsp_cfg1::INTX_LOW_LATENCY:       return InterpFilter::LowLatency;
+        case reg::dsp_cfg1::INTX_ULTRA_LOW_LATENCY: return InterpFilter::UltraLowLatency;
+        case reg::dsp_cfg1::INTX_LOW_POWER:         return InterpFilter::LowPower;
+    }
+    return InterpFilter::LinearPhase;
+}
+
+constexpr uint8_t dacHpfToField(DacHpf h) {
+    switch (h) {
+        case DacHpf::Programmable: return reg::dsp_cfg1::HPF_PROGRAMMABLE;
+        case DacHpf::Cut1Hz:       return reg::dsp_cfg1::HPF_1HZ;
+        case DacHpf::Cut12Hz:      return reg::dsp_cfg1::HPF_12HZ;
+        case DacHpf::Cut96Hz:      return reg::dsp_cfg1::HPF_96HZ;
+    }
+    return reg::dsp_cfg1::HPF_PROGRAMMABLE;
+}
+
+constexpr DacHpf fieldToDacHpf(uint8_t field) {
+    switch (field) {
+        case reg::dsp_cfg1::HPF_PROGRAMMABLE: return DacHpf::Programmable;
+        case reg::dsp_cfg1::HPF_1HZ:          return DacHpf::Cut1Hz;
+        case reg::dsp_cfg1::HPF_12HZ:         return DacHpf::Cut12Hz;
+        case reg::dsp_cfg1::HPF_96HZ:         return DacHpf::Cut96Hz;
+    }
+    return DacHpf::Programmable;
+}
+
+constexpr uint8_t bqCountToField(uint8_t n) {
+    switch (n) {
+        case 0: return reg::dsp_cfg1::BQ_NONE;
+        case 1: return reg::dsp_cfg1::BQ_1;
+        case 2: return reg::dsp_cfg1::BQ_2;
+        case 3: return reg::dsp_cfg1::BQ_3;
+    }
+    return reg::dsp_cfg1::BQ_2;  // POR default
+}
+
+constexpr uint8_t fieldToBqCount(uint8_t field) {
+    switch (field) {
+        case reg::dsp_cfg1::BQ_NONE: return 0;
+        case reg::dsp_cfg1::BQ_1:    return 1;
+        case reg::dsp_cfg1::BQ_2:    return 2;
+        case reg::dsp_cfg1::BQ_3:    return 3;
+    }
+    return 2;
+}
+
+}  // anonymous namespace
+
+Result TAC5212::setDacInterpolationFilter(InterpFilter f) {
+    return _rmw(0, reg::DSP_CFG1, reg::dsp_cfg1::MASK_INTX_FILT, interpToField(f));
+}
+
+Result TAC5212::getDacInterpolationFilter(InterpFilter &out) {
+    const uint8_t cfg = _read(0, reg::DSP_CFG1);
+    out = fieldToInterp(cfg & reg::dsp_cfg1::MASK_INTX_FILT);
+    return Result::ok();
+}
+
+Result TAC5212::setDacHpf(DacHpf h) {
+    return _rmw(0, reg::DSP_CFG1, reg::dsp_cfg1::MASK_HPF_SEL, dacHpfToField(h));
+}
+
+Result TAC5212::getDacHpf(DacHpf &out) {
+    const uint8_t cfg = _read(0, reg::DSP_CFG1);
+    out = fieldToDacHpf(cfg & reg::dsp_cfg1::MASK_HPF_SEL);
+    return Result::ok();
+}
+
+Result TAC5212::setDacBiquadsPerChannel(uint8_t n) {
+    if (n > 3) return Result::error("DAC biquads per channel must be 0..3");
+    return _rmw(0, reg::DSP_CFG1, reg::dsp_cfg1::MASK_BQ_CFG, bqCountToField(n));
+}
+
+Result TAC5212::getDacBiquadsPerChannel(uint8_t &n) {
+    const uint8_t cfg = _read(0, reg::DSP_CFG1);
+    n = fieldToBqCount(cfg & reg::dsp_cfg1::MASK_BQ_CFG);
+    return Result::ok();
+}
+
+Result TAC5212::setDacDvolGang(bool ganged) {
+    return _rmw(0, reg::DSP_CFG1, reg::dsp_cfg1::MASK_DVOL_GANG,
+                ganged ? reg::dsp_cfg1::MASK_DVOL_GANG : uint8_t{0});
+}
+
+Result TAC5212::setDacSoftStep(bool enabled) {
+    // The bit is DISABLE_SOFT_STEP (active high disables), so invert.
+    return _rmw(0, reg::DSP_CFG1, reg::dsp_cfg1::MASK_DISABLE_SOFT_STEP,
+                enabled ? uint8_t{0} : reg::dsp_cfg1::MASK_DISABLE_SOFT_STEP);
+}
+
+// -----------------------------------------------------------------------------
+// Out per-channel DSP — DVOL + biquads
+// -----------------------------------------------------------------------------
+
+namespace {
+
+// Map physical Out N to the DVOL register addresses for sub-channels A/B
+// (page 0, single-byte). Output 1 spans CH1A + CH1B; output 2 spans
+// CH2A + CH2B. In differential modes both sub-channels need the same
+// volume to keep DC offset at zero on the line outputs.
+struct DvolRegs { uint8_t a; uint8_t b; };
+constexpr DvolRegs dvolRegsFor(uint8_t n) {
+    return (n == 2)
+        ? DvolRegs{reg::dac_dvol::CH2A, reg::dac_dvol::CH2B}
+        : DvolRegs{reg::dac_dvol::CH1A, reg::dac_dvol::CH1B};
+}
+
+// Pack a 32-bit two's-complement big-endian into 4 bytes.
+inline void packBE32(uint8_t *out, int32_t value) {
+    const uint32_t v = static_cast<uint32_t>(value);
+    out[0] = static_cast<uint8_t>((v >> 24) & 0xFF);
+    out[1] = static_cast<uint8_t>((v >> 16) & 0xFF);
+    out[2] = static_cast<uint8_t>((v >>  8) & 0xFF);
+    out[3] = static_cast<uint8_t>( v        & 0xFF);
+}
+
+inline int32_t unpackBE32(const uint8_t *in) {
+    const uint32_t v =
+        (static_cast<uint32_t>(in[0]) << 24) |
+        (static_cast<uint32_t>(in[1]) << 16) |
+        (static_cast<uint32_t>(in[2]) <<  8) |
+         static_cast<uint32_t>(in[3]);
+    return static_cast<int32_t>(v);
+}
+
+}  // anonymous namespace
+
+Result TAC5212::Out::setDvol(float dB) {
+    if (dB > reg::dac_dvol::DB_MAX)
+        return Result::error("DAC dvol exceeds +27 dB max");
+    const uint8_t code = reg::dac_dvol::fromDb(dB);
+    const DvolRegs r = dvolRegsFor(_n);
+    // Single-byte writes per sub-channel. Both sub-channels track each
+    // other so differential output mode preserves DC balance.
+    Result rA = _codec->_write(reg::dac_dvol::PAGE, r.a, code);
+    if (rA.isError()) return rA;
+    return _codec->_write(reg::dac_dvol::PAGE, r.b, code);
+}
+
+Result TAC5212::Out::getDvol(float &dB) {
+    // Read sub-channel A; A and B are kept in sync by setDvol.
+    const DvolRegs r = dvolRegsFor(_n);
+    const uint8_t code = _codec->_read(reg::dac_dvol::PAGE, r.a);
+    dB = reg::dac_dvol::toDb(code);
+    return Result::ok();
+}
+
+namespace {
+
+// Hardware allocates 12 biquad slots across 4 channels per Table 7-48.
+// For DAC channels 1 and 2, the per-channel band index `idx` (1..3) maps
+// to global biquad number:
+//   idx 1: BQ_n          where n = channel
+//   idx 2: BQ_(n+4)
+//   idx 3: BQ_(n+8)
+constexpr uint8_t globalBiquadFor(uint8_t channel, uint8_t idx) {
+    return channel + (idx - 1) * 4;
+}
+
+}  // anonymous namespace
+
+Result TAC5212::Out::setBiquad(uint8_t idx, const BiquadCoeffs &c) {
+    if (idx < 1 || idx > 3) return Result::error("biquad idx must be 1..3");
+
+    const uint8_t bq    = globalBiquadFor(_n, idx);
+    const uint8_t page  = reg::dac_biquad::pageFor(bq);
+    const uint8_t base  = reg::dac_biquad::baseFor(bq);
+
+    // Pack 5 × 4 bytes MSB-first.
+    uint8_t bytes[20];
+    packBE32(bytes +  0, c.n0);
+    packBE32(bytes +  4, c.n1);
+    packBE32(bytes +  8, c.n2);
+    packBE32(bytes + 12, c.d1);
+    packBE32(bytes + 16, c.d2);
+
+    return _codec->writeBurst(page, base, bytes, sizeof(bytes));
+}
+
+Result TAC5212::Out::clearBiquad(uint8_t idx) {
+    return setBiquad(idx, BiquadCoeffs::bypass());
+}
+
+Result TAC5212::Out::getBiquad(uint8_t idx, BiquadCoeffs &out) {
+    if (idx < 1 || idx > 3) return Result::error("biquad idx must be 1..3");
+
+    const uint8_t bq    = globalBiquadFor(_n, idx);
+    const uint8_t page  = reg::dac_biquad::pageFor(bq);
+    const uint8_t base  = reg::dac_biquad::baseFor(bq);
+
+    // Read 20 bytes one at a time. Burst reads aren't a hot path here
+    // (only used at snapshot) so the per-byte loop is fine.
+    uint8_t bytes[20];
+    for (uint8_t i = 0; i < 20; ++i) {
+        bytes[i] = _codec->_read(page, static_cast<uint8_t>(base + i));
+    }
+    out.n0 = unpackBE32(bytes +  0);
+    out.n1 = unpackBE32(bytes +  4);
+    out.n2 = unpackBE32(bytes +  8);
+    out.d1 = unpackBE32(bytes + 12);
+    out.d2 = unpackBE32(bytes + 16);
+    return Result::ok();
+}
+
+// -----------------------------------------------------------------------------
 // Raw register access (escape hatch, and what reg/set + reg/get route to)
 // -----------------------------------------------------------------------------
 
@@ -519,6 +743,72 @@ Result TAC5212::writeRegister(uint8_t page, uint8_t reg, uint8_t value) {
 
 uint8_t TAC5212::readRegister(uint8_t page, uint8_t reg) {
     return _read(page, reg);
+}
+
+// Burst write across consecutive register addresses. Handles the auto
+// increment-page-boundary case: after register 0x7F on page N, the chip
+// auto-rolls to register 0x08 on page N+1.
+//
+// Implemented as a sequence of single-page chunks because the Wire library
+// has a small TX buffer (~32 bytes on Teensy 4.x) and ChunkySplitting it
+// per page also keeps the page-cache (`_curPage`) in sync.
+Result TAC5212::writeBurst(uint8_t page, uint8_t startReg, const uint8_t *bytes, size_t n) {
+    if (n == 0) return Result::ok();
+    if (bytes == nullptr) return Result::error("writeBurst: null bytes pointer");
+
+    size_t remaining = n;
+    uint8_t curPage  = page;
+    uint8_t curReg   = startReg;
+    const uint8_t *cursor = bytes;
+
+    while (remaining > 0) {
+        Result pg = _selectPage(curPage);
+        if (pg.isError()) return pg;
+
+        // Chunk size: don't cross into the next page (after 0x7F → next page
+        // 0x08). Also keep within the Wire library TX buffer; 16 data bytes
+        // per transaction stays well under the Teensy default.
+        const size_t inThisPage = (curReg <= 0x7F)
+            ? static_cast<size_t>(0x80 - curReg)
+            : 0;
+        const size_t maxChunk   = 16;
+        size_t chunk = remaining;
+        if (chunk > inThisPage) chunk = inThisPage;
+        if (chunk > maxChunk)   chunk = maxChunk;
+        if (chunk == 0) {
+            // Already at end-of-page; force next-page roll by re-selecting
+            // and resetting curReg to 0x08 (the chip does this automatically
+            // on auto-increment, but we mirror it explicitly for clarity).
+            curPage = static_cast<uint8_t>(curPage + 1);
+            curReg  = 0x08;
+            continue;
+        }
+
+        _wire->beginTransmission(_addr);
+        _wire->write(curReg);
+        for (size_t i = 0; i < chunk; ++i) {
+            _wire->write(cursor[i]);
+        }
+        const uint8_t err = _wire->endTransmission();
+        if (err != 0) {
+            ++_errors;
+            return Result::error("I2C NACK during burst write");
+        }
+
+        cursor    += chunk;
+        remaining -= chunk;
+        // Advance curReg; if we hit 0x80 step into next page at 0x08.
+        const uint16_t advanced = static_cast<uint16_t>(curReg) + chunk;
+        if (advanced >= 0x80) {
+            curPage = static_cast<uint8_t>(curPage + 1);
+            curReg  = static_cast<uint8_t>(0x08 + (advanced - 0x80));
+            // The chip auto-rolled the page pointer; sync our cache.
+            _curPage = curPage;
+        } else {
+            curReg = static_cast<uint8_t>(advanced);
+        }
+    }
+    return Result::ok();
 }
 
 // -----------------------------------------------------------------------------
