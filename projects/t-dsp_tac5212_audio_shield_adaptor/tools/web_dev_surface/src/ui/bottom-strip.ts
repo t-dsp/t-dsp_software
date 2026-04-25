@@ -128,6 +128,105 @@ function makeMiniStrip(
   return wrap;
 }
 
+// Windows playback host volume — readout of what Windows' playback
+// device slider is set to, plus the post-hostvol L/R meters showing
+// what's actually leaving the device after Windows attenuation. The
+// MIX outputDock has the full hostStrip widget; this is the compact
+// dock-sized version. The "BP" indicator lights when host-vol is
+// bypassed (state.main.hostvolEnable === false), telling the user
+// at a glance that the Windows slider isn't being applied.
+function makeHostOutSection(state: MixerState): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'bs-aux';
+
+  const label = document.createElement('div');
+  label.className = 'bs-aux-label';
+  label.textContent = 'WIN OUT';
+
+  const mid = document.createElement('div');
+  mid.className = 'bs-mid';
+  mid.append(
+    makeMiniMeter(state.main.hostPeakL, state.main.hostRmsL),
+    makeMiniMeter(state.main.hostPeakR, state.main.hostRmsR),
+  );
+
+  const bot = document.createElement('div');
+  bot.className = 'bs-bot';
+
+  const value = document.createElement('div');
+  value.className = 'bs-value';
+  state.main.hostvolValue.subscribe((v) => {
+    value.textContent = `${Math.round(v * 100)}%`;
+  });
+
+  const bypass = document.createElement('div');
+  bypass.className = 'bs-mute bs-readonly';
+  bypass.textContent = 'BP';
+  bypass.title = 'Windows volume bypassed (host-vol disabled in MIX)';
+  state.main.hostvolEnable.subscribe((on) => {
+    // hostvolEnable=false means the Windows slider is bypassed —
+    // the fader is the only gain stage. Light the BP indicator then.
+    bypass.classList.toggle('active', !on);
+  });
+
+  bot.append(value, bypass);
+  wrap.append(label, mid, bot);
+  return wrap;
+}
+
+// Windows recording-device level + mute. captureHostvolValue is the
+// firmware's read-only mirror of the Windows recording slider; there
+// is no input-side meter on the firmware side, so the level bar
+// reflects the slider position itself rather than a measured signal.
+// captureHostvolMute is the read-only mirror of the Windows recording
+// mute toggle. Both update when the user moves the Windows slider or
+// hits the mute key on a USB headset, etc.
+function makeHostInSection(state: MixerState): HTMLElement {
+  const wrap = document.createElement('div');
+  wrap.className = 'bs-aux';
+
+  const label = document.createElement('div');
+  label.className = 'bs-aux-label';
+  label.textContent = 'WIN IN';
+
+  const mid = document.createElement('div');
+  mid.className = 'bs-mid';
+
+  // Slider-position bar — same vertical-bar shape as the meters but
+  // driven by captureHostvolValue (0..1) directly, not a level
+  // measurement. transform: scaleY for compositor-only updates.
+  const barWrap = document.createElement('div');
+  barWrap.className = 'bs-meter';
+  const barFill = document.createElement('div');
+  barFill.className = 'bs-meter-fill bs-host-in-fill';
+  barWrap.appendChild(barFill);
+  state.main.captureHostvolValue.subscribe((v) => {
+    barFill.style.transform = `scaleY(${Math.max(0, Math.min(1, v))})`;
+  });
+  mid.appendChild(barWrap);
+
+  const bot = document.createElement('div');
+  bot.className = 'bs-bot';
+
+  const value = document.createElement('div');
+  value.className = 'bs-value';
+  state.main.captureHostvolValue.subscribe((v) => {
+    value.textContent = `${Math.round(v * 100)}%`;
+  });
+
+  const muteInd = document.createElement('div');
+  muteInd.className = 'bs-mute bs-readonly';
+  muteInd.textContent = 'M';
+  muteInd.title = 'Windows recording-device mute (read-only echo)';
+  state.main.captureHostvolMute.subscribe((muted) => {
+    muteInd.classList.toggle('active', muted);
+  });
+
+  bot.append(value, muteInd);
+  wrap.append(label, mid, bot);
+  return wrap;
+}
+
 function makeMainSection(state: MixerState, dispatcher: Dispatcher): HTMLElement {
   const wrap = document.createElement('div');
   wrap.className = 'bs-main';
@@ -187,6 +286,11 @@ export function bottomStrip(state: MixerState, dispatcher: Dispatcher): HTMLElem
     bank.appendChild(makeMiniStrip(i, state, dispatcher));
   }
 
-  root.append(bank, makeMainSection(state, dispatcher));
+  root.append(
+    bank,
+    makeMainSection(state, dispatcher),
+    makeHostOutSection(state),
+    makeHostInSection(state),
+  );
   return root;
 }

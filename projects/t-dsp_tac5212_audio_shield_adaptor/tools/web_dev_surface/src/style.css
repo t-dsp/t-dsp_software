@@ -2594,6 +2594,56 @@ body.spectrum-active .bottom-dock { display: none !important; }
 }
 .bs-main .bs-fader { width: 32px; }
 
+/* Aux readout sections — Windows OUT (post-hostvol meters + slider %)
+ * and Windows IN (capture slider %). Compact column to the right of
+ * the main section. Same shape as .bs-main but narrower since they
+ * have no fader. */
+.bs-aux {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 6px;
+  background: #232323;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  flex: 0 0 auto;
+  align-items: stretch;
+  min-width: 64px;
+}
+.bs-aux-label {
+  font-size: 10px;
+  color: #aaa;
+  letter-spacing: 0.04em;
+  text-align: center;
+  font-weight: 500;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+/* Read-only mute/bypass indicators — visually similar to .bs-mute
+ * but no hover affordance and a more muted active color so the user
+ * doesn't try to click them. */
+.bs-mute.bs-readonly {
+  cursor: default;
+  pointer-events: none;
+}
+.bs-mute.bs-readonly:hover {
+  background: #2a2a2a;
+}
+.bs-mute.bs-readonly.active {
+  background: #5a3d8a;
+  border-color: #7a5dba;
+}
+/* Host-in level bar — uses the same .bs-meter container shape but
+ * with a different fill color (cyan-ish info color) so the user
+ * doesn't confuse a slider position for an audio level meter. */
+.bs-meter-fill.bs-host-in-fill {
+  background: linear-gradient(to top, #2c5a82, #38bdf8);
+  opacity: 0.85;
+}
+
 /* Musician variant — keyboard takes over the dock. The keyboard
  * widget already has its own internal layout; this dock just gives
  * it a consistent dark frame. */
