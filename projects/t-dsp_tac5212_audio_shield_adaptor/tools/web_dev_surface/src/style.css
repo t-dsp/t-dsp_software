@@ -2641,7 +2641,18 @@ body.spectrum-active .bottom-dock { display: none !important; }
   position: sticky;
   top: 0;
   z-index: 4;
-  display: flex;
+  /* display: flex !important — necessary because something in the
+   * cascade (Tailwind preflight on <nav>? a leftover legacy rule?)
+   * was hiding/collapsing this element when the rule had normal
+   * priority. Adding !important plus the explicit min-height + flex
+   * sizing below got it visible. Don't remove without re-checking. */
+  display: flex !important;
+  /* flex: 0 0 auto so the subnav holds its natural height as a flex
+   * child of .workspace; without this the workspace's tight flex
+   * constraints (flex 1 1 auto + min-height: 0 + overflow auto) could
+   * collapse the subnav to 0px on initial layout in some browsers. */
+  flex: 0 0 auto;
+  min-height: 48px;
   gap: 0;
   background: #1c1c1c;
   border: 1px solid #2c2c2c;
