@@ -370,5 +370,135 @@ inline constexpr uint8_t makeSlot(uint8_t n, bool enable = true) {
     return (enable ? slot_cfg::MASK_ENABLE : uint8_t{0}) | (n & slot_cfg::MASK_SLOT);
 }
 
+// =============================================================================
+// DSP_CFG1 — chip-global DAC DSP config (§8.1.1.101)
+// =============================================================================
+
+constexpr uint8_t DSP_CFG1 = 0x73;
+
+namespace dsp_cfg1 {
+    constexpr uint8_t SHIFT_INTX_FILT = 6;
+    constexpr uint8_t MASK_INTX_FILT  = 0xC0;  // bits[7:6]
+    constexpr uint8_t SHIFT_HPF_SEL   = 4;
+    constexpr uint8_t MASK_HPF_SEL    = 0x30;  // bits[5:4]
+    constexpr uint8_t SHIFT_BQ_CFG    = 2;
+    constexpr uint8_t MASK_BQ_CFG     = 0x0C;  // bits[3:2]
+    constexpr uint8_t MASK_DISABLE_SOFT_STEP = 0x02;  // bit[1]
+    constexpr uint8_t MASK_DVOL_GANG  = 0x01;  // bit[0]
+
+    // INTX_FILT[7:6] — DAC interpolation filter response
+    constexpr uint8_t INTX_LINEAR_PHASE      = 0x00;
+    constexpr uint8_t INTX_LOW_LATENCY       = 0x40;
+    constexpr uint8_t INTX_ULTRA_LOW_LATENCY = 0x80;
+    constexpr uint8_t INTX_LOW_POWER         = 0xC0;
+
+    // HPF_SEL[5:4] — DAC high-pass filter (mirrors ADC HPF semantics)
+    constexpr uint8_t HPF_PROGRAMMABLE = 0x00;  // all-pass = HPF off
+    constexpr uint8_t HPF_1HZ          = 0x10;
+    constexpr uint8_t HPF_12HZ         = 0x20;
+    constexpr uint8_t HPF_96HZ         = 0x30;
+
+    // BQ_CFG[3:2] — biquads allocated per DAC channel (chip-global)
+    constexpr uint8_t BQ_NONE = 0x00;
+    constexpr uint8_t BQ_1    = 0x04;
+    constexpr uint8_t BQ_2    = 0x08;
+    constexpr uint8_t BQ_3    = 0x0C;
+}
+
+// =============================================================================
+// ADC biquad coefficient pages (§8.2.1, §8.2.2)
+// =============================================================================
+//
+// Each biquad occupies 20 contiguous bytes (5 × 4-byte coefficients) at
+// offset 0x08 + (idx × 0x14). 12 biquads total, page 8 holds 1..6, page 9
+// holds 7..12. Coefficient layout MSB-first per coef:
+//   N0[31:0]  N1[31:0]  N2[31:0]  D1[31:0]  D2[31:0]
+// in 5.27 fixed-point two's complement.
+
+namespace adc_biquad {
+    constexpr uint8_t PAGE_LO   = 8;
+    constexpr uint8_t PAGE_HI   = 9;
+    constexpr uint8_t BQ_BASE   = 0x08;
+    constexpr uint8_t BQ_STRIDE = 0x14;  // 20 bytes per biquad
+    constexpr uint8_t COEF_SIZE = 4;
+
+    inline constexpr uint8_t pageFor(uint8_t bq /* 1..12 */) {
+        return bq <= 6 ? PAGE_LO : PAGE_HI;
+    }
+    inline constexpr uint8_t baseFor(uint8_t bq /* 1..12 */) {
+        return BQ_BASE + ((bq - 1) % 6) * BQ_STRIDE;
+    }
+
+    constexpr uint8_t OFFSET_N0 = 0x00;
+    constexpr uint8_t OFFSET_N1 = 0x04;
+    constexpr uint8_t OFFSET_N2 = 0x08;
+    constexpr uint8_t OFFSET_D1 = 0x0C;
+    constexpr uint8_t OFFSET_D2 = 0x10;
+}
+
+// =============================================================================
+// DAC biquad coefficient pages (§8.2.5, §8.2.6)
+// =============================================================================
+
+namespace dac_biquad {
+    constexpr uint8_t PAGE_LO   = 15;
+    constexpr uint8_t PAGE_HI   = 16;
+    constexpr uint8_t BQ_BASE   = 0x08;
+    constexpr uint8_t BQ_STRIDE = 0x14;
+    constexpr uint8_t COEF_SIZE = 4;
+
+    inline constexpr uint8_t pageFor(uint8_t bq) {
+        return bq <= 6 ? PAGE_LO : PAGE_HI;
+    }
+    inline constexpr uint8_t baseFor(uint8_t bq) {
+        return BQ_BASE + ((bq - 1) % 6) * BQ_STRIDE;
+    }
+
+    constexpr uint8_t OFFSET_N0 = 0x00;
+    constexpr uint8_t OFFSET_N1 = 0x04;
+    constexpr uint8_t OFFSET_N2 = 0x08;
+    constexpr uint8_t OFFSET_D1 = 0x0C;
+    constexpr uint8_t OFFSET_D2 = 0x10;
+}
+
+// =============================================================================
+// DAC digital volume control (§8.2.8)
+// =============================================================================
+//
+// Encoding (extended range vs. ADC DVOL):
+//   0       = mute
+//   1..200  = -100.0 dB to -0.5 dB (0.5 dB steps)
+//   201     = 0.0 dB unity (POR default)
+//   202..255= +0.5 dB to +27.0 dB (0.5 dB steps)
+
+namespace dac_dvol {
+    constexpr uint8_t PAGE      = 18;
+    constexpr uint8_t CH1A_BASE = 0x0C;
+    constexpr uint8_t CH1B_BASE = 0x10;
+    constexpr uint8_t CH2A_BASE = 0x14;
+    constexpr uint8_t CH2B_BASE = 0x18;
+
+    constexpr uint8_t MUTE        = 0;
+    constexpr uint8_t UNITY_0DB   = 201;
+    constexpr uint8_t MAX_PLUS_27 = 255;
+
+    constexpr float DB_MIN  = -100.0f;
+    constexpr float DB_MAX  =  +27.0f;
+    constexpr float DB_STEP =    0.5f;
+
+    inline constexpr uint8_t fromDb(float dB) {
+        if (dB <= -100.5f) return MUTE;
+        int reg = 201 + static_cast<int>(dB * 2.0f + (dB >= 0 ? 0.5f : -0.5f));
+        if (reg < 1)   reg = 1;
+        if (reg > 255) reg = 255;
+        return static_cast<uint8_t>(reg);
+    }
+
+    inline constexpr float toDb(uint8_t reg) {
+        if (reg == 0) return -120.0f;
+        return (static_cast<float>(reg) - 201.0f) * 0.5f;
+    }
+}
+
 }  // namespace reg
 }  // namespace tac5212
