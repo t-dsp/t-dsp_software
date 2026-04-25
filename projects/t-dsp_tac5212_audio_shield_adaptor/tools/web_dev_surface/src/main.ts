@@ -45,6 +45,7 @@ import { beatsPanel } from './ui/beats-panel';
 import { arpPanel } from './ui/arp-panel';
 import { synthBusStrip } from './ui/synth-bus';
 import { bottomStrip } from './ui/bottom-strip';
+import { tuneStubPanel } from './ui/tune-stub';
 
 // Channel count — 10 channels matching tdsp::kChannelCount in firmware.
 //   1  USB L         } stereo-linked by default
@@ -695,73 +696,17 @@ const serialSection = document.createElement('section');
 serialSection.className = 'view view-serial';
 serialSection.appendChild(console_.element);
 
-// --- TUNE workspace stub -----------------------------------------
+// --- TUNE workspace stub (Solid + Tailwind, Phase 2 spike) -------
 //
-// Phase 1 lands TUNE as a workspace placeholder. Per planning/ui-
-// rebuild/02-hierarchy.md, TUNE is the per-channel-detail surface
-// (HPF / parametric EQ / dynamics / pan / sends matrix) for whichever
-// channel is Sel'd. Most of those are blocked on firmware exposing
-// per-channel processing — see 05-roadmap.md "Firmware dependencies".
-// For now we render a "what this is" panel that displays the Sel'd
-// channel name and a list of features-pending, so the workspace is
-// reachable from the tab bar without dead-ending the user.
-const tuneSection = document.createElement('section');
-tuneSection.className = 'view view-tune';
-const tuneInner = document.createElement('div');
-tuneInner.className = 'tune-stub';
-
-const tuneHeader = document.createElement('div');
-tuneHeader.className = 'tune-stub-header';
-const tuneSelLabel = document.createElement('div');
-tuneSelLabel.className = 'tune-stub-sel';
-const tuneTitle = document.createElement('h2');
-tuneTitle.textContent = 'TUNE — selected channel detail';
-tuneHeader.append(tuneTitle, tuneSelLabel);
-
-const tuneNote = document.createElement('p');
-tuneNote.className = 'tune-stub-note';
-tuneNote.innerHTML =
-  'This workspace will host per-channel HPF, parametric EQ, dynamics, pan, '
-  + 'and a sends matrix for whichever channel is Sel’d. Most of those '
-  + 'controls are blocked on firmware exposing per-channel processing — '
-  + 'see <code>planning/ui-rebuild/05-roadmap.md</code> Phase 5.';
-
-const tuneList = document.createElement('ul');
-tuneList.className = 'tune-stub-list';
-[
-  ['HPF',         'pending firmware support'],
-  ['Parametric EQ', 'pending firmware support'],
-  ['Dynamics',    'pending firmware support'],
-  ['Pan',         'addressable today; widget pending'],
-  ['Sends matrix', 'partial — Main only until aux buses land'],
-].forEach(([name, status]) => {
-  const li = document.createElement('li');
-  const n = document.createElement('strong');
-  n.textContent = name + ': ';
-  const s = document.createElement('span');
-  s.textContent = status;
-  li.append(n, s);
-  tuneList.appendChild(li);
-});
-
-// Live binding to selectedChannel — readable hint that Sel state is
-// global, even before TUNE has real widgets.
-state.selectedChannel.subscribe((idx) => {
-  const ch = state.channels[idx];
-  const name = ch?.name.get() ?? `Ch ${idx + 1}`;
-  tuneSelLabel.textContent = `Selected: ${name} (idx ${idx})`;
-});
-// Also update if the channel name itself changes (firmware rename echo).
-for (let i = 0; i < state.channels.length; i++) {
-  state.channels[i].name.subscribe(() => {
-    if (state.selectedChannel.get() === i) {
-      tuneSelLabel.textContent = `Selected: ${state.channels[i].name.get()} (idx ${i})`;
-    }
-  });
-}
-
-tuneInner.append(tuneHeader, tuneNote, tuneList);
-tuneSection.appendChild(tuneInner);
+// Per planning/ui-rebuild/02-hierarchy.md, TUNE is the per-channel-
+// detail surface (HPF / parametric EQ / dynamics / pan / sends matrix)
+// for whichever channel is Sel'd. The current iteration is a stub —
+// most fields are blocked on firmware exposing per-channel processing
+// (see 05-roadmap.md "Firmware dependencies"). The stub itself is
+// the first Solid + Tailwind component in the codebase; it proves the
+// new toolchain end-to-end and reads state.selectedChannel via the
+// signal-bridge adapter. See ui/tune-stub.tsx.
+const tuneSection = tuneStubPanel(state);
 
 // --- Workspace wrappers (Phase 1) --------------------------------
 //
