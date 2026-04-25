@@ -9,7 +9,9 @@
     "types": ["w3c-web-serial", "vite/client"],
     "isolatedModules": true,
     "esModuleInterop": true,
-    "noEmit": true
+    "noEmit": true,
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js"
   },
   "include": ["src"]
 }

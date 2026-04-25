@@ -6,6 +6,12 @@
 //
 // Chromium-only because it depends on the WebSerial API. See README.md.
 
+// Tailwind v4 theme + utility layer (Phase 2 of UI rebuild). Imported
+// before the legacy style.css so the legacy declarations win on
+// specificity ties — new Solid components opt into Tailwind utilities
+// explicitly via class names; old hand-styled selectors keep working
+// as the source of truth for un-ported panels.
+import './tailwind.css';
 import './style.css';
 
 import { decodePacket, OscArg } from './osc';
