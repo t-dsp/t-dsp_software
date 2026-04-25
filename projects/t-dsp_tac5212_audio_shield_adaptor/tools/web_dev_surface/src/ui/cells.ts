@@ -33,6 +33,25 @@ export function makeName(nameSig: Signal<string>): HTMLElement {
   return el;
 }
 
+// Selectable strip name: tapping the name sets the global selectedChannel
+// signal so the bottom-strip Sel indicator and (future) TUNE workspace
+// know which input is in focus. Highlighted when this channel is the
+// current selection. Sel state is local-only — never echoed to firmware,
+// since X32 firmware doesn't track per-client selection either.
+export function makeSelectableName(
+  nameSig: Signal<string>,
+  channelIdx: number,
+  selectedSig: Signal<number>,
+): HTMLElement {
+  const el = document.createElement('button');
+  el.className = 'strip-name strip-name-sel cell';
+  el.title = 'Tap to select';
+  nameSig.subscribe((n) => (el.textContent = n));
+  selectedSig.subscribe((s) => el.classList.toggle('sel-active', s === channelIdx));
+  el.addEventListener('click', () => selectedSig.set(channelIdx));
+  return el;
+}
+
 export function makeStaticName(text: string): HTMLElement {
   const el = document.createElement('div');
   el.className = 'strip-name cell';

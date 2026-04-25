@@ -38,6 +38,7 @@ import { clockPanel } from './ui/clock-panel';
 import { beatsPanel } from './ui/beats-panel';
 import { arpPanel } from './ui/arp-panel';
 import { synthBusStrip } from './ui/synth-bus';
+import { bottomStrip } from './ui/bottom-strip';
 
 // Channel count — 10 channels matching tdsp::kChannelCount in firmware.
 //   1  USB L         } stereo-linked by default
@@ -237,6 +238,32 @@ meterToggle.addEventListener('click', () => {
   else dispatcher.subscribeMeters();
 });
 header.appendChild(meterToggle);
+
+// Persona toggle — swaps the persistent bottom strip between the
+// Engineer fader-bank variant and the Musician keyboard variant.
+// Persists to localStorage so reloads land in the user's preferred
+// mode. Phase 0 of the UI rebuild epic; in Phase 1 this also drives
+// default-landing-workspace and tab order. See planning/ui-rebuild/.
+const MODE_LS_KEY = 't-dsp.ui.mode';
+const savedMode = localStorage.getItem(MODE_LS_KEY);
+if (savedMode === 'engineer' || savedMode === 'musician') {
+  state.mode.set(savedMode);
+}
+state.mode.subscribe((m) => {
+  try { localStorage.setItem(MODE_LS_KEY, m); } catch { /* private mode etc. */ }
+});
+
+const modeToggle = document.createElement('button');
+modeToggle.className = 'mode-toggle';
+modeToggle.title = 'Toggle Engineer / Musician mode';
+state.mode.subscribe((m) => {
+  modeToggle.textContent = m === 'engineer' ? 'Mode: Engineer' : 'Mode: Musician';
+  modeToggle.classList.toggle('musician', m === 'musician');
+});
+modeToggle.addEventListener('click', () => {
+  state.mode.set(state.mode.get() === 'engineer' ? 'musician' : 'engineer');
+});
+header.appendChild(modeToggle);
 
 header.appendChild(connectButton(state.connected, connect, disconnect));
 
@@ -643,6 +670,59 @@ const selectSystemSubtab = (which: SystemSubtab): void => {
 tacSubtab.addEventListener('click', () => selectSystemSubtab('tac5212'));
 adcSubtab.addEventListener('click', () => selectSystemSubtab('adc6140'));
 
+// --- Persistent bottom dock --------------------------------------
+//
+// Phase 0 of the UI rebuild epic. Two variants share the bottom of
+// every tab: the Engineer fader-bank (mini-strips per channel + main)
+// and the Musician keyboard. The keyboard element is reparented
+// between the Synth view dock and the bottom Musician dock when mode
+// flips, so a single keyboard instance handles both layouts. See
+// planning/ui-rebuild/02-hierarchy.md.
+const bottomEngineerDock = document.createElement('section');
+bottomEngineerDock.className = 'bottom-dock bottom-dock-engineer';
+bottomEngineerDock.appendChild(bottomStrip(state, dispatcher));
+
+const bottomMusicianDock = document.createElement('section');
+bottomMusicianDock.className = 'bottom-dock bottom-dock-musician';
+// Initially empty; keyboard is reparented in here when mode flips
+// to musician. CSS hides the empty container in engineer mode.
+
+const applyMode = (m: 'engineer' | 'musician'): void => {
+  const isMus = m === 'musician';
+  bottomEngineerDock.style.display = isMus ? 'none' : '';
+  bottomMusicianDock.style.display = isMus ? '' : 'none';
+  if (isMus) {
+    if (keyboard.element.parentElement !== bottomMusicianDock) {
+      bottomMusicianDock.appendChild(keyboard.element);
+    }
+    // Keyboard runs whenever Musician mode is active, regardless of
+    // which tab is showing. MIDI subscription only fires when the
+    // bridge is connected — handled by the state.connected listener
+    // below for the late-connect case.
+    if (!keyboard.isRunning()) keyboard.start();
+    if (state.connected.get()) dispatcher.subscribeMidi();
+  } else {
+    if (keyboard.element.parentElement !== synthKeyboardDock) {
+      synthKeyboardDock.appendChild(keyboard.element);
+    }
+    // Hand control back to selectView's tab-driven lifecycle. If we
+    // are not on the Synth tab and the keyboard is running, stop it.
+    if (!synthTab.classList.contains('active') && keyboard.isRunning()) {
+      keyboard.stop();
+      if (state.connected.get()) dispatcher.unsubscribeMidi();
+    }
+  }
+};
+state.mode.subscribe(applyMode);
+
+// Re-subscribe MIDI on connect when in Musician mode — the boot-time
+// applyMode runs before the bridge is connected, so the initial
+// subscribeMidi() either no-ops or fails silently. This catches up
+// once the bridge is live.
+state.connected.subscribe((c) => {
+  if (c && state.mode.get() === 'musician') dispatcher.subscribeMidi();
+});
+
 // --- Tab switching -------------------------------------------------
 
 type ViewName = 'mixer' | 'spectrum' | 'synth' | 'fx' | 'processing' | 'loop' | 'beats' | 'clock' | 'arp' | 'system';
@@ -684,9 +764,17 @@ function selectView(name: ViewName): void {
   // Leaving synth: clear keyboard state, unsubscribe so the firmware
   // stops forwarding MIDI events over USB CDC. Also turn off MPE
   // voice telemetry if the MPE sub-tab was active.
-  if (name !== 'synth' && keyboard.isRunning()) {
+  //
+  // Musician-mode override: the keyboard is parked in the persistent
+  // bottom dock and must keep running regardless of which tab the
+  // user is on. We still drop MPE telemetry on tab leave (it's tab-
+  // bound, not mode-bound) but leave the keyboard running and the
+  // global MIDI subscription alive.
+  if (name !== 'synth' && keyboard.isRunning() && state.mode.get() === 'engineer') {
     keyboard.stop();
     dispatcher.unsubscribeMidi();
+    mpe.setActive(false);
+  } else if (name !== 'synth') {
     mpe.setActive(false);
   }
 
@@ -714,4 +802,4 @@ clockTab.addEventListener('click',      () => selectView('clock'));
 arpTab.addEventListener('click',        () => selectView('arp'));
 systemTab.addEventListener('click',     () => selectView('system'));
 
-app.append(header, viewTabs, mixerView, spectrumSection, synthSection, fxSection, processingSection, loopSection, beatsSection, clockSection, arpSection, systemSection, console_.element);
+app.append(header, viewTabs, mixerView, spectrumSection, synthSection, fxSection, processingSection, loopSection, beatsSection, clockSection, arpSection, systemSection, bottomEngineerDock, bottomMusicianDock, console_.element);

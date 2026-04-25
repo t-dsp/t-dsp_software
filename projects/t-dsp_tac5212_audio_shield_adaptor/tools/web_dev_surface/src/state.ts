@@ -427,6 +427,16 @@ export interface MixerState {
   arp: ArpState;
   connected: Signal<boolean>;
   metersOn: Signal<boolean>;
+  // UI-only state — never echoed to firmware. Drives the per-channel
+  // detail surfacing (TUNE workspace, future) and the bottom-strip
+  // Sel highlight. 0-based channel index.
+  selectedChannel: Signal<number>;
+  // UI-only persona toggle. Persisted to localStorage by main.ts.
+  // 'engineer' = mix-tier defaults (fader bank in bottom strip, MIX
+  // is home). 'musician' = play-tier defaults (keyboard in bottom
+  // strip, PLAY is home — workspace regroup lands in Phase 1; for
+  // Phase 0 only the bottom-strip swap is wired).
+  mode: Signal<'engineer' | 'musician'>;
 }
 
 // Default channel names must match the small-mixer firmware's defaults in
@@ -713,6 +723,8 @@ export function createMixerState(channelCount: number): MixerState {
     },
     connected: new Signal(false),
     metersOn: new Signal(true),   // on by default; connect() re-subscribes
+    selectedChannel: new Signal(0),
+    mode: new Signal<'engineer' | 'musician'>('engineer'),
   };
 }
 

@@ -2297,3 +2297,275 @@ select, input[type="text"] {
   padding: 2px 6px;
   font-size: 11px;
 }
+
+/* ============================================================
+ * UI rebuild — Phase 0
+ *   - Selectable strip names (Sel buttons in MIX strips)
+ *   - Mode toggle (Engineer / Musician) in the header
+ *   - Persistent bottom dock with Engineer (fader bank) and
+ *     Musician (keyboard) variants
+ * See planning/ui-rebuild/02-hierarchy.md and 03-design-system.md.
+ * ============================================================ */
+
+/* Selectable strip name. Builds on .strip-name (defined in the
+ * mixer-row block above). Adds button-ish affordances and a Sel-
+ * active highlight that lights up when this channel is the global
+ * selectedChannel. Background is a subtle accent stripe so the
+ * label still reads at the top of a dense strip. */
+.strip-name-sel {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  cursor: pointer;
+  color: #aaa;
+  padding: 0 2px;
+  font: inherit;
+  font-size: 9px;
+  transition: background 0.08s, border-color 0.08s;
+}
+.strip-name-sel:hover {
+  background: #2a2a2a;
+  border-color: #3a3a3a;
+  color: #d0d0d0;
+}
+.strip-name-sel.sel-active {
+  background: #b86a30;
+  border-color: #d17d3a;
+  color: #fff;
+}
+.strip-name-sel.sel-active:hover {
+  background: #c97435;
+}
+
+/* Mode toggle — header button. Larger than the meter toggle so it
+ * meets touch sizing per planning/ui-rebuild/03-design-system.md
+ * (44 px minimum). Distinct color when in Musician mode so the
+ * persona is obvious at a glance. */
+.mode-toggle {
+  min-height: 32px;
+  padding: 6px 14px;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+.mode-toggle.musician {
+  background: #5a3d8a;
+  border-color: #7a5dba;
+  color: #fff;
+}
+.mode-toggle.musician:hover {
+  background: #6a4d9a;
+}
+
+/* Persistent bottom dock — sticky to the visible bottom so the user
+ * can ride levels (Engineer) or play notes (Musician) from any tab
+ * without leaving the current view. Sticky rather than fixed so
+ * the rest of the page reflows around it normally and the serial
+ * console below it (which is already a permanent fixture) sits at
+ * the very bottom. */
+.bottom-dock {
+  position: sticky;
+  bottom: 0;
+  z-index: 5;
+  background: #1a1a1a;
+  border-top: 1px solid #2c2c2c;
+  border-bottom: 1px solid #2c2c2c;
+  padding: 10px 12px;
+  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.4);
+}
+/* Spectrum-active mode hides the bottom dock — the spectrum view
+ * takes over the whole viewport and the dock would overlap the
+ * canvas. The user's dock state is preserved; switching back to a
+ * normal tab restores it. */
+body.spectrum-active .bottom-dock { display: none !important; }
+
+/* Engineer variant: mini-fader bank + main */
+.bottom-dock-engineer {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+/* Bank container — input strips left, main pinned right. */
+.bs-bank {
+  display: flex;
+  gap: 6px;
+  flex: 1 1 auto;
+  overflow-x: auto;
+}
+
+/* One mini-strip per input channel. Wider than the dense MIX cells
+ * so the touch targets meet the 44 px floor and the channel name is
+ * legible at a glance. Layout: name button → (meter + fader inline)
+ * → (dB readout + mute inline). */
+.bs-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 70px;
+  padding: 4px;
+  background: #232323;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  align-items: stretch;
+  flex: 0 0 auto;
+}
+
+/* Middle row of a mini-strip: meter on the left, fader on the right.
+ * Cuts strip height roughly in half versus stacking them. */
+.bs-mid {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+  justify-content: center;
+  align-items: center;
+}
+.bs-bot {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: stretch;
+}
+.bs-strip.bs-sel-active {
+  border-color: #d17d3a;
+  background: #2a2018;
+  box-shadow: inset 0 0 0 1px #b86a30;
+}
+
+.bs-sel {
+  background: transparent;
+  border: 1px solid #3a3a3a;
+  border-radius: 2px;
+  color: #d0d0d0;
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 0;
+  cursor: pointer;
+  min-height: 28px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.08s, border-color 0.08s;
+}
+.bs-sel:hover {
+  background: #2a2a2a;
+  border-color: #555;
+}
+.bs-sel-active .bs-sel {
+  background: #b86a30;
+  border-color: #d17d3a;
+  color: #fff;
+}
+
+/* Mini meter — same -60..0 dB log mapping as MIX, drawn at small
+ * size next to the fader. transform: scaleY (compositor-only) for
+ * meter fill, identical pattern to the main mixer's meters. */
+.bs-meter {
+  position: relative;
+  height: 80px;
+  width: 8px;
+  background: #0c0c0c;
+  border: 1px solid #2c2c2c;
+  border-radius: 1px;
+  overflow: hidden;
+  flex: 0 0 auto;
+  align-self: center;
+}
+.bs-meter-fill {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 100%;
+  transform: scaleY(0);
+  transform-origin: bottom;
+  will-change: transform;
+}
+.bs-meter-fill.bs-peak {
+  background: linear-gradient(to top, #4a4 0%, #4a4 60%, #cc4 75%, #c44 90%);
+  opacity: 0.95;
+}
+.bs-meter-fill.bs-rms {
+  background: #2a5a2a;
+  opacity: 0.6;
+}
+
+/* Mini fader — native vertical range with a custom larger thumb so
+ * touch targets are usable. Phase 3 replaces with a custom pointer-
+ * event fader (planning/ui-rebuild/03-design-system.md). */
+.bs-fader {
+  -webkit-appearance: slider-vertical;
+  appearance: slider-vertical;
+  height: 80px;
+  width: 28px;
+  margin: 0 auto;
+  padding: 0;
+  flex: 0 0 auto;
+}
+
+.bs-value {
+  font-size: 10px;
+  color: #888;
+  font-family: monospace;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.bs-mute {
+  background: #2a2a2a;
+  color: #d0d0d0;
+  border: 1px solid #444;
+  border-radius: 2px;
+  font: inherit;
+  font-size: 11px;
+  min-height: 28px;
+  cursor: pointer;
+  padding: 0;
+}
+.bs-mute:hover { background: #333; }
+.bs-mute.active {
+  background: #b86a30;
+  border-color: #d68038;
+  color: #fff;
+}
+
+/* Main section — pinned right of the bank, larger meter pair for
+ * the L/R bus, a single fader bound to the L side (firmware echoes
+ * R via stereo link when active). */
+.bs-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 8px;
+  background: #2c2c2c;
+  border: 1px solid #4a4a4a;
+  border-radius: 3px;
+  flex: 0 0 auto;
+  align-items: stretch;
+  min-width: 100px;
+}
+.bs-main-label {
+  font-size: 10px;
+  color: #d0d0d0;
+  letter-spacing: 0.06em;
+  text-align: center;
+  font-weight: 500;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.bs-main-mid {
+  gap: 3px;
+}
+.bs-main .bs-fader { width: 32px; }
+
+/* Musician variant — keyboard takes over the dock. The keyboard
+ * widget already has its own internal layout; this dock just gives
+ * it a consistent dark frame. */
+.bottom-dock-musician {
+  padding: 6px 12px;
+}
+.bottom-dock-musician .piano-wrap {
+  margin: 0;
+}

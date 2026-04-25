@@ -16,7 +16,7 @@ import { Dispatcher } from '../dispatcher';
 import { OscMessage } from '../osc';
 import {
   makeRow,
-  makeName,
+  makeSelectableName,
   makeMeter,
   makeFader,
   makeFaderValue,
@@ -67,9 +67,15 @@ export function channelPair(
   const chL = state.channels[oddIdx];
   const chR = state.channels[oddIdx + 1];
 
-  // Row 1: names (one per channel)
+  // Row 1: names (one per channel). Each is a Sel button — tapping sets
+  // the global selectedChannel signal so the bottom-strip mini-bank
+  // highlights this channel and (future) TUNE workspace renders its
+  // detail page.
   const rowName = makeRow('row-name');
-  rowName.append(makeName(chL.name), makeName(chR.name));
+  rowName.append(
+    makeSelectableName(chL.name, oddIdx,     state.selectedChannel),
+    makeSelectableName(chR.name, oddIdx + 1, state.selectedChannel),
+  );
 
   // Row 2: meters
   const rowMeter = makeRow('row-meter');
