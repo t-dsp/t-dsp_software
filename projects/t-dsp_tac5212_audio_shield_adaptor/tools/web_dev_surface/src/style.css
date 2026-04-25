@@ -2628,8 +2628,19 @@ body.spectrum-active .bottom-dock { display: none !important; }
 
 /* Inner sub-nav (PLAY / FX / SETUP). Sits at the top of each
  * workspace, indented slightly and styled distinctly from the top
- * tab bar so the hierarchy is obvious. */
+ * tab bar so the hierarchy is obvious.
+ *
+ * Sticky-pinned to the top of the workspace's scroll area. The
+ * workspace itself has overflow-y: auto, so when its inner panel
+ * is tall (e.g. the clock panel), the subnav stays visible at the
+ * top of the scrolling viewport — otherwise the user would scroll
+ * past Codec/Clock/Raw OSC/Serial buttons and have no way back to
+ * a sibling inner tab without bouncing through the top workspace
+ * tab bar (which would lose the inner-tab selection). */
 .subnav {
+  position: sticky;
+  top: 0;
+  z-index: 4;
   display: flex;
   gap: 0;
   background: #1c1c1c;
