@@ -434,9 +434,15 @@ export interface MixerState {
   // UI-only persona toggle. Persisted to localStorage by main.ts.
   // 'engineer' = mix-tier defaults (fader bank in bottom strip, MIX
   // is home). 'musician' = play-tier defaults (keyboard in bottom
-  // strip, PLAY is home — workspace regroup lands in Phase 1; for
-  // Phase 0 only the bottom-strip swap is wired).
+  // strip, PLAY is home).
   mode: Signal<'engineer' | 'musician'>;
+  // UI-only workspace + inner-tab state. Persisted to localStorage by
+  // main.ts so reloads land back where the user left off. See
+  // planning/ui-rebuild/02-hierarchy.md for the workspace structure.
+  activeWorkspace: Signal<'mix' | 'play' | 'tune' | 'fx' | 'setup'>;
+  activePlayTab:   Signal<'synths' | 'arp' | 'beats' | 'loop'>;
+  activeFxTab:     Signal<'busfx' | 'processing' | 'spectrum'>;
+  activeSetupTab:  Signal<'codec' | 'clock' | 'rawosc' | 'serial'>;
 }
 
 // Default channel names must match the small-mixer firmware's defaults in
@@ -725,6 +731,10 @@ export function createMixerState(channelCount: number): MixerState {
     metersOn: new Signal(true),   // on by default; connect() re-subscribes
     selectedChannel: new Signal(0),
     mode: new Signal<'engineer' | 'musician'>('engineer'),
+    activeWorkspace: new Signal<'mix' | 'play' | 'tune' | 'fx' | 'setup'>('mix'),
+    activePlayTab:   new Signal<'synths' | 'arp' | 'beats' | 'loop'>('synths'),
+    activeFxTab:     new Signal<'busfx' | 'processing' | 'spectrum'>('busfx'),
+    activeSetupTab:  new Signal<'codec' | 'clock' | 'rawosc' | 'serial'>('codec'),
   };
 }
 

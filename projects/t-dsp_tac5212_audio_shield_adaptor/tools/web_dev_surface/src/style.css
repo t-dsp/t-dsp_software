@@ -2569,3 +2569,160 @@ body.spectrum-active .bottom-dock { display: none !important; }
 .bottom-dock-musician .piano-wrap {
   margin: 0;
 }
+
+/* ============================================================
+ * UI rebuild — Phase 1
+ *   - Five-workspace top tab bar (.workspace-tab style)
+ *   - Inner sub-tab bars (.subnav, .subnav-tab) for PLAY/FX/SETUP
+ *   - Workspace wrapper layout
+ *   - TUNE stub
+ * See planning/ui-rebuild/02-hierarchy.md
+ * ============================================================ */
+
+/* Top-level workspace tab — touch-friendly bump versus the legacy
+ * .view-tab dimensions (44px+ minimum tap target per planning/ui-
+ * rebuild/03-design-system.md). Stays orange-underlined when
+ * active. .workspace-tab also has class .view-tab so the legacy
+ * base styles still apply. */
+.view-tab.workspace-tab {
+  min-height: 44px;
+  padding: 12px 24px;
+  font-size: 14px;
+  letter-spacing: 0.05em;
+  font-weight: 500;
+}
+
+/* Inner sub-nav (PLAY / FX / SETUP). Sits at the top of each
+ * workspace, indented slightly and styled distinctly from the top
+ * tab bar so the hierarchy is obvious. */
+.subnav {
+  display: flex;
+  gap: 0;
+  background: #1c1c1c;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.subnav-tab {
+  flex: 0 0 auto;
+  background: transparent;
+  color: #c0c0c0;
+  border: none;
+  border-radius: 0;
+  padding: 10px 18px;
+  border-bottom: 2px solid transparent;
+  font-size: 13px;
+  letter-spacing: 0.03em;
+  min-height: 38px;
+  cursor: pointer;
+}
+.subnav-tab:hover {
+  background: #232323;
+  color: #f0f0f0;
+}
+.subnav-tab.active {
+  background: #2a2a2a;
+  border-bottom-color: #b86a30;
+  color: #f0f0f0;
+}
+
+/* Workspace container — minimal wrapper. Lets each workspace control
+ * its own internal layout via the inner sections (which kept their
+ * existing classes like .view-mixer / .view-synth / .view-spectrum
+ * so all of those styles still apply). */
+.workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+/* TUNE stub — Phase 1 placeholder until firmware exposes per-channel
+ * processing. Renders the Sel'd channel's identity and a list of
+ * features-pending so the workspace is reachable, not a dead link. */
+.view-tune {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.tune-stub {
+  background: #202020;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.tune-stub-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tune-stub-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 500;
+  color: #f0f0f0;
+  letter-spacing: 0.02em;
+}
+.tune-stub-sel {
+  font-size: 14px;
+  color: #d68038;
+  font-family: monospace;
+}
+.tune-stub-note {
+  margin: 0;
+  font-size: 14px;
+  color: #c0c0c0;
+  line-height: 1.5;
+  max-width: 720px;
+}
+.tune-stub-note code {
+  font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  background: #161616;
+  padding: 2px 6px;
+  border-radius: 2px;
+  border: 1px solid #2c2c2c;
+  font-size: 13px;
+}
+.tune-stub-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tune-stub-list li {
+  font-size: 13px;
+  color: #c0c0c0;
+  padding: 8px 12px;
+  background: #1a1a1a;
+  border: 1px solid #2c2c2c;
+  border-radius: 2px;
+}
+.tune-stub-list strong {
+  color: #f0f0f0;
+  font-weight: 500;
+}
+
+/* The serial console moved out of the permanent bottom slot and into
+ * SETUP > Serial. Add a top label so the section feels like the rest
+ * of the SETUP sub-tabs (they all have a clear identity).
+ *
+ * No new selectors — the existing .console / .console-wrap styles
+ * still apply. The wrapping section just gives it a workspace home. */
+.view-serial {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Raw OSC section — same idea: was inside mixerView, now a SETUP
+ * sub-tab. Existing .raw-section styles still apply. */
+.view-rawosc {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}

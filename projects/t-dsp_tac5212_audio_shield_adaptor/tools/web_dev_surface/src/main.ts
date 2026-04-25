@@ -267,56 +267,48 @@ header.appendChild(modeToggle);
 
 header.appendChild(connectButton(state.connected, connect, disconnect));
 
-// --- View tab bar -------------------------------------------------
+// --- Workspace tab bar (Phase 1 of UI rebuild) -------------------
 //
-// Two top-level views share the content area: the mixer (channel
-// strips + codec panel + raw OSC) and the stereo spectrum analyzer.
-// The tab bar toggles display between two wrapper sections. Serial
-// console stays below both — it's useful in either view.
+// Five top-level workspaces grouped by signal-flow role:
+//   MIX     — channel strips, main bus, sends-on-faders (Phase 6)
+//   PLAY    — synth engines, arp, beats, looper (musician-tier)
+//   TUNE    — selected-channel processing detail (Phase 5; stub now)
+//   FX      — bus FX, main processing, spectrum analyzer
+//   SETUP   — codec panels, clock, raw OSC, serial console
+//
+// Inner sub-tabs live inside each workspace's container (built below).
+// See planning/ui-rebuild/02-hierarchy.md.
+
+type Workspace = 'mix' | 'play' | 'tune' | 'fx' | 'setup';
+type PlayTab   = 'synths' | 'arp' | 'beats' | 'loop';
+type FxTab     = 'busfx' | 'processing' | 'spectrum';
+type SetupTab  = 'codec' | 'clock' | 'rawosc' | 'serial';
 
 const viewTabs = document.createElement('nav');
 viewTabs.className = 'view-tabs';
-const mixerTab = document.createElement('button');
-mixerTab.className = 'view-tab active';
-mixerTab.dataset.view = 'mixer';
-mixerTab.textContent = 'Mixer';
-const spectrumTab = document.createElement('button');
-spectrumTab.className = 'view-tab';
-spectrumTab.dataset.view = 'spectrum';
-spectrumTab.textContent = 'Spectrum';
-const synthTab = document.createElement('button');
-synthTab.className = 'view-tab';
-synthTab.dataset.view = 'synth';
-synthTab.textContent = 'Synth';
-const fxTab = document.createElement('button');
-fxTab.className = 'view-tab';
-fxTab.dataset.view = 'fx';
-fxTab.textContent = 'FX';
-const processingTab = document.createElement('button');
-processingTab.className = 'view-tab';
-processingTab.dataset.view = 'processing';
-processingTab.textContent = 'Processing';
-const loopTab = document.createElement('button');
-loopTab.className = 'view-tab';
-loopTab.dataset.view = 'loop';
-loopTab.textContent = 'Loop';
-const beatsTab = document.createElement('button');
-beatsTab.className = 'view-tab';
-beatsTab.dataset.view = 'beats';
-beatsTab.textContent = 'Beats';
-const clockTab = document.createElement('button');
-clockTab.className = 'view-tab';
-clockTab.dataset.view = 'clock';
-clockTab.textContent = 'Clock';
-const arpTab = document.createElement('button');
-arpTab.className = 'view-tab';
-arpTab.dataset.view = 'arp';
-arpTab.textContent = 'Arp';
-const systemTab = document.createElement('button');
-systemTab.className = 'view-tab';
-systemTab.dataset.view = 'system';
-systemTab.textContent = 'System';
-viewTabs.append(mixerTab, spectrumTab, synthTab, fxTab, processingTab, loopTab, beatsTab, clockTab, arpTab, systemTab);
+
+function makeWorkspaceTab(label: string, ws: Workspace): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.className = 'view-tab workspace-tab';
+  b.dataset.workspace = ws;
+  b.textContent = label;
+  return b;
+}
+const mixWsTab   = makeWorkspaceTab('MIX',   'mix');
+const playWsTab  = makeWorkspaceTab('PLAY',  'play');
+const tuneWsTab  = makeWorkspaceTab('TUNE',  'tune');
+const fxWsTab    = makeWorkspaceTab('FX',    'fx');
+const setupWsTab = makeWorkspaceTab('SETUP', 'setup');
+viewTabs.append(mixWsTab, playWsTab, tuneWsTab, fxWsTab, setupWsTab);
+
+// Helper for inner sub-tab buttons (PLAY / FX / SETUP).
+function makeSubnavTab(label: string, key: string): HTMLButtonElement {
+  const b = document.createElement('button');
+  b.className = 'subnav-tab';
+  b.dataset.subtab = key;
+  b.textContent = label;
+  return b;
+}
 
 // --- Mixer view section (wraps existing mixer content) ------------
 
@@ -345,13 +337,17 @@ outputDock.append(
 );
 mixerRow.appendChild(outputDock);
 
-const rawSection = document.createElement('section');
-rawSection.className = 'raw-section';
+// Raw OSC widget — moves to SETUP > Raw OSC in Phase 1 of the UI
+// rebuild. The section is defined here next to the other in-mixer
+// widgets but appended into setupWorkspace later. Only the mixer-row
+// goes into MIX now.
+const rawOscSection = document.createElement('section');
+rawOscSection.className = 'raw-section view view-rawosc';
 const rawLabel = document.createElement('h4');
 rawLabel.textContent = 'Raw OSC';
-rawSection.append(rawLabel, rawOsc(dispatcher, log));
+rawOscSection.append(rawLabel, rawOsc(dispatcher, log));
 
-mixerView.append(mixerRow, rawSection);
+mixerView.append(mixerRow);
 
 // --- Spectrum view section ----------------------------------------
 
@@ -670,6 +666,147 @@ const selectSystemSubtab = (which: SystemSubtab): void => {
 tacSubtab.addEventListener('click', () => selectSystemSubtab('tac5212'));
 adcSubtab.addEventListener('click', () => selectSystemSubtab('adc6140'));
 
+// --- Serial console section --------------------------------------
+//
+// Phase 1 of the UI rebuild: the always-on serial console moves from
+// the permanent bottom slot into SETUP > Serial. The widget itself
+// is still console_ (created at module scope so log() keeps working
+// from anywhere); we just wrap it in a section element for the new
+// home in setupWorkspace.
+const serialSection = document.createElement('section');
+serialSection.className = 'view view-serial';
+serialSection.appendChild(console_.element);
+
+// --- TUNE workspace stub -----------------------------------------
+//
+// Phase 1 lands TUNE as a workspace placeholder. Per planning/ui-
+// rebuild/02-hierarchy.md, TUNE is the per-channel-detail surface
+// (HPF / parametric EQ / dynamics / pan / sends matrix) for whichever
+// channel is Sel'd. Most of those are blocked on firmware exposing
+// per-channel processing — see 05-roadmap.md "Firmware dependencies".
+// For now we render a "what this is" panel that displays the Sel'd
+// channel name and a list of features-pending, so the workspace is
+// reachable from the tab bar without dead-ending the user.
+const tuneSection = document.createElement('section');
+tuneSection.className = 'view view-tune';
+const tuneInner = document.createElement('div');
+tuneInner.className = 'tune-stub';
+
+const tuneHeader = document.createElement('div');
+tuneHeader.className = 'tune-stub-header';
+const tuneSelLabel = document.createElement('div');
+tuneSelLabel.className = 'tune-stub-sel';
+const tuneTitle = document.createElement('h2');
+tuneTitle.textContent = 'TUNE — selected channel detail';
+tuneHeader.append(tuneTitle, tuneSelLabel);
+
+const tuneNote = document.createElement('p');
+tuneNote.className = 'tune-stub-note';
+tuneNote.innerHTML =
+  'This workspace will host per-channel HPF, parametric EQ, dynamics, pan, '
+  + 'and a sends matrix for whichever channel is Sel’d. Most of those '
+  + 'controls are blocked on firmware exposing per-channel processing — '
+  + 'see <code>planning/ui-rebuild/05-roadmap.md</code> Phase 5.';
+
+const tuneList = document.createElement('ul');
+tuneList.className = 'tune-stub-list';
+[
+  ['HPF',         'pending firmware support'],
+  ['Parametric EQ', 'pending firmware support'],
+  ['Dynamics',    'pending firmware support'],
+  ['Pan',         'addressable today; widget pending'],
+  ['Sends matrix', 'partial — Main only until aux buses land'],
+].forEach(([name, status]) => {
+  const li = document.createElement('li');
+  const n = document.createElement('strong');
+  n.textContent = name + ': ';
+  const s = document.createElement('span');
+  s.textContent = status;
+  li.append(n, s);
+  tuneList.appendChild(li);
+});
+
+// Live binding to selectedChannel — readable hint that Sel state is
+// global, even before TUNE has real widgets.
+state.selectedChannel.subscribe((idx) => {
+  const ch = state.channels[idx];
+  const name = ch?.name.get() ?? `Ch ${idx + 1}`;
+  tuneSelLabel.textContent = `Selected: ${name} (idx ${idx})`;
+});
+// Also update if the channel name itself changes (firmware rename echo).
+for (let i = 0; i < state.channels.length; i++) {
+  state.channels[i].name.subscribe(() => {
+    if (state.selectedChannel.get() === i) {
+      tuneSelLabel.textContent = `Selected: ${state.channels[i].name.get()} (idx ${i})`;
+    }
+  });
+}
+
+tuneInner.append(tuneHeader, tuneNote, tuneList);
+tuneSection.appendChild(tuneInner);
+
+// --- Workspace wrappers (Phase 1) --------------------------------
+//
+// Each top-level workspace is a section that holds:
+//   1. its inner subnav (where applicable)
+//   2. all of its sub-sections (existing section objects, reparented)
+//
+// Visibility is driven by applyVisibility() below, which reads the
+// activeWorkspace and active*Tab signals and toggles display: none on
+// each section. Hidden workspaces leave their state intact (canvas
+// scrollback, sub-tab selections, etc.) — same as the previous
+// display-toggle pattern.
+
+// MIX workspace — single content (channel strips + main + bottom strip
+// from Phase 0 sits below the workspace). No inner subnav.
+const mixWorkspace = document.createElement('section');
+mixWorkspace.className = 'workspace workspace-mix';
+mixWorkspace.appendChild(mixerView);
+
+// PLAY workspace — Synths / Arp / Beats / Loop. Order is musician-
+// flow + signal-flow per planning/ui-rebuild/02-hierarchy.md.
+const playSubnav = document.createElement('nav');
+playSubnav.className = 'subnav';
+const playSynthsTab = makeSubnavTab('Synths', 'synths');
+const playArpTab    = makeSubnavTab('Arp',    'arp');
+const playBeatsTab  = makeSubnavTab('Beats',  'beats');
+const playLoopTab   = makeSubnavTab('Loop',   'loop');
+playSubnav.append(playSynthsTab, playArpTab, playBeatsTab, playLoopTab);
+
+const playWorkspace = document.createElement('section');
+playWorkspace.className = 'workspace workspace-play';
+playWorkspace.append(playSubnav, synthSection, arpSection, beatsSection, loopSection);
+
+// FX workspace — Bus FX / Main Processing / Spectrum. All post-bus.
+const fxSubnav = document.createElement('nav');
+fxSubnav.className = 'subnav';
+const fxBusFxTab      = makeSubnavTab('Bus FX',          'busfx');
+const fxProcessingTab = makeSubnavTab('Main Processing', 'processing');
+const fxSpectrumTab   = makeSubnavTab('Spectrum',        'spectrum');
+fxSubnav.append(fxBusFxTab, fxProcessingTab, fxSpectrumTab);
+
+const fxWorkspace = document.createElement('section');
+fxWorkspace.className = 'workspace workspace-fx';
+fxWorkspace.append(fxSubnav, fxSection, processingSection, spectrumSection);
+
+// SETUP workspace — Codec / Clock / Raw OSC / Serial. Rarely-touched.
+const setupSubnav = document.createElement('nav');
+setupSubnav.className = 'subnav';
+const setupCodecTab  = makeSubnavTab('Codec',   'codec');
+const setupClockTab  = makeSubnavTab('Clock',   'clock');
+const setupRawOscTab = makeSubnavTab('Raw OSC', 'rawosc');
+const setupSerialTab = makeSubnavTab('Serial',  'serial');
+setupSubnav.append(setupCodecTab, setupClockTab, setupRawOscTab, setupSerialTab);
+
+const setupWorkspace = document.createElement('section');
+setupWorkspace.className = 'workspace workspace-setup';
+setupWorkspace.append(setupSubnav, systemSection, clockSection, rawOscSection, serialSection);
+
+// TUNE workspace — single content for now.
+const tuneWorkspace = document.createElement('section');
+tuneWorkspace.className = 'workspace workspace-tune';
+tuneWorkspace.appendChild(tuneSection);
+
 // --- Persistent bottom dock --------------------------------------
 //
 // Phase 0 of the UI rebuild epic. Two variants share the bottom of
@@ -705,9 +842,12 @@ const applyMode = (m: 'engineer' | 'musician'): void => {
     if (keyboard.element.parentElement !== synthKeyboardDock) {
       synthKeyboardDock.appendChild(keyboard.element);
     }
-    // Hand control back to selectView's tab-driven lifecycle. If we
-    // are not on the Synth tab and the keyboard is running, stop it.
-    if (!synthTab.classList.contains('active') && keyboard.isRunning()) {
+    // Hand control back to applyVisibility's tab-driven lifecycle. If
+    // we are not on PLAY > Synths and the keyboard is running, stop it.
+    const onSynthsTab =
+      state.activeWorkspace.get() === 'play' &&
+      state.activePlayTab.get() === 'synths';
+    if (!onSynthsTab && keyboard.isRunning()) {
       keyboard.stop();
       if (state.connected.get()) dispatcher.unsubscribeMidi();
     }
@@ -723,83 +863,196 @@ state.connected.subscribe((c) => {
   if (c && state.mode.get() === 'musician') dispatcher.subscribeMidi();
 });
 
-// --- Tab switching -------------------------------------------------
+// --- Workspace + sub-tab visibility -------------------------------
+//
+// Single derive function that reads the four active-* signals and
+// toggles display: none on every workspace and sub-section. Lifecycle
+// hooks (spectrum.start/stop, keyboard, mpe.setActive) fire here too,
+// gated on whether their owning workspace+subtab is now active.
+//
+// Hidden sections retain their internal state (canvas scrollback,
+// form inputs, sub-sub-tab selections) — same display-toggle pattern
+// as the pre-rebuild code.
 
-type ViewName = 'mixer' | 'spectrum' | 'synth' | 'fx' | 'processing' | 'loop' | 'beats' | 'clock' | 'arp' | 'system';
+function applyVisibility(): void {
+  const ws       = state.activeWorkspace.get();
+  const playTab  = state.activePlayTab.get();
+  const fxTab    = state.activeFxTab.get();
+  const setupTab = state.activeSetupTab.get();
 
-function selectView(name: ViewName): void {
-  mixerTab.classList.toggle('active',      name === 'mixer');
-  spectrumTab.classList.toggle('active',   name === 'spectrum');
-  synthTab.classList.toggle('active',      name === 'synth');
-  fxTab.classList.toggle('active',         name === 'fx');
-  processingTab.classList.toggle('active', name === 'processing');
-  loopTab.classList.toggle('active',       name === 'loop');
-  beatsTab.classList.toggle('active',      name === 'beats');
-  clockTab.classList.toggle('active',      name === 'clock');
-  arpTab.classList.toggle('active',        name === 'arp');
-  systemTab.classList.toggle('active',     name === 'system');
-  mixerView.style.display         = name === 'mixer'      ? '' : 'none';
-  spectrumSection.style.display   = name === 'spectrum'   ? '' : 'none';
-  synthSection.style.display      = name === 'synth'      ? '' : 'none';
-  fxSection.style.display         = name === 'fx'         ? '' : 'none';
-  processingSection.style.display = name === 'processing' ? '' : 'none';
-  loopSection.style.display       = name === 'loop'       ? '' : 'none';
-  beatsSection.style.display      = name === 'beats'      ? '' : 'none';
-  clockSection.style.display      = name === 'clock'      ? '' : 'none';
-  arpSection.style.display        = name === 'arp'        ? '' : 'none';
-  systemSection.style.display     = name === 'system'     ? '' : 'none';
+  // Top-tab active class
+  mixWsTab  .classList.toggle('active', ws === 'mix');
+  playWsTab .classList.toggle('active', ws === 'play');
+  tuneWsTab .classList.toggle('active', ws === 'tune');
+  fxWsTab   .classList.toggle('active', ws === 'fx');
+  setupWsTab.classList.toggle('active', ws === 'setup');
 
-  // Toggle the body-level class that makes #app break out of its
-  // 1200px max-width and go full viewport in spectrum mode. Only the
-  // spectrum tab uses this full-bleed layout; the synth view happily
-  // fits inside the normal column.
-  document.body.classList.toggle('spectrum-active', name === 'spectrum');
+  // Workspace container visibility
+  mixWorkspace  .style.display = ws === 'mix'   ? '' : 'none';
+  playWorkspace .style.display = ws === 'play'  ? '' : 'none';
+  tuneWorkspace .style.display = ws === 'tune'  ? '' : 'none';
+  fxWorkspace   .style.display = ws === 'fx'    ? '' : 'none';
+  setupWorkspace.style.display = ws === 'setup' ? '' : 'none';
 
-  // Leaving spectrum: stop the render loop + unsubscribe so the
-  // firmware stops computing FFTs nobody will see.
-  if (name !== 'spectrum' && spectrum.isRunning()) {
+  // PLAY inner subtab active class + section visibility
+  playSynthsTab.classList.toggle('active', playTab === 'synths');
+  playArpTab   .classList.toggle('active', playTab === 'arp');
+  playBeatsTab .classList.toggle('active', playTab === 'beats');
+  playLoopTab  .classList.toggle('active', playTab === 'loop');
+  synthSection.style.display = playTab === 'synths' ? '' : 'none';
+  arpSection  .style.display = playTab === 'arp'    ? '' : 'none';
+  beatsSection.style.display = playTab === 'beats'  ? '' : 'none';
+  loopSection .style.display = playTab === 'loop'   ? '' : 'none';
+
+  // FX inner subtab active class + section visibility
+  fxBusFxTab     .classList.toggle('active', fxTab === 'busfx');
+  fxProcessingTab.classList.toggle('active', fxTab === 'processing');
+  fxSpectrumTab  .classList.toggle('active', fxTab === 'spectrum');
+  fxSection        .style.display = fxTab === 'busfx'      ? '' : 'none';
+  processingSection.style.display = fxTab === 'processing' ? '' : 'none';
+  spectrumSection  .style.display = fxTab === 'spectrum'   ? '' : 'none';
+
+  // SETUP inner subtab active class + section visibility
+  setupCodecTab .classList.toggle('active', setupTab === 'codec');
+  setupClockTab .classList.toggle('active', setupTab === 'clock');
+  setupRawOscTab.classList.toggle('active', setupTab === 'rawosc');
+  setupSerialTab.classList.toggle('active', setupTab === 'serial');
+  systemSection .style.display = setupTab === 'codec'  ? '' : 'none';
+  clockSection  .style.display = setupTab === 'clock'  ? '' : 'none';
+  rawOscSection .style.display = setupTab === 'rawosc' ? '' : 'none';
+  serialSection .style.display = setupTab === 'serial' ? '' : 'none';
+
+  // Spectrum-active body class — only when FX > Spectrum is the
+  // current visible pane. Previously gated on ws === 'spectrum'; now
+  // gated on workspace+subtab combo so the spectrum-fullscreen mode
+  // only triggers when the user is actually looking at the analyzer.
+  const spectrumActive = ws === 'fx' && fxTab === 'spectrum';
+  document.body.classList.toggle('spectrum-active', spectrumActive);
+
+  // Spectrum lifecycle: subscribe + start when FX > Spectrum is
+  // visible; otherwise stop and unsubscribe so the firmware doesn't
+  // compute FFTs nobody is looking at.
+  if (!spectrumActive && spectrum.isRunning()) {
     spectrum.stop();
     dispatcher.unsubscribeSpectrum();
-  }
-  // Leaving synth: clear keyboard state, unsubscribe so the firmware
-  // stops forwarding MIDI events over USB CDC. Also turn off MPE
-  // voice telemetry if the MPE sub-tab was active.
-  //
-  // Musician-mode override: the keyboard is parked in the persistent
-  // bottom dock and must keep running regardless of which tab the
-  // user is on. We still drop MPE telemetry on tab leave (it's tab-
-  // bound, not mode-bound) but leave the keyboard running and the
-  // global MIDI subscription alive.
-  if (name !== 'synth' && keyboard.isRunning() && state.mode.get() === 'engineer') {
-    keyboard.stop();
-    dispatcher.unsubscribeMidi();
-    mpe.setActive(false);
-  } else if (name !== 'synth') {
-    mpe.setActive(false);
-  }
-
-  if (name === 'spectrum' && !spectrum.isRunning()) {
+  } else if (spectrumActive && !spectrum.isRunning()) {
     dispatcher.subscribeSpectrum();
     spectrum.start();
   }
-  if (name === 'synth' && !keyboard.isRunning()) {
+
+  // Keyboard / MPE lifecycle:
+  //   - Engineer mode: keyboard runs only when PLAY > Synths is open.
+  //   - Musician mode: keyboard always runs (handled by applyMode);
+  //     don't stop it here even when the user navigates elsewhere.
+  // MPE voice telemetry is tab-bound regardless of mode — it costs
+  // bandwidth and only matters when the MPE sub-tab is visible.
+  const synthsActive = ws === 'play' && playTab === 'synths';
+  const mpeSubActive = synthsActive && mpeSubtab.classList.contains('active');
+  const isMusician = state.mode.get() === 'musician';
+
+  if (synthsActive && !keyboard.isRunning()) {
     dispatcher.subscribeMidi();
     keyboard.start();
-    // If the MPE sub-tab was the last active one, re-subscribe its
-    // telemetry stream. Default sub-tab is Dexed so first visit is a
-    // no-op.
-    if (mpeSubtab.classList.contains('active')) mpe.setActive(true);
+  } else if (!synthsActive && keyboard.isRunning() && !isMusician) {
+    keyboard.stop();
+    dispatcher.unsubscribeMidi();
   }
-}
-mixerTab.addEventListener('click',      () => selectView('mixer'));
-spectrumTab.addEventListener('click',   () => selectView('spectrum'));
-synthTab.addEventListener('click',      () => selectView('synth'));
-fxTab.addEventListener('click',         () => selectView('fx'));
-processingTab.addEventListener('click', () => selectView('processing'));
-loopTab.addEventListener('click',       () => selectView('loop'));
-beatsTab.addEventListener('click',      () => selectView('beats'));
-clockTab.addEventListener('click',      () => selectView('clock'));
-arpTab.addEventListener('click',        () => selectView('arp'));
-systemTab.addEventListener('click',     () => selectView('system'));
 
-app.append(header, viewTabs, mixerView, spectrumSection, synthSection, fxSection, processingSection, loopSection, beatsSection, clockSection, arpSection, systemSection, bottomEngineerDock, bottomMusicianDock, console_.element);
+  // MPE active hook independent of keyboard running — telemetry
+  // subscribes/unsubscribes here.
+  mpe.setActive(mpeSubActive);
+}
+
+// Wire the four active-* signals to the derive function. Each signal
+// fires immediately on subscribe with its current value, so the very
+// first applyVisibility call below sets up all visibility correctly
+// on boot.
+state.activeWorkspace.subscribe(applyVisibility);
+state.activePlayTab  .subscribe(applyVisibility);
+state.activeFxTab    .subscribe(applyVisibility);
+state.activeSetupTab .subscribe(applyVisibility);
+
+// Workspace tab clicks
+mixWsTab  .addEventListener('click', () => state.activeWorkspace.set('mix'));
+playWsTab .addEventListener('click', () => state.activeWorkspace.set('play'));
+tuneWsTab .addEventListener('click', () => state.activeWorkspace.set('tune'));
+fxWsTab   .addEventListener('click', () => state.activeWorkspace.set('fx'));
+setupWsTab.addEventListener('click', () => state.activeWorkspace.set('setup'));
+
+// Inner subtab clicks — also set the workspace in case the user
+// somehow clicks an inner subnav button while it's hidden (shouldn't
+// happen, but defensive).
+playSynthsTab.addEventListener('click', () => { state.activePlayTab.set('synths'); state.activeWorkspace.set('play'); });
+playArpTab   .addEventListener('click', () => { state.activePlayTab.set('arp');    state.activeWorkspace.set('play'); });
+playBeatsTab .addEventListener('click', () => { state.activePlayTab.set('beats');  state.activeWorkspace.set('play'); });
+playLoopTab  .addEventListener('click', () => { state.activePlayTab.set('loop');   state.activeWorkspace.set('play'); });
+
+fxBusFxTab     .addEventListener('click', () => { state.activeFxTab.set('busfx');      state.activeWorkspace.set('fx'); });
+fxProcessingTab.addEventListener('click', () => { state.activeFxTab.set('processing'); state.activeWorkspace.set('fx'); });
+fxSpectrumTab  .addEventListener('click', () => { state.activeFxTab.set('spectrum');   state.activeWorkspace.set('fx'); });
+
+setupCodecTab .addEventListener('click', () => { state.activeSetupTab.set('codec');  state.activeWorkspace.set('setup'); });
+setupClockTab .addEventListener('click', () => { state.activeSetupTab.set('clock');  state.activeWorkspace.set('setup'); });
+setupRawOscTab.addEventListener('click', () => { state.activeSetupTab.set('rawosc'); state.activeWorkspace.set('setup'); });
+setupSerialTab.addEventListener('click', () => { state.activeSetupTab.set('serial'); state.activeWorkspace.set('setup'); });
+
+// --- Workspace + tab persistence ---------------------------------
+//
+// Persist the four active-* signals to localStorage so reloads land
+// back where the user left off. Mode-driven default landing only
+// applies when no saved value exists (see below).
+
+const WS_LS_KEY        = 't-dsp.ui.workspace';
+const PLAY_TAB_LS_KEY  = 't-dsp.ui.playTab';
+const FX_TAB_LS_KEY    = 't-dsp.ui.fxTab';
+const SETUP_TAB_LS_KEY = 't-dsp.ui.setupTab';
+
+const isWs = (s: unknown): s is Workspace =>
+  s === 'mix' || s === 'play' || s === 'tune' || s === 'fx' || s === 'setup';
+
+// Restore from localStorage. If nothing saved, derive from mode:
+//   engineer → MIX, musician → PLAY.
+const savedWs = localStorage.getItem(WS_LS_KEY);
+if (isWs(savedWs)) {
+  state.activeWorkspace.set(savedWs);
+} else {
+  state.activeWorkspace.set(state.mode.get() === 'musician' ? 'play' : 'mix');
+}
+
+const savedPlayTab = localStorage.getItem(PLAY_TAB_LS_KEY);
+if (savedPlayTab === 'synths' || savedPlayTab === 'arp' || savedPlayTab === 'beats' || savedPlayTab === 'loop') {
+  state.activePlayTab.set(savedPlayTab);
+}
+const savedFxTab = localStorage.getItem(FX_TAB_LS_KEY);
+if (savedFxTab === 'busfx' || savedFxTab === 'processing' || savedFxTab === 'spectrum') {
+  state.activeFxTab.set(savedFxTab);
+}
+const savedSetupTab = localStorage.getItem(SETUP_TAB_LS_KEY);
+if (savedSetupTab === 'codec' || savedSetupTab === 'clock' || savedSetupTab === 'rawosc' || savedSetupTab === 'serial') {
+  state.activeSetupTab.set(savedSetupTab);
+}
+
+// Write-back on change. Wrapped in try/catch in case localStorage is
+// unavailable (private mode etc).
+state.activeWorkspace.subscribe((w) => { try { localStorage.setItem(WS_LS_KEY,        w); } catch { /* ignore */ } });
+state.activePlayTab  .subscribe((t) => { try { localStorage.setItem(PLAY_TAB_LS_KEY,  t); } catch { /* ignore */ } });
+state.activeFxTab    .subscribe((t) => { try { localStorage.setItem(FX_TAB_LS_KEY,    t); } catch { /* ignore */ } });
+state.activeSetupTab .subscribe((t) => { try { localStorage.setItem(SETUP_TAB_LS_KEY, t); } catch { /* ignore */ } });
+
+// --- Final layout ------------------------------------------------
+//
+// Workspace wrappers are appended in the same order as their tabs in
+// viewTabs. Bottom dock comes last so it's always at the visible
+// bottom. The serial console is now inside setupWorkspace via
+// serialSection — no permanent bottom slot.
+app.append(
+  header,
+  viewTabs,
+  mixWorkspace,
+  playWorkspace,
+  tuneWorkspace,
+  fxWorkspace,
+  setupWorkspace,
+  bottomEngineerDock,
+  bottomMusicianDock,
+);

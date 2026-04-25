@@ -83,8 +83,8 @@ If you only remember four things from this epic:
 - [x] State bridge approach designed (Signal<T> → Solid signal adapter)
 - [x] Migration phases sequenced
 - [x] Component inventory drafted
-- [ ] **Spike 0 — Sel state + persistent bottom strip in current vanilla code** ← next
-- [ ] Spike 1 — workspace regroup (pure nav reorg, no rewrites)
+- [x] Spike 0 — Sel state + persistent bottom strip in current vanilla code (commit fdbe00e)
+- [ ] **Spike 1 — workspace regroup (pure nav reorg, no rewrites)** ← next
 - [ ] Spike 2 — Solid + Tailwind alongside vanilla, port one panel
 - [ ] Spike 3 — TUNE workspace
 - [ ] Spike 4 — sends-on-faders mode
