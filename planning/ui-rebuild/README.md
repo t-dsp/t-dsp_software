@@ -84,12 +84,14 @@ If you only remember four things from this epic:
 - [x] Migration phases sequenced
 - [x] Component inventory drafted
 - [x] Spike 0 — Sel state + persistent bottom strip in current vanilla code (commit fdbe00e)
-- [ ] **Spike 1 — workspace regroup (pure nav reorg, no rewrites)** ← next
-- [ ] Spike 2 — Solid + Tailwind alongside vanilla, port one panel
-- [ ] Spike 3 — TUNE workspace
-- [ ] Spike 4 — sends-on-faders mode
-- [ ] Spike 5 — gesture vocabulary
-- [ ] Phase-by-phase panel migration
+- [x] Spike 1 — workspace regroup (pure nav reorg, no rewrites) (commits ef77aef + d564d50)
+- [x] Spike 2 setup — Solid + Tailwind v4 toolchain landed (commit d235a63)
+- [x] Spike 2 first port — TUNE stub in Solid + Tailwind (commit e586946)
+- [ ] **Spike 2 follow-up — port codec panel to Solid + Tailwind** ← next
+- [ ] Spike 3 — TUNE workspace (real per-channel detail; blocked on firmware EQ/Dyn)
+- [ ] Spike 4 — sends-on-faders mode (UI affordance; partial without aux buses)
+- [ ] Spike 5 — gesture vocabulary (long-press, swipe, two-finger fine mode)
+- [ ] Phase-by-phase panel migration (synth panels, beats, looper, clock, etc.)
 - [ ] Cutover: delete legacy panels
 
 ## Relationship to other epics
