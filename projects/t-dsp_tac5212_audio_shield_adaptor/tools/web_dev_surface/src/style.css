@@ -2401,8 +2401,19 @@ select, input[type="text"] {
  * normal tab restores it. */
 body.spectrum-active .bottom-dock { display: none !important; }
 
-/* Engineer variant: mini-fader bank + main */
+/* Engineer variant frame. The actual bank-and-main flex layout lives
+ * on .bottom-strip (the inner section returned by bottomStrip()) —
+ * setting flex on the outer .bottom-dock-engineer alone would only
+ * lay out its single child (the .bottom-strip wrapper), which is
+ * the wrong scope. */
 .bottom-dock-engineer {
+  /* nothing layout-specific here; .bottom-dock owns the dark frame */
+}
+
+/* The .bottom-strip section wraps the bank and the main. Flex row so
+ * bank takes flex-grow space on the left and main is pinned on the
+ * right at its natural width. */
+.bottom-strip {
   display: flex;
   gap: 8px;
   align-items: stretch;
