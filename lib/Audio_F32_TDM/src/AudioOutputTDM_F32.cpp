@@ -30,6 +30,7 @@ bool                AudioOutputTDM_F32::update_responsibility = false;
 DMAChannel          AudioOutputTDM_F32::dma(false);
 float               AudioOutputTDM_F32::sample_rate_Hz   = AUDIO_SAMPLE_RATE_EXACT;
 int                 AudioOutputTDM_F32::audio_block_samples = AUDIO_BLOCK_SAMPLES;
+volatile uint32_t   AudioOutputTDM_F32::isr_count = 0;
 
 // Ping-pong DMA buffer: 2 audio blocks worth, 8 slots per frame.
 // Lives in DMAMEM (OCRAM2 on Teensy 4.x), which is non-cacheable, so no
@@ -81,6 +82,8 @@ void AudioOutputTDM_F32::begin(void)
 // ----------------------------------------------------------------------------
 void AudioOutputTDM_F32::isr(void)
 {
+    isr_count++;   // M4e: half-buffer-IRQ heartbeat for diagnostics
+
     uint32_t *dest;
     uint32_t saddr = (uint32_t)(dma.TCD->SADDR);
     dma.clearInterrupt();

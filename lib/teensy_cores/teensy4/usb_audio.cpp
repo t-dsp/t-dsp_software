@@ -39,6 +39,13 @@
 // Default (flag unset, or 2) leaves the int16 path bit-identical.
 #include "usb_audio_f32_buffers.h"
 
+#if defined(AUDIO_SUBSLOT_SIZE) && AUDIO_SUBSLOT_SIZE == 3
+// M4e diagnostic counters. Incremented once per callback entry in the
+// F32 path. ISR-only writers; main thread is the reader.
+volatile uint32_t usb_audio_f32_rx_packets = 0;
+volatile uint32_t usb_audio_f32_tx_packets = 0;
+#endif
+
 #ifdef AUDIO_INTERFACE
 
 bool AudioInputUSB::update_responsibility;
@@ -177,6 +184,7 @@ void usb_audio_receive_callback(unsigned int len)
 	// F32-native path: write Q31 directly into the F32 RX ring and skip
 	// the int16 deinterleave entirely. AudioInputUSB (int16) is dormant
 	// in this configuration -- AudioInputUSB_F32 (M4b) consumes the ring.
+	usb_audio_f32_rx_packets++;
 	usb_audio_f32_rx_isr_write(rx_buffer, len);
 	return;
 #else
@@ -419,6 +427,7 @@ unsigned int usb_audio_transmit_callback(void)
 	// AUDIO_TX_SIZE == 294 has room for one jitter sample (M5 rate-
 	// matching can use it). AudioOutputUSB (int16) is dormant in
 	// this configuration.
+	usb_audio_f32_tx_packets++;
 	constexpr unsigned int target_stereo = 48;
 	return usb_audio_f32_tx_isr_read(
 		(uint8_t *)usb_audio_transmit_buffer, target_stereo);

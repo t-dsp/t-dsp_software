@@ -51,6 +51,11 @@ bool usb_audio_f32_tx_push(const float *left_in, const float *right_in,
 extern volatile uint32_t usb_audio_f32_rx_overruns;
 extern volatile uint32_t usb_audio_f32_tx_underruns;
 
+/* M4e: per-callback packet counters (incremented in usb_audio.cpp,
+ * not here). volatile uint32_t, ISR-only writers. */
+extern volatile uint32_t usb_audio_f32_rx_packets;
+extern volatile uint32_t usb_audio_f32_tx_packets;
+
 #ifdef __cplusplus
 } // extern "C"
 #endif

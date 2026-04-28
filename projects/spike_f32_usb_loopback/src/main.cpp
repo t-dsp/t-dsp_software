@@ -121,6 +121,9 @@ static void setupCodec() {
     writeReg(REG_DAC_R2_VOL, DAC_VOL_0DB);
 }
 
+// M4e: codec ack stash. Set once in setup(), printed by the diag loop.
+static uint8_t g_codec_ack = 0;
+
 void setup() {
     // SHDNZ one-shot. Powers the codec LDO and brings it out of HW reset.
     // Per project_shdnz_pin memory, this is the ONLY allowed toggle of
@@ -133,6 +136,19 @@ void setup() {
 
     pinMode(LED_BUILTIN, OUTPUT);
     Serial.begin(115200);
+
+    // Wait up to 2 s for the host to attach to the USB Serial endpoint
+    // before printing the boot banner; otherwise the banner is lost.
+    const uint32_t serial_wait_start = millis();
+    while (!Serial && (millis() - serial_wait_start) < 2000) {
+        delay(10);
+    }
+
+    Serial.println("=== F32 spike boot ===");
+    Serial.printf("AUDIO_SAMPLE_RATE_EXACT=%f\n", AUDIO_SAMPLE_RATE_EXACT);
+    Serial.printf("AUDIO_BLOCK_SAMPLES=%d\n", AUDIO_BLOCK_SAMPLES);
+    Serial.printf("AUDIO_SUBSLOT_SIZE=%d\n", AUDIO_SUBSLOT_SIZE);
+
     AudioMemory_F32(32);
 
     // Production doesn't call Wire.setClock(); leave the bus at the Arduino
@@ -142,8 +158,10 @@ void setup() {
 
     Wire.beginTransmission(TAC5212_I2C_ADDR);
     if (Wire.endTransmission() != 0) {
+        g_codec_ack = 0;
         Serial.println("TAC5212 not found on I2C!");
     } else {
+        g_codec_ack = 1;
         setupCodec();
         Serial.println("TAC5212 init done.");
     }
@@ -153,11 +171,28 @@ void setup() {
 }
 
 void loop() {
-    // 1 Hz heartbeat so absence-of-blink = firmware not running.
-    static uint32_t last_toggle = 0;
     const uint32_t now = millis();
-    if (now - last_toggle >= 500) {
-        last_toggle = now;
+
+    // 1 Hz LED heartbeat so absence-of-blink = firmware not running.
+    static uint32_t last_blink = 0;
+    if (now - last_blink >= 500) {
+        last_blink = now;
         digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+    }
+
+    // 1 Hz diagnostic status print. Counters are volatile uint32_t,
+    // single-word reads are atomic on Cortex-M7.
+    static uint32_t last_status = 0;
+    if (now - last_status >= 1000) {
+        last_status = now;
+        const auto s = AudioInputUSB_F32::getStatus();
+        Serial.printf("[t=%lu] usb_rx=%lu usb_tx=%lu rx_over=%lu tx_under=%lu tdm_isr=%lu codec_ack=%u\n",
+            (unsigned long)now,
+            (unsigned long)usb_audio_f32_rx_packets,
+            (unsigned long)usb_audio_f32_tx_packets,
+            (unsigned long)s.rx_overruns,
+            (unsigned long)s.tx_underruns,
+            (unsigned long)AudioOutputTDM_F32::getIsrCount(),
+            (unsigned)g_codec_ack);
     }
 }

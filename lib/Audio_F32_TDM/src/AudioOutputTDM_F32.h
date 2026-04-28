@@ -42,6 +42,11 @@ public:
     virtual void update(void);
     void begin(void);
 
+    // M4e: ISR-entry counter. Incremented once per half-buffer interrupt
+    // (~375 Hz at 48 kHz / 128-sample blocks). Reader is single-threaded
+    // main loop; single-word load is atomic on Cortex-M7.
+    static uint32_t getIsrCount(void) { return isr_count; }
+
 protected:
     static void config_tdm(void);
     static void isr(void);
@@ -53,6 +58,7 @@ private:
     audio_block_f32_t        *inputQueueArray[8];
     static float              sample_rate_Hz;
     static int                audio_block_samples;
+    static volatile uint32_t  isr_count;
 };
 
 #endif
