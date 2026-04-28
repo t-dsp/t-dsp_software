@@ -65,6 +65,21 @@ static void writeReg(uint8_t reg, uint8_t val) {
     Wire.endTransmission();
 }
 
+// M4g: read a single register for diagnostic purposes (matches the production
+// readReg helper in t-dsp_tac5212_audio_shield_adaptor/src/main.cpp).
+static uint8_t readReg(uint8_t reg) {
+    Wire.beginTransmission(TAC5212_I2C_ADDR);
+    Wire.write(reg);
+    Wire.endTransmission(false);
+    Wire.requestFrom(TAC5212_I2C_ADDR, (uint8_t)1);
+    return Wire.available() ? Wire.read() : 0xFF;
+}
+
+// M4g: codec status snapshot taken once at end of setupCodec() and printed
+// by the diag loop. DEV_STS0 = channel power status; DEV_STS1 = PLL/mode.
+static uint8_t g_codec_sts0 = 0xFF;
+static uint8_t g_codec_sts1 = 0xFF;
+
 // DAC-only subset of production's setupCodecHandRolled(). Skips:
 //   codecConfigurePdmMic       — no PDM mic on the spike
 //   codecConfigureAdcInputs    — no analog input capture
@@ -119,6 +134,11 @@ static void setupCodec() {
     writeReg(REG_DAC_R1_VOL, DAC_VOL_0DB);
     writeReg(REG_DAC_L2_VOL, DAC_VOL_0DB);
     writeReg(REG_DAC_R2_VOL, DAC_VOL_0DB);
+
+    // M4g: snapshot codec channel-power and PLL-lock status after init.
+    delay(10);  // give the chip a moment to update its status registers
+    g_codec_sts0 = readReg(REG_DEV_STS0);
+    g_codec_sts1 = readReg(REG_DEV_STS1);
 }
 
 // M4e: codec ack stash. Set once in setup(), printed by the diag loop.
@@ -194,5 +214,12 @@ void loop() {
             (unsigned long)s.tx_underruns,
             (unsigned long)AudioOutputTDM_F32::getIsrCount(),
             (unsigned)g_codec_ack);
+        Serial.printf("        ui_upd=%lu ui_pop=%lu tdm_upd=%lu tdm_data_chs=%lu sts0=0x%02X sts1=0x%02X\n",
+            (unsigned long)AudioInputUSB_F32::updates,
+            (unsigned long)AudioInputUSB_F32::pop_ok,
+            (unsigned long)AudioOutputTDM_F32::getUpdateCalls(),
+            (unsigned long)AudioOutputTDM_F32::getIsrDataChs(),
+            (unsigned)g_codec_sts0,
+            (unsigned)g_codec_sts1);
     }
 }

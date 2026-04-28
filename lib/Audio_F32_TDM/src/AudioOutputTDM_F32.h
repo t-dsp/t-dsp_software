@@ -45,7 +45,15 @@ public:
     // M4e: ISR-entry counter. Incremented once per half-buffer interrupt
     // (~375 Hz at 48 kHz / 128-sample blocks). Reader is single-threaded
     // main loop; single-word load is atomic on Cortex-M7.
-    static uint32_t getIsrCount(void) { return isr_count; }
+    static uint32_t getIsrCount(void)        { return isr_count; }
+    // M4g: counters at the upstream-facing end of the TDM driver.
+    // update_calls -- how many times update() ran (= audio frames
+    //   pulled from upstream graph). Should match the audio block rate.
+    // isr_data_chs  -- per-ISR sum of channels with a non-null block_input.
+    //   Compare against (channels-in-use * isr_count) to see whether
+    //   blocks are reaching the TDM stage.
+    static uint32_t getUpdateCalls(void)     { return update_calls; }
+    static uint32_t getIsrDataChs(void)      { return isr_data_chs; }
 
 protected:
     static void config_tdm(void);
@@ -59,6 +67,8 @@ private:
     static float              sample_rate_Hz;
     static int                audio_block_samples;
     static volatile uint32_t  isr_count;
+    static volatile uint32_t  update_calls;
+    static volatile uint32_t  isr_data_chs;
 };
 
 #endif

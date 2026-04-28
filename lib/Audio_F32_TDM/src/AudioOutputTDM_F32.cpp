@@ -31,6 +31,8 @@ DMAChannel          AudioOutputTDM_F32::dma(false);
 float               AudioOutputTDM_F32::sample_rate_Hz   = AUDIO_SAMPLE_RATE_EXACT;
 int                 AudioOutputTDM_F32::audio_block_samples = AUDIO_BLOCK_SAMPLES;
 volatile uint32_t   AudioOutputTDM_F32::isr_count = 0;
+volatile uint32_t   AudioOutputTDM_F32::update_calls = 0;
+volatile uint32_t   AudioOutputTDM_F32::isr_data_chs = 0;
 
 // Ping-pong DMA buffer: 2 audio blocks worth, 8 slots per frame.
 // Lives in DMAMEM (OCRAM2 on Teensy 4.x), which is non-cacheable, so no
@@ -105,6 +107,7 @@ void AudioOutputTDM_F32::isr(void)
     for (int ch = 0; ch < 8; ch++) {
         uint32_t *p = dest + ch;   // start of this channel's column
         if (block_input[ch] != nullptr) {
+            isr_data_chs++;   // M4g
             arm_float_to_q31(block_input[ch]->data, q31_tmp, AUDIO_BLOCK_SAMPLES);
             for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
                 p[i * 8] = (uint32_t)q31_tmp[i];
@@ -123,6 +126,7 @@ void AudioOutputTDM_F32::isr(void)
 // ----------------------------------------------------------------------------
 void AudioOutputTDM_F32::update(void)
 {
+    update_calls++;   // M4g
     audio_block_f32_t *prev[8];
 
     __disable_irq();

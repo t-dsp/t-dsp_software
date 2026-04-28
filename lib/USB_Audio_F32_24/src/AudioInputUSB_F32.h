@@ -43,4 +43,9 @@ public:
         return { 0, 0 };
 #endif
     }
+
+    // M4g graph-side counters: did update() run, and did rx_pop hand back
+    // real data (vs silence on underrun)?
+    static volatile uint32_t updates;
+    static volatile uint32_t pop_ok;
 };
