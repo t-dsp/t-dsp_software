@@ -131,6 +131,7 @@ void setup() {
     digitalWrite(TAC5212_EN_PIN, HIGH);
     delay(10);                           // settle internal supplies before I2C
 
+    pinMode(LED_BUILTIN, OUTPUT);
     Serial.begin(115200);
     AudioMemory_F32(32);
 
@@ -152,7 +153,11 @@ void setup() {
 }
 
 void loop() {
-    // M4c: nothing to do in loop. M5 may add a slow status print of the
-    // rx_overruns / tx_underruns counters once we're verifying audio
-    // continuity over time.
+    // 1 Hz heartbeat so absence-of-blink = firmware not running.
+    static uint32_t last_toggle = 0;
+    const uint32_t now = millis();
+    if (now - last_toggle >= 500) {
+        last_toggle = now;
+        digitalWrite(LED_BUILTIN, !digitalRead(LED_BUILTIN));
+    }
 }
