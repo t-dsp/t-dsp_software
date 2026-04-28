@@ -162,6 +162,17 @@ void AudioOutputTDM_F32::config_tdm(void)
 
     CCM_CSCMR1 = (CCM_CSCMR1 & ~(CCM_CSCMR1_SAI1_CLK_SEL_MASK))
                |  CCM_CSCMR1_SAI1_CLK_SEL(2);
+
+    // CRITICAL: TDM mode needs 2x the SAI clock that plain I2S would use,
+    // because each frame contains 8x32 = 256 BCLKs vs I2S's 2x32 = 64.
+    // PJRC's stock output_tdm.cpp halves n1 here, AFTER computing the PLL
+    // multiplier and BEFORE writing it to the SAI clock divider. Without
+    // this line the SAI clocks at fs/2, the codec sees 24 kHz FSYNC when
+    // the descriptor says 48 kHz, the DAC PLL fails to lock, and the
+    // analog output is noise. The prior `claude-32-bit-tdm` reference
+    // dropped this line silently and called the result a "verbatim port".
+    n1 = n1 / 2;  // Double Speed for TDM (verbatim from stock PJRC)
+
     CCM_CS1CDR = (CCM_CS1CDR & ~(CCM_CS1CDR_SAI1_CLK_PRED_MASK
                               |  CCM_CS1CDR_SAI1_CLK_PODF_MASK))
                |  CCM_CS1CDR_SAI1_CLK_PRED(n1 - 1)
