@@ -71,6 +71,21 @@
 #include <arm_math.h>
 #include <string.h>
 
+// __DMB() is the CMSIS Cortex-M7 memory barrier intrinsic. Teensyduino's
+// arm_math.h transitively pulls cmsis_compiler.h / cmsis_gcc.h, which is
+// where __DMB lives. We do NOT include core_cm7.h directly — that header
+// expects cmsis_version.h which isn't on Teensyduino's include path.
+// If a future Teensyduino update breaks the transitive include, fall
+// back to: static inline void __DMB() { __asm__ volatile("dmb" ::: "memory"); }
+
+// Q31 temp buffers in _rx_pop / _tx_push are sized 256 mono samples each;
+// audio frames feed AUDIO_BLOCK_SAMPLES at a time. Promote the runtime
+// >256 bail to a compile-time check at the conservative 128-sample limit
+// (matches the spike's AUDIO_BLOCK_SAMPLES setting). If someone bumps
+// the audio block size later, this fires before silent truncation.
+static_assert(AUDIO_BLOCK_SAMPLES <= 128,
+    "Q31 temp buffers sized for AUDIO_BLOCK_SAMPLES <= 128");
+
 namespace {
 
 constexpr unsigned int RING_SAMPLES = 1024;          // mono slots; power of two
@@ -106,8 +121,11 @@ void usb_audio_f32_rx_isr_write(const uint8_t *packet, unsigned int len_bytes)
         const uint32_t b1 = packet[3 * i + 1];
         const uint32_t b2 = packet[3 * i + 2];
         // Q31 left-justified. b2 lands in bits 31..24, sign-extending the
-        // 24-bit two's-complement value to int32_t correctly.
-        const int32_t q31 = (int32_t)((b2 << 24) | (b1 << 16) | (b0 << 8));
+        // 24-bit two's-complement value to int32_t correctly. Explicit
+        // (uint32_t) casts on each operand keep the shifts well-defined
+        // and free of integer-promotion gotchas under any future refactor.
+        const int32_t q31 = (int32_t)(
+            (uint32_t)b2 << 24 | (uint32_t)b1 << 16 | (uint32_t)b0 << 8);
 
         const uint32_t w_next = (w + 1) & RING_MASK;
         if (w_next == r) {
@@ -118,6 +136,9 @@ void usb_audio_f32_rx_isr_write(const uint8_t *packet, unsigned int len_bytes)
         rx_ring[w] = q31;
         w = w_next;
     }
+    // Producer barrier: ensure all rx_ring[] stores are committed before
+    // the consumer can observe the updated rx_write index.
+    __DMB();
     rx_write = w;
 }
 
@@ -126,6 +147,10 @@ unsigned int usb_audio_f32_tx_isr_read(uint8_t *packet, unsigned int n_stereo_sa
 {
     const uint32_t w = tx_write;
     uint32_t r = tx_read;
+    // Consumer barrier: ensure the producer's tx_write index is observed
+    // before any tx_ring[] loads, so we never see a slot whose write
+    // has not yet been committed.
+    __DMB();
     const unsigned int n_mono_avail = (w - r) & RING_MASK;
     const unsigned int n_mono_want  = n_stereo_samples * 2;
 
@@ -165,6 +190,9 @@ bool usb_audio_f32_rx_pop(float *left_out, float *right_out, unsigned int n_samp
 
     const uint32_t w = rx_write;
     uint32_t r = rx_read;
+    // Consumer barrier: ensure the producer's rx_write index is observed
+    // before any rx_ring[] loads.
+    __DMB();
     const unsigned int n_mono_avail = (w - r) & RING_MASK;
     const unsigned int n_mono_need  = n_samples * 2;
 
@@ -213,6 +241,9 @@ bool usb_audio_f32_tx_push(const float *left_in, const float *right_in, unsigned
         tx_ring[w] = q31_r[i];
         w = (w + 1) & RING_MASK;
     }
+    // Producer barrier: all tx_ring[] stores must be committed before the
+    // ISR consumer can observe the updated tx_write index.
+    __DMB();
     tx_write = w;
     return true;
 }
