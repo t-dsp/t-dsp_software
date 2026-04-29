@@ -20,7 +20,7 @@ import numpy as np
 import sounddevice as sd
 from scipy import signal
 
-FS         = 44100
+FS         = 48000
 DURATION_S = 4.0
 TONE_HZ    = 1000.0
 TONE_DBFS  = -6.0          # leave headroom; alex6679 USB volume slider scales further
@@ -50,9 +50,16 @@ def find_teensy_devices() -> tuple[int, int]:
 def play_record(out_dev: int, in_dev: int, sig: np.ndarray) -> np.ndarray:
     """sd.playrec returns one buffer; both directions share a clock so the
     captured array aligns sample-for-sample with the played one (modulo USB
-    endpoint phase, which we trim off)."""
+    endpoint phase, which we trim off).
+
+    Uses WASAPI exclusive mode to bypass the Windows shared-mode mixer (which
+    forces 16-bit float internally regardless of the device's negotiated
+    format -- masks any 24-bit improvement from the F32 USB classes)."""
     sd.default.samplerate = FS
-    rec = sd.playrec(sig, channels=2, device=(in_dev, out_dev), dtype="float32")
+    excl = sd.WasapiSettings(exclusive=True)
+    rec = sd.playrec(sig, channels=2, device=(in_dev, out_dev),
+                     dtype="float32",
+                     extra_settings=(excl, excl))
     sd.wait()
     return rec
 

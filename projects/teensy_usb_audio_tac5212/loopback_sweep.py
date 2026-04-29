@@ -23,7 +23,7 @@ import numpy as np
 import sounddevice as sd
 from scipy import signal
 
-FS                  = 44100
+FS                  = 48000
 TONE_DBFS           = -6.0
 TONE_DUR_S          = 1.5
 TRIM_S              = 0.4
