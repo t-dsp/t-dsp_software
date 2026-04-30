@@ -97,8 +97,10 @@ def test_echo_on_xremote(osc):
     The firmware fans every state change to all subscribed /xremote
     clients. We're the only client, but our write should still echo
     (X32 behavior: echoes go to ALL subscribers including the writer).
-    50 ms ceiling: 1 audio block (~2.7 ms) + USB poll (1 ms) +
-    SLIP encode + drain queue, well under 50."""
+    100 ms ceiling: USB CDC round-trip on Windows includes a ~16 ms
+    latency-timer chunk delay on top of the main-loop poll + SLIP
+    encode. 100 ms is comfortably below human-perceptible UI lag while
+    still catching genuine queue-tail buildup."""
     osc.send("/xremote")
     osc.drain()  # discard any state-dump that /xremote triggers
     target = 0.42
@@ -110,7 +112,7 @@ def test_echo_on_xremote(osc):
     )
     elapsed = (time.monotonic() - t0) * 1000.0
     assert msg is not None, "no echo of /main/st/mix/fader within 500 ms"
-    assert elapsed < 50.0, f"echo took {elapsed:.1f} ms (>50 ms ceiling)"
+    assert elapsed < 100.0, f"echo took {elapsed:.1f} ms (>100 ms ceiling)"
     assert abs(msg.args[0] - fader_quantize(target)) <= QUANT_TOL
 
 

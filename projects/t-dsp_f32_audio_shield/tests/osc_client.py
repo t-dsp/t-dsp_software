@@ -200,13 +200,17 @@ class OscMessage:
 
 
 def decode_osc(data: bytes) -> OscMessage:
-    """Decode one OSC message (no bundle handling). Raises on malformed input.
+    """Decode one OSC message OR the first message inside a bundle.
 
-    Bundles ('#bundle\\x00...' prefix) aren't expected from this firmware
-    -- it sends discrete messages, one per SLIP frame -- so this decoder
-    rejects them rather than silently picking the first child."""
+    The firmware (CNMAT OSC + tdsp::SlipOscTransport) wraps every echo
+    in an OSCBundle even when the payload is a single message — that's
+    standard CNMAT behavior. We unwrap the bundle and decode its first
+    element; the multi-message decoder is `decode_osc_all` below."""
     if data.startswith(b"#bundle\x00"):
-        raise ValueError("OSC bundle decoding not implemented (firmware sends single messages)")
+        msgs = decode_osc_all(data)
+        if not msgs:
+            raise ValueError("OSC: empty bundle")
+        return msgs[0]
 
     # Address
     addr_end = data.find(b"\x00")
@@ -265,6 +269,34 @@ def decode_osc(data: bytes) -> OscMessage:
             raise ValueError(f"OSC: unsupported typetag char {c!r}")
 
     return OscMessage(address=address, typetag=typetag, args=tuple(args))
+
+
+def decode_osc_all(data: bytes) -> list:
+    """Decode an OSC packet that may be a bundle into a list of messages.
+
+    Recurses through nested bundles (rare; firmware doesn't nest, but
+    spec-conformant). Plain messages return a 1-element list."""
+    if not data.startswith(b"#bundle\x00"):
+        return [decode_osc(data)]
+
+    # Bundle layout: "#bundle\0" (8) + timetag (8) + repeated [size:i32 + element].
+    out = []
+    pos = 16  # skip "#bundle\0" + 8-byte timetag
+    while pos + 4 <= len(data):
+        (size,) = struct.unpack(">I", data[pos:pos + 4])
+        pos += 4
+        if pos + size > len(data):
+            break  # truncated — bail
+        elem = data[pos:pos + size]
+        pos += size
+        if elem.startswith(b"#bundle\x00"):
+            out.extend(decode_osc_all(elem))
+        else:
+            try:
+                out.append(decode_osc(elem))
+            except Exception:
+                pass  # malformed child — skip
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -419,14 +451,17 @@ class OscClient:
                 if frame is None:
                     break
                 try:
-                    msg = decode_osc(frame)
+                    msgs = decode_osc_all(frame)
                 except Exception:
                     # Malformed OSC -- drop it. Tests that care can
                     # inspect the raw stream by reading the serial port
                     # directly before constructing the client.
                     continue
+                if not msgs:
+                    continue
                 with self._inbox_lock:
-                    self._inbox.append(msg)
+                    for m in msgs:
+                        self._inbox.append(m)
                     self._inbox_event.set()
 
     # --- send --------------------------------------------------------------

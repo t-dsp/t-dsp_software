@@ -223,6 +223,11 @@ AudioConnection_F32  c_synthbusR_mix  (g_synthBusR,   0, mixR,          1);
 // 4-segment fader law; 1.0 would mean +10 dB and slam the DAC.
 static float g_chFader[7]    = {0.0f, 0.75f, 0.75f, 0.75f, 0.75f, 0.75f, 0.75f};
 static bool  g_chOn[7]       = {false, true, true, true, true, false, false};
+
+// Per-channel display name (12-char limit per X32 convention). Index 0
+// unused. /ch/NN/config/name does NOT mirror across linked pairs (the
+// spec lets a stereo pair have different L/R labels).
+static char  g_chName[7][16] = {"", "USB L", "USB R", "Line L", "Line R", "Mic L", "Mic R"};
 static float g_mainFaderL    = 0.75f;
 static float g_mainFaderR    = 0.75f;
 static bool  g_mainOn        = true;
@@ -878,6 +883,22 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         }
     }
 
+    // ---- /ch/NN/config/name s ----  (does NOT mirror; per X32 convention)
+    {
+        int ch = parseChannelN(address, "/config/name");
+        if (ch >= 1 && ch <= kMaxChannel) {
+            OSCBundle reply;
+            if (msg.size() > 0 && msg.isString(0)) {
+                msg.getString(0, g_chName[ch], sizeof(g_chName[ch]) - 1);
+            }
+            char buf[32];
+            snprintf(buf, sizeof(buf), "/ch/%02d/config/name", ch);
+            OSCMessage echo(buf); echo.add(g_chName[ch]); reply.add(echo);
+            g_transport.sendBundle(reply);
+            return;
+        }
+    }
+
     // ---- /ch/NN/mix/fader f ----
     //
     // Input is X32-shape 0..1 fader value. We snap to the 1024-step
@@ -942,6 +963,32 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
             g_transport.sendBundle(reply);
             return;
         }
+    }
+
+    // ---- /main/st/mix/fader f ----  (linked-mode master, writes both L and R)
+    //
+    // X32 convention: when /main/st/mix/link is on (always on this
+    // hardware — there's a single stereo bus), this is the canonical
+    // "master fader" leaf. /main/st/mix/faderL and /faderR are for
+    // unlinked control. Snap on input, mirror to both sides.
+    if (strcmp(address, "/main/st/mix/fader") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isFloat(0)) {
+            float v = tdsp::x32::quantizeFader(msg.getFloat(0));
+            g_mainFaderL = v;
+            g_mainFaderR = v;
+            applyMain();
+        }
+        OSCMessage echo("/main/st/mix/fader"); echo.add(g_mainFaderL); reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    // ---- /main/st/mix/link i ----  (X32 leaf; always 1 on this hardware)
+    if (strcmp(address, "/main/st/mix/link") == 0) {
+        OSCBundle reply;
+        OSCMessage echo("/main/st/mix/link"); echo.add((int)1); reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
     }
 
     // ---- /main/st/mix/faderL f ----
