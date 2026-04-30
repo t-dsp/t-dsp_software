@@ -186,7 +186,7 @@ export class Dispatcher {
 
   setMainHostvolEnable(enable: boolean): void {
     this.state.main.hostvolEnable.set(enable);
-    this.sendMsg('/main/st/hostvol/enable', 'i', [enable ? 1 : 0]);
+    this.sendMsg('/main/st/hostvol/on', 'i', [enable ? 1 : 0]);
   }
 
   // Main loopback. When on, the post-fader / pre-hostvol main mix is
@@ -280,12 +280,12 @@ export class Dispatcher {
 
   setDexedVolume(v: number): void {
     this.state.dexed.volume.set(v);
-    this.sendThrottled('/synth/dexed/volume', 'f', [v]);
+    this.sendThrottled('/synth/dexed/mix/fader', 'f', [v]);
   }
 
   setDexedOn(on: boolean): void {
     this.state.dexed.on.set(on);
-    this.sendMsg('/synth/dexed/on', 'i', [on ? 1 : 0]);
+    this.sendMsg('/synth/dexed/mix/on', 'i', [on ? 1 : 0]);
   }
 
   setDexedMidiChannel(ch: number): void {
@@ -842,15 +842,15 @@ export class Dispatcher {
 
   setProcShelfEnable(on: boolean): void {
     this.state.processing.shelfEnable.set(on);
-    this.sendMsg('/proc/shelf/enable', 'i', [on ? 1 : 0]);
+    this.sendMsg('/main/st/eq/on', 'i', [on ? 1 : 0]);
   }
   setProcShelfFreq(hz: number): void {
     this.state.processing.shelfFreqHz.set(hz);
-    this.sendThrottled('/proc/shelf/freq', 'f', [hz]);
+    this.sendThrottled('/main/st/eq/1/f', 'f', [hz]);
   }
   setProcShelfGain(db: number): void {
     this.state.processing.shelfGainDb.set(db);
-    this.sendThrottled('/proc/shelf/gain', 'f', [db]);
+    this.sendThrottled('/main/st/eq/1/g', 'f', [db]);
   }
   setProcLimiterEnable(on: boolean): void {
     this.state.processing.limiterEnable.set(on);
@@ -865,12 +865,12 @@ export class Dispatcher {
 
   setSynthBusVolume(v: number): void {
     this.state.synthBus.volume.set(v);
-    this.sendThrottled('/synth/bus/volume', 'f', [v]);
+    this.sendThrottled('/synth/bus/mix/fader', 'f', [v]);
   }
 
   setSynthBusOn(on: boolean): void {
     this.state.synthBus.on.set(on);
-    this.sendMsg('/synth/bus/on', 'i', [on ? 1 : 0]);
+    this.sendMsg('/synth/bus/mix/on', 'i', [on ? 1 : 0]);
   }
 
   // ---------- Looper ----------
@@ -1143,7 +1143,7 @@ export class Dispatcher {
       return;
     }
 
-    if (a === '/main/st/hostvol/enable' && msg.types === 'i') {
+    if (a === '/main/st/hostvol/on' && msg.types === 'i') {
       this.state.main.hostvolEnable.set((msg.args[0] as number) !== 0);
       return;
     }
@@ -1163,12 +1163,12 @@ export class Dispatcher {
     // Routes to the CAP HOST strip in the output dock. See the
     // teensy4 core patch on branch teensy4-usb-audio-capture-feature-unit
     // for the FU 0x30 descriptor that drives this.
-    if (a === '/usb/cap/hostvol/value' && msg.types === 'f') {
+    if (a === '/-cap/hostvol/value' && msg.types === 'f') {
       this.state.main.captureHostvolValue.set(msg.args[0] as number);
       return;
     }
 
-    if (a === '/usb/cap/hostvol/mute' && msg.types === 'i') {
+    if (a === '/-cap/hostvol/mute' && msg.types === 'i') {
       this.state.main.captureHostvolMute.set((msg.args[0] as number) !== 0);
       return;
     }
@@ -1234,11 +1234,11 @@ export class Dispatcher {
       this.state.dexed.voiceName.set(msg.args[2] as string);
       return;
     }
-    if (a === '/synth/dexed/volume' && msg.types === 'f') {
+    if (a === '/synth/dexed/mix/fader' && msg.types === 'f') {
       this.state.dexed.volume.set(msg.args[0] as number);
       return;
     }
-    if (a === '/synth/dexed/on' && msg.types === 'i') {
+    if (a === '/synth/dexed/mix/on' && msg.types === 'i') {
       this.state.dexed.on.set((msg.args[0] as number) !== 0);
       return;
     }
@@ -1261,15 +1261,15 @@ export class Dispatcher {
     }
 
     // Main-bus processing echoes.
-    if (a === '/proc/shelf/enable' && msg.types === 'i') {
+    if (a === '/main/st/eq/on' && msg.types === 'i') {
       this.state.processing.shelfEnable.set((msg.args[0] as number) !== 0);
       return;
     }
-    if (a === '/proc/shelf/freq' && msg.types === 'f') {
+    if (a === '/main/st/eq/1/f' && msg.types === 'f') {
       this.state.processing.shelfFreqHz.set(msg.args[0] as number);
       return;
     }
-    if (a === '/proc/shelf/gain' && msg.types === 'f') {
+    if (a === '/main/st/eq/1/g' && msg.types === 'f') {
       this.state.processing.shelfGainDb.set(msg.args[0] as number);
       return;
     }
@@ -1556,11 +1556,11 @@ export class Dispatcher {
     }
 
     // Synth bus echoes — group fader + mute for all synths.
-    if (a === '/synth/bus/volume' && msg.types === 'f') {
+    if (a === '/synth/bus/mix/fader' && msg.types === 'f') {
       this.state.synthBus.volume.set(msg.args[0] as number);
       return;
     }
-    if (a === '/synth/bus/on' && msg.types === 'i') {
+    if (a === '/synth/bus/mix/on' && msg.types === 'i') {
       this.state.synthBus.on.set((msg.args[0] as number) !== 0);
       return;
     }
