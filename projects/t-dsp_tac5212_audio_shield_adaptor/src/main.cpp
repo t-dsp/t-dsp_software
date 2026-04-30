@@ -4424,6 +4424,35 @@ static void onCliLine(char *line, int length, void *userData) {
         Serial.println(g_model.main().hostvolValue, 3);
         Serial.print("DEV_STS0: 0x");
         Serial.println(readReg(REG_DEV_STS0), HEX);
+        // Per-output mode: confirms whether OUT*_CFG writes (e.g. UI mode
+        // changes from hp_driver → se_line) actually landed in the chip.
+        // CFG1/CFG2 high two bits = driver type: 0x60=HP, 0x20=line, 0xA0=4Ω,
+        // 0xE0=FD-receiver. CFG0 = source|route.
+        for (uint8_t n = 1; n <= 2; ++n) {
+            tac5212::OutMode mode;
+            const char *label = "unknown";
+            if (g_codec.out(n).getMode(mode).isOk()) {
+                switch (mode) {
+                    case tac5212::OutMode::DiffLine:   label = "diff_line"; break;
+                    case tac5212::OutMode::SeLine:     label = "se_line";   break;
+                    case tac5212::OutMode::HpDriver:   label = "hp_driver"; break;
+                    case tac5212::OutMode::FdReceiver: label = "receiver";  break;
+                }
+            }
+            const uint8_t cfg0 = (n == 1) ? readReg(REG_OUT1_CFG0) : readReg(REG_OUT2_CFG0);
+            const uint8_t cfg1 = (n == 1) ? readReg(REG_OUT1_CFG1) : readReg(REG_OUT2_CFG1);
+            const uint8_t cfg2 = (n == 1) ? readReg(REG_OUT1_CFG2) : readReg(REG_OUT2_CFG2);
+            Serial.print("OUT");
+            Serial.print(n);
+            Serial.print(" mode: ");
+            Serial.print(label);
+            Serial.print("  CFG0=0x");
+            Serial.print(cfg0, HEX);
+            Serial.print(" CFG1=0x");
+            Serial.print(cfg1, HEX);
+            Serial.print(" CFG2=0x");
+            Serial.println(cfg2, HEX);
+        }
         Serial.println("--------------\n");
     }
     // Unknown CLI input is silently ignored for MVP.

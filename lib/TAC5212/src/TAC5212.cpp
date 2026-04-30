@@ -201,6 +201,31 @@ void TAC5212::dumpStatus(Print &out) {
     out.print(F("  MICBIAS GPIO override: "));
     out.println(s.micBiasGpioOverride ? F("YES (I2C shadowed)") : F("no"));
     out.print(F("  I2C error count: ")); out.println(_errors);
+
+    // Per-output mode: decoded label + raw OUTx_CFG0/CFG1/CFG2 bytes so
+    // a write that didn't land (wrong page, reserved combo silently
+    // rejected) is visible at a glance.
+    for (uint8_t n = 1; n <= 2; ++n) {
+        const OutRegs regs = outRegs(n);
+        const uint8_t cfg0 = _read(0, regs.cfg0);
+        const uint8_t cfg1 = _read(0, regs.cfg1);
+        const uint8_t cfg2 = _read(0, regs.cfg2);
+        OutMode mode;
+        const char *label = "unknown";
+        if (Out(this, n).getMode(mode).isOk()) {
+            switch (mode) {
+                case OutMode::DiffLine:   label = "diff_line";  break;
+                case OutMode::SeLine:     label = "se_line";    break;
+                case OutMode::HpDriver:   label = "hp_driver";  break;
+                case OutMode::FdReceiver: label = "receiver";   break;
+            }
+        }
+        out.print(F("  OUT")); out.print(n);
+        out.print(F(" mode: ")); out.print(label);
+        out.print(F("  CFG0=0x")); out.print(cfg0, HEX);
+        out.print(F(" CFG1=0x")); out.print(cfg1, HEX);
+        out.print(F(" CFG2=0x")); out.println(cfg2, HEX);
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -487,26 +512,68 @@ Result TAC5212::Out::getMode(OutMode &out) {
 // PDM block (stubs — to be filled in after INTF_CFG4 bitfield verification)
 // -----------------------------------------------------------------------------
 
+// PDM enable wraps five register writes that together turn GPIO1 into
+// a PDM clock output, route the GPI1 data input into PDM channels 3
+// and 4, and enable the corresponding TX channels in CH_EN. The TX
+// slot mapping (which TDM slots PDM 3 / PDM 4 land on) is the
+// caller's responsibility — typically setTxChannelSlot(3, 2) +
+// setTxChannelSlot(4, 3) for a standard slots-2/3 layout.
+//
+// setEnable(false) reverses the writes: GPIO1 / GPI1 back to default
+// (HIZ / disabled) and IN_CH3/IN_CH4 cleared. The PDM channels stay
+// owned by their PDM source allocation in INTF_CFG4 — disabling them
+// in CH_EN is enough to stop the data on the bus.
 Result TAC5212::Pdm::setEnable(bool on) {
-    // Wraps multiple registers:
-    //   GPIO1_CFG    = PDM clock out (function=4, drive=1)
-    //   GPI1_CFG     = GPI1 enabled as digital input
-    //   INTF_CFG4    = route GPI1 → PDM channels 3+4
-    //   CH_EN bits   = IN_CH3 | IN_CH4 enable
-    //   PWR_CFG      = ADC_PDZ (if not already on)
-    //
-    // The exact INTF_CFG4 bitfield needs datasheet re-verification before
-    // implementation. Flagging as a deliberate stub.
-    (void)on;
-    return Result::error("TAC5212::Pdm::setEnable not yet implemented");
+    using namespace reg;
+
+    if (on) {
+        // GPIO1 = PDM clock output, active high/low drive (drive code 1).
+        const uint8_t gpio1Val =
+            static_cast<uint8_t>(gpio1_cfg::FUNC_PDM_CLK << gpio1_cfg::SHIFT_FUNC) |
+            gpio1_cfg::DRIVE_ACTIVE_HIGH_LOW;
+        Result r = _codec->_write(0, GPIO1_CFG, gpio1Val);
+        if (r.isError()) return r;
+
+        // GPI1 = digital input enabled.
+        r = _codec->_write(0, GPI1_CFG, gpi1_cfg::MASK_ENABLE);
+        if (r.isError()) return r;
+
+        // Route GPI1 -> PDM channels 3 + 4. Other bits in INTF_CFG4 are
+        // reserved at POR; preserve them via _rmw.
+        r = _codec->_rmw(0, INTF_CFG4,
+                         intf_cfg4::MASK_GPI_TO_PDM,
+                         intf_cfg4::GPI1_TO_PDM_3_4);
+        if (r.isError()) return r;
+
+        // Enable IN_CH3 + IN_CH4 in CH_EN. Read-modify-write so we
+        // don't disturb whatever inMask/outMask the caller already
+        // applied to ADC + DAC channels.
+        return _codec->_rmw(0, CH_EN,
+                            ch_en::MASK_IN_CH3 | ch_en::MASK_IN_CH4,
+                            ch_en::MASK_IN_CH3 | ch_en::MASK_IN_CH4);
+    }
+
+    // Disable path: clear IN_CH3 / IN_CH4 in CH_EN; revert the GPIO
+    // function bits to defaults (disabled / hi-Z).
+    Result r = _codec->_rmw(0, CH_EN,
+                            ch_en::MASK_IN_CH3 | ch_en::MASK_IN_CH4,
+                            0);
+    if (r.isError()) return r;
+    r = _codec->_write(0, GPI1_CFG, 0);
+    if (r.isError()) return r;
+    return _codec->_write(0, GPIO1_CFG, 0);
 }
 
+// Source / clock-pin selectors are reserved for future board variants
+// that use GPI2 or different GPIO pin assignments. The current board
+// is fixed at GPI1 + GPIO1, which the GPI1_TO_PDM_3_4 routing covers,
+// so there's no work for these to do today.
 Result TAC5212::Pdm::setSource(PdmSource) {
-    return Result::error("TAC5212::Pdm::setSource not yet implemented");
+    return Result::ok();
 }
 
 Result TAC5212::Pdm::setClkPin(PdmClkPin) {
-    return Result::error("TAC5212::Pdm::setClkPin not yet implemented");
+    return Result::ok();
 }
 
 // -----------------------------------------------------------------------------
@@ -901,7 +968,28 @@ Result TAC5212::setSerialFormat(const SerialFormat &fmt) {
     if (fmt.bclkPol  == Polarity::Inverted) value |= reg::pasi_cfg0::MASK_BCLK_POL;
     if (fmt.busErrRecover)                  value |= reg::pasi_cfg0::MASK_BUS_ERR_RCOV;
 
-    return _write(0, reg::PASI_CFG0, value);
+    Result r = _write(0, reg::PASI_CFG0, value);
+    if (r.isError()) return r;
+
+    // Route DOUT to PASI TX and enable the DIN receiver. Without these the
+    // serial interface format selected above has no audible effect — DOUT
+    // would carry silence and DIN would be ignored. POR leaves both pins
+    // disabled, so this is the standard pairing every TDM/I2S/LJ path needs.
+    r = _write(0, reg::INTF_CFG1, reg::intf_cfg1::PASI_DOUT_ACTIVE_LOW_WEAK_HIGH);
+    if (r.isError()) return r;
+    return _write(0, reg::INTF_CFG2, reg::intf_cfg2::DIN_ENABLE);
+}
+
+// MISC_CFG0 bit 1 (DSP_AVDD_SEL) routes valid SAR AVDD data to the DSP block.
+// POR leaves it at the "Reserved" value (0), which causes the DSP-resident
+// limiter / BOP / DRC blocks to operate on garbage and produce a high-pitched
+// squeal as soon as any of them is enabled. Set to 1 once at boot, before any
+// DSP block is enabled, and leave it that way.
+Result TAC5212::setDspAvddSelect(bool on) {
+    return _rmw(reg::dac_dynamics_ctrl::PAGE,
+                reg::dac_dynamics_ctrl::MISC_CFG0,
+                reg::dac_dynamics_ctrl::MASK_DSP_AVDD_SEL,
+                on ? reg::dac_dynamics_ctrl::MASK_DSP_AVDD_SEL : uint8_t{0});
 }
 
 Result TAC5212::setRxChannelSlot(uint8_t rxCh, uint8_t slot, bool enable) {
@@ -933,7 +1021,7 @@ Result TAC5212::setRxSlotOffset(uint8_t bclks) {
 }
 
 Result TAC5212::setTxSlotOffset(uint8_t bclks) {
-    return _write(0, reg::PASI_TX_CFG2, bclks);
+    return _write(0, reg::PASI_TX_CFG1, bclks);
 }
 
 Result TAC5212::setChannelEnable(uint8_t inMask, uint8_t outMask) {

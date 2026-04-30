@@ -356,6 +356,13 @@ public:
     Result setDacDvolGang(bool ganged);
     Result setDacSoftStep(bool enabled);  // true = enabled (default)
 
+    // Page-1 MISC_CFG0 bit 1 (DSP_AVDD_SEL) — required HIGH before any
+    // DSP-resident block (limiter, BOP, DRC) is enabled. Datasheet POR
+    // leaves the bit at "Reserved" (0); enabling a DSP block in that
+    // state produces a high-pitched squeal until the bit is set. Call
+    // once at boot, before setDacLimiterEnable / setDacDrcEnable.
+    Result setDspAvddSelect(bool on);
+
     // --- DAC dynamics: distortion limiter + DRC (chip-global) ----------------
     //
     // Limiter and DRC are pre-DAC dynamics processors. The chip ships with
@@ -418,6 +425,17 @@ public:
         bool     busErrRecover  = true;
     };
 
+    // Configure the audio serial interface end-to-end:
+    //   * PASI_CFG0 from the SerialFormat fields (format / word length /
+    //     FSYNC + BCLK polarity / bus-error recovery)
+    //   * INTF_CFG1 to route the DOUT pin from PASI TX (active-low /
+    //     weak-high drive)
+    //   * INTF_CFG2 to enable the PASI DIN receiver
+    //
+    // The latter two are POR-disabled and would silently kill audio if
+    // left untouched, so they're folded into this single call rather
+    // than exposed as separate setters. Slot map, slot offsets, and
+    // channel enable / power-up are still the caller's responsibility.
     Result setSerialFormat(const SerialFormat&);
     Result setRxChannelSlot(uint8_t rxCh, uint8_t slot, bool enable = true);
     Result setTxChannelSlot(uint8_t txCh, uint8_t slot, bool enable = true);

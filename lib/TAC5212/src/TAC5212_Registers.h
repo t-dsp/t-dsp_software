@@ -74,11 +74,41 @@ namespace gpi1_cfg {
     constexpr uint8_t MASK_ENABLE = 0x02;  // bit[1]
 }
 
+// INTF_CFG4 selects the routing of GPIx pins to PDM channels. The
+// chip exposes routing options for combinations of the two PDM-data
+// pins and the two PDM channel pairs (1+2 vs 3+4). For the on-board
+// stereo PDM mic on this hardware revision, both mic outputs share
+// GPI1 (the data line) and the chip splits left/right by clock phase
+// — encoded as "GPI1 -> PDM 3+4". Other routings would be added when
+// boards using GPI2 or PDM 1+2 land.
+namespace intf_cfg4 {
+    constexpr uint8_t MASK_GPI_TO_PDM = 0x07;
+    constexpr uint8_t GPI1_TO_PDM_3_4 = 0x03;
+}
+
 // --- Audio serial interface / TDM slot routing -------------------------------
 
 constexpr uint8_t INTF_CFG1    = 0x10;
 constexpr uint8_t INTF_CFG2    = 0x11;
 constexpr uint8_t INTF_CFG4    = 0x13;
+
+namespace intf_cfg1 {
+    // INTF_CFG1 selects what the DOUT pin transmits and how it's driven.
+    // The only mode this library actively uses is "DOUT carries the audio
+    // serial interface (PASI) TX data with active-low / weak-high drive" —
+    // the canonical pairing for any TDM/I2S/LJ playback path. Other DOUT
+    // functions (clock outputs, GPIO etc.) aren't exposed; reach for
+    // writeRegister() if they're ever needed.
+    constexpr uint8_t PASI_DOUT_ACTIVE_LOW_WEAK_HIGH = 0x52;
+}
+
+namespace intf_cfg2 {
+    // INTF_CFG2 bit 7 enables the PASI DIN receiver. Without this set, the
+    // chip ignores incoming serial data — DAC plays silence regardless of
+    // slot map. POR is 0; setSerialFormat() flips it on.
+    constexpr uint8_t MASK_DIN_ENABLE = 0x80;
+    constexpr uint8_t DIN_ENABLE      = 0x80;
+}
 
 constexpr uint8_t PASI_CFG0    = 0x1A;
 
@@ -101,7 +131,14 @@ namespace pasi_cfg0 {
     constexpr uint8_t WORDLEN_32  = 0x30;
 }
 
-constexpr uint8_t PASI_TX_CFG2 = 0x1D;  // TX BCLK offset
+// CRITICAL: 0x1C (PASI_TX_CFG1) holds the TX BCLK offset in bits[4:0].
+// 0x1D (PASI_TX_CFG2) holds per-channel DOUT/DOUT2 select bits — writing
+// the offset value there flips TX_CH1_SEL and routes ADC CH1 to DOUT2,
+// killing the CH1 slot (the L channel goes silent end-to-end). Earlier
+// versions of this header had these swapped; the correct register for
+// setTxSlotOffset() is PASI_TX_CFG1.
+constexpr uint8_t PASI_TX_CFG1 = 0x1C;  // TX BCLK offset
+constexpr uint8_t PASI_TX_CFG2 = 0x1D;  // TX channel DOUT/DOUT2 select bits
 constexpr uint8_t PASI_RX_CFG0 = 0x26;  // RX BCLK offset
 
 constexpr uint8_t TX_CH1_SLOT  = 0x1E;

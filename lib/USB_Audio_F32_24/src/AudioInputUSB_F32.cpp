@@ -10,6 +10,7 @@
 
 #include "AudioInputUSB_F32.h"
 #include <string.h>
+#include <usb_audio.h>   // for AudioInputUSB::features (FU 0x31)
 
 volatile uint32_t AudioInputUSB_F32::updates = 0;
 volatile uint32_t AudioInputUSB_F32::pop_ok  = 0;
@@ -43,4 +44,21 @@ void AudioInputUSB_F32::update(void)
     transmit(right, 1);
     AudioStream_F32::release(left);
     AudioStream_F32::release(right);
+}
+
+// ----- Feature Unit accessors (FU 0x31, Windows speaker volume slider) -----
+//
+// AudioInputUSB::features lives in usb_audio.cpp regardless of which input
+// class is instantiated — the framework's USB ISR populates it when
+// Windows pushes SET_CUR. Reading it here lets sketches drive a host
+// volume amp without #including <usb_audio.h> at the sketch level.
+
+float AudioInputUSB_F32::volume() {
+    if (AudioInputUSB::features.mute) return 0.0f;
+    return (float)AudioInputUSB::features.volume *
+           (1.0f / (float)FEATURE_MAX_VOLUME);
+}
+
+bool AudioInputUSB_F32::mute() {
+    return AudioInputUSB::features.mute != 0;
 }

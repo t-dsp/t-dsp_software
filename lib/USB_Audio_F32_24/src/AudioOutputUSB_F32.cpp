@@ -6,6 +6,7 @@
  */
 
 #include "AudioOutputUSB_F32.h"
+#include <usb_audio.h>   // for AudioOutputUSB::features (FU 0x30)
 
 void AudioOutputUSB_F32::update(void)
 {
@@ -26,4 +27,16 @@ void AudioOutputUSB_F32::update(void)
 
     AudioStream_F32::release(left);
     AudioStream_F32::release(right);
+}
+
+// ----- Feature Unit accessors (FU 0x30, Windows recording slider) -----
+
+float AudioOutputUSB_F32::volume() {
+    if (AudioOutputUSB::features.mute) return 0.0f;
+    return (float)AudioOutputUSB::features.volume *
+           (1.0f / (float)FEATURE_MAX_VOLUME);
+}
+
+bool AudioOutputUSB_F32::mute() {
+    return AudioOutputUSB::features.mute != 0;
 }

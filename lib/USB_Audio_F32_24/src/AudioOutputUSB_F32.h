@@ -29,6 +29,13 @@ public:
 
     virtual void update(void);
 
+    // Read the capture Feature Unit (USB Audio Class FU 0x30, the
+    // Windows recording-device volume slider). Mirrors AudioInputUSB_F32::
+    // volume() — see that comment for the rationale on keeping the
+    // <usb_audio.h> include scoped to the .cpp.
+    static float volume();
+    static bool  mute();
+
 private:
     audio_block_f32_t *inputQueueArray[2];
 };

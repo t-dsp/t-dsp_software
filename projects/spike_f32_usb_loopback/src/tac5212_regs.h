@@ -82,6 +82,15 @@ constexpr uint8_t SLEEP_CFG_WAKE = 0x09;
 //   bit 2 = 1 (BCLK inverted), bit 1 = 0, bit 0 = 1 (recovery)
 constexpr uint8_t PASI_CFG0_TDM_32_BCLK_INV = 0x35;
 
+// Spike (24-bit data, F32 path): same as above but WORDLEN_24 in bits 5:4.
+// The codec reads the top 24 bits of each 32-bit slot as the audio sample;
+// the bottom 8 bits (F32 round-trip rounding noise) are ignored. Production
+// uses WORDLEN_32 because it packs two 16-bit channels per slot in the
+// stock int16 path -- a different storage convention. Match the WORDLEN
+// to the actual data width to avoid the codec interpreting LSB rounding
+// noise as signal.
+constexpr uint8_t PASI_CFG0_TDM_24_BCLK_INV = 0x25;
+
 // INTF_CFG1: DOUT = PASI DOUT with active-low/weak-high drive
 constexpr uint8_t INTF_CFG1_DOUT_PASI = 0x52;
 // INTF_CFG2: PASI DIN enabled

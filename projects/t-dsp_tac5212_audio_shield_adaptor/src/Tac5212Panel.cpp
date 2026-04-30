@@ -64,6 +64,10 @@ static void echoErrorReply(OSCBundle &reply, const char *addr, const char *msg) 
     reply.add(m);
 }
 
+// Forward decl — body lives further down with the other enum stringifiers,
+// but handleStatus needs it to label each output's decoded mode.
+static const char *outModeToString(tac5212::OutMode m);
+
 // ----- Tac5212Panel::route -----
 
 void Tac5212Panel::route(OSCMessage &msg, int addrOffset, OSCBundle &reply) {
@@ -710,6 +714,31 @@ void Tac5212Panel::handleStatus(OSCMessage &msg, OSCBundle &reply) {
     m.add((int32_t)(status.micBiasActive ? 1 : 0));
     m.add((int32_t)(status.faultActive ? 1 : 0));
     m.add((int32_t)(status.micBiasGpioOverride ? 1 : 0));
+
+    // Per-output decoded mode + raw OUTx_CFG0/CFG1/CFG2 register bytes,
+    // read straight from the chip so a "did the write land?" check can be
+    // answered directly from the /status reply. CFG0 = source|route,
+    // CFG1 = OUTxP driver/level, CFG2 = OUTxM driver/level.
+    // Layout per output: s,i,i,i = mode_string, cfg0, cfg1, cfg2.
+    constexpr uint8_t kOutCfgRegs[2][3] = {
+        {REG_OUT1_CFG0, REG_OUT1_CFG1, REG_OUT1_CFG2},
+        {REG_OUT2_CFG0, REG_OUT2_CFG1, REG_OUT2_CFG2},
+    };
+    for (int n = 1; n <= 2; ++n) {
+        tac5212::OutMode mode;
+        const char *modeStr = "unknown";
+        if (_codec.out(n).getMode(mode).isOk()) {
+            modeStr = outModeToString(mode);
+        }
+        const uint8_t cfg0 = _codec.readRegister(0, kOutCfgRegs[n - 1][0]);
+        const uint8_t cfg1 = _codec.readRegister(0, kOutCfgRegs[n - 1][1]);
+        const uint8_t cfg2 = _codec.readRegister(0, kOutCfgRegs[n - 1][2]);
+        m.add(modeStr);
+        m.add((int32_t)cfg0);
+        m.add((int32_t)cfg1);
+        m.add((int32_t)cfg2);
+    }
+
     reply.add(m);
 }
 

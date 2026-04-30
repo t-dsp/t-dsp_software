@@ -54,6 +54,14 @@ public:
     //   blocks are reaching the TDM stage.
     static uint32_t getUpdateCalls(void)     { return update_calls; }
     static uint32_t getIsrDataChs(void)      { return isr_data_chs; }
+    // M4i: peak |Q31| seen by the ISR on slot 0 since last read. Resets
+    // to 0 on read so the diag loop sees per-second peaks. Q31 sign-removed:
+    //   1.0 -> 0x7FFFFFFF, 0 -> 0, 0.5 -> 0x40000000.
+    static uint32_t readAndClearPeakSlot0(void) {
+        uint32_t v = peak_slot0;
+        peak_slot0 = 0;
+        return v;
+    }
 
 protected:
     static void config_tdm(void);
@@ -69,6 +77,7 @@ private:
     static volatile uint32_t  isr_count;
     static volatile uint32_t  update_calls;
     static volatile uint32_t  isr_data_chs;
+    static volatile uint32_t  peak_slot0;
 };
 
 #endif

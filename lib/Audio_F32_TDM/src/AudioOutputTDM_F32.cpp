@@ -24,6 +24,7 @@
 #include "AudioOutputTDM_F32.h"
 #include "utility/imxrt_hw.h"   // set_audioClock(); from Teensy Audio Library
 #include <arm_math.h>
+#include <string.h>
 
 audio_block_f32_t * AudioOutputTDM_F32::block_input[8] = { nullptr };
 bool                AudioOutputTDM_F32::update_responsibility = false;
@@ -33,6 +34,7 @@ int                 AudioOutputTDM_F32::audio_block_samples = AUDIO_BLOCK_SAMPLE
 volatile uint32_t   AudioOutputTDM_F32::isr_count = 0;
 volatile uint32_t   AudioOutputTDM_F32::update_calls = 0;
 volatile uint32_t   AudioOutputTDM_F32::isr_data_chs = 0;
+volatile uint32_t   AudioOutputTDM_F32::peak_slot0 = 0;
 
 // Ping-pong DMA buffer: 2 audio blocks worth, 8 slots per frame.
 // Lives in DMAMEM (OCRAM2 on Teensy 4.x), which is non-cacheable, so no
@@ -51,6 +53,13 @@ void AudioOutputTDM_F32::begin(void)
 
     for (int i = 0; i < 8; i++) block_input[i] = nullptr;
 
+    // M4p: stock AudioOutputTDM does memset(tdm_tx_buffer, 0, ...) here.
+    // F32 port had been omitting it -- DMAMEM is uninitialized at boot,
+    // so the first DMA cycle would ship random bits to the codec until
+    // the ISR caught up. Suspected cause of the persistent squeal: those
+    // initial garbage bytes put the codec into a stuck state.
+    memset(tdm_tx_buffer, 0, sizeof(tdm_tx_buffer));
+
     config_tdm();
 
     CORE_PIN7_CONFIG = 3;   // SAI1_TX_DATA0 on Teensy 4.1 pin 7
@@ -67,14 +76,17 @@ void AudioOutputTDM_F32::begin(void)
     dma.TCD->BITER_ELINKNO = sizeof(tdm_tx_buffer) / 4;
     dma.TCD->CSR           = DMA_TCD_CSR_INTHALF | DMA_TCD_CSR_INTMAJOR;
     dma.triggerAtHardwareEvent(DMAMUX_SOURCE_SAI1_TX);
+
+    // M4p: match stock ordering -- update_setup BEFORE dma.enable, so the
+    // first ISR firing has update_responsibility set correctly and pulls
+    // real blocks instead of running with stale state.
+    update_responsibility = update_setup();
     dma.enable();
 
     I2S1_RCSR |= I2S_RCSR_RE | I2S_RCSR_BCE;
     I2S1_TCSR  = I2S_TCSR_TE | I2S_TCSR_BCE | I2S_TCSR_FRDE;
 
     dma.attachInterrupt(isr);
-
-    update_responsibility = update_setup();
 }
 
 // ----------------------------------------------------------------------------
@@ -111,6 +123,17 @@ void AudioOutputTDM_F32::isr(void)
             arm_float_to_q31(block_input[ch]->data, q31_tmp, AUDIO_BLOCK_SAMPLES);
             for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
                 p[i * 8] = (uint32_t)q31_tmp[i];
+            }
+            // M4i: peak |Q31| on slot 0 only — that's the L channel from USB.
+            // Tells us whether real audio data is hitting the DMA buffer.
+            if (ch == 0) {
+                uint32_t local_peak = peak_slot0;
+                for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+                    int32_t s = q31_tmp[i];
+                    uint32_t a = (s < 0) ? (uint32_t)(-s) : (uint32_t)s;
+                    if (a > local_peak) local_peak = a;
+                }
+                peak_slot0 = local_peak;
             }
         } else {
             for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
@@ -162,6 +185,13 @@ void AudioOutputTDM_F32::config_tdm(void)
     int   c0 = C;
     int   c2 = 10000;
     int   c1 = C * c2 - (c0 * c2);
+    // Reverted from M4p: force=true is required for the spike. Some other
+    // init in the spike's USB-Audio-Class chain enables the audio PLL
+    // before AudioOutputTDM_F32::begin() runs (probably the USB stack at
+    // SAMPLE_RATE_EXACT=48000). Without force=true, set_audioClock returns
+    // early and our intended PLL config never applies, leaving the SAI
+    // clocked off the wrong PLL → buzz at output. Stock production
+    // doesn't hit this because its USB-AC path doesn't pre-enable the PLL.
     set_audioClock(c0, c1, c2, true);
 
     CCM_CSCMR1 = (CCM_CSCMR1 & ~(CCM_CSCMR1_SAI1_CLK_SEL_MASK))

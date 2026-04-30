@@ -48,4 +48,19 @@ public:
     // real data (vs silence on underrun)?
     static volatile uint32_t updates;
     static volatile uint32_t pop_ok;
+
+    // Read the playback Feature Unit (USB Audio Class FU 0x31, the
+    // Windows speaker volume slider). Same shape as the int16
+    // AudioInputUSB::volume() the production project uses: 0..1 linear
+    // (mute folded to 0). The implementation file pulls in <usb_audio.h>
+    // to read AudioInputUSB::features.{volume,mute}; the static struct
+    // is shared between subslot sizes — Windows talks to the same FU
+    // regardless of whether the F32 or int16 endpoint is enabled.
+    //
+    // Keeping the include scoped to the .cpp avoids dragging the int16
+    // AudioInputUSB / AudioStream class definitions into every consumer
+    // of this header, which kept the int16 audio graph out of the link
+    // unless explicitly opted into.
+    static float volume();
+    static bool  mute();
 };
