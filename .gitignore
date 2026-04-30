@@ -20,10 +20,12 @@ Thumbs.db
 .claude/scheduled_tasks.lock
 .claude/worktrees/
 
-# Electron-builder output (web_dev_surface)
-projects/t-dsp_tac5212_audio_shield_adaptor/tools/web_dev_surface/release/
-projects/t-dsp_tac5212_audio_shield_adaptor/tools/web_dev_surface/dist/
-projects/t-dsp_tac5212_audio_shield_adaptor/tools/web_dev_surface/node_modules/
+# Electron-builder + Vite output (t-dsp_web_dev — was tools/web_dev_surface
+# inside the adaptor project before being promoted to a top-level project
+# at projects/t-dsp_web_dev/ on the f32-shield-port branch)
+projects/t-dsp_web_dev/release/
+projects/t-dsp_web_dev/dist/
+projects/t-dsp_web_dev/node_modules/
 
 # Vendor datasheets (large PDFs — kept locally, not tracked)
 projects/*/docs/*.pdf

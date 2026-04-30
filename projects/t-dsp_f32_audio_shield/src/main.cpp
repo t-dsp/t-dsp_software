@@ -1252,7 +1252,7 @@ void setup() {
     Serial.println("  Mixer: USB ch1/ch2 -> mixL/R -> mainAmp -> hostvol -> shelf -> DAC");
     Serial.println("  USB MIDI host: keyboard -> router -> viz sink (/midi/note)");
     Serial.println("  Codec panel: /codec/tac5212/... over SLIP-OSC on USB CDC");
-    Serial.println("  Dev surface: projects/t-dsp_tac5212_audio_shield_adaptor/tools/web_dev_surface/");
+    Serial.println("  Dev surface: projects/t-dsp_web_dev/");
 }
 
 void loop() {

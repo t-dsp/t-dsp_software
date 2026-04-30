@@ -5,7 +5,7 @@
 // panels are per-board — different examples with different codecs each
 // have their own CodecPanel subclass.
 //
-// Address tree handled (must match tools/web_dev_surface/src/codec-panel-
+// Address tree handled (must match projects/t-dsp_web_dev/src/codec-panel-
 // config.ts and planning/osc-mixer-foundation/02-osc-protocol.md):
 //
 //   /adc/N/mode s         "single_ended_inp" | "differential"

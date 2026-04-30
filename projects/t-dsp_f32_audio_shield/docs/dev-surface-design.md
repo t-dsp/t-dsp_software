@@ -4,7 +4,7 @@
 > Audience: firmware dev who built the v1 dev surface and the upcoming X32-style OSC tree.
 > Scope: the host-side mixer UI that talks to the Teensy 4.1 firmware over SLIP-OSC on USB CDC.
 
-The current dev surface (`projects/t-dsp_tac5212_audio_shield_adaptor/tools/web_dev_surface/`) works but has known scaling problems:
+The current dev surface (`projects/t-dsp_web_dev/`, was `projects/t-dsp_tac5212_audio_shield_adaptor/tools/web_dev_surface/` before being promoted to a top-level project) works but has known scaling problems:
 
 - Hard-coded channel count, hard-coded panel set, hard-coded address strings everywhere in `dispatcher.ts`.
 - Volume sliders feel sluggish — the per-address 33 ms throttle is right in concept, but the rendering path round-trips through the synchronous `Signal.subscribe` callback, which writes the DOM inline; on a 30 Hz meter blob fan-out this fights the main thread.
@@ -1071,7 +1071,7 @@ If we go full Solid, we should also reconsider:
 
 The current dev surface has **no tests**. The migration plan calls for tests at every phase boundary. Open question: where do they live?
 
-- Vitest under `tools/web_dev_surface/test/`?
+- Vitest under `projects/t-dsp_web_dev/test/`?
 - Add a `pnpm test` script to package.json?
 
 **Recommendation:** Vitest, colocated `*.test.ts` next to the modules. Keep CI-light; this is a bench tool.

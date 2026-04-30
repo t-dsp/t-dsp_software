@@ -138,7 +138,7 @@ Tests without any marker are pure math (fader law) and run unconditionally.
 
 ## Coexistence with the dev surface bridge
 
-The dev surface (`projects/t-dsp_tac5212_audio_shield_adaptor/tools/web_dev_surface/serial-bridge.mjs`)
+The dev surface (`projects/t-dsp_web_dev/serial-bridge.mjs`)
 also opens the Teensy COM port. **Stop the bridge before running the
 test harness** (Ctrl+C in the terminal where you started it, or close
 the dev surface tab if you spawned it from there). The COM port is
