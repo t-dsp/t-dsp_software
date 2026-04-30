@@ -77,6 +77,7 @@
 #include "Tac5212Panel.h"
 #include "DexedSink.h"
 #include "DexedVoiceBank.h"
+#include "osc/X32FaderLaw.h"
 
 // ============================================================================
 // Hardware constants
@@ -217,10 +218,13 @@ AudioConnection_F32  c_synthbusR_mix  (g_synthBusR,   0, mixR,          1);
 // Mute-by-default for ch5/ch6 because the on-board PDM mics are LIVE
 // the moment their channels are powered — we don't want unintended
 // monitoring at boot. Dev surface unmutes via /ch/05/mix/on 1.
-static float g_chFader[7]    = {0.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+//
+// Faders default to 0.75 — that's X32 unity (0 dB) under the
+// 4-segment fader law; 1.0 would mean +10 dB and slam the DAC.
+static float g_chFader[7]    = {0.0f, 0.75f, 0.75f, 0.75f, 0.75f, 0.75f, 0.75f};
 static bool  g_chOn[7]       = {false, true, true, true, true, false, false};
-static float g_mainFaderL    = 1.0f;
-static float g_mainFaderR    = 1.0f;
+static float g_mainFaderL    = 0.75f;
+static float g_mainFaderR    = 0.75f;
 static bool  g_mainOn        = true;
 
 // Playback hostvol — Windows speaker slider, USB FU 0x31. Engaged by
@@ -260,9 +264,36 @@ static int   g_dexedVoice  = 0;
 
 // Synth-bus group fader — what the dev surface's Mixer "synth" strip
 // drives via /synth/bus/volume + /synth/bus/on. Sits downstream of
-// every per-synth volume and upstream of the mix bus.
-static float g_synthBusVolume = 1.0f;
+// every per-synth volume and upstream of the mix bus. Defaults to
+// X32 unity (0.75 = 0 dB).
+static float g_synthBusVolume = 0.75f;
 static bool  g_synthBusOn     = true;
+
+// Stereo-link state — global config, X32 convention. Index 0 = pair
+// (1,2), index 1 = pair (3,4), index 2 = pair (5,6). Set via
+// /config/chlink/{1-2,3-4,5-6}; when on, server-side mirrors writes
+// across the linked pair (see mirrorPartner / linkApplyChannelFader
+// below). Not per-channel state — link is a property of the pair.
+static bool g_chLink[3] = {false, false, false};
+
+// If `ch` is the L or R member of a currently-linked pair, returns the
+// partner channel number; otherwise 0. Pair (1,2) is index 0, pair
+// (3,4) is index 1, pair (5,6) is index 2.
+static int linkPartner(int ch) {
+    if (ch < 1 || ch > 6) return 0;
+    int idx = (ch - 1) / 2;        // pair index 0..2
+    if (!g_chLink[idx]) return 0;
+    return (ch & 1) ? ch + 1 : ch - 1;  // odd -> +1, even -> -1
+}
+
+// Map a /config/chlink/N-M address to its g_chLink index. Returns -1
+// for an unrecognized pair token.
+static int chlinkPairIndex(const char *pair) {
+    if (strcmp(pair, "1-2") == 0) return 0;
+    if (strcmp(pair, "3-4") == 0) return 1;
+    if (strcmp(pair, "5-6") == 0) return 2;
+    return -1;
+}
 
 // ============================================================================
 // Control plane — codec driver + OSC dispatcher + dev-surface transport
@@ -391,17 +422,24 @@ static ChMap chToMix(int ch) {
     }
 }
 
+// Channel fader -> linear gain via X32 4-segment fader law. The fader
+// values stored in g_chFader[] are in 0..1 X32 form (already snapped to
+// the 1024-step grid by the OSC handler); converting to linear gain is
+// the chip's job.
 static void applyChannelFader(int ch) {
     if (ch < 1 || ch >= (int)(sizeof(g_chOn) / sizeof(g_chOn[0]))) return;
     ChMap m = chToMix(ch);
     if (!m.mix) return;  // channel reserved for a future audio path
-    const float g = g_chOn[ch] ? g_chFader[ch] : 0.0f;
+    const float g = g_chOn[ch] ? tdsp::x32::faderToLinear(g_chFader[ch]) : 0.0f;
     m.mix->gain(m.slot, g);
 }
 
+// Main fader -> linear gain via X32 fader law. Same convention as the
+// channel fader: g_mainFaderL/R are X32-shape 0..1 floats; conversion
+// to linear gain happens here.
 static void applyMain() {
-    const float gL = g_mainOn ? g_mainFaderL : 0.0f;
-    const float gR = g_mainOn ? g_mainFaderR : 0.0f;
+    const float gL = g_mainOn ? tdsp::x32::faderToLinear(g_mainFaderL) : 0.0f;
+    const float gR = g_mainOn ? tdsp::x32::faderToLinear(g_mainFaderR) : 0.0f;
     mainAmpL.setGain(gL);
     mainAmpR.setGain(gR);
 }
@@ -450,16 +488,15 @@ static void pollHostVolume() {
     g_transport.sendBundle(reply);
 }
 
-// Dexed gain — multiplies stored volume by the on-flag. Used by both
-// /synth/dexed/volume and /synth/dexed/on.
+// Dexed gain — X32 fader law applied to g_dexedVolume (0..1 fader form),
+// gated by the per-engine on/off flag. The /synth/dexed/mix/fader leaf
+// stores the fader; we convert to linear here.
 static void applyDexedGain() {
-    g_dexedGain.setGain(g_dexedOn ? g_dexedVolume : 0.0f);
+    g_dexedGain.setGain(g_dexedOn ? tdsp::x32::faderToLinear(g_dexedVolume) : 0.0f);
 }
 
 static void applyDexedVolume(float v) {
-    if (v < 0.0f) v = 0.0f;
-    if (v > 1.0f) v = 1.0f;
-    g_dexedVolume = v;
+    g_dexedVolume = tdsp::x32::quantizeFader(v);
     applyDexedGain();
 }
 
@@ -468,10 +505,11 @@ static void applyDexedOn(bool on) {
     applyDexedGain();
 }
 
-// Synth-bus group fader. Multiplies through both sides; on=false
-// holds it at 0 without disturbing the stored volume.
+// Synth-bus group fader. X32 fader law applied to g_synthBusVolume.
+// on=false holds the bus at 0 without disturbing the stored fader value
+// — toggle returns the bus to its previous level.
 static void applySynthBusGain() {
-    const float g = g_synthBusOn ? g_synthBusVolume : 0.0f;
+    const float g = g_synthBusOn ? tdsp::x32::faderToLinear(g_synthBusVolume) : 0.0f;
     g_synthBusL.setGain(g);
     g_synthBusR.setGain(g);
 }
@@ -562,6 +600,11 @@ static void broadcastSnapshot(OSCBundle &reply) {
             reply.add(mm);
         }
     }
+
+    // Stereo-link state — pairs (1,2), (3,4), (5,6).
+    { OSCMessage m("/config/chlink/1-2"); m.add((int)(g_chLink[0] ? 1 : 0)); reply.add(m); }
+    { OSCMessage m("/config/chlink/3-4"); m.add((int)(g_chLink[1] ? 1 : 0)); reply.add(m); }
+    { OSCMessage m("/config/chlink/5-6"); m.add((int)(g_chLink[2] ? 1 : 0)); reply.add(m); }
 
     // Main bus.
     { OSCMessage m("/main/st/mix/faderL"); m.add(g_mainFaderL); reply.add(m); }
@@ -796,42 +839,89 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
     // ADC6140 is wired.
     constexpr int kMaxChannel = 6;
 
-    // ---- /ch/NN/mix/fader f ----
-    {
-        int ch = parseChannelN(address, "/mix/fader");
-        if (ch >= 1 && ch <= kMaxChannel) {
+    // ---- /config/chlink/N-M i ---- (X32 stereo-link convention)
+    //
+    // Toggling link-on does NOT retroactively mirror current values —
+    // it only affects subsequent writes (X32 OSC PDF, p. 25). The echo
+    // is just the stored flag.
+    if (strncmp(address, "/config/chlink/", 15) == 0) {
+        int idx = chlinkPairIndex(address + 15);
+        if (idx >= 0) {
             OSCBundle reply;
-            if (msg.size() > 0 && msg.isFloat(0)) {
-                float v = msg.getFloat(0);
-                if (v < 0.0f) v = 0.0f;
-                if (v > 1.0f) v = 1.0f;
-                g_chFader[ch] = v;
-                applyChannelFader(ch);
+            if (msg.size() > 0 && msg.isInt(0)) {
+                g_chLink[idx] = msg.getInt(0) != 0;
             }
             char buf[32];
-            snprintf(buf, sizeof(buf), "/ch/%02d/mix/fader", ch);
+            snprintf(buf, sizeof(buf), "/config/chlink/%s", address + 15);
             OSCMessage echo(buf);
-            echo.add(g_chFader[ch]);
+            echo.add((int)(g_chLink[idx] ? 1 : 0));
             reply.add(echo);
             g_transport.sendBundle(reply);
             return;
         }
     }
 
-    // ---- /ch/NN/mix/on i ----
+    // ---- /ch/NN/mix/fader f ----
+    //
+    // Input is X32-shape 0..1 fader value. We snap to the 1024-step
+    // grid before applying so the echo reports the value the audio
+    // graph is actually using (clients can't tell their float diverged
+    // from the chip's quantization step).
+    //
+    // Stereo-link mirror: if /config/chlink/N-M is on for this pair,
+    // the partner channel gets the same write applied + echoed back
+    // server-side. Both echoes ride in the same reply bundle so the
+    // dev surface sees them atomically.
+    {
+        int ch = parseChannelN(address, "/mix/fader");
+        if (ch >= 1 && ch <= kMaxChannel) {
+            OSCBundle reply;
+            if (msg.size() > 0 && msg.isFloat(0)) {
+                float v = tdsp::x32::quantizeFader(msg.getFloat(0));
+                g_chFader[ch] = v;
+                applyChannelFader(ch);
+                int partner = linkPartner(ch);
+                if (partner > 0) {
+                    g_chFader[partner] = v;
+                    applyChannelFader(partner);
+                }
+            }
+            char buf[32];
+            snprintf(buf, sizeof(buf), "/ch/%02d/mix/fader", ch);
+            OSCMessage echo(buf); echo.add(g_chFader[ch]); reply.add(echo);
+            int partner = linkPartner(ch);
+            if (partner > 0) {
+                snprintf(buf, sizeof(buf), "/ch/%02d/mix/fader", partner);
+                OSCMessage echo2(buf); echo2.add(g_chFader[partner]); reply.add(echo2);
+            }
+            g_transport.sendBundle(reply);
+            return;
+        }
+    }
+
+    // ---- /ch/NN/mix/on i ---- (mute, mirrored across linked pair)
     {
         int ch = parseChannelN(address, "/mix/on");
         if (ch >= 1 && ch <= kMaxChannel) {
             OSCBundle reply;
             if (msg.size() > 0 && msg.isInt(0)) {
-                g_chOn[ch] = msg.getInt(0) != 0;
+                bool on = msg.getInt(0) != 0;
+                g_chOn[ch] = on;
                 applyChannelFader(ch);
+                int partner = linkPartner(ch);
+                if (partner > 0) {
+                    g_chOn[partner] = on;
+                    applyChannelFader(partner);
+                }
             }
             char buf[32];
             snprintf(buf, sizeof(buf), "/ch/%02d/mix/on", ch);
-            OSCMessage echo(buf);
-            echo.add((int)(g_chOn[ch] ? 1 : 0));
-            reply.add(echo);
+            OSCMessage echo(buf); echo.add((int)(g_chOn[ch] ? 1 : 0)); reply.add(echo);
+            int partner = linkPartner(ch);
+            if (partner > 0) {
+                snprintf(buf, sizeof(buf), "/ch/%02d/mix/on", partner);
+                OSCMessage echo2(buf); echo2.add((int)(g_chOn[partner] ? 1 : 0)); reply.add(echo2);
+            }
             g_transport.sendBundle(reply);
             return;
         }
@@ -841,10 +931,7 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
     if (strcmp(address, "/main/st/mix/faderL") == 0) {
         OSCBundle reply;
         if (msg.size() > 0 && msg.isFloat(0)) {
-            float v = msg.getFloat(0);
-            if (v < 0.0f) v = 0.0f;
-            if (v > 1.0f) v = 1.0f;
-            g_mainFaderL = v;
+            g_mainFaderL = tdsp::x32::quantizeFader(msg.getFloat(0));
             applyMain();
         }
         OSCMessage echo("/main/st/mix/faderL"); echo.add(g_mainFaderL); reply.add(echo);
@@ -854,10 +941,7 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
     if (strcmp(address, "/main/st/mix/faderR") == 0) {
         OSCBundle reply;
         if (msg.size() > 0 && msg.isFloat(0)) {
-            float v = msg.getFloat(0);
-            if (v < 0.0f) v = 0.0f;
-            if (v > 1.0f) v = 1.0f;
-            g_mainFaderR = v;
+            g_mainFaderR = tdsp::x32::quantizeFader(msg.getFloat(0));
             applyMain();
         }
         OSCMessage echo("/main/st/mix/faderR"); echo.add(g_mainFaderR); reply.add(echo);
@@ -888,14 +972,11 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
-    // ---- /synth/bus/volume f ----  (mixer's "synth" strip)
+    // ---- /synth/bus/volume f ----  (mixer's "synth" strip; quantized via X32 fader law)
     if (strcmp(address, "/synth/bus/volume") == 0) {
         OSCBundle reply;
         if (msg.size() > 0 && msg.isFloat(0)) {
-            float v = msg.getFloat(0);
-            if (v < 0.0f) v = 0.0f;
-            if (v > 1.0f) v = 1.0f;
-            g_synthBusVolume = v;
+            g_synthBusVolume = tdsp::x32::quantizeFader(msg.getFloat(0));
             applySynthBusGain();
         }
         OSCMessage echo("/synth/bus/volume"); echo.add(g_synthBusVolume); reply.add(echo);
