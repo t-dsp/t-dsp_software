@@ -543,8 +543,8 @@ static void pollCaptureHostVolume() {
     if (!changed) return;
 
     OSCBundle reply;
-    { OSCMessage m("/usb/cap/hostvol/value"); m.add(g_capHostvolValue);          reply.add(m); }
-    { OSCMessage m("/usb/cap/hostvol/mute");  m.add((int)(g_capHostvolMute?1:0)); reply.add(m); }
+    { OSCMessage m("/-cap/hostvol/value"); m.add(g_capHostvolValue);          reply.add(m); }
+    { OSCMessage m("/-cap/hostvol/mute");  m.add((int)(g_capHostvolMute?1:0)); reply.add(m); }
     g_transport.sendBundle(reply);
 }
 
@@ -611,28 +611,32 @@ static void broadcastSnapshot(OSCBundle &reply) {
     { OSCMessage m("/main/st/mix/faderR"); m.add(g_mainFaderR); reply.add(m); }
     { OSCMessage m("/main/st/mix/on");     m.add((int)(g_mainOn ? 1 : 0)); reply.add(m); }
 
-    // Host volume — playback (FU 0x31) and capture (FU 0x30).
-    { OSCMessage m("/main/st/hostvol/enable"); m.add((int)(g_hostvolEnable ? 1 : 0)); reply.add(m); }
-    { OSCMessage m("/main/st/hostvol/value");  m.add(g_hostvolValue);                 reply.add(m); }
-    { OSCMessage m("/usb/cap/hostvol/value");  m.add(g_capHostvolValue);              reply.add(m); }
-    { OSCMessage m("/usb/cap/hostvol/mute");   m.add((int)(g_capHostvolMute ? 1 : 0)); reply.add(m); }
+    // Host volume — playback (FU 0x31, /main/st/hostvol) and capture
+    // (FU 0x30, /-cap/hostvol housekeeping branch).
+    { OSCMessage m("/main/st/hostvol/on");    m.add((int)(g_hostvolEnable ? 1 : 0)); reply.add(m); }
+    { OSCMessage m("/main/st/hostvol/value"); m.add(g_hostvolValue);                 reply.add(m); }
+    { OSCMessage m("/-cap/hostvol/value");    m.add(g_capHostvolValue);              reply.add(m); }
+    { OSCMessage m("/-cap/hostvol/mute");     m.add((int)(g_capHostvolMute ? 1 : 0)); reply.add(m); }
 
-    // Processing tab.
-    { OSCMessage m("/proc/shelf/enable"); m.add((int)(g_procShelfEnable ? 1 : 0)); reply.add(m); }
-    { OSCMessage m("/proc/shelf/freq");   m.add(g_procShelfFreqHz);                reply.add(m); }
-    { OSCMessage m("/proc/shelf/gain");   m.add(g_procShelfGainDb);                reply.add(m); }
+    // Master EQ — band 1 mapped to today's high-shelf processing
+    // biquad. Bands 2..4 reserved per OSC.md.
+    { OSCMessage m("/main/st/eq/on");    m.add((int)(g_procShelfEnable ? 1 : 0)); reply.add(m); }
+    { OSCMessage m("/main/st/eq/1/type"); m.add((int)4);              reply.add(m); }  // HShlv
+    { OSCMessage m("/main/st/eq/1/f");    m.add(g_procShelfFreqHz);   reply.add(m); }
+    { OSCMessage m("/main/st/eq/1/g");    m.add(g_procShelfGainDb);   reply.add(m); }
+    { OSCMessage m("/main/st/eq/1/q");    m.add(0.707f);              reply.add(m); }
 
     // Arp.
     { OSCMessage m("/arp/on"); m.add((int)(g_arpFilter.enabled() ? 1 : 0)); reply.add(m); }
 
     // Synth bus (mixer's "synth" strip).
-    { OSCMessage m("/synth/bus/volume"); m.add(g_synthBusVolume);            reply.add(m); }
-    { OSCMessage m("/synth/bus/on");     m.add((int)(g_synthBusOn ? 1 : 0)); reply.add(m); }
+    { OSCMessage m("/synth/bus/mix/fader"); m.add(g_synthBusVolume);            reply.add(m); }
+    { OSCMessage m("/synth/bus/mix/on");    m.add((int)(g_synthBusOn ? 1 : 0)); reply.add(m); }
 
     // Synth — Dexed.
-    { OSCMessage m("/synth/dexed/volume");  m.add(g_dexedVolume);                 reply.add(m); }
-    { OSCMessage m("/synth/dexed/on");      m.add((int)(g_dexedOn ? 1 : 0));      reply.add(m); }
-    { OSCMessage m("/synth/dexed/midi/ch"); m.add((int)g_dexedSink.listenChannel()); reply.add(m); }
+    { OSCMessage m("/synth/dexed/mix/fader"); m.add(g_dexedVolume);                 reply.add(m); }
+    { OSCMessage m("/synth/dexed/mix/on");    m.add((int)(g_dexedOn ? 1 : 0));      reply.add(m); }
+    { OSCMessage m("/synth/dexed/midi/ch");   m.add((int)g_dexedSink.listenChannel()); reply.add(m); }
     {
         char name[tdsp::dexed::kVoiceNameBufBytes] = {0};
         tdsp::dexed::copyVoiceName(g_dexedBank, g_dexedVoice, name, sizeof(name));
@@ -823,12 +827,25 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
-    // ---- /info ----
+    // ---- /info ---- (X32-shape: product, phase, model, fw version)
     if (strcmp(address, "/info") == 0) {
         OSCBundle reply;
         OSCMessage m("/info");
         m.add("t-dsp_f32_audio_shield");
-        m.add("phase2");
+        m.add("phase3");
+        m.add("TAC5212-Teensy41");
+        m.add("fw 0.2.0");
+        reply.add(m);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    // ---- /status ---- (state, transport, protocol version)
+    if (strcmp(address, "/status") == 0) {
+        OSCBundle reply;
+        OSCMessage m("/status");
+        m.add("active");
+        m.add("USB:CDC");
+        m.add("1.0.0");
         reply.add(m);
         g_transport.sendBundle(reply);
         return;
@@ -959,38 +976,38 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
-    // ---- /midi/viz/enable i ----
-    if (strcmp(address, "/midi/viz/enable") == 0) {
+    // ---- /midi/viz/on i ----  (engage /midi/note broadcast)
+    if (strcmp(address, "/midi/viz/on") == 0) {
         OSCBundle reply;
         if (msg.size() > 0 && msg.isInt(0)) {
             g_midiVizSink.enable(msg.getInt(0) != 0);
         }
-        OSCMessage echo("/midi/viz/enable");
+        OSCMessage echo("/midi/viz/on");
         echo.add((int)(g_midiVizSink.enabled() ? 1 : 0));
         reply.add(echo);
         g_transport.sendBundle(reply);
         return;
     }
 
-    // ---- /synth/bus/volume f ----  (mixer's "synth" strip; quantized via X32 fader law)
-    if (strcmp(address, "/synth/bus/volume") == 0) {
+    // ---- /synth/bus/mix/fader f ----  (mixer's "synth" strip; X32 law)
+    if (strcmp(address, "/synth/bus/mix/fader") == 0) {
         OSCBundle reply;
         if (msg.size() > 0 && msg.isFloat(0)) {
             g_synthBusVolume = tdsp::x32::quantizeFader(msg.getFloat(0));
             applySynthBusGain();
         }
-        OSCMessage echo("/synth/bus/volume"); echo.add(g_synthBusVolume); reply.add(echo);
+        OSCMessage echo("/synth/bus/mix/fader"); echo.add(g_synthBusVolume); reply.add(echo);
         g_transport.sendBundle(reply);
         return;
     }
-    // ---- /synth/bus/on i ----
-    if (strcmp(address, "/synth/bus/on") == 0) {
+    // ---- /synth/bus/mix/on i ----
+    if (strcmp(address, "/synth/bus/mix/on") == 0) {
         OSCBundle reply;
         if (msg.size() > 0 && msg.isInt(0)) {
             g_synthBusOn = msg.getInt(0) != 0;
             applySynthBusGain();
         }
-        OSCMessage echo("/synth/bus/on"); echo.add((int)(g_synthBusOn ? 1 : 0)); reply.add(echo);
+        OSCMessage echo("/synth/bus/mix/on"); echo.add((int)(g_synthBusOn ? 1 : 0)); reply.add(echo);
         g_transport.sendBundle(reply);
         return;
     }
@@ -1037,19 +1054,19 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
-    // ---- /synth/dexed/volume f ----
-    if (strcmp(address, "/synth/dexed/volume") == 0) {
+    // ---- /synth/dexed/mix/fader f ---- (X32-shape engine fader)
+    if (strcmp(address, "/synth/dexed/mix/fader") == 0) {
         OSCBundle reply;
         if (msg.size() > 0 && msg.isFloat(0)) applyDexedVolume(msg.getFloat(0));
-        OSCMessage echo("/synth/dexed/volume"); echo.add(g_dexedVolume); reply.add(echo);
+        OSCMessage echo("/synth/dexed/mix/fader"); echo.add(g_dexedVolume); reply.add(echo);
         g_transport.sendBundle(reply);
         return;
     }
-    // ---- /synth/dexed/on i ----
-    if (strcmp(address, "/synth/dexed/on") == 0) {
+    // ---- /synth/dexed/mix/on i ----
+    if (strcmp(address, "/synth/dexed/mix/on") == 0) {
         OSCBundle reply;
         if (msg.size() > 0 && msg.isInt(0)) applyDexedOn(msg.getInt(0) != 0);
-        OSCMessage echo("/synth/dexed/on"); echo.add((int)(g_dexedOn ? 1 : 0)); reply.add(echo);
+        OSCMessage echo("/synth/dexed/mix/on"); echo.add((int)(g_dexedOn ? 1 : 0)); reply.add(echo);
         g_transport.sendBundle(reply);
         return;
     }
@@ -1099,14 +1116,14 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
-    // ---- /main/st/hostvol/enable, /main/st/hostvol/value ----
-    if (strcmp(address, "/main/st/hostvol/enable") == 0) {
+    // ---- /main/st/hostvol/on, /main/st/hostvol/value ----
+    if (strcmp(address, "/main/st/hostvol/on") == 0) {
         OSCBundle reply;
         if (msg.size() > 0 && msg.isInt(0)) {
             g_hostvolEnable = msg.getInt(0) != 0;
             applyHostvol();
         }
-        OSCMessage echo("/main/st/hostvol/enable");
+        OSCMessage echo("/main/st/hostvol/on");
         echo.add((int)(g_hostvolEnable ? 1 : 0));
         reply.add(echo);
         g_transport.sendBundle(reply);
@@ -1128,17 +1145,22 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
-    // ---- /proc/shelf/enable, /freq, /gain ----
-    if (strcmp(address, "/proc/shelf/enable") == 0) {
+    // ---- /main/st/eq/on, /eq/1/{type,f,g,q} ----
+    //
+    // X32 main bus EQ namespace. Today only band 1 is wired (high-shelf,
+    // matches the production "Dull" preset 3 kHz / -12 dB). Bands 2..4
+    // are reserved by the spec and would be added behind the same biquad
+    // stage with .setCoefficients on additional stages.
+    if (strcmp(address, "/main/st/eq/on") == 0) {
         OSCBundle reply;
         if (msg.size() > 0 && msg.isInt(0)) {
             g_procShelfEnable = msg.getInt(0) != 0;
             applyProcShelf();
         }
-        OSCMessage echo("/proc/shelf/enable"); echo.add((int)(g_procShelfEnable ? 1 : 0));
+        OSCMessage echo("/main/st/eq/on"); echo.add((int)(g_procShelfEnable ? 1 : 0));
         reply.add(echo); g_transport.sendBundle(reply); return;
     }
-    if (strcmp(address, "/proc/shelf/freq") == 0) {
+    if (strcmp(address, "/main/st/eq/1/f") == 0) {
         OSCBundle reply;
         if (msg.size() > 0 && msg.isFloat(0)) {
             float f = msg.getFloat(0);
@@ -1147,20 +1169,150 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
             g_procShelfFreqHz = f;
             applyProcShelf();
         }
-        OSCMessage echo("/proc/shelf/freq"); echo.add(g_procShelfFreqHz);
+        OSCMessage echo("/main/st/eq/1/f"); echo.add(g_procShelfFreqHz);
         reply.add(echo); g_transport.sendBundle(reply); return;
     }
-    if (strcmp(address, "/proc/shelf/gain") == 0) {
+    if (strcmp(address, "/main/st/eq/1/g") == 0) {
         OSCBundle reply;
         if (msg.size() > 0 && msg.isFloat(0)) {
             float g = msg.getFloat(0);
-            if (g < -24.0f) g = -24.0f;
-            if (g >  12.0f) g =  12.0f;
+            if (g < -15.0f) g = -15.0f;     // X32 EQ band gain range
+            if (g >  15.0f) g =  15.0f;
             g_procShelfGainDb = g;
             applyProcShelf();
         }
-        OSCMessage echo("/proc/shelf/gain"); echo.add(g_procShelfGainDb);
+        OSCMessage echo("/main/st/eq/1/g"); echo.add(g_procShelfGainDb);
         reply.add(echo); g_transport.sendBundle(reply); return;
+    }
+    // /main/st/eq/1/type and /q are accepted (write echoed) but pinned
+    // to high-shelf (type 4) and Q ~0.7 (slope=1.0 in setHighShelf) for
+    // now — the full PEQ/LCut/etc tree lands when more bands are added.
+    if (strcmp(address, "/main/st/eq/1/type") == 0) {
+        OSCBundle reply;
+        OSCMessage echo("/main/st/eq/1/type"); echo.add((int)4);  // 4 = HShlv (X32 enum)
+        reply.add(echo); g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/main/st/eq/1/q") == 0) {
+        OSCBundle reply;
+        OSCMessage echo("/main/st/eq/1/q"); echo.add(0.707f);
+        reply.add(echo); g_transport.sendBundle(reply); return;
+    }
+
+    // ---- /-cap/hostvol/{value,mute} ---- (read-only echo)
+    if (strcmp(address, "/-cap/hostvol/value") == 0) {
+        OSCBundle reply;
+        OSCMessage echo("/-cap/hostvol/value"); echo.add(g_capHostvolValue);
+        reply.add(echo); g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/-cap/hostvol/mute") == 0) {
+        OSCBundle reply;
+        OSCMessage echo("/-cap/hostvol/mute"); echo.add((int)(g_capHostvolMute ? 1 : 0));
+        reply.add(echo); g_transport.sendBundle(reply); return;
+    }
+
+    // ---- /-stat/* ---- (system status, read-only)
+    //
+    // CPU usage and audio block-pool stats refresh every read; the
+    // dev surface should /subscribe for streaming or just poll
+    // /-stat/cpu directly. AudioStream::cpu_usage_max returns scaled
+    // percent * 100 — we emit it as a 0..100 float.
+    if (strcmp(address, "/-stat/cpu") == 0) {
+        OSCBundle reply;
+        OSCMessage echo("/-stat/cpu");
+        echo.add(AudioProcessorUsageMax());  // float, percent 0..100
+        reply.add(echo); g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/-stat/audio/blocks/f32") == 0) {
+        OSCBundle reply;
+        OSCMessage echo("/-stat/audio/blocks/f32");
+        echo.add((int)AudioStream_F32::f32_memory_used);
+        echo.add((int)AudioStream_F32::f32_memory_used_max);
+        reply.add(echo); g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/-stat/audio/blocks/i16") == 0) {
+        OSCBundle reply;
+        OSCMessage echo("/-stat/audio/blocks/i16");
+        echo.add((int)AudioStream::memory_used);
+        echo.add((int)AudioStream::memory_used_max);
+        reply.add(echo); g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/-stat/fw/version") == 0) {
+        OSCBundle reply;
+        OSCMessage echo("/-stat/fw/version"); echo.add("0.2.0");
+        reply.add(echo); g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/-stat/fw/phase") == 0) {
+        OSCBundle reply;
+        OSCMessage echo("/-stat/fw/phase"); echo.add("phase3");
+        reply.add(echo); g_transport.sendBundle(reply); return;
+    }
+    if (strcmp(address, "/-stat/boot/timeMs") == 0) {
+        OSCBundle reply;
+        OSCMessage echo("/-stat/boot/timeMs"); echo.add((int)millis());
+        reply.add(echo); g_transport.sendBundle(reply); return;
+    }
+
+    // ---- /xremote, /subscribe, /renew, /unsubscribe ----
+    //
+    // X32 subscription primitives. On this hardware there's only one
+    // CDC client at a time, so every echo already goes to that client
+    // — these accept-stubs let X32-ecosystem tools (Mixing Station,
+    // X32 Edit, the test harness) connect and complete the subscription
+    // dance even though no per-rate / per-TTL bookkeeping is needed.
+    // When we eventually grow multi-client (UDP) transport, the same
+    // entry points get a real subscriber-list backing.
+    if (strcmp(address, "/xremote") == 0 ||
+        strcmp(address, "/subscribe") == 0 ||
+        strcmp(address, "/renew") == 0 ||
+        strcmp(address, "/unsubscribe") == 0) {
+        return;  // accept silently; firmware always pushes to the connected client
+    }
+
+    // ---- /node ,s "<path>" ---- (X32 group read)
+    //
+    // Returns one packed text line per subtree, ending in '\n'. The
+    // dev surface uses this on connect to populate the UI in a few
+    // round-trips instead of issuing per-leaf reads.
+    //
+    // Currently implemented for the channel strip subtrees; other
+    // subtrees fall back to a "(empty)" reply rather than triggering
+    // /snapshot. The dev surface should mix /node for known subtrees
+    // with /snapshot for the still-unported ones.
+    if (strcmp(address, "/node") == 0 && msg.size() > 0 && msg.isString(0)) {
+        char path[64] = {0};
+        msg.getString(0, path, sizeof(path) - 1);
+        char line[256] = {0};
+        // "/ch/01" => "ch01 fader-value on-flag\n"  (matches X32 packed form)
+        if (strncmp(path, "ch/", 3) == 0 && strlen(path) >= 5) {
+            int ch = (path[3] - '0') * 10 + (path[4] - '0');
+            if (ch >= 1 && ch <= 6) {
+                snprintf(line, sizeof(line),
+                         "/ch/%02d %.4f %d\n",
+                         ch, g_chFader[ch], g_chOn[ch] ? 1 : 0);
+            }
+        } else if (strcmp(path, "main/st") == 0) {
+            snprintf(line, sizeof(line),
+                     "/main/st %.4f %.4f %d %.4f %d\n",
+                     g_mainFaderL, g_mainFaderR, g_mainOn ? 1 : 0,
+                     g_hostvolValue, g_hostvolEnable ? 1 : 0);
+        } else if (strcmp(path, "synth/dexed") == 0) {
+            char vname[tdsp::dexed::kVoiceNameBufBytes] = {0};
+            tdsp::dexed::copyVoiceName(g_dexedBank, g_dexedVoice, vname, sizeof(vname));
+            snprintf(line, sizeof(line),
+                     "/synth/dexed %.4f %d %d %d \"%s\"\n",
+                     g_dexedVolume, g_dexedOn ? 1 : 0, g_dexedBank, g_dexedVoice, vname);
+        } else if (strcmp(path, "synth/bus") == 0) {
+            snprintf(line, sizeof(line),
+                     "/synth/bus %.4f %d\n",
+                     g_synthBusVolume, g_synthBusOn ? 1 : 0);
+        } else {
+            snprintf(line, sizeof(line), "/%s\n", path);  // empty subtree
+        }
+        OSCBundle reply;
+        OSCMessage m("/node"); m.add(line);
+        reply.add(m);
+        g_transport.sendBundle(reply);
+        return;
     }
 
     // Everything else: delegate to OscDispatcher. With g_model set but no
