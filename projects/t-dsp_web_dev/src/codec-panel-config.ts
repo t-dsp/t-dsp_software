@@ -35,6 +35,15 @@ export type Control =
   | { kind: 'action'; label: string; help?: string; address: string }
   | { kind: 'range'; label: string; help?: string; address: string;
       min: number; max: number; step: number; unit: string }
+  // Radio group that fans out each option to one or more OSC writes. Used
+  // for "quick configuration" presets that touch multiple leaves at once
+  // (e.g. set OUT1 and OUT2 to the same driver mode in one click). The
+  // selected option is determined by listening to every address it writes:
+  // an option is "current" only when all of its writes match the live
+  // values. If the underlying leaves are out of sync (or were set to a
+  // value not represented here), no option is selected.
+  | { kind: 'radio'; label: string; help?: string;
+      options: { label: string; writes: { address: string; value: string }[] }[] }
   | { kind: 'biquad'; label: string; help?: string;
       // Address base: per-band root, e.g. /codec/tac5212/dac/1/bq/2.
       // Widget sends `<base>/design s f f f` on slider change and
@@ -333,6 +342,18 @@ export const tac5212Panel: Tab[] = [
             help: 'SW_RESET only — leaves the chip in raw POR state (silent). Use Initialize to bring audio back.' },
           { kind: 'action', label: 'Initialize', address: '/codec/tac5212/init',
             help: 'Re-runs the full boot bring-up: reset, serial format, slot mapping, ADC/DAC config, power-up, unmute. Recovers from a stuck state without a power cycle.' },
+          { kind: 'radio',  label: 'Output',
+            help: 'Headphone = 16Ω driver on OUT1/OUT2 jack (TRS). Line Out = single-ended line driver, signal on tip referenced to sleeve — feed an external amp or RCA via a 3.5mm-RCA pigtail. Sets both OUT1 and OUT2.',
+            options: [
+              { label: 'Headphone', writes: [
+                { address: '/codec/tac5212/out/1/mode', value: 'hp_driver' },
+                { address: '/codec/tac5212/out/2/mode', value: 'hp_driver' },
+              ]},
+              { label: 'Line Out', writes: [
+                { address: '/codec/tac5212/out/1/mode', value: 'se_line' },
+                { address: '/codec/tac5212/out/2/mode', value: 'se_line' },
+              ]},
+            ] },
           { kind: 'toggle', label: 'Wake',       address: '/codec/tac5212/wake' },
           { kind: 'action', label: 'Info',       address: '/codec/tac5212/info' },
           { kind: 'action', label: 'Status',     address: '/codec/tac5212/status' },

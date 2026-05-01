@@ -37,12 +37,8 @@ import { synthSlotPicker } from './ui/synth-slot-picker';
 import { mpeSlotPanel } from './ui/mpe-slot-panel';
 import { neuroSlotPanel } from './ui/neuro-slot-panel';
 import { acidSlotPanel } from './ui/acid-slot-panel';
-// NOTE: supersaw-panel / chip-panel are intentionally not imported
-// here — each of those engines is being rebuilt as its own slot via
-// the parallel agent task in planning/synth-slot-rebuild/. Each agent
-// re-adds the import for their engine when they wire its panel into
-// the slot picker. Neuro lands at slot 4 via neuro-slot-panel; Acid
-// lands at slot 5 via acid-slot-panel.
+import { supersawSlotPanel } from './ui/supersaw-slot-panel';
+import { chipSlotPanel } from './ui/chip-slot-panel';
 import { processingPanel } from './ui/processing-panel';
 import { fxPanel } from './ui/fx-panel';
 import { looperPanel } from './ui/looper-panel';
@@ -445,11 +441,13 @@ synthSection.style.display = 'none';
 const synthContent = document.createElement('div');
 synthContent.className = 'synth-content';
 
-const dexedPanelEl   = dexedPanel(state, dispatcher);
-const samplerPanelEl = samplerPanel(state, dispatcher);
-const mpePanelEl     = mpeSlotPanel(state, dispatcher);
-const neuroPanelEl   = neuroSlotPanel(state, dispatcher);
-const acidPanelEl    = acidSlotPanel(state, dispatcher);
+const dexedPanelEl    = dexedPanel(state, dispatcher);
+const samplerPanelEl  = samplerPanel(state, dispatcher);
+const mpePanelEl      = mpeSlotPanel(state, dispatcher);
+const neuroPanelEl    = neuroSlotPanel(state, dispatcher);
+const acidPanelEl     = acidSlotPanel(state, dispatcher);
+const supersawPanelEl = supersawSlotPanel(state, dispatcher);
+const chipPanelEl     = chipSlotPanel(state, dispatcher);
 
 // Empty-slot placeholder. Reused for slots 3..7 (the panel just shows
 // which slot is active and a "coming soon" hint). Agents replace this
@@ -469,7 +467,9 @@ samplerPanelEl.style.display = 'none';
 mpePanelEl.style.display = 'none';
 neuroPanelEl.style.display = 'none';
 acidPanelEl.style.display = 'none';
-synthContent.append(dexedPanelEl, samplerPanelEl, mpePanelEl, neuroPanelEl, acidPanelEl, emptySlotPanelEl);
+supersawPanelEl.style.display = 'none';
+chipPanelEl.style.display = 'none';
+synthContent.append(dexedPanelEl, samplerPanelEl, mpePanelEl, neuroPanelEl, acidPanelEl, supersawPanelEl, chipPanelEl, emptySlotPanelEl);
 
 const synthKeyboardDock = document.createElement('div');
 synthKeyboardDock.className = 'synth-keyboard-dock';
@@ -535,7 +535,9 @@ state.synthSlot.active.subscribe((active) => {
   mpePanelEl      .style.display = active === 3 ? '' : 'none';
   neuroPanelEl    .style.display = active === 4 ? '' : 'none';
   acidPanelEl     .style.display = active === 5 ? '' : 'none';
-  emptySlotPanelEl.style.display = (active === 2 || active === 6 || active === 7) ? '' : 'none';
+  supersawPanelEl .style.display = active === 6 ? '' : 'none';
+  chipPanelEl     .style.display = active === 7 ? '' : 'none';
+  emptySlotPanelEl.style.display = (active === 2) ? '' : 'none';
 });
 
 synthSection.append(synthSlotPickerEl, synthContent, synthKeyboardDock);

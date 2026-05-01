@@ -522,6 +522,21 @@ AudioConnection_F32  c_acid_toF32_gain(g_acidToF32,  0, g_acidGain,   0);
 AudioConnection_F32  c_acid_gain_sumL (g_acidGain,   0, g_synthSumLB, 1);
 AudioConnection_F32  c_acid_gain_sumR (g_acidGain,   0, g_synthSumRB, 1);
 
+// --- Slot 7 (Chip) audio graph ---
+//
+// pulse1 / pulse2 / triangle / noise -> 4-into-1 mixer -> ADSR envelope ->
+// I16->F32 bridge -> per-slot mono F32 gain -> dual-mono fan-out into
+// sub-mixer slot 7 (input 3 of the stage-B mixer per side).
+AudioConnection      c_chip_p1_mix   (g_chipPulse1,   0, g_chipMix,    0);
+AudioConnection      c_chip_p2_mix   (g_chipPulse2,   0, g_chipMix,    1);
+AudioConnection      c_chip_tr_mix   (g_chipTriangle, 0, g_chipMix,    2);
+AudioConnection      c_chip_no_mix   (g_chipNoise,    0, g_chipMix,    3);
+AudioConnection      c_chip_mix_env  (g_chipMix,      0, g_chipEnv,    0);
+AudioConnection      c_chip_env_toF32(g_chipEnv,      0, g_chipToF32,  0);
+AudioConnection_F32  c_chip_toF32_gain(g_chipToF32,   0, g_chipGain,   0);
+AudioConnection_F32  c_chip_gain_sumL(g_chipGain,     0, g_synthSumLB, 3);
+AudioConnection_F32  c_chip_gain_sumR(g_chipGain,     0, g_synthSumRB, 3);
+
 // --- Synth sub-mixer chain (8 slots) ---
 //
 // Slots 0..3 sum into g_synthSumLA / g_synthSumRA (slot N -> input N).
@@ -687,9 +702,19 @@ static const tdsp_synth::AcidSlot::AudioContext kAcidCtx{
 };
 tdsp_synth::AcidSlot      g_acidSlot(kAcidCtx);
 
+// Slot 7 — Chip (NES/Gameboy chiptune lead). Wraps the ChipSink
+// instantiated above (g_chipSink), gating its output through g_chipGain
+// based on slot-active state. Engine knobs (pulse duties / detune /
+// triangle+noise levels / voicing / arpeggio / ADSR) round-trip through
+// OSC directly into the sink.
+static const tdsp_synth::ChipSlot::AudioContext kChipCtx{
+    &g_chipSink,
+    &g_chipGain,
+};
+tdsp_synth::ChipSlot      g_chipSlot(kChipCtx);
+
 tdsp_synth::SilentSlot    g_silentSlot2("silent", "(empty)");
 tdsp_synth::SilentSlot    g_silentSlot4("silent", "(empty)");
-tdsp_synth::SilentSlot    g_silentSlot7("silent", "(empty)");
 tdsp_synth::SynthSwitcher g_synthSwitcher;
 
 // Stereo-link state — global config, X32 convention. Index 0 = pair
@@ -1146,6 +1171,25 @@ static void broadcastSnapshot(OSCBundle &reply) {
     { OSCMessage m("/synth/acid/amp_decay");  m.add(g_acidSlot.sink()->ampDecay());             reply.add(m); }
     { OSCMessage m("/synth/acid/accent");     m.add(g_acidSlot.sink()->accent());               reply.add(m); }
     { OSCMessage m("/synth/acid/slide");      m.add(g_acidSlot.sink()->slideMs());              reply.add(m); }
+
+    // Slot 7 — Chip (NES/Gameboy chiptune). Slot housekeeping + every
+    // engine knob the panel exposes; included so a fresh-connect dev
+    // surface populates without per-leaf reads.
+    { OSCMessage m("/synth/chip/mix/fader");     m.add(g_chipSlot.volume());                       reply.add(m); }
+    { OSCMessage m("/synth/chip/mix/on");        m.add((int)(g_chipSlot.on() ? 1 : 0));            reply.add(m); }
+    { OSCMessage m("/synth/chip/midi/ch");       m.add((int)g_chipSlot.listenChannel());           reply.add(m); }
+    { OSCMessage m("/synth/chip/pulse1_duty");   m.add((int)g_chipSlot.sink()->pulse1Duty());      reply.add(m); }
+    { OSCMessage m("/synth/chip/pulse2_duty");   m.add((int)g_chipSlot.sink()->pulse2Duty());      reply.add(m); }
+    { OSCMessage m("/synth/chip/pulse2_detune"); m.add(g_chipSlot.sink()->pulse2Detune());         reply.add(m); }
+    { OSCMessage m("/synth/chip/tri_level");     m.add(g_chipSlot.sink()->triangleLevel());        reply.add(m); }
+    { OSCMessage m("/synth/chip/noise_level");   m.add(g_chipSlot.sink()->noiseLevel());           reply.add(m); }
+    { OSCMessage m("/synth/chip/voicing");       m.add((int)g_chipSlot.sink()->voicing());         reply.add(m); }
+    { OSCMessage m("/synth/chip/arpeggio");      m.add((int)g_chipSlot.sink()->arpeggio());        reply.add(m); }
+    { OSCMessage m("/synth/chip/arp_rate");      m.add(g_chipSlot.sink()->arpRate());              reply.add(m); }
+    { OSCMessage m("/synth/chip/attack");        m.add(g_chipSlot.sink()->attack());               reply.add(m); }
+    { OSCMessage m("/synth/chip/decay");         m.add(g_chipSlot.sink()->decay());                reply.add(m); }
+    { OSCMessage m("/synth/chip/sustain");       m.add(g_chipSlot.sink()->sustain());              reply.add(m); }
+    { OSCMessage m("/synth/chip/release");       m.add(g_chipSlot.sink()->release());              reply.add(m); }
 
     {
         OSCMessage m("/synth/sampler/info");
@@ -2172,6 +2216,89 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
     ACID_FLOAT_HANDLER("/synth/acid/slide",     setSlideMs,      g_acidSlot.sink()->slideMs())
 #undef ACID_FLOAT_HANDLER
 
+    // ---- /synth/chip/* — NES/Gameboy chiptune (slot 7) -------------------
+    //
+    // Read/write/echo pattern. Slot housekeeping (mix/fader, mix/on,
+    // midi/ch) follows the new sampler-style convention; engine knobs
+    // (pulse duty / detune / triangle+noise levels / voicing / arp /
+    // ADSR) round-trip through OSC directly into ChipSink.
+    if (strcmp(address, "/synth/chip/mix/fader") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isFloat(0)) {
+            g_chipSlot.setVolume(msg.getFloat(0));
+        }
+        OSCMessage echo("/synth/chip/mix/fader");
+        echo.add(g_chipSlot.volume());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/chip/mix/on") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            g_chipSlot.setOn(msg.getInt(0) != 0);
+        }
+        OSCMessage echo("/synth/chip/mix/on");
+        echo.add((int)(g_chipSlot.on() ? 1 : 0));
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/chip/midi/ch") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            int ch = msg.getInt(0);
+            if (ch < 0 || ch > 16) ch = 0;
+            g_chipSlot.setListenChannel((uint8_t)ch);
+        }
+        OSCMessage echo("/synth/chip/midi/ch");
+        echo.add((int)g_chipSlot.listenChannel());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    // Engine int-arg setters (clamp inside ChipSink).
+#define CHIP_INT_HANDLER(addr, setFn, getExpr)                            \
+    if (strcmp(address, addr) == 0) {                                     \
+        OSCBundle reply;                                                  \
+        if (msg.size() > 0 && msg.isInt(0)) {                             \
+            g_chipSlot.sink()->setFn((uint8_t)msg.getInt(0));             \
+        }                                                                 \
+        OSCMessage echo(addr);                                            \
+        echo.add((int)(getExpr));                                         \
+        reply.add(echo);                                                  \
+        g_transport.sendBundle(reply);                                    \
+        return;                                                           \
+    }
+    CHIP_INT_HANDLER("/synth/chip/pulse1_duty", setPulse1Duty, g_chipSlot.sink()->pulse1Duty())
+    CHIP_INT_HANDLER("/synth/chip/pulse2_duty", setPulse2Duty, g_chipSlot.sink()->pulse2Duty())
+    CHIP_INT_HANDLER("/synth/chip/voicing",     setVoicing,    g_chipSlot.sink()->voicing())
+    CHIP_INT_HANDLER("/synth/chip/arpeggio",    setArpeggio,   g_chipSlot.sink()->arpeggio())
+#undef CHIP_INT_HANDLER
+
+    // Engine float-arg setters (clamp inside ChipSink).
+#define CHIP_FLOAT_HANDLER(addr, setFn, getExpr)                          \
+    if (strcmp(address, addr) == 0) {                                     \
+        OSCBundle reply;                                                  \
+        if (msg.size() > 0 && msg.isFloat(0)) {                           \
+            g_chipSlot.sink()->setFn(msg.getFloat(0));                    \
+        }                                                                 \
+        OSCMessage echo(addr);                                            \
+        echo.add(getExpr);                                                \
+        reply.add(echo);                                                  \
+        g_transport.sendBundle(reply);                                    \
+        return;                                                           \
+    }
+    CHIP_FLOAT_HANDLER("/synth/chip/pulse2_detune", setPulse2Detune,  g_chipSlot.sink()->pulse2Detune())
+    CHIP_FLOAT_HANDLER("/synth/chip/tri_level",     setTriangleLevel, g_chipSlot.sink()->triangleLevel())
+    CHIP_FLOAT_HANDLER("/synth/chip/noise_level",   setNoiseLevel,    g_chipSlot.sink()->noiseLevel())
+    CHIP_FLOAT_HANDLER("/synth/chip/arp_rate",      setArpRate,       g_chipSlot.sink()->arpRate())
+    CHIP_FLOAT_HANDLER("/synth/chip/attack",        setAttack,        g_chipSlot.sink()->attack())
+    CHIP_FLOAT_HANDLER("/synth/chip/decay",         setDecay,         g_chipSlot.sink()->decay())
+    CHIP_FLOAT_HANDLER("/synth/chip/sustain",       setSustain,       g_chipSlot.sink()->sustain())
+    CHIP_FLOAT_HANDLER("/synth/chip/release",       setRelease,       g_chipSlot.sink()->release())
+#undef CHIP_FLOAT_HANDLER
+
     // ---- /synth/dexed/bank/names ----  (dev surface populates the bank dropdown)
     if (strcmp(address, "/synth/dexed/bank/names") == 0) {
         OSCMessage m("/synth/dexed/bank/names");
@@ -2678,7 +2805,8 @@ void setup() {
     g_acidSlot.begin();
     g_synthSwitcher.setSlot(6, &g_supersawSlot);  // was: &g_silentSlot6
     g_supersawSlot.begin();
-    g_synthSwitcher.setSlot(7, &g_silentSlot7);
+    g_synthSwitcher.setSlot(7, &g_chipSlot);  // was: &g_silentSlot7
+    g_chipSlot.begin();
     g_arpFilter.addDownstream(&g_synthSwitcher);
     g_synthSwitcher.setActive(0);  // Dexed audible at boot
 
@@ -2746,6 +2874,14 @@ void loop() {
     // glide. No-op when the voice is idle and no glide is in flight
     // (early-return inside AcidSink::tick).
     g_acidSlot.tick(millis());
+
+    // Neuro slot: advance portamento glide + LFO. No-op when no key is
+    // held and the LFO is off (early-return inside NeuroSink::tick).
+    g_neuroSink.tick(millis());
+
+    // Chip slot: advance the triangle-voice arpeggiator. No-op when arp
+    // mode is off / no held note (early-return inside ChipSink::tick).
+    g_chipSink.tick(millis());
 
     // 1 Hz LED heartbeat — proves the main loop hasn't wedged.
     static uint32_t s_lastBlinkMs = 0;
