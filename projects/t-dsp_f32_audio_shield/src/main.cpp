@@ -838,22 +838,30 @@ static void setupCodec() {
     g_codec.setAdcHpf(true);
     g_codec.setAdcDecimationFilter(tac5212::AdcDecimationFilter::LinearPhase);
 
-    // BQ_CFG only — no coef writes. The chip POR coefficient values
-    // (datasheet §8.2.1, Table 8-210, RESET column) are
-    // {N0=0x7FFFFFFF, N1=N2=D1=D2=0} on every slot — already a true
-    // bypass. Bumping BQ_CFG from chip default 2 to 3 just adds a
-    // third bypass biquad; audio passes through unchanged.
-    //
-    // The lib's setBiquad / clearBiquad coef-write path is left
-    // unexercised at boot until we figure out why our last attempt
-    // at writing coefs silenced the DAC even though the BQ_BASE fix
-    // had landed. The dev surface can drive coefs into slots via
-    // /codec/tac5212/.../biquad/.../coeffs after boot — that's
-    // testable independently.
+    // Wire up all 3 ADC biquad slots per channel. With BQ_BASE
+    // restored to 0x08 (the value the TI register CSV confirms), the
+    // lib's writeBurst lands on the actual coefficient registers
+    // instead of the offset addresses my misread of the PDF text
+    // extraction had picked. clearBiquad writes BiquadCoeffs::bypass()
+    // = {0x7FFFFFFF, 0, 0, 0, 0} which is a true unity passthrough
+    // and matches the chip POR — so audio flows unchanged but the
+    // slots are explicitly programmed. Dev surface OSC can drive
+    // real EQ coefs into them later without worrying about whether
+    // the previous boot left some garbage state behind.
+    for (uint8_t ch = 1; ch <= 2; ++ch) {
+        for (uint8_t idx = 1; idx <= 3; ++idx) {
+            g_codec.adc(ch).clearBiquad(idx);
+        }
+    }
     g_codec.setAdcBiquadsPerChannel(3);
 
-    // ----- DAC DSP ----- (same approach: BQ_CFG only, no coef writes)
+    // ----- DAC DSP -----
     g_codec.setDacInterpolationFilter(tac5212::InterpFilter::LinearPhase);
+    for (uint8_t out = 1; out <= 2; ++out) {
+        for (uint8_t idx = 1; idx <= 3; ++idx) {
+            g_codec.out(out).clearBiquad(idx);
+        }
+    }
     g_codec.setDacBiquadsPerChannel(3);
 
     Serial.print("DEV_STS0: 0x");
