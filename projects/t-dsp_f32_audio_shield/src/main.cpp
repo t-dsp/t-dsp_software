@@ -817,27 +817,54 @@ static void setupCodec() {
     // engaged in that state.
     g_codec.setDspAvddSelect(true);
 
-    // ----- ADC HPF -----
+    // ----- ADC + PDM DSP -----
     //
-    // 12 Hz cutoff on the chip's ADC DSP path. Applies to both the
-    // analog ADC channels (CH1, CH2) AND the PDM mics (CH3, CH4) —
-    // the chip has one HPF stage shared by all input channels. Free
-    // rumble cut, no Teensy CPU cost.
+    // The chip has one DSP stage shared by all input channels — both
+    // analog ADC (CH1, CH2) and PDM mics (CH3, CH4) feed through the
+    // same decimation, HPF, and biquad chain inside the codec.
+    //
+    // HPF: 12 Hz cutoff, on by default. Cuts room rumble and any DC
+    //      offset before it reaches the F32 graph. Free, no CPU cost.
+    // Decimation filter: linear phase. Cleanest passband; the chip
+    //      offers low-latency / ultra-low-latency modes for live
+    //      monitoring paths but linear phase is the audio-quality
+    //      default.
+    // Biquads: 3 slots per channel, all initialized to bypass. The
+    //      chip's BQ_CFG default is 2 — we bump to 3 for the maximum
+    //      slot count the dev surface can address. Bypass coefs land
+    //      in the correct registers now that BQ_BASE = 0x0A in the
+    //      lib (was 0x08 — that misalignment is what killed the DAC
+    //      in commit b8ad626 before the lib fix in fcff26a).
     g_codec.setAdcHpf(true);
+    g_codec.setAdcDecimationFilter(tac5212::AdcDecimationFilter::LinearPhase);
+    for (uint8_t ch = 1; ch <= 2; ++ch) {
+        for (uint8_t idx = 1; idx <= 3; ++idx) {
+            g_codec.adc(ch).clearBiquad(idx);  // bypass coefs (true unity)
+        }
+    }
+    g_codec.setAdcBiquadsPerChannel(3);
 
-    // The remaining chip-side DSP — ADC + DAC biquads, distortion
-    // limiter, decimation-filter mode, DRC — is wired in lib/TAC5212
-    // and addressable via the /codec/tac5212/... OSC tree, but stays
-    // at chip POR defaults at boot until we datasheet-verify safe
-    // coefficient values. An earlier attempt at enabling the limiter
-    // + setting biquad counts to 3 with bypass coefs silenced the DAC
-    // output entirely — turned out the chip rejected one of the
-    // configurations and the audio path went dead. Reverted to "only
-    // touch what we've validated."
+    // ----- DAC DSP -----
+    //
+    // Same shape on the output side: 3 biquads per DAC channel, all
+    // bypass at boot, addressable via /codec/tac5212/dac/N/biquad/M
+    // from the dev surface. Interpolation filter at linear phase to
+    // match the input-side default.
+    //
+    // Distortion limiter is left OFF by default. It's tested in a
+    // followup commit once we've validated the chip POR coefficient
+    // block doesn't over-attenuate at our 0 dBFS audio level.
+    g_codec.setDacInterpolationFilter(tac5212::InterpFilter::LinearPhase);
+    for (uint8_t out = 1; out <= 2; ++out) {
+        for (uint8_t idx = 1; idx <= 3; ++idx) {
+            g_codec.out(out).clearBiquad(idx);
+        }
+    }
+    g_codec.setDacBiquadsPerChannel(3);
 
     Serial.print("DEV_STS0: 0x");
     Serial.println(g_codec.readRegister(0, 0x79), HEX);
-    Serial.println("Codec ready: ADC HPF on; DAC biquads / limiter at chip defaults");
+    Serial.println("Codec ready: ADC HPF on, ADC + DAC biquads (3/ch, bypass coefs), DAC limiter off");
 }
 
 // ============================================================================
