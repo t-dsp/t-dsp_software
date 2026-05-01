@@ -1,24 +1,50 @@
 // Acid slot panel — config UI for slot 5 (TB-303-style mono bass).
 //
 // New panel built for the slot-architecture rebuild. Layout follows
-// sampler-panel.ts / mpe-slot-panel.ts: ON/OFF header, then a vertical
-// stack of labeled rows for the slot housekeeping (volume, MIDI
-// channel) and the engine knobs (waveform, tuning, cutoff, resonance,
-// env mod, env decay, amp decay, accent, slide).
+// sampler-panel.ts / mpe-slot-panel.ts: ON/OFF header, preset dropdown
+// (ported from the legacy acid-panel.ts), then a vertical stack of
+// labeled rows for the slot housekeeping (volume, MIDI channel) and
+// the engine knobs (waveform, tuning, cutoff, resonance, env mod,
+// env decay, amp decay, accent, slide).
 //
 // All controls round-trip through the firmware via OSC. Optimistic
 // local-signal updates make the UI feel responsive; the echoes that
 // land back through dispatcher.handleIncoming() re-apply (idempotent
 // when the value matches).
 //
-// The legacy acid-panel.ts (richer — preset grid, MIDI Auto checkbox)
+// The legacy acid-panel.ts (richer grid layout, MIDI Auto checkbox)
 // is left in place untouched per the parallel-agent contract. Once
-// the user confirms this slim replacement is what they want, the
-// legacy file can be deleted; if the presets are missed, port them
-// in here following the same sub-component shape.
+// the user confirms this replacement is what they want, the legacy
+// file can be deleted.
 
 import { Dispatcher } from '../dispatcher';
 import { MixerState, Signal } from '../state';
+import presetDoc from '../../../../lib/TDspAcid/presets.json';
+
+interface PresetParams {
+  waveform: number;
+  tuning: number;
+  cutoff_hz: number;
+  resonance: number;
+  env_mod: number;
+  env_decay_sec: number;
+  amp_decay_sec: number;
+  accent: number;
+  slide_ms: number;
+  volume: number;
+}
+interface Preset {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  params: PresetParams;
+}
+interface PresetDoc {
+  categories: Record<string, { color: string; label: string }>;
+  presets: Preset[];
+}
+const PRESETS = presetDoc as PresetDoc;
 
 const WAVEFORM_LABELS = ['Saw', 'Square'] as const;
 
@@ -46,6 +72,63 @@ export function acidSlotPanel(state: MixerState, dispatcher: Dispatcher): HTMLEl
   onLabel.className = 'synth-on-label';
   onLabel.textContent = 'Acid';
   onRow.append(onBtn, onLabel);
+
+  // ---- Preset dropdown -----------------------------------------------
+  // Ports the curated TB-303 preset bank from lib/TDspAcid/presets.json
+  // (Classic 303, Squelchy, Deep Acid, Rave Hoover, ...). Selecting a
+  // preset pushes every parameter through the dispatcher so firmware
+  // re-applies waveform, tuning, cutoff, resonance, env mod / decay,
+  // amp decay, accent, slide, and volume in one shot. The active
+  // preset is tracked in state.acid.activePresetId so a reconnect
+  // restores it; tweaking individual knobs leaves the selection alone
+  // (matches legacy acid-panel.ts behaviour). Categories are surfaced
+  // as <optgroup>s so the semantic grouping (classic / squelch / rave
+  // / dub) survives the dropdown.
+  const presetRow = document.createElement('div');
+  presetRow.className = 'sampler-control-row';
+  const presetLabel = document.createElement('label');
+  presetLabel.textContent = 'Preset';
+  const presetSelect = document.createElement('select');
+  presetSelect.className = 'sampler-midi-channel';
+
+  const noneOpt = document.createElement('option');
+  noneOpt.value = '';
+  noneOpt.textContent = '— Select preset —';
+  presetSelect.appendChild(noneOpt);
+  for (const [catKey, cat] of Object.entries(PRESETS.categories)) {
+    const group = document.createElement('optgroup');
+    group.label = cat.label;
+    for (const p of PRESETS.presets) {
+      if (p.category !== catKey) continue;
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name;
+      opt.title = p.description;
+      group.appendChild(opt);
+    }
+    if (group.childElementCount > 0) presetSelect.appendChild(group);
+  }
+  state.acid.activePresetId.subscribe((id) => { presetSelect.value = id; });
+  presetSelect.addEventListener('change', () => {
+    const preset = PRESETS.presets.find((p) => p.id === presetSelect.value);
+    if (!preset) {
+      state.acid.activePresetId.set('');
+      return;
+    }
+    const p = preset.params;
+    dispatcher.setAcidWaveform(p.waveform);
+    dispatcher.setAcidTuning(p.tuning);
+    dispatcher.setAcidCutoff(p.cutoff_hz);
+    dispatcher.setAcidResonance(p.resonance);
+    dispatcher.setAcidEnvMod(p.env_mod);
+    dispatcher.setAcidEnvDecay(p.env_decay_sec);
+    dispatcher.setAcidAmpDecay(p.amp_decay_sec);
+    dispatcher.setAcidAccent(p.accent);
+    dispatcher.setAcidSlide(p.slide_ms);
+    dispatcher.setAcidVolume(p.volume);
+    state.acid.activePresetId.set(preset.id);
+  });
+  presetRow.append(presetLabel, presetSelect);
 
   // ---- Volume slider --------------------------------------------------
   const volRow = buildSliderRow(
@@ -163,6 +246,7 @@ export function acidSlotPanel(state: MixerState, dispatcher: Dispatcher): HTMLEl
 
   root.append(
     onRow,
+    presetRow,
     volRow,
     midiRow,
     waveRow,
