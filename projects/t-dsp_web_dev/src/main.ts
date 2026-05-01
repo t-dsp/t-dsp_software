@@ -449,6 +449,7 @@ const dexedPanelEl    = dexedPanel(state, dispatcher);
 const samplerPanelEl  = samplerPanel(state, dispatcher);
 const mpePanelEl      = mpeSlotPanel(state, dispatcher);
 const supersawPanelEl = supersawSlotPanel(state, dispatcher);
+const chipPanelEl     = chipSlotPanel(state, dispatcher);
 
 // Empty-slot placeholder. Reused for slots 3..7 (the panel just shows
 // which slot is active and a "coming soon" hint). Agents replace this
@@ -467,7 +468,8 @@ emptySlotPanelEl.style.display = 'none';
 samplerPanelEl.style.display = 'none';
 mpePanelEl.style.display = 'none';
 supersawPanelEl.style.display = 'none';
-synthContent.append(dexedPanelEl, samplerPanelEl, mpePanelEl, supersawPanelEl, emptySlotPanelEl);
+chipPanelEl.style.display = 'none';
+synthContent.append(dexedPanelEl, samplerPanelEl, mpePanelEl, supersawPanelEl, chipPanelEl, emptySlotPanelEl);
 
 const synthKeyboardDock = document.createElement('div');
 synthKeyboardDock.className = 'synth-keyboard-dock';
@@ -532,7 +534,8 @@ state.synthSlot.active.subscribe((active) => {
   samplerPanelEl  .style.display = active === 1 ? '' : 'none';
   mpePanelEl      .style.display = active === 3 ? '' : 'none';
   supersawPanelEl .style.display = active === 6 ? '' : 'none';
-  emptySlotPanelEl.style.display = (active === 2 || active === 4 || active === 5 || active === 7) ? '' : 'none';
+  chipPanelEl     .style.display = active === 7 ? '' : 'none';
+  emptySlotPanelEl.style.display = (active === 2 || active === 4 || active === 5) ? '' : 'none';
 });
 
 synthSection.append(synthSlotPickerEl, synthContent, synthKeyboardDock);
