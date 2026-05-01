@@ -782,9 +782,15 @@ static void setupCodec() {
     g_codec.out(1).setDvol(-128.0f);
     g_codec.out(2).setDvol(-128.0f);
 
-    // Channel enable + power-up. inMask = IN_CH1+IN_CH2 (top two bits),
-    // outMask = OUT_CH1+OUT_CH2 (bottom two bits of the nibble).
-    g_codec.setChannelEnable(/*inMask=*/0xC, /*outMask=*/0xC);
+    // Channel enable + power-up. inMask = IN_CH1+IN_CH2 (analog ADC) +
+    // IN_CH3+IN_CH4 (PDM mic L+R) = nibble 0xF. outMask = OUT_CH1+OUT_CH2.
+    //
+    // Note: pdm().setEnable(true) above ALSO sets IN_CH3+IN_CH4 via
+    // read-modify-write, but setChannelEnable() does a full-byte write
+    // that would clobber those bits if we passed 0xC. Including them
+    // in the mask here is what actually gates whether the on-board
+    // PDM mics produce audio on TDM slots 2/3.
+    g_codec.setChannelEnable(/*inMask=*/0xF, /*outMask=*/0xC);
     g_codec.powerAdc(true);
     g_codec.powerDac(true);
     delay(100);  // let analog blocks settle before any audio hits the DAC
