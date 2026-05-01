@@ -77,6 +77,7 @@
 #include <TDspClock.h>
 #include <TDspArp.h>
 #include <TDspMPE.h>
+#include <TDspAcid.h>
 
 #include "Tac5212Panel.h"
 #include "DexedSink.h"
@@ -89,6 +90,7 @@
 #include "synth/MpeSlot.h"
 #include "synth/SupersawSlot.h"
 #include "synth/ChipSlot.h"
+#include "synth/AcidSlot.h"
 #include "synth/SynthSwitcher.h"
 
 #include <TDspSupersaw.h>
@@ -258,6 +260,31 @@ ChipSink::VoicePorts g_chipPorts = {
     &g_chipMix,    &g_chipEnv,
 };
 ChipSink g_chipSink(g_chipPorts);
+
+// --- Slot 5 (Acid) ---
+//
+// TB-303-style monophonic bass via lib/TDspAcid/AcidSink. One saw/square
+// oscillator -> state-variable filter (LP) -> ADSR envelope. The filter
+// envelope is software-driven inside AcidSink::tick (writes
+// AudioFilterStateVariable::frequency directly), so no second
+// AudioEffectEnvelope is needed on the filter. Mono int16 chain; one
+// I16->F32 bridge fans dual-mono into sub-mixer slot 5
+// (g_synthSumLB[1] / g_synthSumRB[1]) — same shape Dexed/MPE/Supersaw
+// use.
+//
+// AcidSink owns the note stack (last-note priority), the
+// slide-only-when-overlapping rule, and accent; AcidSlot just gates the
+// per-slot F32 gain on active/on and forwards loop ticks.
+AudioSynthWaveform        g_acidOsc;
+AudioFilterStateVariable  g_acidFilter;
+AudioEffectEnvelope       g_acidAmpEnv;
+AudioConvert_I16toF32     g_acidToF32;
+AudioEffectGain_F32       g_acidGain;       // mono, post-bridge
+
+AcidSink::VoicePorts g_acidPorts = {
+    &g_acidOsc, &g_acidFilter, &g_acidAmpEnv,
+};
+AcidSink g_acidSink(g_acidPorts);
 
 // --- Synth sub-mixer (8-slot chain) ---
 //
@@ -434,6 +461,18 @@ AudioConnection_F32  c_ss_toF32_gain(g_supersawToF32,   0, g_supersawGain,     0
 AudioConnection_F32  c_ss_gain_sumL(g_supersawGain,     0, g_synthSumLB,       2);
 AudioConnection_F32  c_ss_gain_sumR(g_supersawGain,     0, g_synthSumRB,       2);
 
+// --- Slot 5 (Acid) audio graph ---
+//
+// osc -> SVF (LP out at index 0) -> ADSR envelope -> I16->F32 bridge ->
+// per-slot mono F32 gain -> dual-mono fan-out into sub-mixer slot 5
+// (input 1 of the stage-B mixer per side, centered dual-mono).
+AudioConnection      c_acid_o_f       (g_acidOsc,    0, g_acidFilter, 0);
+AudioConnection      c_acid_f_env     (g_acidFilter, 0, g_acidAmpEnv, 0);
+AudioConnection      c_acid_env_toF32 (g_acidAmpEnv, 0, g_acidToF32,  0);
+AudioConnection_F32  c_acid_toF32_gain(g_acidToF32,  0, g_acidGain,   0);
+AudioConnection_F32  c_acid_gain_sumL (g_acidGain,   0, g_synthSumLB, 1);
+AudioConnection_F32  c_acid_gain_sumR (g_acidGain,   0, g_synthSumRB, 1);
+
 // --- Synth sub-mixer chain (8 slots) ---
 //
 // Slots 0..3 sum into g_synthSumLA / g_synthSumRA (slot N -> input N).
@@ -577,9 +616,19 @@ static const tdsp_synth::SupersawSlot::AudioContext kSupersawCtx{
 };
 tdsp_synth::SupersawSlot  g_supersawSlot(kSupersawCtx);
 
+// Slot 5 — Acid (TB-303-style mono bass). Wraps the AcidSink instance
+// declared above (g_acidSink), gating its output through g_acidGain
+// based on slot-active state. Engine knobs (waveform / tuning / cutoff
+// / resonance / env mod / decay / accent / slide) round-trip through
+// OSC directly into the sink.
+static const tdsp_synth::AcidSlot::AudioContext kAcidCtx{
+    &g_acidSink,
+    &g_acidGain,
+};
+tdsp_synth::AcidSlot      g_acidSlot(kAcidCtx);
+
 tdsp_synth::SilentSlot    g_silentSlot2("silent", "(empty)");
 tdsp_synth::SilentSlot    g_silentSlot4("silent", "(empty)");
-tdsp_synth::SilentSlot    g_silentSlot5("silent", "(empty)");
 tdsp_synth::SilentSlot    g_silentSlot7("silent", "(empty)");
 tdsp_synth::SynthSwitcher g_synthSwitcher;
 
@@ -1000,6 +1049,23 @@ static void broadcastSnapshot(OSCBundle &reply) {
     { OSCMessage m("/synth/supersaw/sustain");     m.add(g_supersawSlot.sink()->sustain());           reply.add(m); }
     { OSCMessage m("/synth/supersaw/release");     m.add(g_supersawSlot.sink()->release());           reply.add(m); }
     { OSCMessage m("/synth/supersaw/portamento");  m.add(g_supersawSlot.sink()->portamentoMs());      reply.add(m); }
+
+    // Slot 5 — Acid (TB-303-style mono bass). /synth/acid/* paths match
+    // the legacy dispatcher (set via dispatcher.setAcid*); the snapshot
+    // populates them on connect so the dev surface doesn't need a
+    // per-leaf read round.
+    { OSCMessage m("/synth/acid/volume");     m.add(g_acidSlot.volume());                       reply.add(m); }
+    { OSCMessage m("/synth/acid/on");         m.add((int)(g_acidSlot.on() ? 1 : 0));            reply.add(m); }
+    { OSCMessage m("/synth/acid/midi/ch");    m.add((int)g_acidSlot.listenChannel());           reply.add(m); }
+    { OSCMessage m("/synth/acid/waveform");   m.add((int)g_acidSlot.sink()->waveform());        reply.add(m); }
+    { OSCMessage m("/synth/acid/tuning");     m.add((int)g_acidSlot.sink()->tuning());          reply.add(m); }
+    { OSCMessage m("/synth/acid/cutoff");     m.add(g_acidSlot.sink()->cutoff());               reply.add(m); }
+    { OSCMessage m("/synth/acid/resonance");  m.add(g_acidSlot.sink()->resonance());            reply.add(m); }
+    { OSCMessage m("/synth/acid/env_mod");    m.add(g_acidSlot.sink()->envModAmount());         reply.add(m); }
+    { OSCMessage m("/synth/acid/env_decay");  m.add(g_acidSlot.sink()->envDecay());             reply.add(m); }
+    { OSCMessage m("/synth/acid/amp_decay");  m.add(g_acidSlot.sink()->ampDecay());             reply.add(m); }
+    { OSCMessage m("/synth/acid/accent");     m.add(g_acidSlot.sink()->accent());               reply.add(m); }
+    { OSCMessage m("/synth/acid/slide");      m.add(g_acidSlot.sink()->slideMs());              reply.add(m); }
 
     {
         OSCMessage m("/synth/sampler/info");
@@ -1836,6 +1902,102 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
+    // ---- /synth/acid/* — TB-303 mono bass (slot 5) ------------------
+    //
+    // Mix paths follow the same dual-form contract MPE / Supersaw use:
+    // accept both `/mix/fader` + `/mix/on` (slot-architecture form) and
+    // legacy `/volume` + `/on` (matches dispatcher.setAcidVolume etc.
+    // and the snapshot leaves above). Engine knobs flow straight to
+    // AcidSink via g_acidSlot.sink().
+
+    if (strcmp(address, "/synth/acid/mix/fader") == 0 ||
+        strcmp(address, "/synth/acid/volume")    == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isFloat(0)) {
+            g_acidSlot.setVolume(msg.getFloat(0));
+        }
+        OSCMessage echo("/synth/acid/volume");
+        echo.add(g_acidSlot.volume());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/acid/mix/on") == 0 ||
+        strcmp(address, "/synth/acid/on")     == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            g_acidSlot.setOn(msg.getInt(0) != 0);
+        }
+        OSCMessage echo("/synth/acid/on");
+        echo.add((int)(g_acidSlot.on() ? 1 : 0));
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/acid/midi/ch") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            int ch = msg.getInt(0);
+            if (ch < 0)  ch = 0;
+            if (ch > 16) ch = 0;
+            g_acidSlot.setListenChannel((uint8_t)ch);
+        }
+        OSCMessage echo("/synth/acid/midi/ch");
+        echo.add((int)g_acidSlot.listenChannel());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/acid/waveform") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            int w = msg.getInt(0);
+            if (w < 0) w = 0;
+            if (w > 1) w = 1;
+            g_acidSlot.sink()->setWaveform((uint8_t)w);
+        }
+        OSCMessage echo("/synth/acid/waveform");
+        echo.add((int)g_acidSlot.sink()->waveform());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/acid/tuning") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            g_acidSlot.sink()->setTuning(msg.getInt(0));
+        }
+        OSCMessage echo("/synth/acid/tuning");
+        echo.add((int)g_acidSlot.sink()->tuning());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    // Float-typed engine knobs share a small macro to keep this section
+    // a flat list of 1-line entries (mirrors the SS_FLOAT_HANDLER block
+    // in the supersaw section).
+#define ACID_FLOAT_HANDLER(addr, setFn, getExpr)                          \
+    if (strcmp(address, (addr)) == 0) {                                   \
+        OSCBundle reply;                                                  \
+        if (msg.size() > 0 && msg.isFloat(0)) {                           \
+            g_acidSlot.sink()->setFn(msg.getFloat(0));                    \
+        }                                                                 \
+        OSCMessage echo((addr));                                          \
+        echo.add((float)(getExpr));                                       \
+        reply.add(echo);                                                  \
+        g_transport.sendBundle(reply);                                    \
+        return;                                                           \
+    }
+    ACID_FLOAT_HANDLER("/synth/acid/cutoff",    setCutoff,       g_acidSlot.sink()->cutoff())
+    ACID_FLOAT_HANDLER("/synth/acid/resonance", setResonance,    g_acidSlot.sink()->resonance())
+    ACID_FLOAT_HANDLER("/synth/acid/env_mod",   setEnvModAmount, g_acidSlot.sink()->envModAmount())
+    ACID_FLOAT_HANDLER("/synth/acid/env_decay", setEnvDecay,     g_acidSlot.sink()->envDecay())
+    ACID_FLOAT_HANDLER("/synth/acid/amp_decay", setAmpDecay,     g_acidSlot.sink()->ampDecay())
+    ACID_FLOAT_HANDLER("/synth/acid/accent",    setAccent,       g_acidSlot.sink()->accent())
+    ACID_FLOAT_HANDLER("/synth/acid/slide",     setSlideMs,      g_acidSlot.sink()->slideMs())
+#undef ACID_FLOAT_HANDLER
+
     // ---- /synth/dexed/bank/names ----  (dev surface populates the bank dropdown)
     if (strcmp(address, "/synth/dexed/bank/names") == 0) {
         OSCMessage m("/synth/dexed/bank/names");
@@ -2337,7 +2499,8 @@ void setup() {
     g_synthSwitcher.setSlot(2, &g_silentSlot2);  // placeholder until Plaits agent wires slot 2
     g_synthSwitcher.setSlot(3, &g_mpeSlot);
     g_synthSwitcher.setSlot(4, &g_silentSlot4);
-    g_synthSwitcher.setSlot(5, &g_silentSlot5);
+    g_synthSwitcher.setSlot(5, &g_acidSlot);      // was: &g_silentSlot5
+    g_acidSlot.begin();
     g_synthSwitcher.setSlot(6, &g_supersawSlot);  // was: &g_silentSlot6
     g_supersawSlot.begin();
     g_synthSwitcher.setSlot(7, &g_silentSlot7);
@@ -2399,6 +2562,11 @@ void loop() {
     // Supersaw slot: advance portamento glide. No-op when not held / no
     // glide in progress (early-return inside SupersawSink::tick).
     g_supersawSink.tick(millis());
+
+    // Acid slot: advance the software filter envelope decay + portamento
+    // glide. No-op when the voice is idle and no glide is in flight
+    // (early-return inside AcidSink::tick).
+    g_acidSlot.tick(millis());
 
     // 1 Hz LED heartbeat — proves the main loop hasn't wedged.
     static uint32_t s_lastBlinkMs = 0;
