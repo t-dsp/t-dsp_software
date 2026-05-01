@@ -19,7 +19,7 @@
 
 import { Dispatcher } from '../dispatcher';
 import { MixerState, Signal } from '../state';
-import presetDoc from '../../../../../../lib/TDspArp/presets.json';
+import presetDoc from '../../../../lib/TDspArp/presets.json';
 
 // ---- preset shape ----------------------------------------------------
 

@@ -2,7 +2,7 @@
 
 import { Dispatcher } from '../dispatcher';
 import { MixerState, Signal } from '../state';
-import presetDoc from '../../../../../../lib/TDspSupersaw/presets.json';
+import presetDoc from '../../../../lib/TDspSupersaw/presets.json';
 
 interface PresetParams {
   volume: number;

@@ -14,7 +14,7 @@
 
 import { Dispatcher } from '../dispatcher';
 import { MixerState, Signal } from '../state';
-import presetDoc from '../../../../../../lib/TDspNeuro/presets.json';
+import presetDoc from '../../../../lib/TDspNeuro/presets.json';
 
 // Shape of one preset in presets.json — narrow to what the UI needs.
 interface PresetParams {

@@ -3,7 +3,7 @@
 
 import { Dispatcher } from '../dispatcher';
 import { MixerState, Signal } from '../state';
-import presetDoc from '../../../../../../lib/TDspAcid/presets.json';
+import presetDoc from '../../../../lib/TDspAcid/presets.json';
 
 interface PresetParams {
   waveform: number;
