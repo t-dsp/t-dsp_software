@@ -29,3 +29,10 @@ projects/t-dsp_web_dev/node_modules/
 
 # Vendor datasheets (large PDFs — kept locally, not tracked)
 projects/*/docs/*.pdf
+
+# references/: TAC5212 datasheet + small snippets are tracked, but the
+# upstream library clones below are trivially re-cloneable from GitHub
+# and would just bloat the repo (~21MB) — keep on disk, don't track.
+references/OpenAudio_ArduinoLibrary/
+references/teensy-4-async-inputs/
+references/teensy-4-usbAudio/
