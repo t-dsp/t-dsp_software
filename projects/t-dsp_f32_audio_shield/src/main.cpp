@@ -837,29 +837,23 @@ static void setupCodec() {
     //      in commit b8ad626 before the lib fix in fcff26a).
     g_codec.setAdcHpf(true);
     g_codec.setAdcDecimationFilter(tac5212::AdcDecimationFilter::LinearPhase);
-    for (uint8_t ch = 1; ch <= 2; ++ch) {
-        for (uint8_t idx = 1; idx <= 3; ++idx) {
-            g_codec.adc(ch).clearBiquad(idx);  // bypass coefs (true unity)
-        }
-    }
+
+    // BQ_CFG only — no coef writes. The chip POR coefficient values
+    // (datasheet §8.2.1, Table 8-210, RESET column) are
+    // {N0=0x7FFFFFFF, N1=N2=D1=D2=0} on every slot — already a true
+    // bypass. Bumping BQ_CFG from chip default 2 to 3 just adds a
+    // third bypass biquad; audio passes through unchanged.
+    //
+    // The lib's setBiquad / clearBiquad coef-write path is left
+    // unexercised at boot until we figure out why our last attempt
+    // at writing coefs silenced the DAC even though the BQ_BASE fix
+    // had landed. The dev surface can drive coefs into slots via
+    // /codec/tac5212/.../biquad/.../coeffs after boot — that's
+    // testable independently.
     g_codec.setAdcBiquadsPerChannel(3);
 
-    // ----- DAC DSP -----
-    //
-    // Same shape on the output side: 3 biquads per DAC channel, all
-    // bypass at boot, addressable via /codec/tac5212/dac/N/biquad/M
-    // from the dev surface. Interpolation filter at linear phase to
-    // match the input-side default.
-    //
-    // Distortion limiter is left OFF by default. It's tested in a
-    // followup commit once we've validated the chip POR coefficient
-    // block doesn't over-attenuate at our 0 dBFS audio level.
+    // ----- DAC DSP ----- (same approach: BQ_CFG only, no coef writes)
     g_codec.setDacInterpolationFilter(tac5212::InterpFilter::LinearPhase);
-    for (uint8_t out = 1; out <= 2; ++out) {
-        for (uint8_t idx = 1; idx <= 3; ++idx) {
-            g_codec.out(out).clearBiquad(idx);
-        }
-    }
     g_codec.setDacBiquadsPerChannel(3);
 
     Serial.print("DEV_STS0: 0x");
