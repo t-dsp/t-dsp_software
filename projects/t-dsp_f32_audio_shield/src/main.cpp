@@ -66,13 +66,17 @@
 
 #include <USBHost_t36.h>
 
+#include <Audio.h>
+#include <SD.h>
 #include <synth_dexed.h>
+#include <TeensyVariablePlayback.h>
 
 #include <TAC5212.h>
 #include <TDspMixer.h>
 #include <TDspMidi.h>
 #include <TDspClock.h>
 #include <TDspArp.h>
+#include <TDspMPE.h>
 
 #include "Tac5212Panel.h"
 #include "DexedSink.h"
@@ -81,7 +85,14 @@
 #include "synth/SynthSlot.h"
 #include "synth/DexedSlot.h"
 #include "synth/SilentSlot.h"
+#include "synth/MultisampleSlot.h"
+#include "synth/MpeSlot.h"
+#include "synth/SupersawSlot.h"
+#include "synth/ChipSlot.h"
 #include "synth/SynthSwitcher.h"
+
+#include <TDspSupersaw.h>
+#include <TDspChip.h>
 
 // ============================================================================
 // Hardware constants
@@ -147,11 +158,133 @@ AudioConvert_I16toF32   g_dexedToF32;
 AudioEffectGain_F32     g_dexedGain;
 DexedSink               g_dexedSink(&g_dexed);
 
-// Synth-bus group fader — sits downstream of every per-synth gain
-// (only Dexed for now) and upstream of the mix bus. The dev surface's
-// Mixer view shows a single "synth" strip backed by /synth/bus/volume
-// + /synth/bus/on; this stage is what those leaves drive. Future
-// synth engines feed a sum mixer, then through here, then into mixL/R.
+// --- Sampler slot 1 (multisample SD streaming) ---
+//
+// 8-voice polyphonic sampler reading 48 kHz / 16-bit / stereo WAVs from
+// the Teensy 4.1's BUILTIN_SDCARD via newdigate/teensy-variable-playback.
+// Stage 1 mixers sum 4 voices each (envelopes feed into them); stage 2
+// (mix[2]) sums the two stage-1 outputs to mono per side. Then bridge
+// to F32 and route through the per-slot gain into the synth sub-mixer.
+//
+// File-scope so AudioConnection ctors can reference them at static init.
+// MultisampleSlot stores pointers to these via the AudioContext struct.
+AudioPlaySdResmp        g_smPlayer[8];
+AudioEffectEnvelope     g_smEnvL[8];
+AudioEffectEnvelope     g_smEnvR[8];
+AudioMixer4             g_smMixL[3];
+AudioMixer4             g_smMixR[3];
+AudioConvert_I16toF32   g_smToF32L;
+AudioConvert_I16toF32   g_smToF32R;
+AudioEffectGain_F32     g_smGainL;
+AudioEffectGain_F32     g_smGainR;
+
+// --- MPE VA slot 3 (MPE-aware virtual-analog) ---
+//
+// 4-voice MPE-aware virtual-analog engine via lib/TDspMPE/MpeVaSink:
+// each voice is `AudioSynthWaveform → AudioFilterStateVariable →
+// AudioEffectEnvelope`. Per-voice CC#74 routes to that voice's filter
+// cutoff, so each MPE finger steers brightness on its own note only.
+// Mono int16 voice path; one I16->F32 bridge fans dual-mono into
+// sub-mixer slot 3 (same shape Dexed uses).
+//
+// File-scope so AudioConnection ctors can reference them at static
+// init. MpeSlot wraps these via the AudioContext + the MpeVaSink the
+// library already provides.
+AudioSynthWaveform        g_mpeOsc[4];
+AudioFilterStateVariable  g_mpeFilter[4];
+AudioEffectEnvelope       g_mpeEnv[4];
+AudioMixer4               g_mpeMix;          // sums 4 voices to mono
+AudioConvert_I16toF32     g_mpeToF32;
+AudioEffectGain_F32       g_mpeGain;         // mono, post-bridge
+
+// MpeVaSink voice ports — pointers into the file-scope arrays above.
+// The sink itself is stateless w.r.t. ownership (it just steers the
+// nodes), so the slot adapter holds a reference.
+MpeVaSink::VoicePorts g_mpeVoices[4] = {
+    { &g_mpeOsc[0], &g_mpeEnv[0], &g_mpeFilter[0] },
+    { &g_mpeOsc[1], &g_mpeEnv[1], &g_mpeFilter[1] },
+    { &g_mpeOsc[2], &g_mpeEnv[2], &g_mpeFilter[2] },
+    { &g_mpeOsc[3], &g_mpeEnv[3], &g_mpeFilter[3] },
+};
+MpeVaSink g_mpeSink(g_mpeVoices, 4);
+
+// --- Slot 6 (Supersaw) ---
+//
+// JP-8000-style 5-voice detuned saw lead via lib/TDspSupersaw/SupersawSink.
+// 5 saws (osc1..5) -> mixAB (sums osc1..4) -> mixFinal (mixAB + osc5) ->
+// state-variable filter (LP) -> ADSR envelope. Mono int16 chain; one
+// I16->F32 bridge fans dual-mono into sub-mixer slot 6 (g_synthSumLB[2] /
+// g_synthSumRB[2]) — same shape Dexed/MPE use.
+//
+// SupersawSink owns the note stack, portamento glide, and parameter
+// state; SupersawSlot just gates the per-slot F32 gain on active/on.
+AudioSynthWaveform        g_supersawO1, g_supersawO2, g_supersawO3, g_supersawO4, g_supersawO5;
+AudioMixer4               g_supersawMixAB;
+AudioMixer4               g_supersawMixFinal;
+AudioFilterStateVariable  g_supersawFilt;
+AudioEffectEnvelope       g_supersawEnv;
+AudioConvert_I16toF32     g_supersawToF32;
+AudioEffectGain_F32       g_supersawGain;     // mono, post-bridge
+
+SupersawSink::VoicePorts g_supersawPorts = {
+    &g_supersawO1, &g_supersawO2, &g_supersawO3, &g_supersawO4, &g_supersawO5,
+    &g_supersawMixAB, &g_supersawMixFinal,
+    &g_supersawFilt, &g_supersawEnv,
+};
+SupersawSink g_supersawSink(g_supersawPorts);
+
+// --- Slot 7 (Chip) ---
+//
+// NES/Gameboy-style monophonic chiptune voice via lib/TDspChip/ChipSink.
+// Two pulse oscillators (duty-cycle selectable) + triangle sub + pink
+// noise feed a 4-input AudioMixer4, which then runs through an ADSR
+// envelope. Mono int16 chain; one I16->F32 bridge fans dual-mono into
+// sub-mixer slot 7 (g_synthSumLB[3] / g_synthSumRB[3]) — same shape
+// Dexed/MPE/Supersaw use.
+//
+// ChipSink owns the note stack, last-note priority, voicing/arpeggio
+// state, and the ADSR shape; ChipSlot just gates the per-slot F32 gain
+// on active/on.
+AudioSynthWaveform        g_chipPulse1, g_chipPulse2;
+AudioSynthWaveform        g_chipTriangle;
+AudioSynthNoisePink       g_chipNoise;
+AudioMixer4               g_chipMix;
+AudioEffectEnvelope       g_chipEnv;
+AudioConvert_I16toF32     g_chipToF32;
+AudioEffectGain_F32       g_chipGain;       // mono, post-bridge
+
+ChipSink::VoicePorts g_chipPorts = {
+    &g_chipPulse1, &g_chipPulse2, &g_chipTriangle, &g_chipNoise,
+    &g_chipMix,    &g_chipEnv,
+};
+ChipSink g_chipSink(g_chipPorts);
+
+// --- Synth sub-mixer (8-slot chain) ---
+//
+// Sums per-slot outputs (slot 0 = Dexed, slot 1 = sampler, slots 2..7 =
+// future engines) into the synth bus. AudioMixer4_F32 has 4 inputs, so
+// 8 slots need a chain: two stage-A mixers (slots 0..3 and 4..7) feed
+// a stage-B mixer that produces the final sum per channel. Slot
+// active/inactive is gated by each engine's own gain stage, so all
+// sub-mixer input gains stay at 1.0.
+//
+// Wiring:
+//   slot 0..3 outputs -> g_synthSumLA[0..3] / g_synthSumRA[0..3]
+//   slot 4..7 outputs -> g_synthSumLB[0..3] / g_synthSumRB[0..3]
+//   g_synthSumLA  -> g_synthSumLC[0]   (final stage)
+//   g_synthSumLB  -> g_synthSumLC[1]
+//   g_synthSumLC  -> g_synthBusL       (existing path through main mix)
+AudioMixer4_F32         g_synthSumLA;
+AudioMixer4_F32         g_synthSumLB;
+AudioMixer4_F32         g_synthSumLC;
+AudioMixer4_F32         g_synthSumRA;
+AudioMixer4_F32         g_synthSumRB;
+AudioMixer4_F32         g_synthSumRC;
+
+// Synth-bus group fader — sits downstream of the sub-mixer and upstream
+// of the main mix bus. The dev surface's Mixer view shows a single
+// "synth" strip backed by /synth/bus/volume + /synth/bus/on; this stage
+// is what those leaves drive.
 AudioEffectGain_F32     g_synthBusL;
 AudioEffectGain_F32     g_synthBusR;
 
@@ -185,17 +318,135 @@ AudioConnection_F32  c_cap_R (tdmIn, 1, usbOut, 1);
 AudioConnection_F32  c_micL_mix (tdmIn, 2, mixL, 2);
 AudioConnection_F32  c_micR_mix (tdmIn, 3, mixR, 2);
 
-// Dexed (int16) -> bridge -> F32 per-synth gain -> dual-mono fan-out
-// into the synth bus -> mix bus slot 1. Two gain stages: per-synth
-// gain (g_dexedGain, /synth/dexed/volume) and group bus gain
-// (g_synthBus*, /synth/bus/volume). The dev surface's Mixer view
-// drives the bus gain; the Synth tab drives the per-engine gain.
+// Dexed (int16) -> bridge -> F32 per-synth gain -> sub-mixer slot 0.
+// Two gain stages: per-synth gain (g_dexedGain, /synth/dexed/volume)
+// and group bus gain (g_synthBus*, /synth/bus/volume). The dev
+// surface's Mixer view drives the bus gain; the Synth tab drives the
+// per-engine gain. Sub-mixer dual-mono fan-out: Dexed feeds slot 0
+// of both g_synthSumL and g_synthSumR (centered).
 AudioConnection      c_dexed_to_conv  (g_dexed,       0, g_dexedToF32,  0);
 AudioConnection_F32  c_conv_to_gain   (g_dexedToF32,  0, g_dexedGain,   0);
-AudioConnection_F32  c_dexed_to_busL  (g_dexedGain,   0, g_synthBusL,   0);
-AudioConnection_F32  c_dexed_to_busR  (g_dexedGain,   0, g_synthBusR,   0);
-AudioConnection_F32  c_synthbusL_mix  (g_synthBusL,   0, mixL,          1);
-AudioConnection_F32  c_synthbusR_mix  (g_synthBusR,   0, mixR,          1);
+AudioConnection_F32  c_dexed_to_sumL  (g_dexedGain,   0, g_synthSumLA,  0);
+AudioConnection_F32  c_dexed_to_sumR  (g_dexedGain,   0, g_synthSumRA,  0);
+
+// --- Sampler slot 1 audio graph ---
+//
+// Players (stereo int16) -> per-channel envelopes -> stage-1 4-into-1
+// mixers (voices 0..3 in [0], 4..7 in [1]) -> stage-2 2-into-1 final
+// mixer (sum of stage-1 outputs in inputs 0+1 of [2]) -> I16->F32
+// bridge -> per-slot F32 gain -> sub-mixer slot 1.
+AudioConnection c_sm_p0_L(g_smPlayer[0], 0, g_smEnvL[0], 0);
+AudioConnection c_sm_p0_R(g_smPlayer[0], 1, g_smEnvR[0], 0);
+AudioConnection c_sm_p1_L(g_smPlayer[1], 0, g_smEnvL[1], 0);
+AudioConnection c_sm_p1_R(g_smPlayer[1], 1, g_smEnvR[1], 0);
+AudioConnection c_sm_p2_L(g_smPlayer[2], 0, g_smEnvL[2], 0);
+AudioConnection c_sm_p2_R(g_smPlayer[2], 1, g_smEnvR[2], 0);
+AudioConnection c_sm_p3_L(g_smPlayer[3], 0, g_smEnvL[3], 0);
+AudioConnection c_sm_p3_R(g_smPlayer[3], 1, g_smEnvR[3], 0);
+AudioConnection c_sm_p4_L(g_smPlayer[4], 0, g_smEnvL[4], 0);
+AudioConnection c_sm_p4_R(g_smPlayer[4], 1, g_smEnvR[4], 0);
+AudioConnection c_sm_p5_L(g_smPlayer[5], 0, g_smEnvL[5], 0);
+AudioConnection c_sm_p5_R(g_smPlayer[5], 1, g_smEnvR[5], 0);
+AudioConnection c_sm_p6_L(g_smPlayer[6], 0, g_smEnvL[6], 0);
+AudioConnection c_sm_p6_R(g_smPlayer[6], 1, g_smEnvR[6], 0);
+AudioConnection c_sm_p7_L(g_smPlayer[7], 0, g_smEnvL[7], 0);
+AudioConnection c_sm_p7_R(g_smPlayer[7], 1, g_smEnvR[7], 0);
+
+// Stage 1 — voices 0..3 envelopes into mix[0]; voices 4..7 into mix[1].
+AudioConnection c_sm_eL0_m1(g_smEnvL[0], 0, g_smMixL[0], 0);
+AudioConnection c_sm_eL1_m1(g_smEnvL[1], 0, g_smMixL[0], 1);
+AudioConnection c_sm_eL2_m1(g_smEnvL[2], 0, g_smMixL[0], 2);
+AudioConnection c_sm_eL3_m1(g_smEnvL[3], 0, g_smMixL[0], 3);
+AudioConnection c_sm_eL4_m2(g_smEnvL[4], 0, g_smMixL[1], 0);
+AudioConnection c_sm_eL5_m2(g_smEnvL[5], 0, g_smMixL[1], 1);
+AudioConnection c_sm_eL6_m2(g_smEnvL[6], 0, g_smMixL[1], 2);
+AudioConnection c_sm_eL7_m2(g_smEnvL[7], 0, g_smMixL[1], 3);
+AudioConnection c_sm_eR0_m1(g_smEnvR[0], 0, g_smMixR[0], 0);
+AudioConnection c_sm_eR1_m1(g_smEnvR[1], 0, g_smMixR[0], 1);
+AudioConnection c_sm_eR2_m1(g_smEnvR[2], 0, g_smMixR[0], 2);
+AudioConnection c_sm_eR3_m1(g_smEnvR[3], 0, g_smMixR[0], 3);
+AudioConnection c_sm_eR4_m2(g_smEnvR[4], 0, g_smMixR[1], 0);
+AudioConnection c_sm_eR5_m2(g_smEnvR[5], 0, g_smMixR[1], 1);
+AudioConnection c_sm_eR6_m2(g_smEnvR[6], 0, g_smMixR[1], 2);
+AudioConnection c_sm_eR7_m2(g_smEnvR[7], 0, g_smMixR[1], 3);
+
+// Stage 2 — sum the two stage-1 mixer outputs to a single mono per side.
+AudioConnection c_sm_mL0_final(g_smMixL[0], 0, g_smMixL[2], 0);
+AudioConnection c_sm_mL1_final(g_smMixL[1], 0, g_smMixL[2], 1);
+AudioConnection c_sm_mR0_final(g_smMixR[0], 0, g_smMixR[2], 0);
+AudioConnection c_sm_mR1_final(g_smMixR[1], 0, g_smMixR[2], 1);
+
+// Bridge int16 -> F32, per-slot gain stage, then into the sub-mixer slot 1.
+AudioConnection      c_sm_finalL_toF32(g_smMixL[2], 0, g_smToF32L, 0);
+AudioConnection      c_sm_finalR_toF32(g_smMixR[2], 0, g_smToF32R, 0);
+AudioConnection_F32  c_sm_toF32L_gainL(g_smToF32L,  0, g_smGainL,  0);
+AudioConnection_F32  c_sm_toF32R_gainR(g_smToF32R,  0, g_smGainR,  0);
+AudioConnection_F32  c_sm_gainL_sumL  (g_smGainL,   0, g_synthSumLA, 1);
+AudioConnection_F32  c_sm_gainR_sumR  (g_smGainR,   0, g_synthSumRA, 1);
+
+// --- MPE VA slot 3 audio graph ---
+//
+// Per voice: osc -> filter (LP) -> env. All four envelopes sum into a
+// single 4-into-1 mono mixer (g_mpeMix), then I16->F32 bridge ->
+// per-slot mono F32 gain -> dual-mono fan-out into sub-mixer slot 3.
+//
+// MpeVaSink only reads the SVF's lowpass output (index 0). Bandpass /
+// highpass paths are unused by this engine; the SVF is voice-local
+// anyway because per-voice CC#74 modulates the cutoff per finger.
+AudioConnection c_mpe_o0_f0(g_mpeOsc[0], 0, g_mpeFilter[0], 0);
+AudioConnection c_mpe_o1_f1(g_mpeOsc[1], 0, g_mpeFilter[1], 0);
+AudioConnection c_mpe_o2_f2(g_mpeOsc[2], 0, g_mpeFilter[2], 0);
+AudioConnection c_mpe_o3_f3(g_mpeOsc[3], 0, g_mpeFilter[3], 0);
+
+AudioConnection c_mpe_f0_e0(g_mpeFilter[0], 0, g_mpeEnv[0], 0);
+AudioConnection c_mpe_f1_e1(g_mpeFilter[1], 0, g_mpeEnv[1], 0);
+AudioConnection c_mpe_f2_e2(g_mpeFilter[2], 0, g_mpeEnv[2], 0);
+AudioConnection c_mpe_f3_e3(g_mpeFilter[3], 0, g_mpeEnv[3], 0);
+
+AudioConnection c_mpe_e0_mix(g_mpeEnv[0], 0, g_mpeMix, 0);
+AudioConnection c_mpe_e1_mix(g_mpeEnv[1], 0, g_mpeMix, 1);
+AudioConnection c_mpe_e2_mix(g_mpeEnv[2], 0, g_mpeMix, 2);
+AudioConnection c_mpe_e3_mix(g_mpeEnv[3], 0, g_mpeMix, 3);
+
+// Bridge int16 -> F32, per-slot gain, then fan-out into sub-mixer
+// slot 3 (input 3 of the stage-A mixer per side, centered dual-mono).
+AudioConnection      c_mpe_mix_toF32 (g_mpeMix,    0, g_mpeToF32, 0);
+AudioConnection_F32  c_mpe_toF32_gain(g_mpeToF32,  0, g_mpeGain,  0);
+AudioConnection_F32  c_mpe_gain_sumL (g_mpeGain,   0, g_synthSumLA, 3);
+AudioConnection_F32  c_mpe_gain_sumR (g_mpeGain,   0, g_synthSumRA, 3);
+
+// --- Slot 6 (Supersaw) audio graph ---
+//
+// 5 oscs -> mixAB (osc1..osc4) -> mixFinal (mixAB + osc5) -> SVF -> ADSR
+// envelope -> I16->F32 bridge -> per-slot mono F32 gain -> dual-mono
+// fan-out into sub-mixer slot 6 (input 2 of the stage-B mixer per side).
+AudioConnection      c_ss_o1_mab   (g_supersawO1,       0, g_supersawMixAB,    0);
+AudioConnection      c_ss_o2_mab   (g_supersawO2,       0, g_supersawMixAB,    1);
+AudioConnection      c_ss_o3_mab   (g_supersawO3,       0, g_supersawMixAB,    2);
+AudioConnection      c_ss_o4_mab   (g_supersawO4,       0, g_supersawMixAB,    3);
+AudioConnection      c_ss_mab_mf   (g_supersawMixAB,    0, g_supersawMixFinal, 0);
+AudioConnection      c_ss_o5_mf    (g_supersawO5,       0, g_supersawMixFinal, 1);
+AudioConnection      c_ss_mf_filt  (g_supersawMixFinal, 0, g_supersawFilt,     0);
+// SVF lowpass output (channel 0). Bandpass / highpass unused.
+AudioConnection      c_ss_filt_env (g_supersawFilt,     0, g_supersawEnv,      0);
+AudioConnection      c_ss_env_toF32(g_supersawEnv,      0, g_supersawToF32,    0);
+AudioConnection_F32  c_ss_toF32_gain(g_supersawToF32,   0, g_supersawGain,     0);
+AudioConnection_F32  c_ss_gain_sumL(g_supersawGain,     0, g_synthSumLB,       2);
+AudioConnection_F32  c_ss_gain_sumR(g_supersawGain,     0, g_synthSumRB,       2);
+
+// --- Synth sub-mixer chain (8 slots) ---
+//
+// Slots 0..3 sum into g_synthSumLA / g_synthSumRA (slot N -> input N).
+// Slots 4..7 sum into g_synthSumLB / g_synthSumRB (slot N -> input N-4).
+// Stage A and B feed the final stage C, which feeds g_synthBusL/R.
+AudioConnection_F32  c_synthsumLA_LC  (g_synthSumLA,  0, g_synthSumLC, 0);
+AudioConnection_F32  c_synthsumLB_LC  (g_synthSumLB,  0, g_synthSumLC, 1);
+AudioConnection_F32  c_synthsumRA_RC  (g_synthSumRA,  0, g_synthSumRC, 0);
+AudioConnection_F32  c_synthsumRB_RC  (g_synthSumRB,  0, g_synthSumRC, 1);
+AudioConnection_F32  c_synthsumL_busL (g_synthSumLC,  0, g_synthBusL,  0);
+AudioConnection_F32  c_synthsumR_busR (g_synthSumRC,  0, g_synthBusR,  0);
+AudioConnection_F32  c_synthbusL_mix  (g_synthBusL,  0, mixL,        1);
+AudioConnection_F32  c_synthbusR_mix  (g_synthBusR,  0, mixR,        1);
 
 // ============================================================================
 // Mixer state — driven by OSC handlers below
@@ -284,9 +535,10 @@ static bool  g_synthBusOn     = true;
 // while only one is audible at a time (per project memory
 // feedback_synth_switch_not_layer — switch UX, not layer UX). Slot 0 =
 // Dexed (existing engine, wrapped by DexedSlot which observes g_dexedOn
-// / g_dexedVolume via const pointers). Slots 1..3 are SilentSlot
-// placeholders until later phases bring real engines online (mda
-// EPiano, multisample sampler, SF2 player).
+// / g_dexedVolume via const pointers). Slot 1 = MultisampleSlot
+// (SD-streaming sampler — Phase 2). Slot 3 = MpeSlot (MPE-aware VA).
+// Slot 2 (Plaits) and slots 4..7 are SilentSlot placeholders until
+// later phases / per-slot agents bring more engines online.
 //
 // SynthSwitcher is registered as the sole downstream of g_arpFilter.
 // It fans MIDI to whichever slot is active. Switching a slot calls
@@ -295,9 +547,40 @@ static bool  g_synthBusOn     = true;
 // its stored fader.
 tdsp_synth::DexedSlot     g_dexedSlot(&g_dexed, &g_dexedSink, &g_dexedGain,
                                       &g_dexedOn, &g_dexedVolume);
-tdsp_synth::SilentSlot    g_silentSlot1("silent", "(empty)");
+
+static const tdsp_synth::MultisampleSlot::AudioContext kSamplerCtx{
+    g_smPlayer, g_smEnvL, g_smEnvR,
+    g_smMixL,   g_smMixR,
+    &g_smGainL, &g_smGainR,
+};
+tdsp_synth::MultisampleSlot g_multisampleSlot(kSamplerCtx);
+
+// Slot 3 — MPE-aware virtual-analog. Wraps the MpeVaSink already
+// instantiated above (g_mpeSink), gating its output through g_mpeGain
+// based on slot-active state. Per-MPE-voice CC#74 routes per-voice
+// inside the sink; the slot just owns the volume/on/master-channel
+// surface and the active flag.
+static const tdsp_synth::MpeSlot::AudioContext kMpeCtx{
+    &g_mpeSink,
+    &g_mpeGain,
+};
+tdsp_synth::MpeSlot       g_mpeSlot(kMpeCtx);
+
+// Slot 6 — Supersaw (JP-8000-style 5-osc detuned-saw lead). Wraps the
+// SupersawSink instantiated above (g_supersawSink), gating its output
+// through g_supersawGain based on slot-active state. Engine knobs
+// (detune / mix / cutoff / ADSR / portamento) round-trip through OSC
+// directly into the sink.
+static const tdsp_synth::SupersawSlot::AudioContext kSupersawCtx{
+    &g_supersawSink,
+    &g_supersawGain,
+};
+tdsp_synth::SupersawSlot  g_supersawSlot(kSupersawCtx);
+
 tdsp_synth::SilentSlot    g_silentSlot2("silent", "(empty)");
-tdsp_synth::SilentSlot    g_silentSlot3("silent", "(empty)");
+tdsp_synth::SilentSlot    g_silentSlot4("silent", "(empty)");
+tdsp_synth::SilentSlot    g_silentSlot5("silent", "(empty)");
+tdsp_synth::SilentSlot    g_silentSlot7("silent", "(empty)");
 tdsp_synth::SynthSwitcher g_synthSwitcher;
 
 // Stereo-link state — global config, X32 convention. Index 0 = pair
@@ -677,6 +960,54 @@ static void broadcastSnapshot(OSCBundle &reply) {
     // Synth bus (mixer's "synth" strip).
     { OSCMessage m("/synth/bus/mix/fader"); m.add(g_synthBusVolume);            reply.add(m); }
     { OSCMessage m("/synth/bus/mix/on");    m.add((int)(g_synthBusOn ? 1 : 0)); reply.add(m); }
+
+    // Slot 1 — multisample sampler.
+    { OSCMessage m("/synth/sampler/mix/fader"); m.add(g_multisampleSlot.volume());            reply.add(m); }
+    { OSCMessage m("/synth/sampler/mix/on");    m.add((int)(g_multisampleSlot.on() ? 1 : 0)); reply.add(m); }
+    { OSCMessage m("/synth/sampler/midi/ch");   m.add((int)g_multisampleSlot.listenChannel()); reply.add(m); }
+
+    // Slot 3 — MPE VA. /synth/mpe/volume + /synth/mpe/on are the
+    // legacy paths the dispatcher already binds to. The engine knobs
+    // (waveform / attack / release / filter / LFO) round-trip through
+    // OSC; including them in the snapshot means a fresh-connect
+    // dev surface populates without an extra round of queries.
+    { OSCMessage m("/synth/mpe/volume");          m.add(g_mpeSlot.volume());                  reply.add(m); }
+    { OSCMessage m("/synth/mpe/on");              m.add((int)(g_mpeSlot.on() ? 1 : 0));       reply.add(m); }
+    { OSCMessage m("/synth/mpe/midi/master");     m.add((int)g_mpeSlot.masterChannel());      reply.add(m); }
+    { OSCMessage m("/synth/mpe/waveform");        m.add((int)g_mpeSlot.sink()->waveform());   reply.add(m); }
+    { OSCMessage m("/synth/mpe/attack");          m.add(g_mpeSlot.sink()->attack());          reply.add(m); }
+    { OSCMessage m("/synth/mpe/release");         m.add(g_mpeSlot.sink()->release());         reply.add(m); }
+    { OSCMessage m("/synth/mpe/filter/cutoff");   m.add(g_mpeSlot.sink()->filterCutoff());    reply.add(m); }
+    { OSCMessage m("/synth/mpe/filter/resonance");m.add(g_mpeSlot.sink()->filterResonance()); reply.add(m); }
+    { OSCMessage m("/synth/mpe/lfo/rate");        m.add(g_mpeSlot.sink()->lfoRate());         reply.add(m); }
+    { OSCMessage m("/synth/mpe/lfo/depth");       m.add(g_mpeSlot.sink()->lfoDepth());        reply.add(m); }
+    { OSCMessage m("/synth/mpe/lfo/dest");        m.add((int)g_mpeSlot.sink()->lfoDest());    reply.add(m); }
+    { OSCMessage m("/synth/mpe/lfo/waveform");    m.add((int)g_mpeSlot.sink()->lfoWaveform());reply.add(m); }
+
+    // Slot 6 — Supersaw. /synth/supersaw/* paths match the legacy
+    // dispatcher (set via dispatcher.setSupersaw*). Engine knobs
+    // round-trip through OSC; including them in the snapshot means a
+    // fresh-connect dev surface populates without per-leaf reads.
+    { OSCMessage m("/synth/supersaw/volume");      m.add(g_supersawSlot.volume());                    reply.add(m); }
+    { OSCMessage m("/synth/supersaw/on");          m.add((int)(g_supersawSlot.on() ? 1 : 0));         reply.add(m); }
+    { OSCMessage m("/synth/supersaw/midi/ch");     m.add((int)g_supersawSlot.listenChannel());        reply.add(m); }
+    { OSCMessage m("/synth/supersaw/detune");      m.add(g_supersawSlot.sink()->detuneCents());       reply.add(m); }
+    { OSCMessage m("/synth/supersaw/mix_center");  m.add(g_supersawSlot.sink()->mixCenter());         reply.add(m); }
+    { OSCMessage m("/synth/supersaw/cutoff");      m.add(g_supersawSlot.sink()->cutoff());            reply.add(m); }
+    { OSCMessage m("/synth/supersaw/resonance");   m.add(g_supersawSlot.sink()->resonance());         reply.add(m); }
+    { OSCMessage m("/synth/supersaw/attack");      m.add(g_supersawSlot.sink()->attack());            reply.add(m); }
+    { OSCMessage m("/synth/supersaw/decay");       m.add(g_supersawSlot.sink()->decay());             reply.add(m); }
+    { OSCMessage m("/synth/supersaw/sustain");     m.add(g_supersawSlot.sink()->sustain());           reply.add(m); }
+    { OSCMessage m("/synth/supersaw/release");     m.add(g_supersawSlot.sink()->release());           reply.add(m); }
+    { OSCMessage m("/synth/supersaw/portamento");  m.add(g_supersawSlot.sink()->portamentoMs());      reply.add(m); }
+
+    {
+        OSCMessage m("/synth/sampler/info");
+        m.add(g_multisampleSlot.bankName());
+        m.add((int)g_multisampleSlot.numSamples());
+        m.add((int)g_multisampleSlot.numReleaseSamples());
+        reply.add(m);
+    }
 
     // Slot model: /synth/active picks one of N slots; /synth/slots
     // enumerates them so the dev surface can render the picker.
@@ -1220,6 +1551,291 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
+    // ---- /synth/sampler/mix/fader f ----  (per-slot fader, X32 law)
+    if (strcmp(address, "/synth/sampler/mix/fader") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isFloat(0)) {
+            g_multisampleSlot.setVolume(msg.getFloat(0));
+        }
+        OSCMessage echo("/synth/sampler/mix/fader");
+        echo.add(g_multisampleSlot.volume());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    // ---- /synth/sampler/mix/on i ----
+    if (strcmp(address, "/synth/sampler/mix/on") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            g_multisampleSlot.setOn(msg.getInt(0) != 0);
+        }
+        OSCMessage echo("/synth/sampler/mix/on");
+        echo.add((int)(g_multisampleSlot.on() ? 1 : 0));
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    // ---- /synth/sampler/midi/ch i ----  (0 = omni, 1..16 = single)
+    if (strcmp(address, "/synth/sampler/midi/ch") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            int ch = msg.getInt(0);
+            if (ch < 0 || ch > 16) ch = 0;
+            g_multisampleSlot.panic();  // release notes on the old channel
+            g_multisampleSlot.setListenChannel((uint8_t)ch);
+        }
+        OSCMessage echo("/synth/sampler/midi/ch");
+        echo.add((int)g_multisampleSlot.listenChannel());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    // ---- /synth/sampler/info ----  (read-only: bank name + sample count)
+    if (strcmp(address, "/synth/sampler/info") == 0) {
+        OSCBundle reply;
+        OSCMessage echo("/synth/sampler/info");
+        echo.add(g_multisampleSlot.bankName());
+        echo.add((int)g_multisampleSlot.numSamples());
+        echo.add((int)g_multisampleSlot.numReleaseSamples());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    // ---- /synth/mpe/* — MPE-aware VA engine (slot 3) -----------------
+    //
+    // Read/write/echo pattern, ported from the legacy
+    // projects/t-dsp_tac5212_audio_shield_adaptor wiring. Existing
+    // dispatcher.ts (state.mpe.*, dispatcher.setMpe*) already targets
+    // these addresses, so the dev surface populates without changes.
+    if (strcmp(address, "/synth/mpe/mix/fader") == 0 ||
+        strcmp(address, "/synth/mpe/volume")    == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isFloat(0)) {
+            g_mpeSlot.setVolume(msg.getFloat(0));
+        }
+        OSCMessage echo("/synth/mpe/volume");
+        echo.add(g_mpeSlot.volume());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/mpe/mix/on") == 0 ||
+        strcmp(address, "/synth/mpe/on")     == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            g_mpeSlot.setOn(msg.getInt(0) != 0);
+        }
+        OSCMessage echo("/synth/mpe/on");
+        echo.add((int)(g_mpeSlot.on() ? 1 : 0));
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/mpe/midi/master") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            int ch = msg.getInt(0);
+            if (ch < 0 || ch > 16) ch = 0;
+            g_mpeSlot.setMasterChannel((uint8_t)ch);
+        }
+        OSCMessage echo("/synth/mpe/midi/master");
+        echo.add((int)g_mpeSlot.masterChannel());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/mpe/attack") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isFloat(0)) {
+            g_mpeSlot.sink()->setAttack(msg.getFloat(0));
+        }
+        OSCMessage echo("/synth/mpe/attack");
+        echo.add(g_mpeSlot.sink()->attack());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/mpe/release") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isFloat(0)) {
+            g_mpeSlot.sink()->setRelease(msg.getFloat(0));
+        }
+        OSCMessage echo("/synth/mpe/release");
+        echo.add(g_mpeSlot.sink()->release());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/mpe/waveform") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            int w = msg.getInt(0);
+            if (w < 0) w = 0;
+            if (w > 3) w = 3;
+            g_mpeSlot.sink()->setWaveform((uint8_t)w);
+        }
+        OSCMessage echo("/synth/mpe/waveform");
+        echo.add((int)g_mpeSlot.sink()->waveform());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/mpe/filter/cutoff") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isFloat(0)) {
+            g_mpeSlot.sink()->setFilterCutoff(msg.getFloat(0));
+        }
+        OSCMessage echo("/synth/mpe/filter/cutoff");
+        echo.add(g_mpeSlot.sink()->filterCutoff());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/mpe/filter/resonance") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isFloat(0)) {
+            g_mpeSlot.sink()->setFilterResonance(msg.getFloat(0));
+        }
+        OSCMessage echo("/synth/mpe/filter/resonance");
+        echo.add(g_mpeSlot.sink()->filterResonance());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/mpe/lfo/rate") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isFloat(0)) {
+            g_mpeSlot.sink()->setLfoRate(msg.getFloat(0));
+        }
+        OSCMessage echo("/synth/mpe/lfo/rate");
+        echo.add(g_mpeSlot.sink()->lfoRate());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/mpe/lfo/depth") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isFloat(0)) {
+            g_mpeSlot.sink()->setLfoDepth(msg.getFloat(0));
+        }
+        OSCMessage echo("/synth/mpe/lfo/depth");
+        echo.add(g_mpeSlot.sink()->lfoDepth());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/mpe/lfo/dest") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            g_mpeSlot.sink()->setLfoDest((uint8_t)msg.getInt(0));
+        }
+        OSCMessage echo("/synth/mpe/lfo/dest");
+        echo.add((int)g_mpeSlot.sink()->lfoDest());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/mpe/lfo/waveform") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            g_mpeSlot.sink()->setLfoWaveform((uint8_t)msg.getInt(0));
+        }
+        OSCMessage echo("/synth/mpe/lfo/waveform");
+        echo.add((int)g_mpeSlot.sink()->lfoWaveform());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    // ---- /synth/supersaw/* — JP-8000 lead (slot 6) ------------------
+    //
+    // Read/write/echo pattern, ported from the legacy
+    // projects/t-dsp_tac5212_audio_shield_adaptor wiring. Existing
+    // dispatcher.ts (state.supersaw.*, dispatcher.setSupersaw*) already
+    // targets these paths, so the dev surface populates without changes.
+    // /mix/fader and /mix/on aliases mirror the slot housekeeping
+    // convention used by the sampler/MPE slots.
+    if (strcmp(address, "/synth/supersaw/mix/fader") == 0 ||
+        strcmp(address, "/synth/supersaw/volume")    == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isFloat(0)) {
+            g_supersawSlot.setVolume(msg.getFloat(0));
+        }
+        OSCMessage echo("/synth/supersaw/volume");
+        echo.add(g_supersawSlot.volume());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/supersaw/mix/on") == 0 ||
+        strcmp(address, "/synth/supersaw/on")     == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            g_supersawSlot.setOn(msg.getInt(0) != 0);
+        }
+        OSCMessage echo("/synth/supersaw/on");
+        echo.add((int)(g_supersawSlot.on() ? 1 : 0));
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/supersaw/midi/ch") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            int ch = msg.getInt(0);
+            if (ch < 0 || ch > 16) ch = 0;
+            g_supersawSlot.setListenChannel((uint8_t)ch);
+        }
+        OSCMessage echo("/synth/supersaw/midi/ch");
+        echo.add((int)g_supersawSlot.listenChannel());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    // Engine knobs — every leaf is float, set-and-echo, mutating
+    // SupersawSink directly (it clamps and re-applies internally).
+#define SS_FLOAT_HANDLER(addr, setFn, getExpr)                            \
+    if (strcmp(address, addr) == 0) {                                     \
+        OSCBundle reply;                                                  \
+        if (msg.size() > 0 && msg.isFloat(0)) {                           \
+            g_supersawSlot.sink()->setFn(msg.getFloat(0));                \
+        }                                                                 \
+        OSCMessage echo(addr);                                            \
+        echo.add(getExpr);                                                \
+        reply.add(echo);                                                  \
+        g_transport.sendBundle(reply);                                    \
+        return;                                                           \
+    }
+    SS_FLOAT_HANDLER("/synth/supersaw/detune",      setDetuneCents,  g_supersawSlot.sink()->detuneCents())
+    SS_FLOAT_HANDLER("/synth/supersaw/mix_center",  setMixCenter,    g_supersawSlot.sink()->mixCenter())
+    SS_FLOAT_HANDLER("/synth/supersaw/cutoff",      setCutoff,       g_supersawSlot.sink()->cutoff())
+    SS_FLOAT_HANDLER("/synth/supersaw/resonance",   setResonance,    g_supersawSlot.sink()->resonance())
+    SS_FLOAT_HANDLER("/synth/supersaw/attack",      setAttack,       g_supersawSlot.sink()->attack())
+    SS_FLOAT_HANDLER("/synth/supersaw/decay",       setDecay,        g_supersawSlot.sink()->decay())
+    SS_FLOAT_HANDLER("/synth/supersaw/sustain",     setSustain,      g_supersawSlot.sink()->sustain())
+    SS_FLOAT_HANDLER("/synth/supersaw/release",     setRelease,      g_supersawSlot.sink()->release())
+    SS_FLOAT_HANDLER("/synth/supersaw/portamento",  setPortamentoMs, g_supersawSlot.sink()->portamentoMs())
+#undef SS_FLOAT_HANDLER
+    // /chorus_depth has no firmware FX yet — keep a stateful echo so the
+    // dispatcher's setSupersawChorusDepth round-trips and the panel's
+    // slider position survives a reconnect.
+    if (strcmp(address, "/synth/supersaw/chorus_depth") == 0) {
+        static float s_supersawChorus = 0.5f;
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isFloat(0)) {
+            float v = msg.getFloat(0);
+            if (v < 0.0f) v = 0.0f;
+            if (v > 1.0f) v = 1.0f;
+            s_supersawChorus = v;
+        }
+        OSCMessage echo("/synth/supersaw/chorus_depth");
+        echo.add(s_supersawChorus);
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
     // ---- /synth/dexed/bank/names ----  (dev surface populates the bank dropdown)
     if (strcmp(address, "/synth/dexed/bank/names") == 0) {
         OSCMessage m("/synth/dexed/bank/names");
@@ -1321,6 +1937,22 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         uint8_t channel  = (uint8_t)msg.getInt(2);
         if (velocity > 0) g_midiRouter.handleNoteOn(channel, note, velocity);
         else              g_midiRouter.handleNoteOff(channel, note, 0);
+        return;
+    }
+
+    // ---- /midi/cc/in i i i ----  (cc, value, channel)
+    //
+    // UI-originated control change from the dev surface — currently used
+    // for the spacebar-as-sustain-pedal binding (CC#64). Same router
+    // path as a hardware MIDI keyboard, so downstream synths react
+    // identically (the active slot's MidiSink::onSustain fires on CC#64
+    // for sampler / Dexed / any future engine).
+    if (strcmp(address, "/midi/cc/in") == 0 && msg.size() >= 3
+        && msg.isInt(0) && msg.isInt(1) && msg.isInt(2)) {
+        uint8_t cc      = (uint8_t)msg.getInt(0);
+        uint8_t value   = (uint8_t)msg.getInt(1);
+        uint8_t channel = (uint8_t)msg.getInt(2);
+        g_midiRouter.handleControlChange(channel, cc, value);
         return;
     }
 
@@ -1576,10 +2208,33 @@ void setup() {
     AudioMemory_F32(128);
 
     // int16 pool: 8-voice Dexed engine internals + the bridge's int16
-    // input slot. 256 is conservative; matches the headroom the
-    // production project's mixer relies on for clean audio at full
-    // polyphony.
-    AudioMemory(256);
+    // input slot + 8-voice multisample sampler (per-voice players,
+    // envelopes, mixer chain — ~50 audio_block_t held simultaneously
+    // at peak polyphony). 320 leaves headroom for the additional
+    // sampler load on top of Dexed.
+    AudioMemory(320);
+
+    // --- SD card init (sampler slot needs SD before scanBank) ----------
+    //
+    // BUILTIN_SDCARD on Teensy 4.1 = 4-bit SDIO. The audio shield's SD
+    // slot (1-bit SPI) is too slow for polyphonic streaming. If no SD
+    // card is inserted the sampler stays silent — the rest of the
+    // firmware (USB audio, Dexed, mixer) continues normally.
+    if (!SD.begin(BUILTIN_SDCARD)) {
+        Serial.println("[sampler] SD card init failed - sampler slot will stay silent");
+    } else {
+        Serial.println("[sampler] SD card initialized");
+        g_multisampleSlot.begin();
+        // Default bank path. User drops 48 kHz / 16-bit / stereo WAVs
+        // named after their root note (e.g., C4.wav, F#3.wav) under this
+        // directory. scanBank() is silent if the directory doesn't exist.
+        g_multisampleSlot.scanBank("/samples/piano");
+    }
+
+    // MPE slot 3 — initialise oscillators / filters / envelopes to a
+    // defined silent state. Doesn't depend on SD; safe to call
+    // unconditionally.
+    g_mpeSlot.begin();
 
     // Push initial mixer state into the audio graph. ch3/4 reserve
     // their slots (no audio path yet); applyChannelFader is a no-op
@@ -1674,12 +2329,18 @@ void setup() {
     // Wire slots into the switcher and route the switcher downstream
     // of the arp filter. Engines register through the switcher rather
     // than directly with the arp so the active-slot model controls
-    // which engine hears the keyboard. Slots 1..3 are SilentSlot
-    // placeholders until later phases land real engines.
+    // which engine hears the keyboard. Slot 0 = Dexed, slot 1 = sampler,
+    // slot 3 = MPE; slot 2 (Plaits) and 4..7 are SilentSlot placeholders
+    // until later phases / per-slot agents bring more engines online.
     g_synthSwitcher.setSlot(0, &g_dexedSlot);
-    g_synthSwitcher.setSlot(1, &g_silentSlot1);
-    g_synthSwitcher.setSlot(2, &g_silentSlot2);
-    g_synthSwitcher.setSlot(3, &g_silentSlot3);
+    g_synthSwitcher.setSlot(1, &g_multisampleSlot);
+    g_synthSwitcher.setSlot(2, &g_silentSlot2);  // placeholder until Plaits agent wires slot 2
+    g_synthSwitcher.setSlot(3, &g_mpeSlot);
+    g_synthSwitcher.setSlot(4, &g_silentSlot4);
+    g_synthSwitcher.setSlot(5, &g_silentSlot5);
+    g_synthSwitcher.setSlot(6, &g_supersawSlot);  // was: &g_silentSlot6
+    g_supersawSlot.begin();
+    g_synthSwitcher.setSlot(7, &g_silentSlot7);
     g_arpFilter.addDownstream(&g_synthSwitcher);
     g_synthSwitcher.setActive(0);  // Dexed audible at boot
 
@@ -1730,6 +2391,14 @@ void loop() {
     // only handles the gate-off timing that closes notes after their
     // gate window expires.
     g_arpFilter.tick(micros());
+
+    // Sampler slot: stop SD streams whose envelopes have decayed. Cheap
+    // when nothing's playing (early-return per voice on idle state).
+    g_multisampleSlot.pollVoices();
+
+    // Supersaw slot: advance portamento glide. No-op when not held / no
+    // glide in progress (early-return inside SupersawSink::tick).
+    g_supersawSink.tick(millis());
 
     // 1 Hz LED heartbeat — proves the main loop hasn't wedged.
     static uint32_t s_lastBlinkMs = 0;

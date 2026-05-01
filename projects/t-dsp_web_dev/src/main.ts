@@ -32,11 +32,14 @@ import { rawOsc } from './ui/raw-osc';
 import { spectrumView } from './ui/spectrum';
 import { keyboardView } from './ui/keyboard';
 import { dexedPanel } from './ui/dexed-panel';
-import { mpePanel } from './ui/mpe-panel';
-import { neuroPanel } from './ui/neuro-panel';
-import { acidPanel } from './ui/acid-panel';
-import { supersawPanel } from './ui/supersaw-panel';
-import { chipPanel } from './ui/chip-panel';
+import { samplerPanel } from './ui/sampler-panel';
+import { synthSlotPicker } from './ui/synth-slot-picker';
+import { mpeSlotPanel } from './ui/mpe-slot-panel';
+// NOTE: neuro-panel / acid-panel / supersaw-panel / chip-panel are
+// intentionally not imported here — each of those engines is being
+// rebuilt as its own slot via the parallel agent task in
+// planning/synth-slot-rebuild/. Each agent re-adds the import for
+// their engine when they wire its panel into the slot picker.
 import { processingPanel } from './ui/processing-panel';
 import { fxPanel } from './ui/fx-panel';
 import { looperPanel } from './ui/looper-panel';
@@ -193,6 +196,13 @@ async function connect(): Promise<void> {
       // (bank signal defaults to 0, which is what the firmware boots to).
       dispatcher.queryDexedBankNames();
       dispatcher.queryDexedVoiceNames(state.dexed.bank.get());
+      // Synth slot metadata (id + displayName per slot 0..3). /snapshot
+      // also includes /synth/slots, but querying explicitly here makes
+      // the picker labels appear faster on connect.
+      dispatcher.querySynthSlots();
+      // Sampler bank info — file count + bank name. /snapshot also
+      // covers this; explicit query ensures the panel populates fast.
+      dispatcher.querySamplerInfo();
       if (state.metersOn.get()) {
         dispatcher.subscribeMeters();
       }
@@ -409,158 +419,117 @@ dispatcher.setMidiSink((note, velocity, channel) => {
 // treats channel 1 as its master channel (notes silently dropped per
 // MPE spec) so we send on channel 2, a member channel MpeVaSink will
 // actually allocate a voice for.
-let activeSynthSubtab: 'dexed' | 'mpe' | 'neuro' | 'acid' | 'supersaw' | 'chip' = 'dexed';
-const keyboardChannelForSubtab = (): number => {
-  // Per-synth default channels: Dexed=1, MPE member=2 (ch 1 is its
-  // master/ignored channel per MPE spec), Neuro=3, Acid=4, Supersaw=5,
-  // Chip=6. On-screen keys always reach the currently-visible synth.
-  switch (activeSynthSubtab) {
-    case 'mpe':      return 2;
-    case 'neuro':    return 3;
-    case 'acid':     return 4;
-    case 'supersaw': return 5;
-    case 'chip':     return 6;
-    default:         return 1;
-  }
-};
+// Slot-aware keyboard MIDI dispatch. The firmware's SynthSwitcher routes
+// MIDI to whichever slot is active; each slot has its own listenChannel
+// (default omni). Send on channel 1 — slots that listen on channel 1
+// or omni will pick it up, which covers all default configurations.
 keyboard.onPress((note, down) => {
-  // Fixed velocity 100 for Phase 1 — velocity-from-gesture is a
-  // follow-on. Channel routes by active sub-tab so the key you press
-  // always reaches the synth you're looking at.
-  dispatcher.sendMidiNote(note, down ? 100 : 0, keyboardChannelForSubtab());
+  dispatcher.sendMidiNote(note, down ? 100 : 0, 1);
 });
 
 const synthSection = document.createElement('section');
 synthSection.className = 'view view-synth';
 synthSection.style.display = 'none';
 
-// Synth sub-tabs — Dexed (FM) and MPE (VA). One content container
-// swaps its visible panel on sub-tab click; both panels stay mounted
-// so their subscribe/unsubscribe cycles are triggered by the
-// setActive hooks rather than DOM add/remove (keeps canvas scroll
-// state, form values, etc. stable across switches).
-const synthSubnav = document.createElement('nav');
-synthSubnav.className = 'synth-subnav';
-
-// Each sub-tab button has a label + a "playing" dot that lights
-// up when the synth's on state is true. Keeps the on/off state
-// visible even when the sub-tab isn't selected.
-const makeSubtab = (label: string): HTMLButtonElement => {
-  const b = document.createElement('button');
-  b.className = 'synth-subnav-tab';
-  const dot = document.createElement('span');
-  dot.className = 'synth-subnav-dot';
-  const text = document.createElement('span');
-  text.textContent = label;
-  b.append(dot, text);
-  return b;
-};
-const dexedSubtab = makeSubtab('Dexed');
-dexedSubtab.classList.add('active');
-state.dexed.on.subscribe((on) => dexedSubtab.classList.toggle('playing', on));
-const mpeSubtab = makeSubtab('MPE');
-state.mpe.on.subscribe((on) => mpeSubtab.classList.toggle('playing', on));
-const neuroSubtab = makeSubtab('Neuro');
-state.neuro.on.subscribe((on) => neuroSubtab.classList.toggle('playing', on));
-const acidSubtab = makeSubtab('Acid');
-state.acid.on.subscribe((on) => acidSubtab.classList.toggle('playing', on));
-const supersawSubtab = makeSubtab('Supersaw');
-state.supersaw.on.subscribe((on) => supersawSubtab.classList.toggle('playing', on));
-const chipSubtab = makeSubtab('Chip');
-state.chip.on.subscribe((on) => chipSubtab.classList.toggle('playing', on));
-synthSubnav.append(dexedSubtab, mpeSubtab, neuroSubtab, acidSubtab, supersawSubtab, chipSubtab);
-
+// Synth content — one panel per slot, exactly one visible at a time.
+// The slot picker (declared below) drives visibility via the
+// state.synthSlot.active subscription. Each slot's panel is mounted
+// here once at construction; only its display style toggles.
+//
+// Slot 0 (Dexed) and Slot 1 (Sampler/Piano) have full panels.
+// Slots 2..7 are placeholders showing "(slot empty)" until the parallel
+// agent rebuild fills them in (see planning/synth-slot-rebuild/).
 const synthContent = document.createElement('div');
 synthContent.className = 'synth-content';
-const dexedPanelEl = dexedPanel(state, dispatcher);
-const mpe = mpePanel(state, dispatcher);
-const neuro = neuroPanel(state, dispatcher);
-const acid = acidPanel(state, dispatcher);
-const supersaw = supersawPanel(state, dispatcher);
-const chip = chipPanel(state, dispatcher);
-mpe.element.style.display = 'none';
-neuro.element.style.display = 'none';
-acid.element.style.display = 'none';
-supersaw.element.style.display = 'none';
-chip.element.style.display = 'none';
-synthContent.append(dexedPanelEl, mpe.element, neuro.element, acid.element, supersaw.element, chip.element);
 
-type SynthSubtab = 'dexed' | 'mpe' | 'neuro' | 'acid' | 'supersaw' | 'chip';
+const dexedPanelEl   = dexedPanel(state, dispatcher);
+const samplerPanelEl = samplerPanel(state, dispatcher);
+const mpePanelEl     = mpeSlotPanel(state, dispatcher);
 
-// MIDI-Auto enforcer — only touches on-states for synths whose
-// midiAuto flag is TRUE. Gives each synth an opt-out: unchecking
-// MIDI Auto on (say) Dexed means the Dexed on-state stays put even
-// as you switch tabs, so you can layer Dexed + Supersaw on the
-// same performance. Only fires when state.connected is true —
-// otherwise the OSC writes are thrown away into a disconnected
-// bridge and the firmware's defaults stay intact.
-const enforceMidiAuto = (): void => {
-  if (!state.connected.get()) return;
-  // Always force the active tab's synth ON and every other synth with
-  // midiAuto=true OFF. Send unconditionally (no local on-state diff check)
-  // so firmware reboots, snapshot races, or any other UI/firmware drift
-  // can't leave a stale synth audible. midiAuto=false opts a synth out
-  // of the enforcer entirely — that's the layering escape hatch.
-  const force = (which: SynthSubtab, midiAuto: boolean, set: (on: boolean) => void) => {
-    if (which === activeSynthSubtab) { set(true); return; }
-    if (midiAuto) set(false);
-  };
-  force('dexed',    state.dexed.midiAuto.get(),    (v) => dispatcher.setDexedOn(v));
-  force('mpe',      state.mpe.midiAuto.get(),      (v) => dispatcher.setMpeOn(v));
-  force('neuro',    state.neuro.midiAuto.get(),    (v) => dispatcher.setNeuroOn(v));
-  force('acid',     state.acid.midiAuto.get(),     (v) => dispatcher.setAcidOn(v));
-  force('supersaw', state.supersaw.midiAuto.get(), (v) => dispatcher.setSupersawOn(v));
-  force('chip',     state.chip.midiAuto.get(),     (v) => dispatcher.setChipOn(v));
-};
+// Empty-slot placeholder. Reused for slots 3..7 (the panel just shows
+// which slot is active and a "coming soon" hint). Agents replace this
+// with real per-engine panels as they wire each slot.
+const emptySlotPanelEl = document.createElement('div');
+emptySlotPanelEl.className = 'empty-slot-panel';
+const emptyLabel = document.createElement('div');
+emptyLabel.className = 'empty-slot-text';
+emptyLabel.textContent = 'This slot is empty.';
+const emptyHint = document.createElement('div');
+emptyHint.className = 'empty-slot-hint';
+emptyHint.textContent = 'Replace via planning/synth-slot-rebuild/.';
+emptySlotPanelEl.append(emptyLabel, emptyHint);
+emptySlotPanelEl.style.display = 'none';
 
-const selectSynthSubtab = (which: SynthSubtab): void => {
-  activeSynthSubtab = which;
-  dexedSubtab.classList.toggle('active', which === 'dexed');
-  mpeSubtab.classList.toggle('active',   which === 'mpe');
-  neuroSubtab.classList.toggle('active', which === 'neuro');
-  acidSubtab.classList.toggle('active',  which === 'acid');
-  supersawSubtab.classList.toggle('active', which === 'supersaw');
-  chipSubtab.classList.toggle('active',  which === 'chip');
-  dexedPanelEl.style.display  = which === 'dexed'    ? '' : 'none';
-  mpe.element.style.display   = which === 'mpe'      ? '' : 'none';
-  neuro.element.style.display = which === 'neuro'    ? '' : 'none';
-  acid.element.style.display  = which === 'acid'     ? '' : 'none';
-  supersaw.element.style.display = which === 'supersaw' ? '' : 'none';
-  chip.element.style.display  = which === 'chip'     ? '' : 'none';
-  // MPE is the only panel with active-hook telemetry; Acid/Supersaw/
-  // Chip are mono with no voice orbs.
-  mpe.setActive(which === 'mpe');
-  neuro.setActive(which === 'neuro');
-  acid.setActive(which === 'acid');
-  supersaw.setActive(which === 'supersaw');
-  chip.setActive(which === 'chip');
-  enforceMidiAuto();
-};
-
-// Re-apply on connect so the firmware's cold-boot defaults (all synths
-// on) converge to the UI's sub-tab-follows layout. Re-apply whenever
-// any synth's midiAuto toggles ON — flipping Auto on immediately
-// enforces its rule.
-state.connected.subscribe((c) => { if (c) enforceMidiAuto(); });
-state.dexed.midiAuto   .subscribe((on) => { if (on) enforceMidiAuto(); });
-state.mpe.midiAuto     .subscribe((on) => { if (on) enforceMidiAuto(); });
-state.neuro.midiAuto   .subscribe((on) => { if (on) enforceMidiAuto(); });
-state.acid.midiAuto    .subscribe((on) => { if (on) enforceMidiAuto(); });
-state.supersaw.midiAuto.subscribe((on) => { if (on) enforceMidiAuto(); });
-state.chip.midiAuto    .subscribe((on) => { if (on) enforceMidiAuto(); });
-
-dexedSubtab   .addEventListener('click', () => selectSynthSubtab('dexed'));
-mpeSubtab     .addEventListener('click', () => selectSynthSubtab('mpe'));
-neuroSubtab   .addEventListener('click', () => selectSynthSubtab('neuro'));
-acidSubtab    .addEventListener('click', () => selectSynthSubtab('acid'));
-supersawSubtab.addEventListener('click', () => selectSynthSubtab('supersaw'));
-chipSubtab    .addEventListener('click', () => selectSynthSubtab('chip'));
+samplerPanelEl.style.display = 'none';
+mpePanelEl.style.display = 'none';
+synthContent.append(dexedPanelEl, samplerPanelEl, mpePanelEl, emptySlotPanelEl);
 
 const synthKeyboardDock = document.createElement('div');
 synthKeyboardDock.className = 'synth-keyboard-dock';
+
+// Sustain pedal indicator — visually tracks the spacebar binding so the
+// user can see when they're holding sustain. Sits above the keyboard,
+// inside the dock so it's only visible on the synth tab.
+const sustainPill = document.createElement('div');
+sustainPill.className = 'sustain-pill';
+sustainPill.textContent = 'SUSTAIN  (Space)';
+synthKeyboardDock.appendChild(sustainPill);
 synthKeyboardDock.appendChild(keyboard.element);
 
-synthSection.append(synthSubnav, synthContent, synthKeyboardDock);
+// Spacebar -> CC#64 (sustain). Only act when the user isn't typing into
+// an input/textarea (so the Raw OSC field, channel-name editor, etc.
+// stay usable). Suppress key-repeat so a long hold sends one CC#64=127
+// on press and one CC#64=0 on release. preventDefault on keydown stops
+// the page from scrolling when the user holds Space.
+let sustainHeld = false;
+function isTypingTarget(t: EventTarget | null): boolean {
+  if (!(t instanceof HTMLElement)) return false;
+  const tag = t.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || t.isContentEditable;
+}
+window.addEventListener('keydown', (e) => {
+  if (e.code !== 'Space' || e.repeat) return;
+  if (isTypingTarget(e.target)) return;
+  e.preventDefault();
+  if (sustainHeld) return;
+  sustainHeld = true;
+  sustainPill.classList.add('active');
+  dispatcher.sendMidiCC(64, 127, 1);
+});
+window.addEventListener('keyup', (e) => {
+  if (e.code !== 'Space') return;
+  if (isTypingTarget(e.target)) return;
+  if (!sustainHeld) return;
+  sustainHeld = false;
+  sustainPill.classList.remove('active');
+  dispatcher.sendMidiCC(64, 0, 1);
+});
+// Safety net: window blur (alt-tab, switch app) drops a held space silently.
+window.addEventListener('blur', () => {
+  if (!sustainHeld) return;
+  sustainHeld = false;
+  sustainPill.classList.remove('active');
+  dispatcher.sendMidiCC(64, 0, 1);
+});
+
+// Slot picker — sits above the legacy synth-engine subtabs because it's
+// the higher-level routing control. Clicking a slot calls /synth/active
+// in firmware; the firmware's switcher panics held notes on the
+// outgoing slot and ramps the incoming slot's gain.
+const synthSlotPickerEl = synthSlotPicker(state, dispatcher);
+
+// Visibility: exactly one slot panel is shown at a time, driven by the
+// firmware-authoritative state.synthSlot.active. Slots 2..7 currently
+// render a placeholder; agents fill them in following the contract in
+// planning/synth-slot-rebuild/.
+state.synthSlot.active.subscribe((active) => {
+  dexedPanelEl    .style.display = active === 0 ? '' : 'none';
+  samplerPanelEl  .style.display = active === 1 ? '' : 'none';
+  mpePanelEl      .style.display = active === 3 ? '' : 'none';
+  emptySlotPanelEl.style.display = (active === 2 || active >= 4) ? '' : 'none';
+});
+
+synthSection.append(synthSlotPickerEl, synthContent, synthKeyboardDock);
 
 // --- FX view section ----------------------------------------------
 //
@@ -903,14 +872,13 @@ function applyVisibility(): void {
     spectrum.start();
   }
 
-  // Keyboard / MPE lifecycle:
+  // Keyboard lifecycle:
   //   - Engineer mode: keyboard runs only when PLAY > Synths is open.
   //   - Musician mode: keyboard always runs (handled by applyMode);
   //     don't stop it here even when the user navigates elsewhere.
-  // MPE voice telemetry is tab-bound regardless of mode — it costs
-  // bandwidth and only matters when the MPE sub-tab is visible.
+  // MPE voice telemetry will re-attach here once the per-slot agent
+  // rebuild lands an MPE slot — for now, no telemetry hook.
   const synthsActive = ws === 'play' && playTab === 'synths';
-  const mpeSubActive = synthsActive && mpeSubtab.classList.contains('active');
   const isMusician = state.mode.get() === 'musician';
 
   if (synthsActive && !keyboard.isRunning()) {
@@ -920,10 +888,6 @@ function applyVisibility(): void {
     keyboard.stop();
     dispatcher.unsubscribeMidi();
   }
-
-  // MPE active hook independent of keyboard running — telemetry
-  // subscribes/unsubscribes here.
-  mpe.setActive(mpeSubActive);
 }
 
 // Wire the four active-* signals to the derive function. Each signal
