@@ -279,7 +279,16 @@ static bool  g_synthBusOn     = true;
 // /config/chlink/{1-2,3-4,5-6}; when on, server-side mirrors writes
 // across the linked pair (see mirrorPartner / linkApplyChannelFader
 // below). Not per-channel state — link is a property of the pair.
-static bool g_chLink[3] = {false, false, false};
+//
+// Default: all three pairs linked. The hardware lays out USB, Line,
+// and Mic as natural stereo pairs — USB host audio is L+R, the line
+// input jack is a stereo TRS, and the on-board PDM mics are a
+// stereo pair. Linking them by default means a fader/mute gesture
+// on either side of a pair affects both, which is what most users
+// expect on first touch. The dev surface's link button can break
+// the pair (set chlink to 0) for cases where independent control
+// is needed.
+static bool g_chLink[3] = {true, true, true};
 
 // If `ch` is the L or R member of a currently-linked pair, returns the
 // partner channel number; otherwise 0. Pair (1,2) is index 0, pair
