@@ -83,52 +83,98 @@ export function neuroSlotPanel(state: MixerState, dispatcher: Dispatcher): HTMLE
   onLabel.textContent = 'Neuro';
   onRow.append(onBtn, onLabel);
 
-  // ---- Preset dropdown -----------------------------------------------
-  // Curated reese / neuro bass voicings ported from the legacy
-  // lib/TDspNeuro/presets.json. Selecting a preset pushes every CORE
-  // parameter through the dispatcher so firmware re-applies the
-  // oscillator balance, filter, envelope, LFO, and portamento in one
-  // shot. Stink-chain fields in the JSON are skipped — that part of
-  // the engine isn't wired in this slot rebuild — so stink-heavy
-  // presets ("Full Face", "Talkbox", "Metallic") will sound cleaner
-  // than the legacy. Once the stink chain comes back as a follow-up,
-  // adding the dispatcher.setNeuroStink* calls here is a one-line edit
-  // per field.
+  // ---- Bank + Preset dropdowns ---------------------------------------
+  // Two cascading selectors: "Bank" picks one of the JSON categories
+  // (Classic / Growl / Wobble / Sub / Stink); "Preset" lists only the
+  // voicings in that bank. Replaces the prior single optgrouped dropdown
+  // with a synth-classic bank/preset hierarchy that mirrors how the
+  // legacy ui/neuro-panel.ts surfaced these (filter buttons + grid).
   //
-  // state.neuro.activePresetId tracks the active selection so a
-  // reconnect highlights the right preset; tweaking an individual knob
-  // afterwards leaves the selection alone (matches the chip-panel
-  // behaviour).
+  // Selecting a preset pushes every CORE parameter through the
+  // dispatcher so firmware re-applies oscillator balance, filter,
+  // envelope, LFO, and portamento in one shot. Stink-chain fields in
+  // the JSON are skipped — that part of the engine isn't wired in this
+  // slot rebuild — so stink-heavy presets ("Full Face", "Talkbox",
+  // "Metallic") will sound cleaner than the legacy. Once the stink
+  // chain comes back as a follow-up, adding the dispatcher.setNeuroStink*
+  // calls here is a one-line edit per field.
+  //
+  // state.neuro.activePresetId is the source of truth for which preset
+  // is loaded. The Bank selector is derived from it (look up the
+  // preset's category) so reconnects auto-restore both dropdowns;
+  // tweaking an individual knob afterwards leaves the selection alone
+  // (matches the chip-panel behaviour).
+  const bankKeys = Object.keys(PRESETS.categories);
+
+  const bankRow = document.createElement('div');
+  bankRow.className = 'sampler-control-row';
+  const bankLabel = document.createElement('label');
+  bankLabel.textContent = 'Bank';
+  const bankSelect = document.createElement('select');
+  bankSelect.className = 'sampler-midi-channel';
+  for (const k of bankKeys) {
+    const opt = document.createElement('option');
+    opt.value = k;
+    opt.textContent = PRESETS.categories[k].label;
+    bankSelect.appendChild(opt);
+  }
+  bankRow.append(bankLabel, bankSelect);
+
   const presetRow = document.createElement('div');
   presetRow.className = 'sampler-control-row';
   const presetLabel = document.createElement('label');
   presetLabel.textContent = 'Preset';
   const presetSelect = document.createElement('select');
   presetSelect.className = 'sampler-midi-channel';
-  const noneOpt = document.createElement('option');
-  noneOpt.value = '';
-  noneOpt.textContent = '— Select preset —';
-  presetSelect.appendChild(noneOpt);
-  for (const [catKey, cat] of Object.entries(PRESETS.categories)) {
-    const group = document.createElement('optgroup');
-    group.label = cat.label;
-    for (const p of PRESETS.presets) {
-      if (p.category !== catKey) continue;
+  presetRow.append(presetLabel, presetSelect);
+
+  // Re-populate the preset dropdown for a given bank. `keepSelected`
+  // preserves the current preset id if it belongs to the new bank;
+  // otherwise the dropdown lands on the bank's first preset (purely
+  // visual — no dispatcher call until the user actually picks one).
+  const refreshPresetOptions = (bankKey: string, keepSelected: string): void => {
+    presetSelect.innerHTML = '';
+    const matches = PRESETS.presets.filter((p) => p.category === bankKey);
+    for (const p of matches) {
       const opt = document.createElement('option');
       opt.value = p.id;
       opt.textContent = p.name;
       opt.title = p.description;
-      group.appendChild(opt);
+      presetSelect.appendChild(opt);
     }
-    if (group.childElementCount > 0) presetSelect.appendChild(group);
-  }
-  state.neuro.activePresetId.subscribe((id) => { presetSelect.value = id; });
+    presetSelect.value = matches.some((p) => p.id === keepSelected)
+      ? keepSelected
+      : (matches[0]?.id ?? '');
+  };
+
+  // Initial population: pick the bank that contains the active preset
+  // (or the first bank if there isn't one yet). The active preset id
+  // remains the source of truth — the bank dropdown is a view onto it.
+  const initialId = state.neuro.activePresetId.get();
+  const initialBank = PRESETS.presets.find((p) => p.id === initialId)?.category
+                      ?? bankKeys[0];
+  bankSelect.value = initialBank;
+  refreshPresetOptions(initialBank, initialId);
+
+  state.neuro.activePresetId.subscribe((id) => {
+    const bank = PRESETS.presets.find((p) => p.id === id)?.category;
+    if (bank && bankSelect.value !== bank) {
+      bankSelect.value = bank;
+      refreshPresetOptions(bank, id);
+    } else {
+      presetSelect.value = id;
+    }
+  });
+
+  bankSelect.addEventListener('change', () => {
+    refreshPresetOptions(bankSelect.value, '');  // pick first preset in bank
+    // No dispatcher call here — switching the bank dropdown doesn't
+    // load anything until the user picks a preset. This way you can
+    // browse banks without smashing your current sound.
+  });
   presetSelect.addEventListener('change', () => {
     const preset = PRESETS.presets.find((p) => p.id === presetSelect.value);
-    if (!preset) {
-      state.neuro.activePresetId.set('');
-      return;
-    }
+    if (!preset) return;
     const p = preset.params;
     dispatcher.setNeuroVolume         (p.volume);
     dispatcher.setNeuroAttack         (p.attack_sec);
@@ -145,7 +191,6 @@ export function neuroSlotPanel(state: MixerState, dispatcher: Dispatcher): HTMLE
     dispatcher.setNeuroPortamento     (p.portamento_ms);
     state.neuro.activePresetId.set(preset.id);
   });
-  presetRow.append(presetLabel, presetSelect);
 
   // ---- Volume slider --------------------------------------------------
   const volRow = buildSliderRow(
@@ -255,6 +300,7 @@ export function neuroSlotPanel(state: MixerState, dispatcher: Dispatcher): HTMLE
 
   root.append(
     onRow,
+    bankRow,
     presetRow,
     volRow,
     midiRow,
