@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.10)
+project(sd_wav)
+set(CMAKE_CXX_STANDARD 14)
+teensy_include_directories(../../src)
+teensy_add_executable(sd_wav sd_wav.ino)
+teensy_target_link_libraries(sd_wav SD SdFat teensy_variable_playback Audio  SPI SerialFlash cores Wire arm_math)

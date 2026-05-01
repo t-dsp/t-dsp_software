@@ -1,0 +1,17 @@
+#ifndef TEENSY_VARIABLE_PLAYBACK_TEST_LOWLEVEL_INDEXEDFILE_INDEXEDFILEFIXTURE_H
+#define TEENSY_VARIABLE_PLAYBACK_TEST_LOWLEVEL_INDEXEDFILE_INDEXEDFILEFIXTURE_H
+
+#include "Audio.h"
+#include "IndexableFile.h"
+
+struct IndexableFileFixture {
+
+    IndexableFileFixture()  {
+    }
+
+    ~IndexableFileFixture() {
+    }
+
+};
+
+#endif //TEENSY_VARIABLE_PLAYBACK_TEST_LOWLEVEL_INDEXEDFILE_INDEXEDFILEFIXTURE_H

@@ -1,0 +1,4 @@
+add_library(teensy_variable_playback STATIC
+        ${HEADER_FILES}
+        ${SOURCE_FILES})
+
