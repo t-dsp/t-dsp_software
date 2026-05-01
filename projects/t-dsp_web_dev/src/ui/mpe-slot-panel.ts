@@ -18,10 +18,36 @@
 
 import { Dispatcher } from '../dispatcher';
 import { MixerState, Signal } from '../state';
+import presetDoc from '../../../../lib/TDspMPE/presets.json';
 
 const WAVEFORM_LABELS = ['Saw', 'Square', 'Tri', 'Sine'] as const;
 const LFO_DEST_LABELS = ['Off', 'Cutoff', 'Pitch', 'Amp'] as const;
 const LFO_WAVE_LABELS = ['Sine', 'Tri', 'Saw', 'Square'] as const;
+
+interface PresetParams {
+  waveform: number;
+  attack_sec: number;
+  release_sec: number;
+  volume: number;
+  filter_cutoff_hz: number;
+  filter_resonance: number;
+  lfo_rate_hz: number;
+  lfo_depth: number;
+  lfo_dest: number;
+  lfo_waveform: number;
+}
+interface Preset {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  params: PresetParams;
+}
+interface PresetDoc {
+  categories: Record<string, { color: string; label: string }>;
+  presets: Preset[];
+}
+const PRESETS = presetDoc as PresetDoc;
 
 export function mpeSlotPanel(state: MixerState, dispatcher: Dispatcher): HTMLElement {
   const root = document.createElement('div');
@@ -47,6 +73,61 @@ export function mpeSlotPanel(state: MixerState, dispatcher: Dispatcher): HTMLEle
   onLabel.className = 'synth-on-label';
   onLabel.textContent = 'MPE VA';
   onRow.append(onBtn, onLabel);
+
+  // ---- Preset dropdown ------------------------------------------------
+  // Curated VA presets from lib/TDspMPE/presets.json (Buzzsaw, Chiptune,
+  // Glass Pad, ...). Selecting one fires the ten engine OSC writes
+  // through the dispatcher; the firmware re-applies waveform / envelope /
+  // filter / LFO / volume in one shot. Categories surface as <optgroup>s
+  // so the semantic grouping (retro / emulating / abstract / modern)
+  // survives the dropdown. activePresetId is mirrored into state so a
+  // reconnect or a manual knob tweak (which won't match any preset)
+  // clears the selection visibly.
+  const presetRow = document.createElement('div');
+  presetRow.className = 'sampler-control-row';
+  const presetLabel = document.createElement('label');
+  presetLabel.textContent = 'Preset';
+  const presetSelect = document.createElement('select');
+  presetSelect.className = 'sampler-midi-channel';
+
+  const noneOpt = document.createElement('option');
+  noneOpt.value = '';
+  noneOpt.textContent = '— Select preset —';
+  presetSelect.appendChild(noneOpt);
+  for (const [catKey, cat] of Object.entries(PRESETS.categories)) {
+    const group = document.createElement('optgroup');
+    group.label = cat.label;
+    for (const p of PRESETS.presets) {
+      if (p.category !== catKey) continue;
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name;
+      opt.title = p.description;
+      group.appendChild(opt);
+    }
+    if (group.childElementCount > 0) presetSelect.appendChild(group);
+  }
+  state.mpe.activePresetId.subscribe((id) => { presetSelect.value = id; });
+  presetSelect.addEventListener('change', () => {
+    const preset = PRESETS.presets.find((p) => p.id === presetSelect.value);
+    if (!preset) {
+      state.mpe.activePresetId.set('');
+      return;
+    }
+    const p = preset.params;
+    dispatcher.setMpeWaveform       (p.waveform);
+    dispatcher.setMpeAttack         (p.attack_sec);
+    dispatcher.setMpeRelease        (p.release_sec);
+    dispatcher.setMpeVolume         (p.volume);
+    dispatcher.setMpeFilterCutoff   (p.filter_cutoff_hz);
+    dispatcher.setMpeFilterResonance(p.filter_resonance);
+    dispatcher.setMpeLfoRate        (p.lfo_rate_hz);
+    dispatcher.setMpeLfoDepth       (p.lfo_depth);
+    dispatcher.setMpeLfoDest        (p.lfo_dest);
+    dispatcher.setMpeLfoWaveform    (p.lfo_waveform);
+    state.mpe.activePresetId.set(preset.id);
+  });
+  presetRow.append(presetLabel, presetSelect);
 
   // ---- Volume slider --------------------------------------------------
   const volRow = buildSliderRow(
@@ -171,6 +252,7 @@ export function mpeSlotPanel(state: MixerState, dispatcher: Dispatcher): HTMLEle
 
   root.append(
     onRow,
+    presetRow,
     volRow,
     mpeModeRow,
     masterRow,
