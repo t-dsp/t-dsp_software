@@ -1,9 +1,10 @@
 // Chip slot panel — config UI for slot 7 (NES/Gameboy chiptune).
 //
 // New panel built for the slot-architecture rebuild. Layout follows
-// sampler-panel.ts / mpe-slot-panel.ts: ON/OFF header, then a vertical
-// stack of labeled rows for the slot housekeeping (volume, MIDI channel)
-// and the engine knobs (pulse duties / detune / triangle+noise levels /
+// sampler-panel.ts / mpe-slot-panel.ts: ON/OFF header, preset dropdown
+// (ported from the legacy chip-panel.ts), then a vertical stack of
+// labeled rows for the slot housekeeping (volume, MIDI channel) and
+// the engine knobs (pulse duties / detune / triangle+noise levels /
 // voicing / arpeggio / ADSR).
 //
 // All controls round-trip through the firmware via OSC; optimistic
@@ -11,14 +12,42 @@
 // echoes through dispatcher.handleIncoming() re-apply (idempotent
 // when the value matches).
 //
-// The legacy chip-panel.ts (richer — preset grid, midi-auto follow) is
+// The legacy chip-panel.ts (richer grid layout, midi-auto follow) is
 // left in place untouched per the parallel-agent contract. Once the
-// user confirms this slim replacement is what they want, the legacy
-// file can be deleted; if presets are missed, port them in here
-// following the same row builders.
+// user confirms this replacement is what they want, the legacy file
+// can be deleted.
 
 import { Dispatcher } from '../dispatcher';
 import { MixerState, Signal } from '../state';
+import presetDoc from '../../../../lib/TDspChip/presets.json';
+
+interface PresetParams {
+  volume: number;
+  pulse1_duty: number;
+  pulse2_duty: number;
+  pulse2_detune: number;
+  tri_level: number;
+  noise_level: number;
+  voicing: number;
+  arpeggio: number;
+  arp_rate_hz: number;
+  attack_sec: number;
+  decay_sec: number;
+  sustain: number;
+  release_sec: number;
+}
+interface Preset {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  params: PresetParams;
+}
+interface PresetDoc {
+  categories: Record<string, { color: string; label: string }>;
+  presets: Preset[];
+}
+const PRESETS = presetDoc as PresetDoc;
 
 const DUTY_LABELS    = ['12.5%', '25%', '50%', '75%'] as const;
 const VOICING_LABELS = ['Unison', 'Octave', '5th', '3rd'] as const;
@@ -48,6 +77,64 @@ export function chipSlotPanel(state: MixerState, dispatcher: Dispatcher): HTMLEl
   onLabel.className = 'synth-on-label';
   onLabel.textContent = 'Chip';
   onRow.append(onBtn, onLabel);
+
+  // ---- Preset dropdown -----------------------------------------------
+  // Ports the curated chiptune preset bank from lib/TDspChip/presets.json
+  // (Boss Fight, Princess Theme, Coin, Laser, ...). Selecting a preset
+  // pushes every parameter through the dispatcher so firmware re-applies
+  // pulse duty, voicing, arp, ADSR, and volume in one shot. The active
+  // preset is tracked in state.chip.activePresetId so a reconnect or
+  // engine knob tweak (which won't match any preset's params) clears the
+  // selection cleanly. Categories are surfaced as <optgroup>s so the
+  // semantic grouping (boss / melody / zap / drum) survives the dropdown.
+  const presetRow = document.createElement('div');
+  presetRow.className = 'sampler-control-row';
+  const presetLabel = document.createElement('label');
+  presetLabel.textContent = 'Preset';
+  const presetSelect = document.createElement('select');
+  presetSelect.className = 'sampler-midi-channel';
+
+  const noneOpt = document.createElement('option');
+  noneOpt.value = '';
+  noneOpt.textContent = '— Select preset —';
+  presetSelect.appendChild(noneOpt);
+  for (const [catKey, cat] of Object.entries(PRESETS.categories)) {
+    const group = document.createElement('optgroup');
+    group.label = cat.label;
+    for (const p of PRESETS.presets) {
+      if (p.category !== catKey) continue;
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name;
+      opt.title = p.description;
+      group.appendChild(opt);
+    }
+    if (group.childElementCount > 0) presetSelect.appendChild(group);
+  }
+  state.chip.activePresetId.subscribe((id) => { presetSelect.value = id; });
+  presetSelect.addEventListener('change', () => {
+    const preset = PRESETS.presets.find((p) => p.id === presetSelect.value);
+    if (!preset) {
+      state.chip.activePresetId.set('');
+      return;
+    }
+    const p = preset.params;
+    dispatcher.setChipVolume(p.volume);
+    dispatcher.setChipPulse1Duty(p.pulse1_duty);
+    dispatcher.setChipPulse2Duty(p.pulse2_duty);
+    dispatcher.setChipPulse2Detune(p.pulse2_detune);
+    dispatcher.setChipTriLevel(p.tri_level);
+    dispatcher.setChipNoiseLevel(p.noise_level);
+    dispatcher.setChipVoicing(p.voicing);
+    dispatcher.setChipArpeggio(p.arpeggio);
+    dispatcher.setChipArpRate(p.arp_rate_hz);
+    dispatcher.setChipAttack(p.attack_sec);
+    dispatcher.setChipDecay(p.decay_sec);
+    dispatcher.setChipSustain(p.sustain);
+    dispatcher.setChipRelease(p.release_sec);
+    state.chip.activePresetId.set(preset.id);
+  });
+  presetRow.append(presetLabel, presetSelect);
 
   // ---- Volume slider --------------------------------------------------
   const volRow = buildSliderRow(
@@ -170,6 +257,7 @@ export function chipSlotPanel(state: MixerState, dispatcher: Dispatcher): HTMLEl
 
   root.append(
     onRow,
+    presetRow,
     volRow,
     midiRow,
     pulse1Row,
