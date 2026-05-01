@@ -803,53 +803,32 @@ static void setupCodec() {
     delay(100);  // let analog blocks settle before any audio hits the DAC
 
     // Arm DSP_AVDD_SEL before any DSP-resident block (limiter, BOP, DRC)
-    // can be enabled. Required HIGH for the chip-side limiter we engage
-    // a few lines below; otherwise the DSP block runs on garbage data
-    // and squeals audibly the moment it's enabled.
+    // can be enabled. Required HIGH before turning any of those on; the
+    // POR value is reserved and produces a squeal if a DSP block is
+    // engaged in that state.
     g_codec.setDspAvddSelect(true);
 
-    // ----- ADC + PDM DSP defaults (chip-side processing) -----
+    // ----- ADC HPF -----
     //
-    // These are the chip-side equivalents of the F32 mixer's per-channel
-    // DSP. They sit BEFORE the F32 graph (analog ADC + PDM are decimated
-    // through them inside the codec), so anything done here doesn't
-    // cost CPU on the Teensy and applies to every channel uniformly.
-    //
-    // The chip has 12 biquad slots split across 4 sub-channels at 3 each.
-    // Boot defaults are bypass coefs (BiquadCoeffs::bypass()) — the slots
-    // are "wired up" and addressable via /codec/tac5212/adc/N/biquad/M
-    // but don't shape the audio until the dev surface configures them.
-    g_codec.setAdcDecimationFilter(tac5212::AdcDecimationFilter::LinearPhase);
-    g_codec.setAdcHpf(true);              // 12 Hz HPF on for ADC + PDM, default
-    g_codec.setAdcBiquadsPerChannel(3);
-    for (uint8_t ch = 1; ch <= 2; ++ch) {
-        for (uint8_t idx = 1; idx <= 3; ++idx) {
-            g_codec.adc(ch).clearBiquad(idx);  // POR all-pass coefs
-        }
-    }
+    // 12 Hz cutoff on the chip's ADC DSP path. Applies to both the
+    // analog ADC channels (CH1, CH2) AND the PDM mics (CH3, CH4) —
+    // the chip has one HPF stage shared by all input channels. Free
+    // rumble cut, no Teensy CPU cost.
+    g_codec.setAdcHpf(true);
 
-    // ----- DAC DSP defaults (chip-side processing) -----
-    //
-    // DAC has its own 12-slot biquad bank + a chip-side distortion
-    // limiter (page 25 coefficient block, page 1 enable bit). The
-    // limiter sits between the DAC mixer and the analog output stage,
-    // so it catches anything coming through the F32 graph before it
-    // hits the speakers — useful for ear-safety on a system that drops
-    // a USB host or routes a signal louder than expected. Default ON.
-    g_codec.setDacInterpolationFilter(tac5212::InterpFilter::LinearPhase);
-    g_codec.setDacBiquadsPerChannel(3);
-    for (uint8_t out = 1; out <= 2; ++out) {
-        for (uint8_t idx = 1; idx <= 3; ++idx) {
-            g_codec.out(out).clearBiquad(idx);  // POR all-pass coefs
-        }
-    }
-    g_codec.setDacLimiterCoeffs(tac5212::LimiterCoeffs::chipDefault());
-    g_codec.setDacLimiterInputSel(tac5212::LimiterInputSel::Max);
-    g_codec.setDacLimiterEnable(true);
+    // The remaining chip-side DSP — ADC + DAC biquads, distortion
+    // limiter, decimation-filter mode, DRC — is wired in lib/TAC5212
+    // and addressable via the /codec/tac5212/... OSC tree, but stays
+    // at chip POR defaults at boot until we datasheet-verify safe
+    // coefficient values. An earlier attempt at enabling the limiter
+    // + setting biquad counts to 3 with bypass coefs silenced the DAC
+    // output entirely — turned out the chip rejected one of the
+    // configurations and the audio path went dead. Reverted to "only
+    // touch what we've validated."
 
     Serial.print("DEV_STS0: 0x");
     Serial.println(g_codec.readRegister(0, 0x79), HEX);
-    Serial.println("Codec ready: ADC HPF on, 3+3 biquad slots, DAC limiter on");
+    Serial.println("Codec ready: ADC HPF on; DAC biquads / limiter at chip defaults");
 }
 
 // ============================================================================
