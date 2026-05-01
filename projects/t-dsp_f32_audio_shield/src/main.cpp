@@ -78,6 +78,10 @@
 #include "DexedSink.h"
 #include "DexedVoiceBank.h"
 #include "osc/X32FaderLaw.h"
+#include "synth/SynthSlot.h"
+#include "synth/DexedSlot.h"
+#include "synth/SilentSlot.h"
+#include "synth/SynthSwitcher.h"
 
 // ============================================================================
 // Hardware constants
@@ -273,6 +277,28 @@ static int   g_dexedVoice  = 0;
 // X32 unity (0.75 = 0 dB).
 static float g_synthBusVolume = 0.75f;
 static bool  g_synthBusOn     = true;
+
+// --- Synth slots / switcher ---
+//
+// The slot abstraction lets the firmware host multiple synth engines
+// while only one is audible at a time (per project memory
+// feedback_synth_switch_not_layer — switch UX, not layer UX). Slot 0 =
+// Dexed (existing engine, wrapped by DexedSlot which observes g_dexedOn
+// / g_dexedVolume via const pointers). Slots 1..3 are SilentSlot
+// placeholders until later phases bring real engines online (mda
+// EPiano, multisample sampler, SF2 player).
+//
+// SynthSwitcher is registered as the sole downstream of g_arpFilter.
+// It fans MIDI to whichever slot is active. Switching a slot calls
+// setActive(true/false) on the engines so the outgoing slot panics
+// held notes + zeroes its gain stage and the incoming slot restores
+// its stored fader.
+tdsp_synth::DexedSlot     g_dexedSlot(&g_dexed, &g_dexedSink, &g_dexedGain,
+                                      &g_dexedOn, &g_dexedVolume);
+tdsp_synth::SilentSlot    g_silentSlot1("silent", "(empty)");
+tdsp_synth::SilentSlot    g_silentSlot2("silent", "(empty)");
+tdsp_synth::SilentSlot    g_silentSlot3("silent", "(empty)");
+tdsp_synth::SynthSwitcher g_synthSwitcher;
 
 // Stereo-link state — global config, X32 convention. Index 0 = pair
 // (1,2), index 1 = pair (3,4), index 2 = pair (5,6). Set via
@@ -503,10 +529,15 @@ static void pollHostVolume() {
 }
 
 // Dexed gain — X32 fader law applied to g_dexedVolume (0..1 fader form),
-// gated by the per-engine on/off flag. The /synth/dexed/mix/fader leaf
-// stores the fader; we convert to linear here.
+// gated by the per-engine on/off flag AND the slot active flag. With
+// the slot model, /synth/dexed/mix/fader and /synth/dexed/mix/on
+// continue to mutate g_dexedVolume / g_dexedOn here so the dev surface
+// contract is unchanged; the slot's applyGain() reads those + the
+// active-slot state and pushes the combined value into the gain stage.
+// Inactive Dexed: gain held at 0 regardless of fader/on values, so
+// stored state survives a switch-out / switch-in round trip.
 static void applyDexedGain() {
-    g_dexedGain.setGain(g_dexedOn ? tdsp::x32::faderToLinear(g_dexedVolume) : 0.0f);
+    g_dexedSlot.applyGain();
 }
 
 static void applyDexedVolume(float v) {
@@ -646,6 +677,21 @@ static void broadcastSnapshot(OSCBundle &reply) {
     // Synth bus (mixer's "synth" strip).
     { OSCMessage m("/synth/bus/mix/fader"); m.add(g_synthBusVolume);            reply.add(m); }
     { OSCMessage m("/synth/bus/mix/on");    m.add((int)(g_synthBusOn ? 1 : 0)); reply.add(m); }
+
+    // Slot model: /synth/active picks one of N slots; /synth/slots
+    // enumerates them so the dev surface can render the picker.
+    { OSCMessage m("/synth/active"); m.add(g_synthSwitcher.active()); reply.add(m); }
+    {
+        OSCMessage m("/synth/slots");
+        for (int i = 0; i < tdsp_synth::SynthSwitcher::kMaxSlots; ++i) {
+            auto *s = g_synthSwitcher.slot(i);
+            char buf[48];
+            if (s) snprintf(buf, sizeof(buf), "%s|%s", s->id(), s->displayName());
+            else   snprintf(buf, sizeof(buf), "silent|(empty)");
+            m.add(buf);
+        }
+        reply.add(m);
+    }
 
     // Synth — Dexed.
     { OSCMessage m("/synth/dexed/mix/fader"); m.add(g_dexedVolume);                 reply.add(m); }
@@ -1135,6 +1181,45 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
+    // ---- /synth/active i ---- (0..3, picks the audible engine)
+    //
+    // Switching is exclusive: setActive() panics + zero-gains the
+    // outgoing slot, then restores gain on the incoming slot via its
+    // observed on/volume state. Out-of-range or unset-slot indices
+    // are rejected (the active index doesn't change).
+    if (strcmp(address, "/synth/active") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            int idx = msg.getInt(0);
+            g_synthSwitcher.setActive(idx);
+        }
+        OSCMessage echo("/synth/active");
+        echo.add(g_synthSwitcher.active());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    // ---- /synth/slots ---- (read-only enumeration of slot ids + display names)
+    //
+    // Returns one packed "id|displayName" string per slot so the dev
+    // surface can render the picker without per-slot follow-up reads.
+    // Empty slots return "silent|(empty)".
+    if (strcmp(address, "/synth/slots") == 0) {
+        OSCBundle reply;
+        OSCMessage echo("/synth/slots");
+        for (int i = 0; i < tdsp_synth::SynthSwitcher::kMaxSlots; ++i) {
+            auto *s = g_synthSwitcher.slot(i);
+            char buf[48];
+            if (s) snprintf(buf, sizeof(buf), "%s|%s", s->id(), s->displayName());
+            else   snprintf(buf, sizeof(buf), "silent|(empty)");
+            echo.add(buf);
+        }
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
     // ---- /synth/dexed/bank/names ----  (dev surface populates the bank dropdown)
     if (strcmp(address, "/synth/dexed/bank/names") == 0) {
         OSCMessage m("/synth/dexed/bank/names");
@@ -1585,10 +1670,18 @@ void setup() {
     applyDexedVolume(g_dexedVolume);
 
     g_dexedSink.setListenChannel(0);
-    // Register downstream of the arp so the same DexedSink plays
-    // straight notes (arp disabled, default) or arpeggiated notes
-    // (arp enabled). Future synth engines register the same way.
-    g_arpFilter.addDownstream(&g_dexedSink);
+
+    // Wire slots into the switcher and route the switcher downstream
+    // of the arp filter. Engines register through the switcher rather
+    // than directly with the arp so the active-slot model controls
+    // which engine hears the keyboard. Slots 1..3 are SilentSlot
+    // placeholders until later phases land real engines.
+    g_synthSwitcher.setSlot(0, &g_dexedSlot);
+    g_synthSwitcher.setSlot(1, &g_silentSlot1);
+    g_synthSwitcher.setSlot(2, &g_silentSlot2);
+    g_synthSwitcher.setSlot(3, &g_silentSlot3);
+    g_arpFilter.addDownstream(&g_synthSwitcher);
+    g_synthSwitcher.setActive(0);  // Dexed audible at boot
 
     // --- Boot gate release ------------------------------------------------
     //
