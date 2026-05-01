@@ -315,6 +315,144 @@ Result TAC5212::setAdcHpf(bool on) {
     return _rmw(0, reg::DSP_CFG0, reg::dsp_cfg0::MASK_HPF_SEL, value);
 }
 
+namespace {
+constexpr uint8_t adcHpfModeToField(AdcHpfMode m) {
+    switch (m) {
+        case AdcHpfMode::Programmable: return reg::dsp_cfg0::HPF_SEL_PROGRAMMABLE;
+        case AdcHpfMode::Cut1Hz:       return reg::dsp_cfg0::HPF_SEL_1HZ;
+        case AdcHpfMode::Cut12Hz:      return reg::dsp_cfg0::HPF_SEL_12HZ;
+        case AdcHpfMode::Cut96Hz:      return reg::dsp_cfg0::HPF_SEL_96HZ;
+    }
+    return reg::dsp_cfg0::HPF_SEL_PROGRAMMABLE;
+}
+constexpr AdcHpfMode adcHpfModeFromField(uint8_t f) {
+    switch (f) {
+        case reg::dsp_cfg0::HPF_SEL_PROGRAMMABLE: return AdcHpfMode::Programmable;
+        case reg::dsp_cfg0::HPF_SEL_1HZ:          return AdcHpfMode::Cut1Hz;
+        case reg::dsp_cfg0::HPF_SEL_12HZ:         return AdcHpfMode::Cut12Hz;
+        case reg::dsp_cfg0::HPF_SEL_96HZ:         return AdcHpfMode::Cut96Hz;
+    }
+    return AdcHpfMode::Programmable;
+}
+constexpr uint8_t adcDeciToField(AdcDecimationFilter f) {
+    switch (f) {
+        case AdcDecimationFilter::LinearPhase:     return reg::dsp_cfg0::DECI_FILT_LINEAR_PHASE;
+        case AdcDecimationFilter::LowLatency:      return reg::dsp_cfg0::DECI_FILT_LOW_LATENCY;
+        case AdcDecimationFilter::UltraLowLatency: return reg::dsp_cfg0::DECI_FILT_ULTRA_LOW_LATENCY;
+    }
+    return reg::dsp_cfg0::DECI_FILT_LINEAR_PHASE;
+}
+constexpr AdcDecimationFilter adcDeciFromField(uint8_t f) {
+    switch (f) {
+        case reg::dsp_cfg0::DECI_FILT_LINEAR_PHASE:      return AdcDecimationFilter::LinearPhase;
+        case reg::dsp_cfg0::DECI_FILT_LOW_LATENCY:       return AdcDecimationFilter::LowLatency;
+        case reg::dsp_cfg0::DECI_FILT_ULTRA_LOW_LATENCY: return AdcDecimationFilter::UltraLowLatency;
+    }
+    return AdcDecimationFilter::LinearPhase;
+}
+constexpr uint8_t adcBqCountToField(uint8_t n) {
+    switch (n) {
+        case 0: return reg::dsp_cfg0::BQ_NONE;
+        case 1: return reg::dsp_cfg0::BQ_1;
+        case 2: return reg::dsp_cfg0::BQ_2;
+        case 3: return reg::dsp_cfg0::BQ_3;
+    }
+    return reg::dsp_cfg0::BQ_NONE;
+}
+constexpr uint8_t adcBqCountFromField(uint8_t f) {
+    switch (f) {
+        case reg::dsp_cfg0::BQ_NONE: return 0;
+        case reg::dsp_cfg0::BQ_1:    return 1;
+        case reg::dsp_cfg0::BQ_2:    return 2;
+        case reg::dsp_cfg0::BQ_3:    return 3;
+    }
+    return 0;
+}
+}  // anonymous namespace
+
+Result TAC5212::setAdcHpfMode(AdcHpfMode m) {
+    return _rmw(0, reg::DSP_CFG0, reg::dsp_cfg0::MASK_HPF_SEL, adcHpfModeToField(m));
+}
+Result TAC5212::getAdcHpfMode(AdcHpfMode &out) {
+    out = adcHpfModeFromField(_read(0, reg::DSP_CFG0) & reg::dsp_cfg0::MASK_HPF_SEL);
+    return Result::ok();
+}
+
+Result TAC5212::setAdcDecimationFilter(AdcDecimationFilter f) {
+    return _rmw(0, reg::DSP_CFG0, reg::dsp_cfg0::MASK_DECI_FILT, adcDeciToField(f));
+}
+Result TAC5212::getAdcDecimationFilter(AdcDecimationFilter &out) {
+    out = adcDeciFromField(_read(0, reg::DSP_CFG0) & reg::dsp_cfg0::MASK_DECI_FILT);
+    return Result::ok();
+}
+
+Result TAC5212::setAdcBiquadsPerChannel(uint8_t n) {
+    if (n > 3) return Result::error("ADC biquads per channel must be 0..3");
+    return _rmw(0, reg::DSP_CFG0, reg::dsp_cfg0::MASK_BQ_CFG, adcBqCountToField(n));
+}
+Result TAC5212::getAdcBiquadsPerChannel(uint8_t &n) {
+    n = adcBqCountFromField(_read(0, reg::DSP_CFG0) & reg::dsp_cfg0::MASK_BQ_CFG);
+    return Result::ok();
+}
+
+// ADC biquad coefficient programming. Storage layout matches the DAC
+// side — adc_biquad pages 8 + 9, 6 biquads per page, 20 bytes per
+// biquad in 5x4-byte big-endian Q31 form.
+Result TAC5212::Adc::setBiquad(uint8_t idx, const BiquadCoeffs &c) {
+    if (idx < 1 || idx > 3) return Result::error("biquad idx must be 1..3");
+
+    // Same channel-to-global-biquad mapping as DAC (datasheet Table 7-48):
+    // idx 1: BQ_n (n = channel),  idx 2: BQ_(n+4),  idx 3: BQ_(n+8).
+    const uint8_t bq    = static_cast<uint8_t>(_n + (idx - 1) * 4);
+    const uint8_t page  = reg::adc_biquad::pageFor(bq);
+    const uint8_t base  = reg::adc_biquad::baseFor(bq);
+
+    uint8_t bytes[20];
+    auto packBE32 = [](uint8_t *out, int32_t v) {
+        const uint32_t u = static_cast<uint32_t>(v);
+        out[0] = static_cast<uint8_t>((u >> 24) & 0xFF);
+        out[1] = static_cast<uint8_t>((u >> 16) & 0xFF);
+        out[2] = static_cast<uint8_t>((u >>  8) & 0xFF);
+        out[3] = static_cast<uint8_t>( u        & 0xFF);
+    };
+    packBE32(bytes +  0, c.n0);
+    packBE32(bytes +  4, c.n1);
+    packBE32(bytes +  8, c.n2);
+    packBE32(bytes + 12, c.d1);
+    packBE32(bytes + 16, c.d2);
+    return _codec->writeBurst(page, base, bytes, sizeof(bytes));
+}
+
+Result TAC5212::Adc::clearBiquad(uint8_t idx) {
+    return setBiquad(idx, BiquadCoeffs::bypass());
+}
+
+Result TAC5212::Adc::getBiquad(uint8_t idx, BiquadCoeffs &out) {
+    if (idx < 1 || idx > 3) return Result::error("biquad idx must be 1..3");
+
+    const uint8_t bq    = static_cast<uint8_t>(_n + (idx - 1) * 4);
+    const uint8_t page  = reg::adc_biquad::pageFor(bq);
+    const uint8_t base  = reg::adc_biquad::baseFor(bq);
+
+    uint8_t bytes[20];
+    for (uint8_t i = 0; i < 20; ++i) {
+        bytes[i] = _codec->_read(page, static_cast<uint8_t>(base + i));
+    }
+    auto unpackBE32 = [](const uint8_t *in) {
+        return static_cast<int32_t>(
+            (static_cast<uint32_t>(in[0]) << 24) |
+            (static_cast<uint32_t>(in[1]) << 16) |
+            (static_cast<uint32_t>(in[2]) <<  8) |
+             static_cast<uint32_t>(in[3]));
+    };
+    out.n0 = unpackBE32(bytes +  0);
+    out.n1 = unpackBE32(bytes +  4);
+    out.n2 = unpackBE32(bytes +  8);
+    out.d1 = unpackBE32(bytes + 12);
+    out.d2 = unpackBE32(bytes + 16);
+    return Result::ok();
+}
+
 Result TAC5212::setVrefFscale(VrefFscale scale) {
     uint8_t current = 0;
     _readVrefMicbiasCfg(&current);

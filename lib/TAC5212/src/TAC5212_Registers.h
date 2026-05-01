@@ -314,6 +314,21 @@ namespace dsp_cfg0 {
     constexpr uint8_t HPF_SEL_1HZ          = 0x10;  // 01 << 4
     constexpr uint8_t HPF_SEL_12HZ         = 0x20;  // 10 << 4 — typical audio HPF
     constexpr uint8_t HPF_SEL_96HZ         = 0x30;  // 11 << 4
+
+    // DECI_FILT[7:6] — ADC + PDM decimation filter response. Different
+    // trade-offs between near-Nyquist roll-off and processing latency.
+    // The setting is shared by analog ADC channels and PDM channels —
+    // the chip uses the same DSP path after PDM demodulation.
+    constexpr uint8_t DECI_FILT_LINEAR_PHASE      = 0x00 << SHIFT_DECI_FILT;
+    constexpr uint8_t DECI_FILT_LOW_LATENCY       = 0x01 << SHIFT_DECI_FILT;
+    constexpr uint8_t DECI_FILT_ULTRA_LOW_LATENCY = 0x02 << SHIFT_DECI_FILT;
+
+    // BQ_CFG[3:2] — ADC biquad slots allocated per ADC sub-channel.
+    // Same encoding the DAC side uses (DSP_CFG1 BQ_CFG).
+    constexpr uint8_t BQ_NONE = 0x00;
+    constexpr uint8_t BQ_1    = 0x04;
+    constexpr uint8_t BQ_2    = 0x08;
+    constexpr uint8_t BQ_3    = 0x0C;
 }
 
 // --- DAC output drivers (§8.1.1.86 / §8.1.1.87 / §8.1.1.88) ------------------

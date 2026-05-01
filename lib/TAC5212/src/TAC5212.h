@@ -141,6 +141,29 @@ enum class InterpFilter : uint8_t {
     LowPower,
 };
 
+// ADC + PDM decimation filter response (chip-global, all input
+// channels — analog ADC AND PDM are downstream of the same
+// decimation stage). Same trade-offs as InterpFilter but on the
+// input side: linear phase has the cleanest passband but the most
+// pre-ringing and ~1 ms group delay; low-latency / ultra-low-latency
+// trade off out-of-band rejection for less latency, useful for live
+// in-ear monitoring paths where round-trip delay matters.
+enum class AdcDecimationFilter : uint8_t {
+    LinearPhase,
+    LowLatency,
+    UltraLowLatency,
+};
+
+// ADC HPF mode (chip-global). The boolean setAdcHpf() picks
+// {Programmable=off, Cutoff12Hz=on}; this enum lets callers pick
+// the other two cutoffs (1 Hz, 96 Hz).
+enum class AdcHpfMode : uint8_t {
+    Programmable,    // POR all-pass coefs = effectively HPF off
+    Cut1Hz,          // -3 dB at 0.00002 * fs (1 Hz @ 48 kHz)
+    Cut12Hz,         // -3 dB at 0.00025 * fs (12 Hz @ 48 kHz, typical audio)
+    Cut96Hz,         // -3 dB at 0.002 * fs (96 Hz @ 48 kHz, aggressive)
+};
+
 // DAC high-pass filter (chip-global). Programmable mode loads the POR
 // default all-pass coefs (HPF off); the three fixed cutoffs are
 // hardware-set -3 dB points.
@@ -337,6 +360,25 @@ public:
     // adc/hpf i 0|1`.
     Result setAdcHpf(bool on);
 
+    // 4-mode variant — same DSP_CFG0 HPF_SEL field, finer control.
+    // Mirrors setDacHpf for the input side.
+    Result setAdcHpfMode(AdcHpfMode);
+    Result getAdcHpfMode(AdcHpfMode &out);
+
+    // ADC + PDM decimation filter (chip-global). Lives in DSP_CFG0
+    // alongside the ADC HPF setting. Affects every input channel
+    // including PDM mics — the chip uses one decimation stage for
+    // both sources.
+    Result setAdcDecimationFilter(AdcDecimationFilter);
+    Result getAdcDecimationFilter(AdcDecimationFilter &out);
+
+    // ADC biquad slot allocation (chip-global, mirrors the DAC side
+    // via DSP_CFG1). Up to 3 biquads per ADC sub-channel; setting a
+    // higher count means biquads not yet programmed get the POR
+    // bypass coefs which is fine.
+    Result setAdcBiquadsPerChannel(uint8_t n);
+    Result getAdcBiquadsPerChannel(uint8_t &n);
+
     // --- Chip-global DAC DSP -------------------------------------------------
     //
     // DSP_CFG1 (page 0, 0x73) packs interpolation filter, HPF mode, biquad
@@ -487,6 +529,19 @@ public:
     //   POR default: 0.0 dB (unity)
     Result setDvol(float dB);
     Result getDvol(float &dB);
+
+    // Per-channel biquad coefficient programming. Mirrors the DAC
+    // side (Out::setBiquad). `idx` is 1..3; the chip's BQ_CFG field
+    // (set via setAdcBiquadsPerChannel) decides how many of the 3
+    // are actually applied.
+    //
+    // The (channel, idx) pair maps to a global biquad slot 1..12 per
+    // datasheet Table 7-48 — same allocation rule as DAC, indexed
+    // into the adc_biquad page region (pages 8-9) instead of dac_biquad
+    // (pages 15-16).
+    Result setBiquad(uint8_t idx, const BiquadCoeffs &coeffs);
+    Result clearBiquad(uint8_t idx);   // writes BiquadCoeffs::bypass()
+    Result getBiquad(uint8_t idx, BiquadCoeffs &out);
 
 private:
     friend class TAC5212;
