@@ -1,12 +1,10 @@
 // Plaits slot panel — config UI for slot 2 (Plaits-inspired macro
 // oscillator).
 //
-// Layout follows mpe-slot-panel.ts: ON/OFF header, slot housekeeping
-// (volume, MPE master toggle), then the five engine controls — model
-// picker (5 segmented tiles), HARMONICS, TIMBRE, MORPH, DECAY,
-// resonance. No preset grid in this first cut — Plaits' identity is
-// the macros, and a starter set of presets can be added later if the
-// user finds themselves dialing the same destinations repeatedly.
+// Layout follows mpe-slot-panel.ts: ON/OFF header, preset dropdown,
+// slot housekeeping (volume, MPE master toggle), then the five engine
+// controls — model picker (5 segmented tiles), HARMONICS, TIMBRE,
+// MORPH, DECAY, resonance.
 //
 // All controls round-trip through the firmware via OSC; optimistic
 // local-signal updates make the UI feel responsive, and incoming
@@ -15,6 +13,29 @@
 
 import { Dispatcher } from '../dispatcher';
 import { MixerState, Signal } from '../state';
+import presetDoc from '../../../../lib/TDspPlaits/presets.json';
+
+interface PresetParams {
+  model: number;
+  harmonics: number;
+  timbre: number;
+  morph: number;
+  decay: number;
+  resonance: number;
+  volume: number;
+}
+interface Preset {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  params: PresetParams;
+}
+interface PresetDoc {
+  categories: Record<string, { color: string; label: string }>;
+  presets: Preset[];
+}
+const PRESETS = presetDoc as PresetDoc;
 
 const MODEL_LABELS = ['VA Saw', 'Square', 'FM Sine', 'Hollow', 'Pulse'] as const;
 
@@ -54,6 +75,55 @@ export function plaitsSlotPanel(state: MixerState, dispatcher: Dispatcher): HTML
   onLabel.className = 'synth-on-label';
   onLabel.textContent = 'Plaits';
   onRow.append(onBtn, onLabel);
+
+  // ---- Preset dropdown -----------------------------------------------
+  // Categories (Plucks / Keys / Pads / Bass / Leads / FX) become
+  // <optgroup>s so the bank structure survives the dropdown. Selecting
+  // a preset pushes every parameter through the dispatcher in one shot;
+  // tweaking individual knobs after that leaves the selection alone
+  // (matches the legacy acid-slot-panel.ts behaviour).
+  const presetRow = document.createElement('div');
+  presetRow.className = 'sampler-control-row';
+  const presetLabel = document.createElement('label');
+  presetLabel.textContent = 'Preset';
+  const presetSelect = document.createElement('select');
+  presetSelect.className = 'sampler-midi-channel';
+
+  const noneOpt = document.createElement('option');
+  noneOpt.value = '';
+  noneOpt.textContent = '— Select preset —';
+  presetSelect.appendChild(noneOpt);
+  for (const [catKey, cat] of Object.entries(PRESETS.categories)) {
+    const group = document.createElement('optgroup');
+    group.label = cat.label;
+    for (const p of PRESETS.presets) {
+      if (p.category !== catKey) continue;
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name;
+      opt.title = p.description;
+      group.appendChild(opt);
+    }
+    if (group.childElementCount > 0) presetSelect.appendChild(group);
+  }
+  state.plaits.activePresetId.subscribe((id) => { presetSelect.value = id; });
+  presetSelect.addEventListener('change', () => {
+    const preset = PRESETS.presets.find((p) => p.id === presetSelect.value);
+    if (!preset) {
+      state.plaits.activePresetId.set('');
+      return;
+    }
+    const p = preset.params;
+    dispatcher.setPlaitsModel(p.model);
+    dispatcher.setPlaitsHarmonics(p.harmonics);
+    dispatcher.setPlaitsTimbre(p.timbre);
+    dispatcher.setPlaitsMorph(p.morph);
+    dispatcher.setPlaitsDecay(p.decay);
+    dispatcher.setPlaitsResonance(p.resonance);
+    dispatcher.setPlaitsVolume(p.volume);
+    state.plaits.activePresetId.set(preset.id);
+  });
+  presetRow.append(presetLabel, presetSelect);
 
   // ---- Volume slider --------------------------------------------------
   const volRow = buildSliderRow(
@@ -192,6 +262,7 @@ export function plaitsSlotPanel(state: MixerState, dispatcher: Dispatcher): HTML
 
   root.append(
     onRow,
+    presetRow,
     volRow,
     mpeModeRow,
     masterRow,

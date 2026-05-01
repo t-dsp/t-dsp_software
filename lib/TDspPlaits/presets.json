@@ -1,0 +1,298 @@
+{
+  "version": 1,
+  "categories": {
+    "pluck": { "color": "#f1c40f", "label": "Plucks" },
+    "keys":  { "color": "#e67e22", "label": "Keys"   },
+    "pad":   { "color": "#9b59b6", "label": "Pads"   },
+    "bass":  { "color": "#16a085", "label": "Bass"   },
+    "lead":  { "color": "#c0392b", "label": "Leads"  },
+    "fx":    { "color": "#34495e", "label": "FX"     }
+  },
+  "presets": [
+    {
+      "id": "wood-pluck",
+      "name": "Wood Pluck",
+      "category": "pluck",
+      "description": "Hollow triangle pair, short decay — soft mallet bouncing off a wooden bar.",
+      "params": {
+        "model": 3, "harmonics": 0.0, "timbre": 0.50, "morph": 0.30,
+        "decay": 0.15, "resonance": 1.20, "volume": 0.70
+      }
+    },
+    {
+      "id": "saw-pluck",
+      "name": "Saw Pluck",
+      "category": "pluck",
+      "description": "Classic Plaits identity — saw stack at the octave, bright and percussive.",
+      "params": {
+        "model": 0, "harmonics": 0.5, "timbre": 0.75, "morph": 0.50,
+        "decay": 0.20, "resonance": 1.00, "volume": 0.70
+      }
+    },
+    {
+      "id": "glass-bell",
+      "name": "Glass Bell",
+      "category": "pluck",
+      "description": "FM sines stacked at oct+5th — crystalline ping with a tail.",
+      "params": {
+        "model": 2, "harmonics": 0.75, "timbre": 0.85, "morph": 0.55,
+        "decay": 0.18, "resonance": 1.50, "volume": 0.68
+      }
+    },
+    {
+      "id": "clave",
+      "name": "Clave",
+      "category": "pluck",
+      "description": "Square pair, dark, very short — woodblock click for percussive lines.",
+      "params": {
+        "model": 1, "harmonics": 0.0, "timbre": 0.35, "morph": 0.20,
+        "decay": 0.05, "resonance": 1.00, "volume": 0.70
+      }
+    },
+    {
+      "id": "kalimba",
+      "name": "Kalimba",
+      "category": "pluck",
+      "description": "Triangle pair at the octave — thumb piano character with quick decay.",
+      "params": {
+        "model": 3, "harmonics": 0.5, "timbre": 0.70, "morph": 0.60,
+        "decay": 0.18, "resonance": 1.00, "volume": 0.70
+      }
+    },
+
+    {
+      "id": "soft-ep",
+      "name": "Soft EP",
+      "category": "keys",
+      "description": "Triangle pair, unison, mid bright, gentle decay — Rhodes-ish electric piano.",
+      "params": {
+        "model": 3, "harmonics": 0.0, "timbre": 0.60, "morph": 0.40,
+        "decay": 0.40, "resonance": 0.90, "volume": 0.70
+      }
+    },
+    {
+      "id": "saw-keys",
+      "name": "Saw Keys",
+      "category": "keys",
+      "description": "Saw stack at the octave with mid decay — versatile keyboard sound.",
+      "params": {
+        "model": 0, "harmonics": 0.5, "timbre": 0.70, "morph": 0.50,
+        "decay": 0.45, "resonance": 1.00, "volume": 0.70
+      }
+    },
+    {
+      "id": "pulse-stab",
+      "name": "Pulse Stab",
+      "category": "keys",
+      "description": "Saw + square at a 5th — broad-spectrum harmonic stab with body.",
+      "params": {
+        "model": 4, "harmonics": 0.25, "timbre": 0.70, "morph": 0.50,
+        "decay": 0.35, "resonance": 1.20, "volume": 0.68
+      }
+    },
+    {
+      "id": "marimba",
+      "name": "Marimba",
+      "category": "keys",
+      "description": "Triangle pair two octaves up, low morph — bright mallet articulation.",
+      "params": {
+        "model": 3, "harmonics": 1.0, "timbre": 0.55, "morph": 0.35,
+        "decay": 0.30, "resonance": 0.90, "volume": 0.70
+      }
+    },
+    {
+      "id": "fm-bell-roll",
+      "name": "FM Bell Roll",
+      "category": "keys",
+      "description": "FM sines at the octave — pitched bell tone that sustains into a chord wash.",
+      "params": {
+        "model": 2, "harmonics": 0.5, "timbre": 0.70, "morph": 0.55,
+        "decay": 0.55, "resonance": 1.40, "volume": 0.68
+      }
+    },
+
+    {
+      "id": "saw-wash",
+      "name": "Saw Wash",
+      "category": "pad",
+      "description": "Saw stack at the octave with a long decay — sustained ambient pad.",
+      "params": {
+        "model": 0, "harmonics": 0.5, "timbre": 0.65, "morph": 0.55,
+        "decay": 0.85, "resonance": 1.00, "volume": 0.65
+      }
+    },
+    {
+      "id": "hollow-pad",
+      "name": "Hollow Pad",
+      "category": "pad",
+      "description": "Square pair at a 5th, soft cutoff — reedy hollow drone.",
+      "params": {
+        "model": 1, "harmonics": 0.25, "timbre": 0.55, "morph": 0.40,
+        "decay": 0.90, "resonance": 0.90, "volume": 0.65
+      }
+    },
+    {
+      "id": "bell-pad",
+      "name": "Bell Pad",
+      "category": "pad",
+      "description": "FM sines at oct+5 with maximum decay — angelic shimmer that hangs forever.",
+      "params": {
+        "model": 2, "harmonics": 0.75, "timbre": 0.70, "morph": 0.50,
+        "decay": 1.0, "resonance": 1.30, "volume": 0.62
+      }
+    },
+    {
+      "id": "dream-tri",
+      "name": "Dream Tri",
+      "category": "pad",
+      "description": "Triangle pair at the octave, soft, very long decay — dreamy washing pad.",
+      "params": {
+        "model": 3, "harmonics": 0.5, "timbre": 0.55, "morph": 0.45,
+        "decay": 1.0, "resonance": 1.00, "volume": 0.65
+      }
+    },
+    {
+      "id": "ambient-drone",
+      "name": "Ambient Drone",
+      "category": "pad",
+      "description": "Saw + square two octaves apart, dark, max decay — evolving low pad.",
+      "params": {
+        "model": 4, "harmonics": 1.0, "timbre": 0.40, "morph": 0.30,
+        "decay": 1.0, "resonance": 1.20, "volume": 0.62
+      }
+    },
+
+    {
+      "id": "sub-bass",
+      "name": "Sub Bass",
+      "category": "bass",
+      "description": "Triangle pair, unison, dark — fundamental sub for low-end weight.",
+      "params": {
+        "model": 3, "harmonics": 0.0, "timbre": 0.25, "morph": 0.10,
+        "decay": 0.30, "resonance": 0.90, "volume": 0.78
+      }
+    },
+    {
+      "id": "saw-bass",
+      "name": "Saw Bass",
+      "category": "bass",
+      "description": "Saw pair at unison, dark cutoff with a touch of resonance — meaty saw bass.",
+      "params": {
+        "model": 0, "harmonics": 0.0, "timbre": 0.40, "morph": 0.30,
+        "decay": 0.40, "resonance": 1.50, "volume": 0.75
+      }
+    },
+    {
+      "id": "reese-tease",
+      "name": "Reese Tease",
+      "category": "bass",
+      "description": "Saw stack at a 5th with mid resonance — detune-y mid-saw bass nod.",
+      "params": {
+        "model": 0, "harmonics": 0.25, "timbre": 0.50, "morph": 0.50,
+        "decay": 0.55, "resonance": 1.80, "volume": 0.75
+      }
+    },
+    {
+      "id": "square-bass",
+      "name": "Square Bass",
+      "category": "bass",
+      "description": "Square pair at unison, hollow tone — old-school PWM-style bass.",
+      "params": {
+        "model": 1, "harmonics": 0.0, "timbre": 0.45, "morph": 0.25,
+        "decay": 0.40, "resonance": 1.00, "volume": 0.75
+      }
+    },
+    {
+      "id": "pluck-bass",
+      "name": "Pluck Bass",
+      "category": "bass",
+      "description": "Saw pair at the octave, short decay — staccato bass stabs with bite.",
+      "params": {
+        "model": 0, "harmonics": 0.5, "timbre": 0.55, "morph": 0.40,
+        "decay": 0.20, "resonance": 1.50, "volume": 0.75
+      }
+    },
+
+    {
+      "id": "saw-lead",
+      "name": "Saw Lead",
+      "category": "lead",
+      "description": "Saw stack at a 5th, bright and resonant — singing solo voice.",
+      "params": {
+        "model": 0, "harmonics": 0.25, "timbre": 0.85, "morph": 0.60,
+        "decay": 0.50, "resonance": 1.50, "volume": 0.70
+      }
+    },
+    {
+      "id": "reedy-lead",
+      "name": "Reedy Lead",
+      "category": "lead",
+      "description": "Square pair, unison, bright — clarinet-ish hollow lead.",
+      "params": {
+        "model": 1, "harmonics": 0.0, "timbre": 0.80, "morph": 0.35,
+        "decay": 0.45, "resonance": 1.50, "volume": 0.70
+      }
+    },
+    {
+      "id": "fm-lead",
+      "name": "FM Lead",
+      "category": "lead",
+      "description": "FM sines at the octave, very bright, morph toward osc 2 — synth flute character.",
+      "params": {
+        "model": 2, "harmonics": 0.5, "timbre": 0.95, "morph": 0.70,
+        "decay": 0.40, "resonance": 1.40, "volume": 0.68
+      }
+    },
+    {
+      "id": "buzz-lead",
+      "name": "Buzz Lead",
+      "category": "lead",
+      "description": "Saw + square at oct+5th — broad harmonic stack for a screaming lead.",
+      "params": {
+        "model": 4, "harmonics": 0.75, "timbre": 0.90, "morph": 0.60,
+        "decay": 0.50, "resonance": 1.50, "volume": 0.68
+      }
+    },
+
+    {
+      "id": "resonant-zap",
+      "name": "Resonant Zap",
+      "category": "fx",
+      "description": "Saw pair, very short decay, near-self-oscillating filter — sci-fi zap.",
+      "params": {
+        "model": 0, "harmonics": 0.5, "timbre": 0.50, "morph": 0.50,
+        "decay": 0.05, "resonance": 4.50, "volume": 0.62
+      }
+    },
+    {
+      "id": "squeal",
+      "name": "Squeal",
+      "category": "fx",
+      "description": "Square pair at oct+5, bright with high resonance — feedback-style squeal.",
+      "params": {
+        "model": 1, "harmonics": 0.75, "timbre": 0.95, "morph": 0.30,
+        "decay": 0.10, "resonance": 4.00, "volume": 0.60
+      }
+    },
+    {
+      "id": "wood-block",
+      "name": "Wood Block",
+      "category": "fx",
+      "description": "Triangle pair, near-instant decay, very low morph — percussion hit.",
+      "params": {
+        "model": 3, "harmonics": 0.0, "timbre": 0.60, "morph": 0.05,
+        "decay": 0.03, "resonance": 1.00, "volume": 0.72
+      }
+    },
+    {
+      "id": "sci-fi-drop",
+      "name": "Sci-Fi Drop",
+      "category": "fx",
+      "description": "FM sines two octaves apart, resonant pluck — laser-drop bleep.",
+      "params": {
+        "model": 2, "harmonics": 1.0, "timbre": 0.85, "morph": 0.25,
+        "decay": 0.12, "resonance": 3.00, "volume": 0.65
+      }
+    }
+  ]
+}

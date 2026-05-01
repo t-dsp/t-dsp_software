@@ -181,6 +181,7 @@ export interface PlaitsState {
   morph:            Signal<number>;  // 0..1 (osc1/osc2 mix balance)
   decay:            Signal<number>;  // 0..1 (envelope decay/release)
   resonance:        Signal<number>;  // 0.707..5.0
+  activePresetId:   Signal<string>;  // UI-only preset highlight
 }
 
 // Neuro (reese/neuro bass) synth state — mirror of the firmware's
@@ -621,6 +622,7 @@ export function createMixerState(channelCount: number): MixerState {
       morph:         new Signal(0.5),
       decay:         new Signal(0.4),
       resonance:     new Signal(1.0),
+      activePresetId: new Signal(''),
     },
     neuro: {
       // Defaults match NeuroSink's firmware cold-boot (see main.cpp
