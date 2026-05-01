@@ -2799,9 +2799,9 @@ void setup() {
     g_synthSwitcher.setSlot(1, &g_multisampleSlot);
     g_synthSwitcher.setSlot(2, &g_silentSlot2);  // placeholder until Plaits agent wires slot 2
     g_synthSwitcher.setSlot(3, &g_mpeSlot);
-    g_synthSwitcher.setSlot(4, &g_neuroSlot);  // was: &g_silentSlot4
+    g_synthSwitcher.setSlot(4, &g_neuroSlot);     // was: &g_silentSlot4
     g_neuroSlot.begin();
-    g_synthSwitcher.setSlot(5, &g_acidSlot);   // was: &g_silentSlot5
+    g_synthSwitcher.setSlot(5, &g_acidSlot);      // was: &g_silentSlot5
     g_acidSlot.begin();
     g_synthSwitcher.setSlot(6, &g_supersawSlot);  // was: &g_silentSlot6
     g_supersawSlot.begin();
@@ -2865,6 +2865,10 @@ void loop() {
     // Supersaw slot: advance portamento glide. No-op when not held / no
     // glide in progress (early-return inside SupersawSink::tick).
     g_supersawSink.tick(millis());
+
+    // Neuro slot: advance portamento glide + LFO. No-op when no key is
+    // held and the LFO is off (early-return inside NeuroSink::tick).
+    g_neuroSink.tick(millis());
 
     // Acid slot: advance the software filter envelope decay + portamento
     // glide. No-op when the voice is idle and no glide is in flight

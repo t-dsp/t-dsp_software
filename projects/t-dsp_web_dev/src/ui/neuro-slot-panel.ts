@@ -1,17 +1,18 @@
 // Neuro slot panel — config UI for slot 4 (reese / DnB neuro bass).
 //
 // New panel built for the slot-architecture rebuild. Layout follows
-// mpe-slot-panel.ts: ON/OFF header, then a vertical stack of labeled
-// rows for the slot housekeeping (volume, MIDI channel) and the engine
-// knobs (oscillator balance, filter cutoff/Q, ADSR-equivalent A/R, LFO,
-// portamento).
+// mpe-slot-panel.ts / chip-slot-panel.ts: ON/OFF header, preset
+// dropdown (ported from the legacy lib/TDspNeuro/presets.json), then
+// a vertical stack of labeled rows for the slot housekeeping (volume,
+// MIDI channel) and the engine knobs (oscillator balance, filter
+// cutoff/Q, ADSR-equivalent A/R, LFO, portamento).
 //
 // All controls round-trip through the firmware via OSC; optimistic
 // local-signal updates make the UI feel responsive, and incoming
 // echoes through dispatcher.handleIncoming() re-apply (idempotent
 // when the value matches).
 //
-// The legacy neuro-panel.ts (richer — preset grid + stink-chain section)
+// The legacy neuro-panel.ts (richer grid layout + stink-chain section)
 // is left in place untouched per the parallel-agent contract. Once the
 // user confirms this slim replacement is what they want, the legacy
 // file can be deleted; if the stink chain is missed, port it back in
@@ -19,6 +20,40 @@
 
 import { Dispatcher } from '../dispatcher';
 import { MixerState, Signal } from '../state';
+import presetDoc from '../../../../lib/TDspNeuro/presets.json';
+
+// Preset shape — mirrors lib/TDspNeuro/presets.json. The stink_* fields
+// are present in the JSON for legacy compatibility but the slot rebuild
+// is intentionally core-only, so the load handler ignores them. When the
+// stink chain comes back as a follow-up, those fields can start driving
+// dispatcher.setNeuroStink* calls without touching this file's schema.
+interface PresetParams {
+  volume: number;
+  attack_sec: number;
+  release_sec: number;
+  detune_cents: number;
+  sub_level: number;
+  osc3_level: number;
+  filter_cutoff_hz: number;
+  filter_resonance: number;
+  lfo_rate_hz: number;
+  lfo_depth: number;
+  lfo_dest: number;
+  lfo_waveform: number;
+  portamento_ms: number;
+}
+interface Preset {
+  id: string;
+  name: string;
+  category: string;
+  description: string;
+  params: PresetParams;  // stink_* fields ignored at load — see header
+}
+interface PresetDoc {
+  categories: Record<string, { color: string; label: string }>;
+  presets: Preset[];
+}
+const PRESETS = presetDoc as unknown as PresetDoc;
 
 const LFO_DEST_LABELS = ['Off', 'Cutoff', 'Pitch', 'Amp'] as const;
 const LFO_WAVE_LABELS = ['Sine', 'Tri', 'Saw', 'Square'] as const;
@@ -47,6 +82,70 @@ export function neuroSlotPanel(state: MixerState, dispatcher: Dispatcher): HTMLE
   onLabel.className = 'synth-on-label';
   onLabel.textContent = 'Neuro';
   onRow.append(onBtn, onLabel);
+
+  // ---- Preset dropdown -----------------------------------------------
+  // Curated reese / neuro bass voicings ported from the legacy
+  // lib/TDspNeuro/presets.json. Selecting a preset pushes every CORE
+  // parameter through the dispatcher so firmware re-applies the
+  // oscillator balance, filter, envelope, LFO, and portamento in one
+  // shot. Stink-chain fields in the JSON are skipped — that part of
+  // the engine isn't wired in this slot rebuild — so stink-heavy
+  // presets ("Full Face", "Talkbox", "Metallic") will sound cleaner
+  // than the legacy. Once the stink chain comes back as a follow-up,
+  // adding the dispatcher.setNeuroStink* calls here is a one-line edit
+  // per field.
+  //
+  // state.neuro.activePresetId tracks the active selection so a
+  // reconnect highlights the right preset; tweaking an individual knob
+  // afterwards leaves the selection alone (matches the chip-panel
+  // behaviour).
+  const presetRow = document.createElement('div');
+  presetRow.className = 'sampler-control-row';
+  const presetLabel = document.createElement('label');
+  presetLabel.textContent = 'Preset';
+  const presetSelect = document.createElement('select');
+  presetSelect.className = 'sampler-midi-channel';
+  const noneOpt = document.createElement('option');
+  noneOpt.value = '';
+  noneOpt.textContent = '— Select preset —';
+  presetSelect.appendChild(noneOpt);
+  for (const [catKey, cat] of Object.entries(PRESETS.categories)) {
+    const group = document.createElement('optgroup');
+    group.label = cat.label;
+    for (const p of PRESETS.presets) {
+      if (p.category !== catKey) continue;
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name;
+      opt.title = p.description;
+      group.appendChild(opt);
+    }
+    if (group.childElementCount > 0) presetSelect.appendChild(group);
+  }
+  state.neuro.activePresetId.subscribe((id) => { presetSelect.value = id; });
+  presetSelect.addEventListener('change', () => {
+    const preset = PRESETS.presets.find((p) => p.id === presetSelect.value);
+    if (!preset) {
+      state.neuro.activePresetId.set('');
+      return;
+    }
+    const p = preset.params;
+    dispatcher.setNeuroVolume         (p.volume);
+    dispatcher.setNeuroAttack         (p.attack_sec);
+    dispatcher.setNeuroRelease        (p.release_sec);
+    dispatcher.setNeuroDetune         (p.detune_cents);
+    dispatcher.setNeuroSub            (p.sub_level);
+    dispatcher.setNeuroOsc3           (p.osc3_level);
+    dispatcher.setNeuroFilterCutoff   (p.filter_cutoff_hz);
+    dispatcher.setNeuroFilterResonance(p.filter_resonance);
+    dispatcher.setNeuroLfoRate        (p.lfo_rate_hz);
+    dispatcher.setNeuroLfoDepth       (p.lfo_depth);
+    dispatcher.setNeuroLfoDest        (p.lfo_dest);
+    dispatcher.setNeuroLfoWaveform    (p.lfo_waveform);
+    dispatcher.setNeuroPortamento     (p.portamento_ms);
+    state.neuro.activePresetId.set(preset.id);
+  });
+  presetRow.append(presetLabel, presetSelect);
 
   // ---- Volume slider --------------------------------------------------
   const volRow = buildSliderRow(
@@ -156,6 +255,7 @@ export function neuroSlotPanel(state: MixerState, dispatcher: Dispatcher): HTMLE
 
   root.append(
     onRow,
+    presetRow,
     volRow,
     midiRow,
     detuneRow,
