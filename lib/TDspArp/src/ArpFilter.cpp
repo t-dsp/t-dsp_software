@@ -232,7 +232,18 @@ void ArpFilter::onClock() {
     _clockTickCount++;
 
     if (!_enabled) return;
-    if (_heldCount == 0) return;
+    if (_heldCount == 0) {
+        // Idle: re-arm the step clock. Without this, ticks accumulate
+        // while nothing is held and onClock would then "catch up" on
+        // the next key press by firing a burst of rapid-fire steps
+        // until _lastStepTick re-aligns with the current tick count.
+        _lastStepTick = 0xFFFFFFFFu;
+        _stepIndex = 0;
+        _repeatIndex = 0;
+        _octavePassIndex = 0;
+        _patternStateAscending = true;
+        return;
+    }
 
     // First step under a running clock: baseline _lastStepTick from
     // current count so the first downbeat lands on a tick boundary.

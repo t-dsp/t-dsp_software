@@ -17,6 +17,19 @@ namespace tdsp {
 
 OscDispatcher::OscDispatcher() = default;
 
+// Append a codec panel to the routing table. Re-registering the same
+// pointer is a no-op so callers can be defensive. Drops silently if the
+// table is full — there's no log channel here, but kMaxCodecPanels is
+// dimensioned for every realistic shield combination.
+void OscDispatcher::registerCodecPanel(CodecPanel *panel) {
+    if (!panel) return;
+    for (int i = 0; i < _codecPanelCount; ++i) {
+        if (_codecPanels[i] == panel) return;
+    }
+    if (_codecPanelCount >= kMaxCodecPanels) return;
+    _codecPanels[_codecPanelCount++] = panel;
+}
+
 // ----- Address parsing helpers -----
 
 int OscDispatcher::parseChannelAddress(const char *address, const char **outSuffix) {
@@ -58,16 +71,21 @@ void OscDispatcher::route(OSCMessage &msg, OSCBundle &reply) {
     address[addrLen] = '\0';
 
     // -- /codec/<model>/... → registered codec panel --
-    if (strncmp(address, "/codec/", 7) == 0 && _codecPanel) {
+    // Iterate registered panels and route to whichever one's modelName
+    // matches the address. Multiple panels coexist (e.g. tac5212 + adc6140).
+    if (strncmp(address, "/codec/", 7) == 0) {
         const char *after = address + 7;  // points at <model>/...
-        const char *model = _codecPanel->modelName();
-        size_t modelLen = strlen(model);
-        if (strncmp(after, model, modelLen) == 0 &&
-            (after[modelLen] == '/' || after[modelLen] == '\0')) {
-            // addrOffset = position after "/codec/<model>" in the address.
-            int addrOffset = 7 + (int)modelLen;
-            _codecPanel->route(msg, addrOffset, reply);
-            return;
+        for (int i = 0; i < _codecPanelCount; ++i) {
+            CodecPanel *panel = _codecPanels[i];
+            if (!panel) continue;
+            const char *model = panel->modelName();
+            size_t modelLen = strlen(model);
+            if (strncmp(after, model, modelLen) == 0 &&
+                (after[modelLen] == '/' || after[modelLen] == '\0')) {
+                int addrOffset = 7 + (int)modelLen;
+                panel->route(msg, addrOffset, reply);
+                return;
+            }
         }
     }
 

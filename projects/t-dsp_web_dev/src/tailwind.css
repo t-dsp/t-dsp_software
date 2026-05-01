@@ -1,0 +1,76 @@
+/* Tailwind v4 entry — UI rebuild Phase 2.
+ *
+ * The @theme block defines design tokens as CSS custom properties.
+ * Tokens here are the touch-first set from
+ * planning/ui-rebuild/03-design-system.md. Tailwind v4 generates
+ * matching utility classes (e.g. bg-surface-2, text-fg-1, gap-3,
+ * h-touch-min) from these declarations automatically.
+ *
+ * The legacy style.css (the dense MIX strip styles, etc.) is still
+ * imported by main.ts and is the source of truth for un-ported
+ * panels. New Solid components style themselves with Tailwind
+ * utilities and the tokens declared here, so the two systems
+ * coexist without conflict during the migration.
+ */
+
+@import "tailwindcss";
+
+@theme {
+  /* Surfaces — backgrounds */
+  --color-surface-0: #0e0e10;
+  --color-surface-1: #18181b;
+  --color-surface-2: #27272a;
+  --color-surface-3: #3f3f46;
+  --color-surface-4: #52525b;
+
+  /* Foreground — text */
+  --color-fg-1: #fafafa;
+  --color-fg-2: #d4d4d8;
+  --color-fg-3: #a1a1aa;
+  --color-fg-disabled: #52525b;
+
+  /* Accent — primary brand orange */
+  --color-accent-500: #d68038;
+  --color-accent-600: #b86a30;
+  --color-accent-700: #8d4f23;
+
+  /* Status */
+  --color-status-ok:    #4ade80;
+  --color-status-warn:  #facc15;
+  --color-status-error: #ef4444;
+  --color-status-info:  #38bdf8;
+
+  /* Bus colors — used as fader-thumb stripes when sends-on-faders is
+   * active (Phase 6). Values match the bus picker in 02-hierarchy.md. */
+  --color-bus-main:  #d68038;
+  --color-bus-synth: #a78bfa;
+  --color-bus-fx:    #38bdf8;
+  --color-bus-aux1:  #34d399;
+  --color-bus-aux2:  #f472b6;
+  --color-bus-aux3:  #fb923c;
+  --color-bus-aux4:  #fbbf24;
+
+  /* Touch sizing — minimums per Apple HIG / Microsoft / Material. */
+  --spacing-touch-min:     44px;
+  --spacing-touch-default: 56px;
+  --spacing-touch-large:   72px;
+
+  /* Common control sizes (referenced by audio-control components). */
+  --spacing-fader-thumb-w:    60px;
+  --spacing-fader-thumb-h:    28px;
+  --spacing-fader-thumb-w-tune: 80px;
+  --spacing-fader-thumb-h-tune: 40px;
+  --spacing-fader-min-h:        240px;
+  --spacing-fader-min-h-mini:   80px;
+  --spacing-knob-min:           72px;
+  --spacing-knob-default:       96px;
+  --spacing-pad-min:            52px;
+  --spacing-pad-default:        64px;
+
+  /* Text scale — body floor is 14px; 9px is an explicit anti-pattern. */
+  --text-xs:  12px;   /* secondary metadata only */
+  --text-sm:  14px;   /* labels */
+  --text-base: 16px;  /* default body */
+  --text-lg:  20px;   /* section headings */
+  --text-xl:  28px;   /* workspace tab labels */
+}

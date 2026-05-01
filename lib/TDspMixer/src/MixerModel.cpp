@@ -17,19 +17,25 @@ static const char *kDefaultNames[kChannelCount + 1] = {
     "Line R",
     "Mic L",
     "Mic R",
+    "XLR 1",   // 7  TLV320ADC6140 CH1 (external XLR preamp)
+    "XLR 2",   // 8
+    "XLR 3",   // 9
+    "XLR 4",   // 10
 };
 
 // Default stereo-link flags. Odd channels of each pair are linked with
-// their even neighbor: (1,2), (3,4), (5,6).
+// their even neighbor: (1,2), (3,4), (5,6). The XLR channels default
+// unlinked because they're individual mono mic inputs (SM58 etc.), not
+// natural L/R pairs.
 static bool defaultLink(int n) {
     return (n == 1) || (n == 3) || (n == 5);
 }
 
-// Default per-channel USB record send. Preserves pre-feature behaviour:
-// Line L/R (3,4) and Mic L/R (5,6) recorded at unity; USB playback L/R
-// (1,2) explicitly excluded to avoid feedback when a DAW monitors input.
+// Default per-channel USB record send. Line L/R (3,4), Mic L/R (5,6) and
+// XLR 1..4 (7..10) recorded at unity by default; USB playback L/R (1,2)
+// explicitly excluded to avoid feedback when a DAW monitors input.
 static bool defaultRecSend(int n) {
-    return (n >= 3 && n <= 6);
+    return (n >= 3 && n <= kChannelCount);
 }
 }  // namespace
 
@@ -43,7 +49,11 @@ void MixerModel::reset() {
         ch.fader     = 1.0f;
         // Mic L/R (5,6) start muted — onboard PDM mics are usually
         // unwanted at boot (feedback into headphones/monitor).
-        ch.on        = (n != 5 && n != 6);
+        // XLR 1..4 (7..10) also start muted because floating XLR inputs
+        // (no mic plugged in) at 24 dB analog preamp gain dump amplified
+        // EMI / hum into the main bus. User unmutes per channel as mics
+        // get plugged in.
+        ch.on        = !(n == 5 || n == 6 || (n >= 7 && n <= 10));
         ch.solo      = false;
         ch.link      = defaultLink(n);
         ch.hpfOn     = false;

@@ -65,6 +65,13 @@ public:
     // channels that don't have a rec amp wired.
     void setChannelRecAmp(int n, AudioAmplifier *amp);
 
+    // Register a right-side mirror mixer slot for a channel. Used when a
+    // mono input (e.g. XLR mic) needs to feed BOTH the main L and main R
+    // buses at the same fader gain. Unlike setMonoMirror (which is a
+    // singleton), this is stored per-channel and scales to many channels.
+    // Call after setChannel(); pass the same channel index.
+    void setChannelStereoMirror(int n, AudioMixer4 *mixerR, int slotR);
+
     // Register the main bus LOOP tap amplifiers (one per L/R). These
     // sit on the post-mainAmp / pre-hostvolAmp signal and feed the
     // capture mixer. Gain is 1.0 when Main.loopEnable is true, else 0.0.
@@ -119,6 +126,11 @@ private:
         AudioFilterBiquad *hpf         = nullptr;
         float              sampleRate  = 44100.0f;
         AudioAmplifier    *recAmp      = nullptr;
+        // Optional right-side mirror. When set, applyChannel() writes the
+        // effective gain to `mixerR.gain(slotR)` in addition to the primary
+        // mixer. Used for mono-to-stereo fanout (e.g. XLR mic into both L+R).
+        AudioMixer4       *mixerR      = nullptr;
+        int                slotR       = 0;
     };
     ChannelBinding _channels[kChannelCount + 1];  // 1-indexed; [0] unused
 

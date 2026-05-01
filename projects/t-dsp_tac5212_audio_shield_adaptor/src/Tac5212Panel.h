@@ -72,6 +72,14 @@ public:
     void muteOutput() override;
     void unmuteOutput() override;
 
+    // Optional re-init hook. Main.cpp registers `setupCodecHandRolled` here
+    // so the panel can re-run the full bring-up sequence (reset + serial
+    // format + slot mapping + PDM + ADC + DAC outputs + power up) when the
+    // user clicks "Initialize" in the System tab. Distinct from /reset,
+    // which only triggers SW_RESET and leaves the chip raw / silent.
+    using InitCallback = void(*)();
+    void setInitializeCallback(InitCallback cb) { _initCb = cb; }
+
 private:
     tac5212::TAC5212 &_codec;
 
@@ -92,14 +100,36 @@ private:
 
     void handleOutMode(int n, OSCMessage &msg, OSCBundle &reply);
 
+    // DAC DSP handlers (per-output)
+    void handleDacDvol(int n, OSCMessage &msg, OSCBundle &reply);
+    void handleDacBiquadCoeffs(int n, int idx, OSCMessage &msg, OSCBundle &reply);
+    void handleDacBiquadDesign(int n, int idx, OSCMessage &msg, OSCBundle &reply);
+
+    // DAC DSP handlers (chip-global)
+    void handleDacInterp(OSCMessage &msg, OSCBundle &reply);
+    void handleDacHpf(OSCMessage &msg, OSCBundle &reply);
+    void handleDacBiquadCount(OSCMessage &msg, OSCBundle &reply);
+    void handleDacDvolGang(OSCMessage &msg, OSCBundle &reply);
+    void handleDacSoftStep(OSCMessage &msg, OSCBundle &reply);
+
+    // DAC dynamics handlers (chip-global)
+    void handleDacDrcEnable(OSCMessage &msg, OSCBundle &reply);
+    void handleDacDrcPreset(OSCMessage &msg, OSCBundle &reply);
+    void handleDacLimiterEnable(OSCMessage &msg, OSCBundle &reply);
+    void handleDacLimiterPreset(OSCMessage &msg, OSCBundle &reply);
+    void handleDacLimiterInput(OSCMessage &msg, OSCBundle &reply);
+
     void handlePdmEnable(OSCMessage &msg, OSCBundle &reply);
     void handlePdmSource(OSCMessage &msg, OSCBundle &reply);
 
     void handleReset(OSCMessage &msg, OSCBundle &reply);
+    void handleInit(OSCMessage &msg, OSCBundle &reply);
     void handleWake(OSCMessage &msg, OSCBundle &reply);
     void handleInfo(OSCMessage &msg, OSCBundle &reply);
     void handleStatus(OSCMessage &msg, OSCBundle &reply);
 
     void handleRegSet(OSCMessage &msg, OSCBundle &reply);
     void handleRegGet(OSCMessage &msg, OSCBundle &reply);
+
+    InitCallback _initCb = nullptr;
 };

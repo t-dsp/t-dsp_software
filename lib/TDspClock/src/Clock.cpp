@@ -95,6 +95,11 @@ void Clock::update(uint32_t nowMicros) {
             _lastTickMicros += perTick;
             due             -= perTick;
             advanceOneTick(_lastTickMicros);
+            // Fan out to any downstream 24-PPQN consumers (arp, beats,
+            // etc.). Only fired on the Internal path — external ticks
+            // reach those consumers via the same MIDI dispatch that
+            // fed onMidiTick().
+            if (_internalTickCb) _internalTickCb(_internalTickUser);
         }
         // _measuredIntervalUs tracks the authoritative tempo; keep it
         // in sync with internal so bpm() queries return the setter's

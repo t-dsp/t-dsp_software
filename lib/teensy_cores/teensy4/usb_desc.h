@@ -951,6 +951,25 @@ let me know?  http://forum.pjrc.com/forums/4-Suggestions-amp-Bug-Reports
 
 #endif
 
+// ---------------------------------------------------------------------------
+// M3: 24-bit / 48 kHz USB Audio override (T-DSP F32 spike).
+// When -DAUDIO_SUBSLOT_SIZE=3 is set on the build, override the per-mode
+// AUDIO_TX_SIZE / AUDIO_RX_SIZE so the isochronous endpoints carry one
+// 48 kHz frame plus one jitter sample of stereo 24-bit audio:
+//     2 ch * 3 B/sample * (48 nominal + 1 jitter) = 294 B/ms
+// Default (flag unset, or set to 2) leaves the stock 16-bit / 44.1 kHz
+// 180-byte sizing alone. Production project (USB_MIDI_AUDIO_SERIAL,
+// no subslot flag) is therefore unaffected.
+// ---------------------------------------------------------------------------
+#ifdef AUDIO_INTERFACE
+  #if defined(AUDIO_SUBSLOT_SIZE) && AUDIO_SUBSLOT_SIZE == 3
+    #undef AUDIO_TX_SIZE
+    #undef AUDIO_RX_SIZE
+    #define AUDIO_TX_SIZE 294
+    #define AUDIO_RX_SIZE 294
+  #endif
+#endif
+
 #ifdef USB_DESC_LIST_DEFINE
 #if defined(NUM_ENDPOINTS) && NUM_ENDPOINTS > 0
 // NUM_ENDPOINTS = number of non-zero endpoints (0 to 7)

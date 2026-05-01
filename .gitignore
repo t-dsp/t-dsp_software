@@ -15,3 +15,24 @@ temp/
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code local state
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+
+# Electron-builder + Vite output (t-dsp_web_dev — was tools/web_dev_surface
+# inside the adaptor project before being promoted to a top-level project
+# at projects/t-dsp_web_dev/ on the f32-shield-port branch)
+projects/t-dsp_web_dev/release/
+projects/t-dsp_web_dev/dist/
+projects/t-dsp_web_dev/node_modules/
+
+# Vendor datasheets (large PDFs — kept locally, not tracked)
+projects/*/docs/*.pdf
+
+# references/: TAC5212 datasheet + small snippets are tracked, but the
+# upstream library clones below are trivially re-cloneable from GitHub
+# and would just bloat the repo (~21MB) — keep on disk, don't track.
+references/OpenAudio_ArduinoLibrary/
+references/teensy-4-async-inputs/
+references/teensy-4-usbAudio/

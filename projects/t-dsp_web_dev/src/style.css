@@ -1,0 +1,2782 @@
+* {
+  box-sizing: border-box;
+}
+
+html, body {
+  /* Required so #app's 100vh / min-height: 100vh has something to
+   * anchor to when we go into spectrum-active mode. Harmless in
+   * normal (mixer) mode. */
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: #181818;
+  color: #e0e0e0;
+  font: 13px/1.4 -apple-system, "Segoe UI", system-ui, sans-serif;
+}
+
+/* #app is now an exact-viewport-height flex column. Header and the
+ * workspace tab bar sit at the top in their natural sizes; the active
+ * workspace flex-grows in the middle and scrolls internally; the
+ * bottom dock sits at the bottom in its natural size. With this
+ * layout the tab bar and the dock are always visible without any
+ * position: sticky / fixed gymnastics — they're just at the top and
+ * bottom of a non-scrolling root.
+ *
+ * Per planning/ui-rebuild/02-hierarchy.md: the persistent bottom
+ * strip is the key navigation primitive for the rebuild, so making
+ * sure it never scrolls out of view is load-bearing. */
+#app {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 1200px;
+  margin: 0 auto;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Spectrum-active mode: the body gets `.spectrum-active` added by
+ * main.ts whenever the Spectrum tab is the visible view. In this mode
+ * #app breaks out of its 1200px max-width cap and fills the browser
+ * viewport edge-to-edge, and the spectrum view grows to consume all
+ * remaining vertical space between the tab bar and the serial console.
+ * Dropping back to the Mixer tab removes the class and the layout
+ * reverts to its centered 1200px column. */
+body.spectrum-active {
+  overflow: hidden;
+}
+
+body.spectrum-active #app {
+  max-width: none;
+  width: 100vw;
+  height: 100vh;
+  padding: 4px;
+  gap: 4px;
+  margin: 0;
+  overflow: hidden;
+}
+
+body.spectrum-active .view.view-spectrum {
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* Suppress workspace internal scroll in spectrum-active mode — the
+ * spectrum view fills the workspace exactly and shouldn't show a
+ * scrollbar even if the canvas math is a fraction of a pixel off.
+ * Otherwise the new flex: 1 / overflow-y: auto on .workspace would
+ * stack on top of the full-bleed spectrum layout. */
+body.spectrum-active .workspace-fx {
+  overflow: hidden;
+  gap: 4px;
+}
+
+body.spectrum-active .spectrum-wrap {
+  /* Override the normal min-height and border so the canvas
+   * goes edge-to-edge. Position and size are driven by the
+   * flex parent (view-spectrum), not intrinsic content. */
+  min-height: 0;
+  border: none;
+  border-radius: 0;
+}
+
+/* ---------- top-level view tabs (Mixer / Spectrum) ---------- */
+/*
+ * The two top-level views share the content area. Only the tab bar
+ * stays visible across both — the view sections toggle via display.
+ * The mixer view keeps its existing flex column layout; the spectrum
+ * view needs a block-styled container so its canvas can fill.
+ */
+
+.view-tabs {
+  display: flex;
+  gap: 0;
+  background: #202020;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  overflow: hidden;
+  /* Explicit flex sizing so the workspace tab bar is never the one
+   * that gives up space when the workspace below is content-heavy. */
+  flex: 0 0 auto;
+}
+
+.view-tab {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 10px 18px;
+  border-bottom: 2px solid transparent;
+  font-size: 12px;
+  letter-spacing: 0.03em;
+}
+
+.view-tab:hover {
+  background: #262626;
+}
+
+.view-tab.active {
+  background: #262626;
+  border-bottom-color: #b86a30;
+  color: #f0f0f0;
+}
+
+.view.view-mixer {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.view.view-spectrum {
+  display: flex;
+  flex-direction: column;
+  min-height: 520px;
+}
+
+h1, h4 {
+  margin: 0;
+}
+
+h4 {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #888;
+}
+
+.header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 0 0 auto;
+}
+
+.header h1 {
+  font-size: 15px;
+  font-weight: 500;
+  flex: 1;
+  color: #f0f0f0;
+}
+
+button {
+  background: #2a2a2a;
+  color: #e0e0e0;
+  border: 1px solid #444;
+  padding: 6px 12px;
+  cursor: pointer;
+  font: inherit;
+  border-radius: 2px;
+}
+
+button:hover {
+  background: #333;
+}
+
+button.active {
+  background: #b86a30;
+  border-color: #d68038;
+  color: #fff;
+}
+
+button.connect.connected {
+  background: #2d6a3a;
+  border-color: #3d8a4a;
+}
+
+select, input[type="text"] {
+  background: #161616;
+  color: #e0e0e0;
+  border: 1px solid #444;
+  padding: 4px 6px;
+  font: inherit;
+  border-radius: 2px;
+}
+
+/* ---------- mixer row ---------- */
+/*
+ * Every strip wrapper (channel pair, main, host) uses the same 7-row
+ * column layout so rows line up across the mixer:
+ *   .row-name   14px
+ *   .row-meter  130px
+ *   .row-fader  160px
+ *   .row-fv     14px
+ *   .row-mute   24px
+ *   .row-solo   24px
+ *   .row-link   24px
+ * Row heights are fixed to guarantee alignment regardless of what
+ * cells live inside each row. Cells within a row are flex-row-aligned
+ * (side-by-side for pairs, single for main/host's shared or spacer
+ * cells). Cells are a fixed 26px wide so L/R meters and faders
+ * occupy the same column position in every wrapper.
+ */
+
+.mixer-row {
+  display: flex;
+  gap: 8px;
+  background: #202020;
+  padding: 12px;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  align-items: flex-start;
+}
+
+/* Main + host wrapper, docked to the right edge of the mixer row so
+ * the output section stays visually separated from the input strips. */
+.output-dock {
+  display: flex;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.strip-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: #262626;
+  padding: 10px 8px;
+  border: 1px solid #333;
+  border-radius: 2px;
+}
+
+.strip-row {
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  justify-content: center;
+  align-items: center;
+}
+
+.row-name   { height: 14px;  }
+.row-meter  { height: 130px; align-items: flex-end; }
+.row-gain   { height: 40px;  }
+.row-fader  { height: 160px; }
+.row-fv     { height: 14px;  }
+.row-mute   { height: 24px;  }
+.row-solo   { height: 24px;  }
+.row-link   { height: 24px;  }
+.row-rec    { height: 24px;  }
+
+/* Individual cells have a fixed width so columns align across rows
+ * and across wrappers. A 26px cell comfortably holds a meter (10px),
+ * a fader (24px), or a small button. */
+.cell {
+  width: 26px;
+  box-sizing: border-box;
+}
+
+/* A "wide" cell spans two columns (26 * 2 + 6px gap = 58px). Used
+ * for single-spanning controls like main's shared mute, a pair's
+ * LINK button, and main's LINK button. */
+.cell.wide,
+.cell.span-2 {
+  width: 58px;
+}
+
+.strip-name {
+  font-size: 9px;
+  color: #aaa;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 14px;
+}
+
+.meter-wrap {
+  height: 130px;
+  background: #0c0c0c;
+  border: 1px solid #333;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Meter fill: sized to the full meter height and shrunk via
+ * transform: scaleY(0..1) from cells.ts. Transform-origin: bottom
+ * means scaleY(0) collapses the bar to the bottom edge.
+ *
+ * Why transform and not height: `height` is a layout property —
+ * every write triggers a forced reflow. `transform` is a compositor
+ * property — writes never touch layout/paint, the GPU handles them.
+ * At 30 Hz × 20 meters this is ~600 saved layouts/sec on the main
+ * thread. No CSS transition: 30 Hz updates are already smooth, and
+ * an overlapping transition would cause the compositor to never
+ * reach idle. */
+.meter-fill {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 100%;
+  transform: scaleY(0);
+  transform-origin: bottom;
+  will-change: transform;
+}
+
+.meter-fill.peak {
+  background: linear-gradient(to top, #4a4 0%, #4a4 60%, #cc4 75%, #c44 90%);
+  opacity: 0.95;
+}
+
+.meter-fill.rms {
+  background: #2a5a2a;
+  opacity: 0.6;
+}
+
+.meter-spacer {
+  background: transparent;
+  border-color: transparent;
+}
+
+.fader {
+  -webkit-appearance: slider-vertical;
+  appearance: slider-vertical;
+  height: 160px;
+  margin: 0;
+  padding: 0;
+}
+
+/* Round trim/gain knob — sits in row-gain just above the fader on each
+ * XLR input strip. Click+drag vertically to change value (Shift = fine);
+ * scroll wheel nudges by one step. The wrapper stacks the dial above a
+ * small dB readout so the current value is always visible without
+ * having to hover. The dial is a separately-rotated inner div carrying
+ * the indicator pip, so transform: rotate() only touches the inner
+ * element (no layout, just compositor work). */
+.gain-knob-wrap {
+  width: 26px;
+  height: 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 1px;
+}
+
+.gain-knob {
+  width: 24px;
+  height: 24px;
+  position: relative;
+  cursor: ns-resize;
+  touch-action: none;        /* claim the gesture so the page doesn't scroll */
+}
+
+.gain-knob-dial {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  background: radial-gradient(circle at 35% 30%, #5a5a5a 0%, #303030 60%, #1c1c1c 100%);
+  border: 1px solid #444;
+  box-shadow: inset 0 -1px 2px rgba(0,0,0,0.5);
+  will-change: transform;
+}
+
+.gain-knob-indicator {
+  position: absolute;
+  top: 1px;
+  left: 50%;
+  width: 2px;
+  height: 7px;
+  margin-left: -1px;
+  background: #d68a3a;
+  border-radius: 1px;
+}
+
+.gain-knob:hover .gain-knob-dial {
+  border-color: #6a6a6a;
+}
+
+.gain-knob-value {
+  font-size: 9px;
+  line-height: 12px;
+  color: #aaa;
+  font-family: monospace;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  width: 100%;
+}
+
+.spacer-gain {
+  height: 40px;
+}
+
+.fader-value {
+  font-size: 10px;
+  color: #888;
+  font-variant-numeric: tabular-nums;
+  font-family: monospace;
+  text-align: center;
+  line-height: 14px;
+}
+
+.mute, .solo, .link-btn, .enable-btn, .rec-btn, .loop-btn {
+  font-size: 11px;
+  padding: 0;
+  height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.link-btn {
+  color: #aaa;
+}
+
+.link-btn.active {
+  background: #2d5a6a;
+  border-color: #3d7a8a;
+  color: #fff;
+}
+
+.enable-btn.active {
+  background: #2d6a3a;
+  border-color: #3d8a4a;
+  color: #fff;
+}
+
+/* Per-channel REC toggle. Red-armed when recSend is true. When
+ * main.loopEnable is active the loop-override class greys the button
+ * and disables pointer events so the stored state is preserved but
+ * can't be twiddled while loop is doing the capture. */
+.rec-btn {
+  color: #aaa;
+}
+
+.rec-btn.active {
+  background: #7a2d2d;
+  border-color: #9a3d3d;
+  color: #fff;
+}
+
+.rec-btn.loop-override,
+.rec-btn[disabled] {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* Main LOOP toggle. Amber when armed — distinct from the red per-
+ * channel REC so you can see at a glance which path is recording. */
+.loop-btn {
+  color: #aaa;
+}
+
+.loop-btn.active {
+  background: #a05a1e;
+  border-color: #c27a3a;
+  color: #fff;
+}
+
+/* Linked-slave: dim the R column of a pair (or main's R side) when
+ * the pair is linked. pointer-events:none also blocks the disabled
+ * fader from receiving drag gestures. */
+.linked-slave {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.cell-spacer {
+  background: transparent;
+  border: none;
+}
+
+/* Main wrapper: slightly darker border, extra emphasis. */
+.main-wrapper {
+  background: #2c2c2c;
+  border-color: #4a4a4a;
+}
+
+/* Host (Windows volume) wrapper. */
+.host-wrapper {
+  background: #1e1e28;
+  border-color: #3a3a4a;
+}
+
+.host-wrapper .strip-name {
+  color: #9aa;
+}
+
+.host-wrapper.bypassed .fader,
+.host-wrapper.bypassed .fader-value {
+  opacity: 0.35;
+}
+
+/* ---------- codec panel ---------- */
+
+.codec-section {
+  background: #202020;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+}
+
+.codec-panel {
+  display: flex;
+  flex-direction: column;
+}
+
+.tab-bar {
+  display: flex;
+  border-bottom: 1px solid #2c2c2c;
+}
+
+.tab-btn {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  padding: 10px 16px;
+  border-bottom: 2px solid transparent;
+  font-size: 12px;
+}
+
+.tab-btn:hover {
+  background: #262626;
+}
+
+.tab-btn.active {
+  background: #262626;
+  border-bottom-color: #b86a30;
+  color: #f0f0f0;
+}
+
+.tab-content {
+  padding: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.group {
+  background: #262626;
+  padding: 10px 12px;
+  border: 1px solid #333;
+  border-radius: 2px;
+  min-width: 220px;
+}
+
+.group h4 {
+  margin: 0 0 8px;
+}
+
+.control {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 4px 0;
+  gap: 8px;
+}
+
+.control label {
+  font-size: 12px;
+  color: #ccc;
+}
+
+.control input[type="range"] {
+  flex: 1;
+  min-width: 80px;
+}
+
+.group-disabled,
+.section-disabled {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+.range-readout {
+  font-size: 11px;
+  font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  color: #aef;
+  min-width: 56px;
+  text-align: right;
+}
+
+/* ---------- codec view (top-level Codec tab) ---------- */
+
+.view-codec {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px 0;
+}
+
+/* The codec-panel inside view-codec stretches to fit. */
+.view-codec .codec-panel {
+  background: transparent;
+  border: none;
+}
+
+/* Sub-tab bar inside the Codec view. Hierarchical layer 2. */
+.view-codec .tab-bar {
+  border-bottom: 1px solid #2c2c2c;
+  padding: 0 4px;
+}
+
+/* Tab-content lays sections out in a single column for readable scanning. */
+.view-codec .tab-content {
+  flex-direction: column;
+  flex-wrap: nowrap;
+  padding: 16px 0 0;
+  gap: 14px;
+}
+
+/* ---------- section cards (hierarchical layer 3) ---------- */
+
+.codec-section-card {
+  background: #1f1f1f;
+  border: 1px solid #2c2c2c;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.codec-section-card-disabled .codec-section-body {
+  opacity: 0.4;
+}
+.codec-section-card-disabled .codec-section-header {
+  cursor: help;
+}
+
+.codec-section-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: #252525;
+  border-bottom: 1px solid #2c2c2c;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-size: 12px;
+  color: #f0f0f0;
+  cursor: pointer;
+  user-select: none;
+}
+.codec-section-header.collapsed {
+  border-bottom-color: transparent;
+}
+.codec-section-header .title {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex: 1;
+}
+.codec-section-header .chevron {
+  font-size: 10px;
+  color: #888;
+  transition: transform 0.15s;
+}
+.codec-section-header.collapsed .chevron {
+  transform: rotate(-90deg);
+}
+.codec-section-subtitle {
+  font-weight: 400;
+  font-size: 11px;
+  color: #888;
+  text-transform: none;
+  letter-spacing: normal;
+}
+.codec-section-presets {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.codec-section-presets .codec-preset-btn {
+  font-size: 10px;
+  padding: 2px 8px;
+  background: #2c2c2c;
+  border: 1px solid #383838;
+  border-radius: 2px;
+  cursor: pointer;
+  color: #ccc;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.codec-section-presets .codec-preset-btn:hover {
+  background: #3a3a3a;
+  color: #fff;
+}
+
+/* Section body — sub-settings layer (layer 4). */
+.codec-section-body {
+  padding: 10px 14px 12px;
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) 2fr;
+  row-gap: 8px;
+  column-gap: 16px;
+  align-items: center;
+}
+.codec-section-body .codec-row-label {
+  font-size: 12px;
+  color: #ccc;
+}
+.codec-section-body .codec-row-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.codec-section-body .codec-row-control .control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  width: 100%;
+}
+.codec-section-body .codec-row-control input[type="range"] {
+  flex: 1;
+}
+.codec-section-body .codec-control-help {
+  grid-column: 2;
+  font-size: 10.5px;
+  color: #888;
+  margin-top: -4px;
+}
+
+/* Biquad rows span both grid columns and host the EQ widget controls. */
+.codec-curve-row {
+  grid-column: 1 / -1;
+  margin-bottom: 4px;
+}
+.codec-biquad-row {
+  grid-column: 1 / -1;
+}
+
+/* ---------- biquad EQ widget ---------- */
+
+.biquad-curve-wrap {
+  background: #161616;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 4px;
+}
+.biquad-curve {
+  display: block;
+  width: 100%;
+  height: 140px;
+}
+
+.biquad-band {
+  display: grid;
+  grid-template-columns: 70px 90px 1fr 60px 1fr 60px 1fr 56px;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 0;
+  border-top: 1px dashed #2a2a2a;
+}
+.biquad-band-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #ddd;
+}
+.biquad-type {
+  font-size: 11px;
+  background: #1d1d1d;
+  border: 1px solid #2c2c2c;
+  color: #ccc;
+  padding: 2px 4px;
+}
+.biquad-band input[type="range"] {
+  width: 100%;
+}
+.biquad-readout {
+  font-size: 10.5px;
+  font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  color: #aef;
+  text-align: right;
+  white-space: nowrap;
+}
+.biquad-band input[type="range"]:disabled,
+.biquad-band input[type="range"]:disabled + .biquad-readout {
+  opacity: 0.4;
+}
+
+/* ---------- raw OSC ---------- */
+
+.raw-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.raw-osc {
+  display: flex;
+  gap: 8px;
+}
+
+.raw-osc-input {
+  flex: 1;
+  font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+/* ---------- spectrum analyzer view ---------- */
+/*
+ * The spectrum-wrap is position:relative so the freeze button can
+ * anchor top-right inside it. The canvas is sized imperatively by
+ * spectrum.ts via ResizeObserver — we don't rely on CSS to drive
+ * canvas.width/.height, only the CSS pixel box. min-height keeps it
+ * big enough to be useful even at narrow viewports.
+ */
+
+.spectrum-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 520px;
+  background: #0a0a10;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+/* Absolute-positioned inside .spectrum-wrap (which is position:relative)
+ * so the canvas doesn't contribute to the wrap's layout. If the canvas
+ * were a flow child, setting its height from JS on every resize would
+ * push the wrap's content box, which would fire ResizeObserver again,
+ * which would set a bigger height... forever. Canonical pattern for
+ * "canvas fills its container": position it absolute and take it out
+ * of the parent's flow. */
+.spectrum-canvas {
+  display: block;
+  position: absolute;
+  inset: 0;
+}
+
+/* Control strip overlaid top-right inside .spectrum-wrap. Holds
+ * Freeze and the display-mode toggles (tilt, bars, etc.). */
+.spectrum-controls {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  display: flex;
+  gap: 6px;
+  z-index: 2;
+}
+
+.spectrum-btn {
+  font-size: 11px;
+  padding: 4px 10px;
+  background: rgba(20, 20, 32, 0.75);
+  border: 1px solid #3a3a4a;
+  color: #ccd;
+  font-family: inherit;
+  cursor: pointer;
+  border-radius: 2px;
+}
+
+.spectrum-btn:hover {
+  background: rgba(40, 40, 60, 0.9);
+}
+
+.spectrum-btn.active {
+  background: #b86a30;
+  border-color: #d68038;
+  color: #fff;
+}
+
+/* ---------- synth view ---------- */
+/*
+ * Three-row layout: sub-nav (synth engine picker) on top, active engine's
+ * config panel in the middle, 88-key piano docked at the bottom. The
+ * keyboard is shared across all synth sub-tabs so every engine plays
+ * from the same instrument. Sub-nav and content are placeholders until
+ * the first synth engine (Dexed) lands — they render empty-state text.
+ *
+ * 88-key piano, A0..C8. White keys are flex children filling the full
+ * width; black keys are absolutely positioned as a percentage of the
+ * container so the layout stays correct at any viewport width without
+ * a ResizeObserver. `.active` highlights use the same amber accent
+ * (#b86a30 / #d68038) as the rest of the app's active controls.
+ */
+
+.view.view-synth {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.synth-subnav {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+  background: #1a1a1a;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 6px 10px;
+  min-height: 32px;
+  align-items: center;
+}
+
+.synth-subnav-empty {
+  color: #666;
+  font-size: 12px;
+  font-style: italic;
+}
+
+.synth-subnav-tab {
+  background: #2c2c2c;
+  color: #bbb;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.synth-subnav-tab {
+  display: inline-flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+.synth-subnav-tab.active {
+  background: #b86a30;
+  color: #111;
+  border-color: #d68038;
+}
+
+/* "Playing" dot next to each sub-tab label — lit when the synth's
+ * on state is true, dim when off. Stays visible on inactive sub-tabs
+ * so the user can see at a glance that (for example) Dexed is still
+ * sounding while they configure MPE. */
+.synth-subnav-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #333;
+  flex-shrink: 0;
+  transition: background 0.12s, box-shadow 0.12s;
+}
+.synth-subnav-tab.playing .synth-subnav-dot {
+  background: #3dd16a;
+  box-shadow: 0 0 4px rgba(61, 209, 106, 0.8);
+}
+.synth-subnav-tab.active.playing .synth-subnav-dot {
+  background: #2a6;
+  box-shadow: 0 0 4px rgba(61, 209, 106, 0.6);
+}
+
+/* ---- per-synth on/off header row (Dexed + MPE panels share this) ---- */
+
+.synth-on-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid #2c2c2c;
+  margin-bottom: 6px;
+}
+
+.synth-on-btn {
+  background: #2a2a2a;
+  color: #999;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  padding: 5px 14px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  min-width: 48px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s, box-shadow 0.12s;
+}
+.synth-on-btn:hover {
+  background: #333;
+  color: #ccc;
+}
+.synth-on-btn.on {
+  background: #1d6e34;
+  color: #eaffe8;
+  border-color: #2e9a4a;
+  box-shadow: 0 0 6px rgba(61, 209, 106, 0.4);
+}
+.synth-on-btn.on:hover {
+  background: #228240;
+}
+
+.synth-on-label {
+  color: #ccc;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.synth-auto {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;      /* push to the right end of the header row */
+  color: #888;
+  font-size: 11px;
+  cursor: pointer;
+  user-select: none;
+}
+.synth-auto:hover {
+  color: #ccc;
+}
+.synth-auto input[type="checkbox"] {
+  accent-color: #b86a30;  /* match the "active" accent used elsewhere */
+  cursor: pointer;
+}
+
+.dexed-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: 520px;
+}
+
+.dexed-row {
+  display: grid;
+  grid-template-columns: 80px 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.dexed-row label {
+  color: #bbb;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.dexed-row select,
+.dexed-row input[type="range"] {
+  background: #181818;
+  color: #e0e0e0;
+  border: 1px solid #333;
+  border-radius: 2px;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 12px;
+  min-width: 0;
+}
+
+.dexed-readout {
+  color: #888;
+  font-size: 11px;
+  font-family: monospace;
+  min-width: 40px;
+  text-align: right;
+}
+
+/* Voice row has the dropdown + two step buttons squeezed into one
+ * grid cell via extra columns. Keeps alignment with the rest of the
+ * 80 / 1fr / auto grid rows. */
+.dexed-row-voice {
+  grid-template-columns: 80px 1fr auto auto;
+}
+
+.dexed-step {
+  background: #2c2c2c;
+  color: #d68038;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 14px;
+  padding: 3px 10px;
+  cursor: pointer;
+  min-width: 32px;
+}
+.dexed-step:hover {
+  background: #363636;
+}
+.dexed-step:active {
+  background: #b86a30;
+  color: #111;
+}
+
+/* Processing view — main-bus output treatment. */
+
+.view.view-processing {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.processing-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-width: 560px;
+}
+
+.proc-module {
+  background: #202020;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 14px 16px;
+}
+
+.proc-module h3 {
+  margin: 0 0 10px 0;
+  color: #d68038;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+
+.proc-module-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.proc-row {
+  display: grid;
+  grid-template-columns: 90px 1fr auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.proc-row label {
+  color: #bbb;
+  font-size: 12px;
+}
+
+.proc-row input[type="range"] {
+  background: #181818;
+  border: 1px solid #333;
+  border-radius: 2px;
+}
+
+.proc-row input[type="range"]:disabled {
+  opacity: 0.4;
+}
+
+.proc-readout {
+  color: #888;
+  font-size: 11px;
+  font-family: monospace;
+  min-width: 60px;
+  text-align: right;
+}
+
+.proc-toggle {
+  width: 16px;
+  height: 16px;
+  accent-color: #d68038;
+}
+
+.proc-note {
+  color: #888;
+  font-size: 11px;
+  line-height: 1.45;
+  margin: 4px 0 0 0;
+}
+
+.proc-preset-row {
+  display: grid;
+  grid-template-columns: 90px 1fr;
+  align-items: center;
+  gap: 12px;
+}
+
+.proc-preset-row label {
+  color: #bbb;
+  font-size: 12px;
+}
+
+.proc-preset-buttons {
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.proc-preset {
+  background: #2c2c2c;
+  color: #bbb;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 11px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+.proc-preset:hover {
+  background: #363636;
+}
+.proc-preset.active {
+  background: #b86a30;
+  color: #111;
+  border-color: #d68038;
+}
+
+.synth-content {
+  background: #202020;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 16px;
+  min-height: 120px;
+}
+
+.synth-content-empty {
+  color: #888;
+  font-size: 13px;
+  margin: 0;
+}
+
+.synth-keyboard-dock {
+  /* Bottom of the Synth view — the keyboard's own .piano-wrap supplies
+   * the background/border/padding so this wrapper is just a positioning
+   * hook in case we later want to add controls alongside the keys. */
+  display: flex;
+  flex-direction: column;
+}
+
+.piano-wrap {
+  background: #202020;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.piano-banner {
+  color: #888;
+  font-size: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.piano-banner-channels {
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+  color: #b0b0b0;
+  white-space: nowrap;
+}
+
+.piano-keyboard {
+  position: relative;
+  width: 100%;
+  height: 160px;
+  user-select: none;
+}
+
+.piano-whites {
+  display: flex;
+  flex-direction: row;
+  width: 100%;
+  height: 100%;
+}
+
+.piano-blacks {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 62%;
+  pointer-events: none;
+}
+
+.piano-key {
+  box-sizing: border-box;
+  /* Kill the browser default tap-highlight / text-select / touch
+   * behaviors so drag-across-keys feels like a real keyboard, not
+   * a web page selection. */
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  touch-action: none;
+  cursor: pointer;
+}
+
+.piano-key-white {
+  flex: 1 1 0;
+  position: relative;
+  background: linear-gradient(to bottom, #f4f4f4, #d8d8d8);
+  border: 1px solid #555;
+  border-right-width: 0;
+  border-radius: 0 0 3px 3px;
+  transition: background 40ms linear;
+}
+
+.piano-key-white:last-child {
+  border-right-width: 1px;
+}
+
+.piano-key-white.active {
+  background: linear-gradient(to bottom, #d68038, #b86a30);
+}
+
+.piano-key-black {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: linear-gradient(to bottom, #2a2a2a, #0e0e0e);
+  border: 1px solid #000;
+  border-radius: 0 0 3px 3px;
+  box-shadow: 0 2px 3px rgba(0, 0, 0, 0.5);
+  transition: background 40ms linear;
+  /* The containing .piano-blacks layer has pointer-events: none so
+   * the gaps between black keys don't block clicks on the white keys
+   * underneath. Individual black keys need to opt back in to capture
+   * pointerdown. */
+  pointer-events: auto;
+}
+
+.piano-key-black.active {
+  background: linear-gradient(to bottom, #e09048, #b86a30);
+}
+
+.piano-key-label {
+  position: absolute;
+  bottom: 4px;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 9px;
+  color: #888;
+  font-family: ui-monospace, Consolas, monospace;
+  pointer-events: none;
+}
+
+/* ---------- console ---------- */
+
+.console-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.console-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.console-clear {
+  font-size: 11px;
+  padding: 3px 8px;
+}
+
+.console {
+  background: #0a0a0a;
+  color: #c0c0c0;
+  font: 11px/1.35 ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  padding: 8px 10px;
+  height: 240px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  border: 1px solid #2c2c2c;
+  border-radius: 2px;
+}
+
+.console-input-row {
+  display: flex;
+  gap: 6px;
+}
+
+.console-input {
+  flex: 1;
+  font-family: ui-monospace, "Cascadia Code", "JetBrains Mono", Consolas, monospace;
+  font-size: 12px;
+  padding: 6px 8px;
+}
+
+.console-send {
+  font-size: 11px;
+  padding: 3px 12px;
+}
+
+/* ================================================================
+ *  MPE VA synth panel
+ * ================================================================ */
+
+.mpe-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 760px;
+}
+
+.mpe-section-title {
+  color: #bbb;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin: 0 0 6px 0;
+}
+
+/* ---- voice orbs ---- */
+
+.mpe-orbs {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.mpe-orbs-canvas {
+  width: 100%;
+  height: 160px;
+  background: #0b0f14;
+  border: 1px solid #2c2c2c;
+  border-radius: 4px;
+  display: block;
+}
+
+.mpe-orbs-legend {
+  display: flex;
+  flex-direction: row;
+  gap: 14px;
+  font-size: 10px;
+  color: #666;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 0 4px;
+}
+
+/* ---- preset grid ---- */
+
+.mpe-presets {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mpe-preset-filter {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+.mpe-preset-filter-btn {
+  --cat-color: #666;
+  background: #1a1a1a;
+  color: #bbb;
+  border: 1px solid #2c2c2c;
+  border-left: 3px solid var(--cat-color);
+  border-radius: 3px;
+  padding: 4px 10px;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.mpe-preset-filter-btn.active {
+  background: #2c2c2c;
+  color: #fff;
+  border-color: #3a3a3a;
+  border-left-color: var(--cat-color);
+}
+.mpe-preset-filter-btn:hover {
+  background: #222;
+}
+
+.mpe-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 6px;
+}
+
+.mpe-preset-card {
+  --cat-color: #666;
+  background: #181818;
+  color: #e0e0e0;
+  border: 1px solid #2c2c2c;
+  border-left: 3px solid var(--cat-color);
+  border-radius: 3px;
+  padding: 8px 10px;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  font-family: inherit;
+  transition: background 0.1s, border-color 0.1s;
+}
+.mpe-preset-card:hover {
+  background: #1e1e1e;
+  border-color: #3a3a3a;
+}
+.mpe-preset-card.active {
+  background: #262626;
+  border-color: #4a4a4a;
+  box-shadow: 0 0 0 1px var(--cat-color);
+}
+
+.mpe-preset-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: #e8e8e8;
+}
+
+.mpe-preset-glyphs {
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  align-items: center;
+  color: #888;
+}
+.mpe-preset-glyph {
+  display: inline-flex;
+  align-items: center;
+}
+.mpe-preset-glyph-lfo {
+  font-size: 9px;
+  color: #d68038;
+  border: 1px solid #5a3010;
+  padding: 1px 4px;
+  border-radius: 2px;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+/* ---- controls ---- */
+
+.mpe-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mpe-row {
+  display: grid;
+  grid-template-columns: 70px 1fr auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.mpe-row-col {
+  /* LFO row wants a vertical stack inside a single full-width cell
+   * so both sub-rows share the column grid. Reset to single column. */
+  grid-template-columns: 1fr;
+  gap: 4px;
+}
+
+.mpe-row label {
+  color: #bbb;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.mpe-row input[type="range"] {
+  background: #181818;
+  border: 1px solid #333;
+  border-radius: 2px;
+  min-width: 0;
+}
+
+.mpe-readout {
+  color: #888;
+  font-size: 11px;
+  font-family: monospace;
+  min-width: 60px;
+  text-align: right;
+}
+
+/* waveform picker — 4 tiles */
+
+.mpe-wave-row {
+  grid-template-columns: 70px repeat(4, auto) 1fr;
+}
+
+.mpe-wave-tile {
+  background: #181818;
+  color: #888;
+  border: 1px solid #333;
+  border-radius: 3px;
+  padding: 4px 8px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.1s, border-color 0.1s, color 0.1s;
+}
+.mpe-wave-tile:hover {
+  background: #222;
+  color: #ccc;
+}
+.mpe-wave-tile.active {
+  background: #b86a30;
+  color: #111;
+  border-color: #d68038;
+}
+
+/* LFO row — nested sub-rows */
+
+.mpe-lfo-sub {
+  display: grid;
+  grid-template-columns: 70px 1fr 50px 0.6fr 40px;
+  align-items: center;
+  gap: 10px;
+}
+
+.mpe-lfo-sub-pickers {
+  grid-template-columns: 70px auto 1fr auto;
+}
+
+.mpe-segmented {
+  display: inline-flex;
+  flex-direction: row;
+  border: 1px solid #333;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.mpe-segmented button {
+  background: #181818;
+  color: #888;
+  border: none;
+  border-right: 1px solid #2c2c2c;
+  padding: 4px 10px;
+  font-family: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.mpe-segmented button:last-child {
+  border-right: none;
+}
+.mpe-segmented button:hover {
+  background: #222;
+  color: #ccc;
+}
+.mpe-segmented button.active {
+  background: #b86a30;
+  color: #111;
+}
+
+/* master channel picker — 16 pills */
+
+.mpe-channel-pills {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+.mpe-channel-pill {
+  background: #181818;
+  color: #888;
+  border: 1px solid #2c2c2c;
+  border-radius: 2px;
+  width: 26px;
+  height: 22px;
+  padding: 0;
+  font-family: monospace;
+  font-size: 10px;
+  cursor: pointer;
+}
+.mpe-channel-pill:hover {
+  background: #222;
+  color: #ccc;
+}
+.mpe-channel-pill.active {
+  background: #b86a30;
+  color: #111;
+  border-color: #d68038;
+  font-weight: 600;
+}
+
+/* ---- Loop panel -------------------------------------------------- */
+
+.looper-source {
+  background: #181818;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 2px;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 6px;
+}
+
+.looper-transport {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin: 4px 0 2px 0;
+}
+
+.looper-btn {
+  background: #2c2c2c;
+  color: #ddd;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 1px;
+  padding: 10px 0;
+  cursor: pointer;
+}
+.looper-btn:hover {
+  background: #363636;
+}
+.looper-btn:active {
+  transform: translateY(1px);
+}
+.looper-btn-rec.active {
+  background: #9a2a2a;
+  border-color: #c93a3a;
+  color: #fff;
+  animation: looper-rec-pulse 1.1s ease-in-out infinite;
+}
+.looper-btn-play.active {
+  background: #2a7a3a;
+  border-color: #3aa050;
+  color: #fff;
+}
+
+@keyframes looper-rec-pulse {
+  0%, 100% { background: #9a2a2a; }
+  50%      { background: #c93a3a; }
+}
+
+.looper-status {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 4px 2px;
+  border-top: 1px solid #2a2a2a;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.looper-state {
+  font-family: monospace;
+  font-size: 11px;
+  letter-spacing: 1px;
+  color: #888;
+}
+.looper-state-rec     { color: #e07070; }
+.looper-state-play    { color: #6bc47a; }
+.looper-state-stopped { color: #d68038; }
+
+.looper-length {
+  font-family: monospace;
+  font-size: 12px;
+  color: #ccc;
+}
+/* ---------- Beats drum machine panel ---------- */
+
+.beats-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  background: #1c1c1c;
+}
+
+.beats-transport {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.beats-play {
+  width: 42px;
+  height: 42px;
+  font-size: 18px;
+  border: 1px solid #3a3a3a;
+  background: #262626;
+  color: #e0e0e0;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.beats-play:hover { background: #303030; }
+.beats-play.active {
+  background: #b86a30;
+  border-color: #d4823f;
+  color: #fff;
+}
+
+.beats-slider-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.beats-label {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: #888;
+  min-width: 32px;
+}
+
+.beats-range {
+  width: 120px;
+}
+
+.beats-readout {
+  font: 11px/1.2 ui-monospace, "Cascadia Code", Consolas, monospace;
+  color: #b0b0b0;
+  min-width: 36px;
+  text-align: right;
+}
+
+.beats-sd {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  padding: 4px 8px;
+  border-radius: 2px;
+}
+.beats-sd.ok      { background: #1f3a1f; color: #8cd78c; }
+.beats-sd.missing { background: #3a1f1f; color: #d78c8c; }
+
+.beats-clock {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.beats-clock-btn {
+  font-size: 11px;
+  padding: 4px 10px;
+  border: 1px solid #3a3a3a;
+  background: #262626;
+  color: #b0b0b0;
+  border-radius: 2px;
+  cursor: pointer;
+}
+.beats-clock-btn:hover { background: #303030; }
+.beats-clock-btn.active {
+  background: #b86a30;
+  border-color: #d4823f;
+  color: #fff;
+}
+
+.beats-presets {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 0;
+  border-bottom: 1px solid #2a2a2a;
+}
+
+.beats-preset {
+  font-size: 11px;
+  padding: 5px 10px;
+  border: 1px solid #3a3a3a;
+  background: #222;
+  color: #c8c8c8;
+  border-radius: 2px;
+  cursor: pointer;
+  letter-spacing: 0.02em;
+}
+.beats-preset:hover {
+  background: #2c2c2c;
+  border-color: #555;
+}
+.beats-preset:active {
+  background: #b86a30;
+  border-color: #d4823f;
+  color: #fff;
+}
+
+.beats-preset-divider {
+  /* Visual gap between the 8 general presets and the 2 D&B presets. */
+  display: inline-block;
+  width: 1px;
+  height: 22px;
+  background: #3a3a3a;
+  margin: 0 6px;
+}
+
+.beats-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.beats-row {
+  display: grid;
+  /* Fixed-width header + cells flexing to fill. Gives all 4 rows a
+   * uniform left-column, so names / mute / sample inputs align
+   * vertically no matter which tracks have a sample field. */
+  grid-template-columns: 220px 1fr;
+  align-items: center;
+  gap: 10px;
+}
+
+.beats-track-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.beats-track-name {
+  font-size: 13px;
+  font-weight: 500;
+  min-width: 48px;
+  color: #e0e0e0;
+}
+
+.beats-mute,
+.beats-track-clear {
+  width: 24px;
+  height: 24px;
+  font-size: 11px;
+  border: 1px solid #3a3a3a;
+  background: #262626;
+  color: #b0b0b0;
+  border-radius: 2px;
+  cursor: pointer;
+  padding: 0;
+}
+.beats-mute:hover,
+.beats-track-clear:hover { background: #303030; }
+.beats-mute.active {
+  background: #7a1f1f;
+  border-color: #a13030;
+  color: #fff;
+}
+
+.beats-sample {
+  flex: 1;
+  min-width: 0;
+  font: 11px/1.2 ui-monospace, "Cascadia Code", Consolas, monospace;
+  padding: 4px 6px;
+  background: #0f0f0f;
+  border: 1px solid #2c2c2c;
+  color: #e0e0e0;
+  border-radius: 2px;
+}
+
+.beats-cells {
+  display: flex;
+  gap: 2px;
+}
+
+.beats-cell {
+  /* Each of 16 cells grows equally to fill its row. aspect-ratio keeps
+   * them roughly square at any viewport width. */
+  flex: 1 1 0;
+  aspect-ratio: 1;
+  min-width: 0;
+  border: 1px solid #2c2c2c;
+  background: #141414;
+  border-radius: 2px;
+  cursor: pointer;
+  padding: 0;
+  transition: background-color 80ms ease, border-color 80ms ease;
+}
+
+.beats-cell:hover {
+  border-color: #555;
+  background: #1a1a1a;
+}
+
+.beats-cell.on {
+  --cell-alpha: 1;
+  /* rgba(184, 106, 48, alpha) = the accent-orange used elsewhere,
+   * modulated by per-step velocity so low-vel cells visually pop less.
+   * Velocity alpha floor is 0.25 in JS so "on" cells stay visible. */
+  background: rgba(184, 106, 48, var(--cell-alpha));
+  border-color: #d4823f;
+}
+
+.beats-cell.playhead {
+  box-shadow: 0 0 0 2px #ffffff inset;
+}
+
+.beats-cell-beatgap {
+  margin-left: 6px;
+}
+
+.beats-bottom {
+  display: flex;
+  justify-content: flex-start;
+  gap: 10px;
+}
+
+.beats-clear-all {
+  font-size: 11px;
+  padding: 5px 12px;
+  background: #2a1a1a;
+  border: 1px solid #4a2a2a;
+  color: #d78c8c;
+  border-radius: 2px;
+  cursor: pointer;
+}
+.beats-clear-all:hover { background: #3a2020; }
+
+/* Velocity popup — floats on top of the grid when the user right-clicks
+ * a step cell. Singleton; dispatcher.ts removes any prior popup before
+ * opening a new one. */
+.beats-vel-popup {
+  position: absolute;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  background: #262626;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+.beats-vel-readout {
+  font: 11px/1.2 ui-monospace, Consolas, monospace;
+  color: #b0b0b0;
+  min-width: 32px;
+}
+
+/* ---------- Clock panel ---------- */
+
+.clock-bpm-block {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 4px 0 8px 0;
+}
+.clock-bpm-big {
+  font: 600 48px/1 ui-monospace, Consolas, monospace;
+  color: #eaeaea;
+  letter-spacing: 1px;
+}
+.clock-bpm-suffix {
+  font-size: 14px;
+  color: #888;
+  letter-spacing: 2px;
+}
+
+.clock-transport {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 2px;
+  border-top: 1px solid #2a2a2a;
+}
+.clock-led {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #333;
+  border: 1px solid #555;
+  box-shadow: inset 0 0 2px rgba(0, 0, 0, 0.8);
+}
+.clock-led.on {
+  background: #4dd06a;
+  border-color: #6dea88;
+  box-shadow: 0 0 8px rgba(77, 208, 106, 0.7);
+}
+.clock-transport-label {
+  font-family: monospace;
+  font-size: 11px;
+  letter-spacing: 2px;
+  color: #888;
+}
+
+.clock-source-bar {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.clock-source-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  background: #2c2c2c;
+  color: #ddd;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  font-family: inherit;
+  padding: 10px 12px;
+  cursor: pointer;
+  text-align: left;
+}
+.clock-source-btn:hover {
+  background: #363636;
+}
+.clock-source-btn.active {
+  background: #2a5380;
+  border-color: #3a78b8;
+  color: #fff;
+}
+.clock-source-label {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+}
+.clock-source-sub {
+  font-size: 10px;
+  color: #a0a0a0;
+  letter-spacing: 0.2px;
+}
+.clock-source-btn.active .clock-source-sub {
+  color: #cbdfef;
+}
+
+.clock-nudge {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  margin-top: 2px;
+}
+.clock-nudge-btn {
+  background: #2c2c2c;
+  color: #ddd;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 12px;
+  padding: 6px 0;
+  cursor: pointer;
+}
+.clock-nudge-btn:hover:not(:disabled) {
+  background: #363636;
+}
+.clock-nudge-btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.clock-nudge-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.clock-bpb {
+  background: #181818;
+  color: #ddd;
+  border: 1px solid #333;
+  border-radius: 2px;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 4px 6px;
+  width: 64px;
+}
+
+/* ======================================================================
+   Arp panel — top-level tab styles. Builds on .mpe-* for rows and
+   preset cards; adds Arp-specific layout (step-mask grid, wrapping
+   segmented pickers for pattern/rate/scale with 15–25 options each).
+   ====================================================================== */
+
+.arp-header {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.arp-toggle {
+  background: #1a1a1a;
+  color: #bbb;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 6px 12px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.arp-toggle:hover { background: #222; }
+.arp-toggle.on {
+  background: #2c2c2c;
+  color: #fff;
+  border-color: #4a4a4a;
+  box-shadow: 0 0 0 1px #b86a30;
+}
+
+.arp-panic {
+  background: #2a1818;
+  color: #e89090;
+  border: 1px solid #552626;
+  border-radius: 3px;
+  padding: 6px 12px;
+  font-family: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  margin-left: auto;
+}
+.arp-panic:hover { background: #3a1e1e; color: #fff; }
+
+/* preset grid tweaks — we have 230+ presets, so the filter strip can
+   wrap, and the search field earns its keep. */
+.arp-preset-filter { flex-wrap: wrap; }
+
+.arp-preset-search {
+  margin-top: 6px;
+}
+.arp-preset-search input {
+  width: 100%;
+  background: #181818;
+  color: #e0e0e0;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 6px 8px;
+  font-family: inherit;
+  font-size: 12px;
+}
+.arp-preset-search input:focus {
+  outline: none;
+  border-color: #4a4a4a;
+}
+
+.arp-preset-grid {
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+}
+
+.arp-preset-glyphs { flex-wrap: wrap; gap: 4px; }
+
+.arp-glyph {
+  display: inline-block;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 2px;
+  background: #222;
+  color: #999;
+  letter-spacing: 0.2px;
+}
+.arp-glyph-pat    { background: #26323f; color: #9fbbd7; }
+.arp-glyph-rate   { background: #322a26; color: #d7af9f; }
+.arp-glyph-oct    { background: #2a3226; color: #b0d79f; }
+.arp-glyph-mpe    { background: #26322f; color: #9fd7c8; }
+.arp-glyph-scale  { background: #322632; color: #d79fd0; }
+
+/* Wrap the long segmented pickers (pattern, rate, scale) so they don't
+   push the panel wider than the viewport. */
+.arp-patterns .mpe-segmented,
+.arp-rates    .mpe-segmented,
+.arp-scale    .mpe-segmented,
+.arp-root     .mpe-segmented,
+.arp-velmode  .mpe-segmented,
+.arp-mpemode  .mpe-segmented,
+.arp-octmode  .mpe-segmented,
+.arp-octrange .mpe-segmented {
+  flex-wrap: wrap;
+  gap: 2px;
+}
+.arp-patterns .mpe-segmented button,
+.arp-rates    .mpe-segmented button,
+.arp-scale    .mpe-segmented button,
+.arp-velmode  .mpe-segmented button,
+.arp-mpemode  .mpe-segmented button {
+  min-width: 52px;
+  padding: 4px 6px;
+  font-size: 10px;
+}
+.arp-root .mpe-segmented button {
+  min-width: 28px;
+  padding: 4px 4px;
+  font-size: 11px;
+  font-family: monospace;
+}
+.arp-octrange .mpe-segmented button {
+  min-width: 36px;
+}
+
+/* 32-cell step mask grid */
+.arp-mask-row { gap: 6px; }
+
+.arp-mask-quick {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.arp-mask-quick button {
+  background: #1a1a1a;
+  color: #bbb;
+  border: 1px solid #2c2c2c;
+  border-radius: 2px;
+  padding: 3px 8px;
+  font-family: inherit;
+  font-size: 10px;
+  cursor: pointer;
+}
+.arp-mask-quick button:hover { background: #222; color: #fff; }
+
+.arp-mask-grid {
+  display: grid;
+  grid-template-columns: repeat(16, minmax(0, 1fr));
+  gap: 2px;
+}
+.arp-mask-cell {
+  aspect-ratio: 1 / 1;
+  background: #181818;
+  color: #555;
+  border: 1px solid #2c2c2c;
+  border-radius: 2px;
+  padding: 0;
+  font-family: inherit;
+  font-size: 9px;
+  cursor: pointer;
+  transition: background 0.06s;
+}
+.arp-mask-cell:hover { background: #222; }
+.arp-mask-cell.on {
+  background: #b86a30;
+  color: #181818;
+  border-color: #d17d3a;
+}
+.arp-mask-cell.on:hover { background: #d17d3a; }
+.arp-mask-cell.out-of-range {
+  opacity: 0.25;
+  pointer-events: none;
+}
+
+.arp-channel-pills .mpe-channel-pill {
+  min-width: 28px;
+  padding: 2px 6px;
+  font-size: 11px;
+}
+
+/* ============================================================
+ * UI rebuild — Phase 0
+ *   - Selectable strip names (Sel buttons in MIX strips)
+ *   - Mode toggle (Engineer / Musician) in the header
+ *   - Persistent bottom dock with Engineer (fader bank) and
+ *     Musician (keyboard) variants
+ * See planning/ui-rebuild/02-hierarchy.md and 03-design-system.md.
+ * ============================================================ */
+
+/* Selectable strip name. Builds on .strip-name (defined in the
+ * mixer-row block above). Adds button-ish affordances and a Sel-
+ * active highlight that lights up when this channel is the global
+ * selectedChannel. Background is a subtle accent stripe so the
+ * label still reads at the top of a dense strip. */
+.strip-name-sel {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 2px;
+  cursor: pointer;
+  color: #aaa;
+  padding: 0 2px;
+  font: inherit;
+  font-size: 9px;
+  transition: background 0.08s, border-color 0.08s;
+}
+.strip-name-sel:hover {
+  background: #2a2a2a;
+  border-color: #3a3a3a;
+  color: #d0d0d0;
+}
+.strip-name-sel.sel-active {
+  background: #b86a30;
+  border-color: #d17d3a;
+  color: #fff;
+}
+.strip-name-sel.sel-active:hover {
+  background: #c97435;
+}
+
+/* Mode toggle — header button. Larger than the meter toggle so it
+ * meets touch sizing per planning/ui-rebuild/03-design-system.md
+ * (44 px minimum). Distinct color when in Musician mode so the
+ * persona is obvious at a glance. */
+.mode-toggle {
+  min-height: 32px;
+  padding: 6px 14px;
+  font-size: 12px;
+  letter-spacing: 0.02em;
+}
+.mode-toggle.musician {
+  background: #5a3d8a;
+  border-color: #7a5dba;
+  color: #fff;
+}
+.mode-toggle.musician:hover {
+  background: #6a4d9a;
+}
+
+/* Persistent bottom dock — pinned at the bottom of #app's flex
+ * column. #app is exactly 100vh tall and the workspace flex-grows
+ * above, so the dock naturally sits at viewport bottom without
+ * needing position: sticky or fixed. flex: 0 0 auto holds its
+ * natural height; the workspace shrinks if the dock is taller. */
+.bottom-dock {
+  flex: 0 0 auto;
+  background: #1a1a1a;
+  border-top: 1px solid #2c2c2c;
+  border-bottom: 1px solid #2c2c2c;
+  padding: 10px 12px;
+  box-shadow: 0 -4px 12px rgba(0, 0, 0, 0.4);
+}
+/* Spectrum-active mode hides the bottom dock — the spectrum view
+ * takes over the whole viewport and the dock would overlap the
+ * canvas. The user's dock state is preserved; switching back to a
+ * normal tab restores it. */
+body.spectrum-active .bottom-dock { display: none !important; }
+
+/* Engineer variant frame. The actual bank-and-main flex layout lives
+ * on .bottom-strip (the inner section returned by bottomStrip()) —
+ * setting flex on the outer .bottom-dock-engineer alone would only
+ * lay out its single child (the .bottom-strip wrapper), which is
+ * the wrong scope. */
+.bottom-dock-engineer {
+  /* nothing layout-specific here; .bottom-dock owns the dark frame */
+}
+
+/* The .bottom-strip section wraps the bank and the main. Flex row so
+ * bank takes flex-grow space on the left and main is pinned on the
+ * right at its natural width. */
+.bottom-strip {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+}
+
+/* Bank container — input strips left, main pinned right. */
+.bs-bank {
+  display: flex;
+  gap: 6px;
+  flex: 1 1 auto;
+  overflow-x: auto;
+}
+
+/* One mini-strip per input channel. Wider than the dense MIX cells
+ * so the touch targets meet the 44 px floor and the channel name is
+ * legible at a glance. Layout: name button → (meter + fader inline)
+ * → (dB readout + mute inline). */
+.bs-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 70px;
+  padding: 4px;
+  background: #232323;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  align-items: stretch;
+  flex: 0 0 auto;
+}
+
+/* Middle row of a mini-strip: meter on the left, fader on the right.
+ * Cuts strip height roughly in half versus stacking them. */
+.bs-mid {
+  display: flex;
+  flex-direction: row;
+  gap: 4px;
+  justify-content: center;
+  align-items: center;
+}
+.bs-bot {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: stretch;
+}
+.bs-strip.bs-sel-active {
+  border-color: #d17d3a;
+  background: #2a2018;
+  box-shadow: inset 0 0 0 1px #b86a30;
+}
+
+.bs-sel {
+  background: transparent;
+  border: 1px solid #3a3a3a;
+  border-radius: 2px;
+  color: #d0d0d0;
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 0;
+  cursor: pointer;
+  min-height: 28px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: background 0.08s, border-color 0.08s;
+}
+.bs-sel:hover {
+  background: #2a2a2a;
+  border-color: #555;
+}
+.bs-sel-active .bs-sel {
+  background: #b86a30;
+  border-color: #d17d3a;
+  color: #fff;
+}
+
+/* Mini meter — same -60..0 dB log mapping as MIX, drawn at small
+ * size next to the fader. transform: scaleY (compositor-only) for
+ * meter fill, identical pattern to the main mixer's meters. */
+.bs-meter {
+  position: relative;
+  height: 80px;
+  width: 8px;
+  background: #0c0c0c;
+  border: 1px solid #2c2c2c;
+  border-radius: 1px;
+  overflow: hidden;
+  flex: 0 0 auto;
+  align-self: center;
+}
+.bs-meter-fill {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 100%;
+  transform: scaleY(0);
+  transform-origin: bottom;
+  will-change: transform;
+}
+.bs-meter-fill.bs-peak {
+  background: linear-gradient(to top, #4a4 0%, #4a4 60%, #cc4 75%, #c44 90%);
+  opacity: 0.95;
+}
+.bs-meter-fill.bs-rms {
+  background: #2a5a2a;
+  opacity: 0.6;
+}
+
+/* Mini fader — native vertical range with a custom larger thumb so
+ * touch targets are usable. Phase 3 replaces with a custom pointer-
+ * event fader (planning/ui-rebuild/03-design-system.md). */
+.bs-fader {
+  -webkit-appearance: slider-vertical;
+  appearance: slider-vertical;
+  height: 80px;
+  width: 28px;
+  margin: 0 auto;
+  padding: 0;
+  flex: 0 0 auto;
+}
+
+.bs-value {
+  font-size: 10px;
+  color: #888;
+  font-family: monospace;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.bs-mute {
+  background: #2a2a2a;
+  color: #d0d0d0;
+  border: 1px solid #444;
+  border-radius: 2px;
+  font: inherit;
+  font-size: 11px;
+  min-height: 28px;
+  cursor: pointer;
+  padding: 0;
+}
+.bs-mute:hover { background: #333; }
+.bs-mute.active {
+  background: #b86a30;
+  border-color: #d68038;
+  color: #fff;
+}
+
+/* Main section — pinned right of the bank, larger meter pair for
+ * the L/R bus, a single fader bound to the L side (firmware echoes
+ * R via stereo link when active). */
+.bs-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 8px;
+  background: #2c2c2c;
+  border: 1px solid #4a4a4a;
+  border-radius: 3px;
+  flex: 0 0 auto;
+  align-items: stretch;
+  min-width: 100px;
+}
+.bs-main-label {
+  font-size: 10px;
+  color: #d0d0d0;
+  letter-spacing: 0.06em;
+  text-align: center;
+  font-weight: 500;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.bs-main-mid {
+  gap: 3px;
+}
+.bs-main .bs-fader { width: 32px; }
+
+/* Aux readout sections — Windows OUT (post-hostvol meters + slider %)
+ * and Windows IN (capture slider %). Compact column to the right of
+ * the main section. Same shape as .bs-main but narrower since they
+ * have no fader. */
+.bs-aux {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 6px;
+  background: #232323;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  flex: 0 0 auto;
+  align-items: stretch;
+  min-width: 64px;
+}
+.bs-aux-label {
+  font-size: 10px;
+  color: #aaa;
+  letter-spacing: 0.04em;
+  text-align: center;
+  font-weight: 500;
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+/* Read-only mute/bypass indicators — visually similar to .bs-mute
+ * but no hover affordance and a more muted active color so the user
+ * doesn't try to click them. */
+.bs-mute.bs-readonly {
+  cursor: default;
+  pointer-events: none;
+}
+.bs-mute.bs-readonly:hover {
+  background: #2a2a2a;
+}
+.bs-mute.bs-readonly.active {
+  background: #5a3d8a;
+  border-color: #7a5dba;
+}
+/* Host-in level bar — uses the same .bs-meter container shape but
+ * with a different fill color (cyan-ish info color) so the user
+ * doesn't confuse a slider position for an audio level meter. */
+.bs-meter-fill.bs-host-in-fill {
+  background: linear-gradient(to top, #2c5a82, #38bdf8);
+  opacity: 0.85;
+}
+
+/* Musician variant — keyboard takes over the dock. The keyboard
+ * widget already has its own internal layout; this dock just gives
+ * it a consistent dark frame. */
+.bottom-dock-musician {
+  padding: 6px 12px;
+}
+.bottom-dock-musician .piano-wrap {
+  margin: 0;
+}
+
+/* ============================================================
+ * UI rebuild — Phase 1
+ *   - Five-workspace top tab bar (.workspace-tab style)
+ *   - Inner sub-tab bars (.subnav, .subnav-tab) for PLAY/FX/SETUP
+ *   - Workspace wrapper layout
+ *   - TUNE stub
+ * See planning/ui-rebuild/02-hierarchy.md
+ * ============================================================ */
+
+/* Top-level workspace tab — touch-friendly bump versus the legacy
+ * .view-tab dimensions (44px+ minimum tap target per planning/ui-
+ * rebuild/03-design-system.md). Stays orange-underlined when
+ * active. .workspace-tab also has class .view-tab so the legacy
+ * base styles still apply. */
+.view-tab.workspace-tab {
+  min-height: 44px;
+  padding: 12px 24px;
+  font-size: 14px;
+  letter-spacing: 0.05em;
+  font-weight: 500;
+}
+
+/* Inner sub-nav (PLAY / FX / SETUP). Sits at the top of each
+ * workspace, indented slightly and styled distinctly from the top
+ * tab bar so the hierarchy is obvious.
+ *
+ * Sticky-pinned to the top of the workspace's scroll area. The
+ * workspace itself has overflow-y: auto, so when its inner panel
+ * is tall (e.g. the clock panel), the subnav stays visible at the
+ * top of the scrolling viewport — otherwise the user would scroll
+ * past Codec/Clock/Raw OSC/Serial buttons and have no way back to
+ * a sibling inner tab without bouncing through the top workspace
+ * tab bar (which would lose the inner-tab selection). */
+.subnav {
+  position: sticky;
+  top: 0;
+  z-index: 4;
+  /* display: flex !important — necessary because something in the
+   * cascade (Tailwind preflight on <nav>? a leftover legacy rule?)
+   * was hiding/collapsing this element when the rule had normal
+   * priority. Adding !important plus the explicit min-height + flex
+   * sizing below got it visible. Don't remove without re-checking. */
+  display: flex !important;
+  /* flex: 0 0 auto so the subnav holds its natural height as a flex
+   * child of .workspace; without this the workspace's tight flex
+   * constraints (flex 1 1 auto + min-height: 0 + overflow auto) could
+   * collapse the subnav to 0px on initial layout in some browsers. */
+  flex: 0 0 auto;
+  min-height: 48px;
+  gap: 0;
+  background: #1c1c1c;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+.subnav-tab {
+  flex: 0 0 auto;
+  background: transparent;
+  color: #c0c0c0;
+  border: none;
+  border-radius: 0;
+  padding: 10px 18px;
+  border-bottom: 2px solid transparent;
+  font-size: 13px;
+  letter-spacing: 0.03em;
+  min-height: 38px;
+  cursor: pointer;
+}
+.subnav-tab:hover {
+  background: #232323;
+  color: #f0f0f0;
+}
+.subnav-tab.active {
+  background: #2a2a2a;
+  border-bottom-color: #b86a30;
+  color: #f0f0f0;
+}
+
+/* Workspace container — flex-grows to fill the space between the top
+ * tab bar and the bottom dock, with internal scrolling for tall
+ * panels (e.g. neuro, mpe). min-height: 0 is the standard incantation
+ * to let a flex child shrink below its content size so overflow can
+ * actually engage.
+ *
+ * Hidden workspaces (display: none from applyVisibility) drop out of
+ * the flex layout entirely, so only the active workspace fights for
+ * the middle space. */
+.workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* TUNE stub layout shell — the inner content was ported to Solid +
+ * Tailwind in Phase 2 (see ui/tune-stub.tsx). The .view-tune wrapper
+ * still exists so the workspace's outer flex layout is consistent
+ * with the other workspaces. Inner styling is now Tailwind-driven. */
+.view-tune {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* The serial console moved out of the permanent bottom slot and into
+ * SETUP > Serial. Add a top label so the section feels like the rest
+ * of the SETUP sub-tabs (they all have a clear identity).
+ *
+ * No new selectors — the existing .console / .console-wrap styles
+ * still apply. The wrapping section just gives it a workspace home. */
+.view-serial {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+/* Raw OSC section — same idea: was inside mixerView, now a SETUP
+ * sub-tab. Existing .raw-section styles still apply. */
+.view-rawosc {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}

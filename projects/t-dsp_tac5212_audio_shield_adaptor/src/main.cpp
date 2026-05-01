@@ -46,6 +46,8 @@
 
 #include "tac5212_regs.h"
 #include <TAC5212.h>
+#include <TAC5212_Biquad.h>
+#include <TLV320ADC6140.h>
 #include <TDspMixer.h>
 #include <TDspMidi.h>
 #include <TDspArp.h>
@@ -60,6 +62,7 @@
 #include <synth_dexed.h>
 
 #include "Tac5212Panel.h"
+#include "Adc6140Panel.h"
 #include "DexedSink.h"
 #include "DexedVoiceBank.h"
 
@@ -73,38 +76,59 @@ const int TAC5212_EN_PIN = 35;
 AudioInputUSB        usbIn;
 AudioInputTDM        tdmIn;
 
-// Per-channel peak/RMS taps for meters. 6 channels, 2 analyzers each.
-AudioAnalyzePeak     peakCh1;  // USB L
-AudioAnalyzePeak     peakCh2;  // USB R
-AudioAnalyzePeak     peakCh3;  // Line L
-AudioAnalyzePeak     peakCh4;  // Line R
-AudioAnalyzePeak     peakCh5;  // Mic L
-AudioAnalyzePeak     peakCh6;  // Mic R
-AudioAnalyzeRMS      rmsCh1;
-AudioAnalyzeRMS      rmsCh2;
-AudioAnalyzeRMS      rmsCh3;
-AudioAnalyzeRMS      rmsCh4;
-AudioAnalyzeRMS      rmsCh5;
-AudioAnalyzeRMS      rmsCh6;
+// Per-channel peak/RMS taps for meters. 10 channels, 2 analyzers each.
+// All meters in DMAMEM — they're sinks (no downstream audio), so they
+// can tolerate RAM2 latency, and we need the RAM1 budget for stack.
+DMAMEM AudioAnalyzePeak     peakCh1;  // USB L
+DMAMEM AudioAnalyzePeak     peakCh2;  // USB R
+DMAMEM AudioAnalyzePeak     peakCh3;  // Line L
+DMAMEM AudioAnalyzePeak     peakCh4;  // Line R
+DMAMEM AudioAnalyzePeak     peakCh5;  // Mic L
+DMAMEM AudioAnalyzePeak     peakCh6;  // Mic R
+DMAMEM AudioAnalyzeRMS      rmsCh1;
+DMAMEM AudioAnalyzeRMS      rmsCh2;
+DMAMEM AudioAnalyzeRMS      rmsCh3;
+DMAMEM AudioAnalyzeRMS      rmsCh4;
+DMAMEM AudioAnalyzeRMS      rmsCh5;
+DMAMEM AudioAnalyzeRMS      rmsCh6;
+// Channels 7-10: TLV320ADC6140 XLR 1..4 (external differential mic pre).
+// The ADC6140 shares the same TDM data line as the TAC5212 but owns
+// slots 4-7 (TAC5212 tri-states those; ADC6140 tri-states slots 0-3).
+// Teensy's AudioInputTDM exposes each 32-bit TDM slot as two consecutive
+// 16-bit output channels (upper-half index N*2, lower-half index N*2+1).
+// We read the upper halves of slots 4..7, which is where the ADC6140
+// places its MSB-first audio samples:
+//   XLR 1 = slot 4 → tdmIn output 8
+//   XLR 2 = slot 5 → tdmIn output 10
+//   XLR 3 = slot 6 → tdmIn output 12
+//   XLR 4 = slot 7 → tdmIn output 14
+DMAMEM AudioAnalyzePeak     peakCh7;   // XLR 1
+DMAMEM AudioAnalyzePeak     peakCh8;   // XLR 2
+DMAMEM AudioAnalyzePeak     peakCh9;   // XLR 3
+DMAMEM AudioAnalyzePeak     peakCh10;  // XLR 4
+DMAMEM AudioAnalyzeRMS      rmsCh7;
+DMAMEM AudioAnalyzeRMS      rmsCh8;
+DMAMEM AudioAnalyzeRMS      rmsCh9;
+DMAMEM AudioAnalyzeRMS      rmsCh10;
 
 // Main bus stereo meter taps — post-main-fader, PRE-hostvol. This is
 // the X32-style "main LR meter" reading: reflects the engineer's fader
 // moves but NOT the Windows volume slider attenuation. Pre-hostvol is
 // the correct tap because the Windows slider is an end-user output
 // trim, not a mix-engine change.
-AudioAnalyzePeak     peakMainL;
-AudioAnalyzePeak     peakMainR;
-AudioAnalyzeRMS      rmsMainL;
-AudioAnalyzeRMS      rmsMainR;
+DMAMEM AudioAnalyzePeak     peakMainL;
+DMAMEM AudioAnalyzePeak     peakMainR;
+DMAMEM AudioAnalyzeRMS      rmsMainL;
+DMAMEM AudioAnalyzeRMS      rmsMainR;
 
 // Host (Windows-volume) meter taps — post-hostvol, so they show the
 // actual level headed to the DAC (main fader × hostvol × hostvolEnable).
 // The engineer can compare these against the main-bus meters to see
 // how much Windows volume is attenuating things.
-AudioAnalyzePeak     peakHostL;
-AudioAnalyzePeak     peakHostR;
-AudioAnalyzeRMS      rmsHostL;
-AudioAnalyzeRMS      rmsHostR;
+DMAMEM AudioAnalyzePeak     peakHostL;
+DMAMEM AudioAnalyzePeak     peakHostR;
+DMAMEM AudioAnalyzeRMS      rmsHostL;
+DMAMEM AudioAnalyzeRMS      rmsHostR;
 
 // Main bus stereo FFT taps — sit on the same pre-hostvol node as the
 // peak/RMS meter taps, so the spectrum analyzer view reflects the mix
@@ -121,16 +145,35 @@ DMAMEM tdsp::AnalyzeFFT_F32 fftMainR;
 // PDM mic combiners — 32-bit PDM split across two 16-bit TDM slots, so
 // each PDM mic (L, R) needs a 2-input mixer that re-combines the high
 // and low halves with correct scaling.
-AudioMixer4          pdmMixL;
-AudioMixer4          pdmMixR;
+// DMAMEM: simple summing mixer, no tight-latency requirement.
+DMAMEM AudioMixer4   pdmMixL;
+DMAMEM AudioMixer4   pdmMixR;
 
 // Main stereo mixer. Slot assignments:
 //   mixL[0] = ch/01 USB L    mixR[0] = ch/02 USB R
 //   mixL[1] = ch/05 Mic L    mixR[1] = ch/06 Mic R
 //   mixL[2] = ch/03 Line L   mixR[2] = ch/04 Line R
-//   slot 3 unused
-AudioMixer4          mixL;
-AudioMixer4          mixR;
+//   mixL[3] / mixR[3]        see main.cpp wiring below (Line-mono xfeed on R)
+DMAMEM AudioMixer4   mixL;
+DMAMEM AudioMixer4   mixR;
+
+// TLV320ADC6140 XLR channels: each of the 4 mono mic inputs feeds into
+// BOTH adcMixL and adcMixR at the same channel fader. The summed mono
+// result on each side lands on postMix slot 3 (the only free slot in the
+// main bus after preMix/looper/metro). Binding pushes each channel's
+// effective gain to `adcMixL.gain(n-7)` AND `adcMixR.gain(n-7)` via the
+// new setChannelStereoMirror() in SignalGraphBinding.
+//
+// DMAMEM: the XLR mix doesn't need the tight-latency of RAM1 (mic pre →
+// main mix is already a few audio blocks of latency), and RAM1 is tight.
+//
+// slot layout:
+//   adcMixL/R[0] = XLR 1  (ch/07)
+//   adcMixL/R[1] = XLR 2  (ch/08)
+//   adcMixL/R[2] = XLR 3  (ch/09)
+//   adcMixL/R[3] = XLR 4  (ch/10)
+DMAMEM AudioMixer4   adcMixL;
+DMAMEM AudioMixer4   adcMixR;
 
 // Pre-main summing bus. Slot 0 is the input-channel mix; slots 1-3 are
 // reserved for synth buses (each synth sums its stereo output into the
@@ -142,8 +185,8 @@ AudioMixer4          mixR;
 // synths, which matches the "main bus is everything you hear" mental
 // model. Cost: one extra audio block of latency per side (~2.9 ms at
 // 44.1 kHz).
-AudioMixer4          preMixL;
-AudioMixer4          preMixR;
+DMAMEM AudioMixer4   preMixL;
+DMAMEM AudioMixer4   preMixR;
 
 // Dexed FM synth engine — 8-voice polyphonic, 6-operator FM. Dexed's
 // audio output is mono; g_dexedGain sits between the engine and the
@@ -293,13 +336,15 @@ AudioAmplifier           g_chipGain;
 // chorus voice count) to a transparent / muted value rather than
 // unwiring anything; the graph shape stays constant at runtime.
 constexpr int kFxChorusDelayLen = 4096;
-short          g_fxChorusDelayLine[kFxChorusDelayLen];
+// 8 KB delay buffer — DMAMEM saves the bulk of RAM1 cost while letting
+// fxChorus stay in RAM1 (the class is tiny; only the buffer is huge).
+DMAMEM short   g_fxChorusDelayLine[kFxChorusDelayLen];
 
-AudioMixer4              fxSendBus;
-AudioEffectChorus        fxChorus;
+AudioMixer4               fxSendBus;
+AudioEffectChorus         fxChorus;
 AudioEffectFreeverbStereo fxReverb;
-AudioAmplifier           fxReturnL;
-AudioAmplifier           fxReturnR;
+AudioAmplifier            fxReturnL;
+AudioAmplifier            fxReturnR;
 
 // ---- Synth bus -----------------------------------------------------
 //
@@ -419,6 +464,24 @@ DMAMEM AudioAmplifier recLineL;
 DMAMEM AudioAmplifier recLineR;
 DMAMEM AudioAmplifier recMicL;
 DMAMEM AudioAmplifier recMicR;
+// XLR record-send amps (channels 7-10). Each is 0 or 1, driven by
+// SignalGraphBinding::applyChannelRec() from Channel.recSend. The amp
+// output of each XLR tap feeds BOTH xlrRecMixL and xlrRecMixR at unity
+// (mono-to-stereo fanout matches the main-bus XLR routing pattern). The
+// four-slot xlrRecMix then lands in finalCaptureL/R below.
+DMAMEM AudioAmplifier recXlr1;
+DMAMEM AudioAmplifier recXlr2;
+DMAMEM AudioAmplifier recXlr3;
+DMAMEM AudioAmplifier recXlr4;
+DMAMEM AudioMixer4    xlrRecMixL;
+DMAMEM AudioMixer4    xlrRecMixR;
+
+// Final capture tier — captureL/R is already full (4 slots = line / mic
+// / usb / loop), so we add one more mixer that sums captureL plus
+// xlrRecMixL, and that's what goes to usbOut. Slot 0 = captureL output,
+// slot 1 = xlrRecMixL output. Slots 2/3 free for future sources.
+DMAMEM AudioMixer4    finalCaptureL;
+DMAMEM AudioMixer4    finalCaptureR;
 
 // Main-bus loopback tap amps. Fed from mainAmpL/R output (post-main-fader,
 // pre-hostvol) so the recording tracks the fader but not Windows volume.
@@ -442,15 +505,15 @@ DMAMEM AudioAmplifier loopR;
 //
 // Default gain is unity (1.0); pollCaptureHostVolume() applies the live
 // value once Windows pushes its first SET_CUR.
-AudioAmplifier       monLineL;
-AudioAmplifier       monLineR;
-AudioAmplifier       monMicL;
-AudioAmplifier       monMicR;
+DMAMEM AudioAmplifier monLineL;
+DMAMEM AudioAmplifier monLineR;
+DMAMEM AudioAmplifier monMicL;
+DMAMEM AudioAmplifier monMicR;
 
 // Mono cross-feed: carries tdmIn ch0 (Line L / ADC CH1) into the R side
 // of the main mixer. In stereo mode gain=0 (silent); in mono/differential
 // mode gain=1 and the binding mirrors ch3's effective gain to mixR[3].
-AudioAmplifier       monoXfeed;
+DMAMEM AudioAmplifier monoXfeed;
 
 // ---- Mono looper ---------------------------------------------------
 //
@@ -483,8 +546,16 @@ tdsp::Looper   g_looper(g_looperBuffer, kLooperSamples);
 DMAMEM AudioMixer4    loopSrcA;   // channels 1..4 pre-fader taps
 DMAMEM AudioMixer4    loopSrcB;   // cascades loopSrcA + ch5 + ch6 → looper input
 
-DMAMEM AudioMixer4    postMixL;   // preMixL + looper return → mainAmpL
-DMAMEM AudioMixer4    postMixR;   // preMixR + looper return → mainAmpR
+DMAMEM AudioMixer4    postMixL;   // preMixL + looper return + metronome → mainAmpL
+DMAMEM AudioMixer4    postMixR;   // preMixR + looper return + metronome → mainAmpR
+
+// Metronome — short tone burst fired on each clock beat edge so the
+// engineer can hear where beats land while arming a loop take. Mono
+// signal dual-monoed into postMix[2]. Beat 1 of the bar gets a higher
+// pitch so the downbeat is audibly distinct — lets you time REC on
+// the downbeat and PLAY on the last beat of the bar without guessing.
+DMAMEM AudioSynthWaveform  metroOsc;
+DMAMEM AudioEffectEnvelope metroEnv;
 
 AudioOutputTDM       tdmOut;
 AudioOutputUSB       usbOut;
@@ -563,6 +634,49 @@ AudioConnection      c_micR_mix    (monMicR, 0, mixR, 1);
 // synth engines. Unused slots sit at gain 0 and contribute nothing.
 AudioConnection      c_mixL_pre    (mixL, 0, preMixL, 0);
 AudioConnection      c_mixR_pre    (mixR, 0, preMixR, 0);
+
+// --- TLV320ADC6140 XLR channels 1..4 -------------------------------------
+//
+// ADC6140 drives TDM slots 4..7 (TAC5212 tri-states those, ADC6140
+// tri-states the TAC5212 slots). Teensy's AudioInputTDM presents each
+// 32-bit slot as two 16-bit output channels (upper half = slot*2, lower
+// half = slot*2+1). Our ADC6140 audio data is in the upper half of each
+// slot, so we read tdmIn outputs 8, 10, 12, 14.
+//
+// Each channel fans out to: meters (peak+rms), adcMixL+adcMixR (fader
+// × dual-mono main mix), and recXlrN → xlrRecMix (USB capture).
+//
+AudioConnection  c_xlr1_peak   (tdmIn, 8,  peakCh7, 0);
+AudioConnection  c_xlr1_rms    (tdmIn, 8,  rmsCh7,  0);
+AudioConnection  c_xlr1_mixL   (tdmIn, 8,  adcMixL, 0);
+AudioConnection  c_xlr1_mixR   (tdmIn, 8,  adcMixR, 0);
+AudioConnection  c_xlr1_rec    (tdmIn, 8,  recXlr1, 0);
+AudioConnection  c_xlr1_recL   (recXlr1,   0, xlrRecMixL, 0);
+AudioConnection  c_xlr1_recR   (recXlr1,   0, xlrRecMixR, 0);
+
+AudioConnection  c_xlr2_peak   (tdmIn, 10, peakCh8, 0);
+AudioConnection  c_xlr2_rms    (tdmIn, 10, rmsCh8,  0);
+AudioConnection  c_xlr2_mixL   (tdmIn, 10, adcMixL, 1);
+AudioConnection  c_xlr2_mixR   (tdmIn, 10, adcMixR, 1);
+AudioConnection  c_xlr2_rec    (tdmIn, 10, recXlr2, 0);
+AudioConnection  c_xlr2_recL   (recXlr2,   0, xlrRecMixL, 1);
+AudioConnection  c_xlr2_recR   (recXlr2,   0, xlrRecMixR, 1);
+
+AudioConnection  c_xlr3_peak   (tdmIn, 12, peakCh9, 0);
+AudioConnection  c_xlr3_rms    (tdmIn, 12, rmsCh9,  0);
+AudioConnection  c_xlr3_mixL   (tdmIn, 12, adcMixL, 2);
+AudioConnection  c_xlr3_mixR   (tdmIn, 12, adcMixR, 2);
+AudioConnection  c_xlr3_rec    (tdmIn, 12, recXlr3, 0);
+AudioConnection  c_xlr3_recL   (recXlr3,   0, xlrRecMixL, 2);
+AudioConnection  c_xlr3_recR   (recXlr3,   0, xlrRecMixR, 2);
+
+AudioConnection  c_xlr4_peak   (tdmIn, 14, peakCh10, 0);
+AudioConnection  c_xlr4_rms    (tdmIn, 14, rmsCh10,  0);
+AudioConnection  c_xlr4_mixL   (tdmIn, 14, adcMixL, 3);
+AudioConnection  c_xlr4_mixR   (tdmIn, 14, adcMixR, 3);
+AudioConnection  c_xlr4_rec    (tdmIn, 14, recXlr4, 0);
+AudioConnection  c_xlr4_recL   (recXlr4,   0, xlrRecMixL, 3);
+AudioConnection  c_xlr4_recR   (recXlr4,   0, xlrRecMixR, 3);
 
 // Dexed: engine → volume amp → both sides of preMix slot 1 (dual-mono).
 // The single AudioAmplifier output feeds two downstream AudioConnections,
@@ -771,6 +885,19 @@ AudioConnection      c_loopSrcB_lp (loopSrcB, 0, g_looper, 0);
 AudioConnection      c_loop_retL   (g_looper, 0, postMixL, 1);
 AudioConnection      c_loop_retR   (g_looper, 0, postMixR, 1);
 
+// Metronome: osc -> envelope -> postMix slot 2 (both sides, dual-mono).
+AudioConnection      c_metro_env   (metroOsc, 0, metroEnv, 0);
+AudioConnection      c_metro_pmL   (metroEnv, 0, postMixL, 2);
+AudioConnection      c_metro_pmR   (metroEnv, 0, postMixR, 2);
+
+// TLV320ADC6140 XLR bus → postMix slot 3. Each of the 4 XLR channels
+// lands in adcMixL/adcMixR scaled by its per-channel fader (dual-mono
+// via SignalGraphBinding's stereo-mirror). The two aggregate stereo
+// streams feed into postMix slot 3 at unity — the only free slot on
+// the main bus after preMix/looper/metro.
+AudioConnection  c_adc_bus_L  (adcMixL, 0, postMixL, 3);
+AudioConnection  c_adc_bus_R  (adcMixR, 0, postMixR, 3);
+
 // Main path: preMix → postMix → mainAmp. The extra stage carries the
 // looper return on slot 1 (slot 0 is the regular pre-main mix). Adds
 // one audio block of latency (~2.9 ms) to the main path.
@@ -818,9 +945,16 @@ AudioConnection      c_hostL_rms   (hostvolAmpL, 0, rmsHostL, 0);
 AudioConnection      c_hostR_peak  (hostvolAmpR, 0, peakHostR, 0);
 AudioConnection      c_hostR_rms   (hostvolAmpR, 0, rmsHostR, 0);
 
-// Capture mixers → USB out (host recording)
-AudioConnection      c_capL_usb    (captureL, 0, usbOut, 0);
-AudioConnection      c_capR_usb    (captureR, 0, usbOut, 1);
+// Capture path — captureL/R already has its 4 slots full (line/mic/usb
+// /loop). The XLR rec sends land in xlrRecMixL/R. A small final-stage
+// mixer per side sums the two, and the result goes to usbOut. Slots 2/3
+// of finalCapture are free for future expansion.
+AudioConnection  c_capL_final  (captureL,      0, finalCaptureL, 0);
+AudioConnection  c_capR_final  (captureR,      0, finalCaptureR, 0);
+AudioConnection  c_xlrRecL_fin (xlrRecMixL,    0, finalCaptureL, 1);
+AudioConnection  c_xlrRecR_fin (xlrRecMixR,    0, finalCaptureR, 1);
+AudioConnection  c_finalL_usb  (finalCaptureL, 0, usbOut, 0);
+AudioConnection  c_finalR_usb  (finalCaptureR, 0, usbOut, 1);
 
 // ============================================================================
 // TDspMixer framework objects
@@ -842,6 +976,14 @@ tdsp::SpectrumEngine      g_spectrum;
 tac5212::TAC5212          g_codec(Wire);
 
 Tac5212Panel              g_codecPanel(g_codec);
+
+// TLV320ADC6140 — external quad-channel ADC for the 4 XLR mic inputs.
+// Shares the I2C bus with TAC5212 (addresses 0x4C / 0x51 respectively) and
+// shares the TDM data line (ADC6140 drives slots 4-7, TAC5212 drives 0-3).
+// SHDNZ is tied to TAC5212_EN_PIN, so both chips power up together.
+tlv320adc6140::TLV320ADC6140 g_adc6140(Wire);
+
+Adc6140Panel                 g_adc6140Panel(g_adc6140);
 
 // Line input mode: false = stereo (CH1=L, CH2=R, single-ended),
 // true = mono differential (CH1 differential, mono → both L+R outputs).
@@ -1065,6 +1207,40 @@ tdsp::ArpFilter g_arpFilter;
 //   0 = none, 1 = record, 2 = play, 3 = stop, 4 = clear
 static uint8_t g_looperArmedAction = 0;
 static bool    g_looperQuantize    = false;
+
+// Cue/Go — two-stage arm. Pressing CUE REC / CUE PLAY etc. stages the
+// action in g_looperCuedAction without firing or arming it; pressing
+// GO then promotes it to g_looperArmedAction, which the normal beat-
+// edge path commits on the next beat (or we fire immediately if the
+// clock isn't running). Lets the engineer prime a take and wait for
+// the musical moment to trigger it without having to time the press.
+// Same 0..4 action code as g_looperArmedAction.
+static uint8_t g_looperCuedAction = 0;
+
+// Clock-follow: when true, playback rate tracks the current clock tempo
+// vs the tempo at which the loop was recorded. If you recorded at
+// 120 BPM and raise the clock to 140, the loop plays 1.167x faster AND
+// pitches up by the same ratio — it's sample-rate scaling, not pitch-
+// invariant time-stretch. Off means the loop plays at recording speed
+// regardless of the current clock.
+//
+// g_looperRecordedBpm is stamped at record-finalize (play() from the
+// Recording state). 0 means "no take / unknown" and the rate stays 1.0
+// so we never divide by zero.
+static bool  g_looperClockFollow = true;
+static float g_looperRecordedBpm = 0.0f;
+
+// Metronome state. Fires a short tone burst on every clock beat edge
+// when on + clock is running. Accent (higher pitch) on beat 1 of the
+// bar — same cue a hardware metronome gives.
+//   g_metroOn     — master enable; off = envelope never triggers
+//   g_metroLevel  — 0..1 output level (osc amplitude; envelope scales on top)
+//   g_metroLastBeat — independent beat tracker so we don't steal the
+//                     looper's consumeBeatEdge() latch. Compares
+//                     beatCount() across loop() ticks.
+static bool     g_metroOn       = false;
+static float    g_metroLevel    = 0.4f;
+static uint32_t g_metroLastBeat = UINT32_MAX;
 
 // MPE VA sink + voice-port wiring. The sink never allocates; it just
 // steers the file-scope oscillator / filter / envelope primitives via
@@ -1623,6 +1799,80 @@ static const char *looperStateStr() {
     }
 }
 
+// Length of the current loop in beats at the clock's current tempo.
+// Returns 0 when there's no take, no clock, or BPM is zero — the UI
+// shows "—" in those cases. Non-quantized loops return a fractional
+// value (e.g. 3.7 beats); quantized loops should land on a whole
+// number thanks to Looper::play(snap,min).
+static float looperLengthBeats() {
+    const uint32_t len = g_looper.lengthSamples();
+    if (len == 0) return 0.0f;
+    const float bpm = g_clock.bpm();
+    if (bpm <= 0.0f) return 0.0f;
+    const float spb = AUDIO_SAMPLE_RATE_EXACT * 60.0f / bpm;
+    if (spb <= 0.0f) return 0.0f;
+    return (float)len / spb;
+}
+
+// Samples-per-beat at the clock's current tempo. Used to snap the
+// recorded length to a whole number of beats when quantize is on —
+// that's what makes the loop "beat aware" (Boss RC-1 style, with MIDI
+// clock sync): the loop boundary lands exactly on a beat so successive
+// playbacks stay locked to the tempo grid.
+//
+// Returns 0 if the clock isn't running or BPM is zero, which the
+// Looper::play(snap,min) overload treats as "no snapping" (same as
+// calling plain play()).
+static uint32_t looperSamplesPerBeat() {
+    if (!g_clock.running()) return 0;
+    const float bpm = g_clock.bpm();
+    if (bpm <= 0.0f) return 0;
+    // seconds/beat = 60/bpm  ;  samples/beat = SR * 60 / bpm
+    const float spb = AUDIO_SAMPLE_RATE_EXACT * 60.0f / bpm;
+    return (uint32_t)(spb + 0.5f);
+}
+
+// Fire one armed transport action. Centralized so both the immediate
+// path (quantize off) and the deferred path (beat-edge in loop()) take
+// the same branches — notably the beat-aware finalize on record->play.
+//   action: 1=record, 2=play, 3=stop, 4=clear
+static void fireLooperAction(uint8_t action) {
+    switch (action) {
+        case 1:
+            g_looper.record();
+            // Reset recorded-tempo stamp so a stale value from a prior
+            // take doesn't drive playback rate before the new take
+            // finalizes.
+            g_looperRecordedBpm = 0.0f;
+            // Also reset live playback rate so we don't hear a mid-take
+            // pitch shift if the previous loop was clock-followed.
+            g_looper.setPlaybackRate(1.0f);
+            break;
+        case 2: {
+            // Finalize: stamp the BPM at which this take was recorded so
+            // clock-follow has a reference for scaling. If the transition
+            // isn't Recording->Playing (e.g. resuming a Stopped take),
+            // we keep whatever recordedBpm was already stored.
+            const bool finalizing = (g_looper.state() == tdsp::Looper::Recording);
+            if (finalizing && g_clock.running() && g_clock.bpm() > 0.0f) {
+                g_looperRecordedBpm = g_clock.bpm();
+            }
+            const uint32_t snap = g_looperQuantize ? looperSamplesPerBeat() : 0;
+            // One-beat minimum when snapping; stops a tap-tap-tap gesture
+            // from producing an empty loop.
+            g_looper.play(snap, snap);
+            break;
+        }
+        case 3: g_looper.stop();   break;
+        case 4:
+            g_looper.clear();
+            g_looperRecordedBpm = 0.0f;
+            g_looper.setPlaybackRate(1.0f);
+            break;
+        default: break;
+    }
+}
+
 // ============================================================================
 // MidiVizSink — broadcasts /midi/note on each note-on/off for the web
 // keyboard visualization. Subscription-gated: the web UI sends
@@ -1731,10 +1981,20 @@ static void onUsbHostSysEx(const uint8_t *data, uint16_t length, bool last) {
 // g_beats consumes clock + transport directly (its own `onMidiStart`
 // etc. API wants µs timestamps); we tee into it here rather than
 // routing through another sink abstraction.
-static void onUsbHostClock()    { g_midiRouter.handleClock();    g_beats.clockPulse();                 }
-static void onUsbHostStart()    { g_midiRouter.handleStart();    g_beats.onMidiStart   (micros());     }
-static void onUsbHostContinue() { g_midiRouter.handleContinue(); g_beats.onMidiContinue(micros());     }
-static void onUsbHostStop()     { g_midiRouter.handleStop();     g_beats.onMidiStop    (micros());     }
+// When the shared Clock is in Internal mode we treat the device as the
+// authoritative tempo source and drop inbound 0xF8 / 0xFA / 0xFB / 0xFC.
+// Without this gate a connected controller that also emits MIDI clock
+// would race the internal tick stream into the arp (double-rate) or,
+// more commonly, dominate it — the arp would appear "stuck" at the
+// external tempo regardless of the Clock-tab slider. g_beats keeps its
+// own BPM and is not tempo-gated here.
+static inline bool externalClockGated() {
+    return g_clock.source() == tdsp::Clock::Internal;
+}
+static void onUsbHostClock()    { if (!externalClockGated()) g_midiRouter.handleClock();    g_beats.clockPulse();                 }
+static void onUsbHostStart()    { if (!externalClockGated()) g_midiRouter.handleStart();    g_beats.onMidiStart   (micros());     }
+static void onUsbHostContinue() { if (!externalClockGated()) g_midiRouter.handleContinue(); g_beats.onMidiContinue(micros());     }
+static void onUsbHostStop()     { if (!externalClockGated()) g_midiRouter.handleStop();     g_beats.onMidiStop    (micros());     }
 
 // ============================================================================
 // Hand-rolled codec init (Phase 1 path, preserved as the working audio config)
@@ -1818,6 +2078,39 @@ static void codecPowerUp() {
     delay(100);
 }
 
+// P1 R0x2D MISC_CFG0 bit 1 = DSP_AVDD_SEL. POR is "Reserved" (0); must be 1
+// for the DSP Limiter, BOP, and DRC blocks to receive valid SAR AVDD data.
+// Leaving it at POR is what causes the high-pitched squeal when the user
+// flips the distortion limiter on. (Bit 7 EN_DISTORTION is touched by the
+// limiter enable RMW elsewhere; bit 1 is set once here at init.)
+static void codecEnableDspAvddSel() {
+    constexpr uint8_t MISC_CFG0_PAGE = 1;
+    constexpr uint8_t MISC_CFG0_REG  = 0x2D;
+    constexpr uint8_t DSP_AVDD_SEL   = 0x02;
+    uint8_t v = g_codec.readRegister(MISC_CFG0_PAGE, MISC_CFG0_REG);
+    g_codec.writeRegister(MISC_CFG0_PAGE, MISC_CFG0_REG,
+                          v | DSP_AVDD_SEL);
+}
+
+// Apply a gentle "smooth" three-band EQ to both DAC outputs at boot so the
+// device produces ear-fatigue-treated audio without requiring the user to
+// open the dev surface. Same recipe as the EQ_PRESETS.smooth defaults in
+// tools/web_dev_surface/src/codec-panel-config.ts:
+//   Band 1: low-shelf  120 Hz +1.5 dB Q 0.7
+//   Band 2: peak       3 kHz  -2.5 dB Q 1.2  (presence-band tame)
+//   Band 3: high-shelf 7 kHz  -3.0 dB Q 0.7  (fatigue zone roll-off)
+// Uses fs=48000 to match the JS-side biquad designer in biquad-design.ts
+// so the UI's preview curve matches the chip's actual response.
+static void codecApplyEarFatigueDefaults() {
+    constexpr float kFs = 48000.0f;
+    g_codec.setDacBiquadsPerChannel(3);
+    for (uint8_t out = 1; out <= 2; ++out) {
+        g_codec.out(out).setBiquad(1, tac5212::bqLowShelf (kFs,  120.0f,  1.5f, 0.7f));
+        g_codec.out(out).setBiquad(2, tac5212::bqPeak     (kFs, 3000.0f, -2.5f, 1.2f));
+        g_codec.out(out).setBiquad(3, tac5212::bqHighShelf(kFs, 7000.0f, -3.0f, 0.7f));
+    }
+}
+
 static void setupCodecHandRolled() {
     Serial.println("Initializing TAC5212 (Phase 1 hand-rolled path)...");
     codecResetAndWake();
@@ -1828,6 +2121,8 @@ static void setupCodecHandRolled() {
     codecConfigureDacOutputs();
     codecMuteDacVolume();  // boot gate: DAC powers up muted (volume == 0)
     codecPowerUp();
+    codecEnableDspAvddSel();  // arm DSP block input select before any DSP enable
+    codecApplyEarFatigueDefaults();  // smooth EQ on both outputs at boot
     Serial.print("DEV_STS0: 0x");
     Serial.println(readReg(REG_DEV_STS0), HEX);
     Serial.println("Codec ready: TDM + PDM + ADC");
@@ -2438,6 +2733,13 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
+    if (strcmp(address, "/loop/lengthBeats") == 0) {
+        OSCBundle reply;
+        OSCMessage m("/loop/lengthBeats"); m.add(looperLengthBeats()); reply.add(m);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
     if (strcmp(address, "/loop/record") == 0 ||
         strcmp(address, "/loop/play")   == 0 ||
         strcmp(address, "/loop/stop")   == 0 ||
@@ -2459,17 +2761,15 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
             g_looperArmedAction = action;
         } else {
             g_looperArmedAction = 0;
-            switch (action) {
-                case 1: g_looper.record(); break;
-                case 2: g_looper.play();   break;
-                case 3: g_looper.stop();   break;
-                case 4: g_looper.clear();  break;
-            }
+            fireLooperAction(action);
         }
         OSCBundle reply;
         OSCMessage ms("/loop/state");  ms.add(looperStateStr());        reply.add(ms);
         OSCMessage ml("/loop/length"); ml.add(g_looper.lengthSeconds()); reply.add(ml);
+        OSCMessage mb("/loop/lengthBeats"); mb.add(looperLengthBeats()); reply.add(mb);
         OSCMessage ma("/loop/armed");  ma.add((int)g_looperArmedAction); reply.add(ma);
+        OSCMessage mc("/loop/cued");   mc.add((int)g_looperCuedAction);  reply.add(mc);
+        OSCMessage mr("/loop/recordedBpm"); mr.add(g_looperRecordedBpm); reply.add(mr);
         g_transport.sendBundle(reply);
         return;
     }
@@ -2486,6 +2786,78 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
             OSCMessage m("/loop/quantize"); m.add((int)(g_looperQuantize ? 1 : 0)); reply.add(m);
         }
         if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    // Cue/Go — stage a transport action without firing or arming it,
+    // then commit it at a later musical moment. Flow:
+    //   /loop/cue i       i = 1..4 (rec/play/stop/clear); 0 clears cue
+    //   /loop/go          promote cued -> armed (or fire if no clock)
+    //   /loop/cued        read-only echo of the current cued slot
+    if (strcmp(address, "/loop/cue") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/loop/cued"); m.add((int)g_looperCuedAction); reply.add(m);
+        } else if (msg.isInt(0)) {
+            int a = msg.getInt(0);
+            if (a < 0) a = 0;
+            if (a > 4) a = 4;
+            g_looperCuedAction = (uint8_t)a;
+            OSCMessage m("/loop/cued"); m.add((int)g_looperCuedAction); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/loop/cued") == 0) {
+        OSCBundle reply;
+        OSCMessage m("/loop/cued"); m.add((int)g_looperCuedAction); reply.add(m);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/loop/go") == 0) {
+        OSCBundle reply;
+        const uint8_t action = g_looperCuedAction;
+        g_looperCuedAction = 0;
+        if (action != 0) {
+            // Always beat-quantize when clock is running — the whole
+            // point of cue/go is the beat alignment. If the clock is
+            // stopped, fall through to immediate fire so the UI is
+            // still responsive.
+            if (g_clock.running()) {
+                g_looperArmedAction = action;
+            } else {
+                fireLooperAction(action);
+            }
+        }
+        OSCMessage mc("/loop/cued"); mc.add((int)g_looperCuedAction); reply.add(mc);
+        OSCMessage ma("/loop/armed"); ma.add((int)g_looperArmedAction); reply.add(ma);
+        OSCMessage ms("/loop/state"); ms.add(looperStateStr()); reply.add(ms);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/loop/clockFollow") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/loop/clockFollow"); m.add((int)(g_looperClockFollow ? 1 : 0)); reply.add(m);
+        } else if (msg.isInt(0)) {
+            g_looperClockFollow = msg.getInt(0) != 0;
+            // Toggling off freezes rate at 1.0 so playback returns to
+            // recording speed. Toggling on lets the loop() poll re-drive
+            // the rate from the live clock.
+            if (!g_looperClockFollow) g_looper.setPlaybackRate(1.0f);
+            OSCMessage m("/loop/clockFollow"); m.add((int)(g_looperClockFollow ? 1 : 0)); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/loop/recordedBpm") == 0) {
+        OSCBundle reply;
+        OSCMessage m("/loop/recordedBpm"); m.add(g_looperRecordedBpm); reply.add(m);
+        g_transport.sendBundle(reply);
         return;
     }
 
@@ -2545,6 +2917,42 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         } else if (msg.isInt(0)) {
             g_clock.setBeatsPerBar((uint8_t)msg.getInt(0));
             OSCMessage m("/clock/beatsPerBar"); m.add((int)g_clock.beatsPerBar()); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    // --- Metronome ----------------------------------------------------
+    //
+    //   /metro/on     i     0 | 1           (read/write)
+    //   /metro/level  f     0..1 amplitude  (read/write)
+    // Click fires on each clock beat edge while on + running; accent on
+    // beat 1 of the bar. Same read/write/echo pattern as /clock/*.
+    if (strcmp(address, "/metro/on") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/metro/on"); m.add((int)(g_metroOn ? 1 : 0)); reply.add(m);
+        } else if (msg.isInt(0)) {
+            g_metroOn = msg.getInt(0) != 0;
+            // Immediately silence the osc when toggled off so a
+            // mid-decay click doesn't linger past the toggle.
+            if (!g_metroOn) metroOsc.amplitude(0.0f);
+            OSCMessage m("/metro/on"); m.add((int)(g_metroOn ? 1 : 0)); reply.add(m);
+        }
+        if (reply.size() > 0) g_transport.sendBundle(reply);
+        return;
+    }
+
+    if (strcmp(address, "/metro/level") == 0) {
+        OSCBundle reply;
+        if (msg.size() == 0) {
+            OSCMessage m("/metro/level"); m.add(g_metroLevel); reply.add(m);
+        } else if (msg.isFloat(0)) {
+            float v = msg.getFloat(0);
+            if (v < 0.0f) v = 0.0f;
+            if (v > 1.0f) v = 1.0f;
+            g_metroLevel = v;
+            OSCMessage m("/metro/level"); m.add(g_metroLevel); reply.add(m);
         }
         if (reply.size() > 0) g_transport.sendBundle(reply);
         return;
@@ -3852,6 +4260,12 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
 
 // CLI line arrived (plain ASCII). Recognized commands:
 //   s / S  — status dump (audio memory, CPU, model state)
+//   i2cscan — walk 0x03..0x77 on Wire and print every address that ACKs.
+//             Useful when bringing up an extra codec/ADC on the same bus
+//             (e.g. TLV320ADC6140 — default 0x4C, strap-configurable to
+//             0x4D/0x4E/0x4F via ADDR0/ADDR1).
+//   adcread — dump TLV320ADC6140 page 0 regs 0x00..0x1F as a 16-wide hex
+//             grid. Selects page 0 first; works without any prior init.
 //   unsub_all — disable all streaming engines (meters, spectrum).
 //              Used by the serial-bridge when the WebSocket client
 //              disconnects so the firmware stops writing data that
@@ -3866,6 +4280,100 @@ static void onCliLine(char *line, int length, void *userData) {
         g_midiVizSink.setEnabled(false);
         g_mpeVoicesEnabled = false;
         Serial.println("streaming disabled");
+        return;
+    }
+    // adcout on  / adcout off — enable or disable ALL of the ADC6140's
+    // ASI output slots. When OFF the ADC6140 tri-states SDOUT entirely.
+    // Useful for isolating whether static / noise on the shared TDM line
+    // is coming from the ADC6140 or from something else (e.g. wrong pin
+    // assumption, TAC5212 bit-flipping). Procedure:
+    //   1. Listen to headphones with both chips active normally.
+    //   2. Type `adcout off`. If the static stops, ADC6140 is the source.
+    //      If the static remains, ADC6140 isn't actually on the pin we
+    //      think (or the source is elsewhere — TAC5212, USB, etc.).
+    //   3. Type `adcout on` to restore.
+    if (strncmp(line, "adcout ", 7) == 0) {
+        const char *arg = line + 7;
+        if (strcmp(arg, "off") == 0) {
+            // ASI_OUT_CH_EN = 0 → all 8 output slots tri-stated
+            g_adc6140.setChannelEnable(0xF0, 0x00);
+            Serial.println("ADC6140 ASI output: OFF (SDOUT tri-stated)");
+            return;
+        }
+        if (strcmp(arg, "on") == 0) {
+            // ASI_OUT_CH_EN = 0xF0 → channels 1-4 driving slots 4-7
+            g_adc6140.setChannelEnable(0xF0, 0xF0);
+            Serial.println("ADC6140 ASI output: ON (channels 1-4 driving slots 4-7)");
+            return;
+        }
+        Serial.println("usage: adcout on | adcout off");
+        return;
+    }
+    if (strcmp(line, "adcread") == 0 || strcmp(line, "adc") == 0) {
+        // One-shot register dump for the TLV320ADC6140 at 0x4C. Selects
+        // page 0 first (reg 0 on every page is PAGE_SELECT) and reads
+        // 0x00..0x1F. On a freshly-powered chip with no init, expect
+        // SLEEP_CFG (0x02) ≈ 0x11 (sleep on, vref quick-charge) and
+        // ASI_CFG0 (0x04) ≈ 0x30 (TDM, 16-bit). Anything reading 0xFF
+        // across the board means NACK / wiring issue, not a chip state.
+        constexpr uint8_t kAdc = 0x4C;
+        Wire.beginTransmission(kAdc);
+        Wire.write((uint8_t)0x00);  // PAGE_SELECT
+        Wire.write((uint8_t)0x00);  // page 0
+        uint8_t err = Wire.endTransmission();
+        if (err != 0) {
+            Serial.print("ADC6140: page-select NACK (err=");
+            Serial.print(err);
+            Serial.println(") — not on bus or wrong address");
+            return;
+        }
+        Serial.println("\n--- TLV320ADC6140 @ 0x4C, page 0, regs 0x00..0x1F ---");
+        for (uint8_t row = 0x00; row < 0x20; row += 0x10) {
+            Serial.print("  ");
+            if (row < 0x10) Serial.print('0');
+            Serial.print(row, HEX);
+            Serial.print(":");
+            for (uint8_t col = 0; col < 0x10; ++col) {
+                uint8_t reg = row + col;
+                Wire.beginTransmission(kAdc);
+                Wire.write(reg);
+                if (Wire.endTransmission(false) != 0) {
+                    Serial.print(" --");
+                    continue;
+                }
+                Wire.requestFrom(kAdc, (uint8_t)1);
+                uint8_t v = Wire.available() ? Wire.read() : 0xFF;
+                Serial.print(' ');
+                if (v < 0x10) Serial.print('0');
+                Serial.print(v, HEX);
+            }
+            Serial.println();
+        }
+        Serial.println("------------------------------------------------------\n");
+        return;
+    }
+    if (strcmp(line, "i2cscan") == 0 || strcmp(line, "i2c") == 0) {
+        Serial.println("\n--- I2C scan (Wire, 0x03..0x77) ---");
+        int found = 0;
+        for (uint8_t addr = 0x03; addr <= 0x77; ++addr) {
+            Wire.beginTransmission(addr);
+            uint8_t err = Wire.endTransmission();
+            if (err == 0) {
+                Serial.print("  0x");
+                if (addr < 0x10) Serial.print('0');
+                Serial.print(addr, HEX);
+                if (addr == TAC5212_I2C_ADDR) {
+                    Serial.print("  (TAC5212)");
+                } else if (addr >= 0x4C && addr <= 0x4F) {
+                    Serial.print("  (TLV320ADC6140 candidate)");
+                }
+                Serial.println();
+                ++found;
+            }
+        }
+        Serial.print(found);
+        Serial.println(" device(s) found");
+        Serial.println("-----------------------------------\n");
         return;
     }
     if (line[0] == 's' || line[0] == 'S') {
@@ -3916,6 +4424,35 @@ static void onCliLine(char *line, int length, void *userData) {
         Serial.println(g_model.main().hostvolValue, 3);
         Serial.print("DEV_STS0: 0x");
         Serial.println(readReg(REG_DEV_STS0), HEX);
+        // Per-output mode: confirms whether OUT*_CFG writes (e.g. UI mode
+        // changes from hp_driver → se_line) actually landed in the chip.
+        // CFG1/CFG2 high two bits = driver type: 0x60=HP, 0x20=line, 0xA0=4Ω,
+        // 0xE0=FD-receiver. CFG0 = source|route.
+        for (uint8_t n = 1; n <= 2; ++n) {
+            tac5212::OutMode mode;
+            const char *label = "unknown";
+            if (g_codec.out(n).getMode(mode).isOk()) {
+                switch (mode) {
+                    case tac5212::OutMode::DiffLine:   label = "diff_line"; break;
+                    case tac5212::OutMode::SeLine:     label = "se_line";   break;
+                    case tac5212::OutMode::HpDriver:   label = "hp_driver"; break;
+                    case tac5212::OutMode::FdReceiver: label = "receiver";  break;
+                }
+            }
+            const uint8_t cfg0 = (n == 1) ? readReg(REG_OUT1_CFG0) : readReg(REG_OUT2_CFG0);
+            const uint8_t cfg1 = (n == 1) ? readReg(REG_OUT1_CFG1) : readReg(REG_OUT2_CFG1);
+            const uint8_t cfg2 = (n == 1) ? readReg(REG_OUT1_CFG2) : readReg(REG_OUT2_CFG2);
+            Serial.print("OUT");
+            Serial.print(n);
+            Serial.print(" mode: ");
+            Serial.print(label);
+            Serial.print("  CFG0=0x");
+            Serial.print(cfg0, HEX);
+            Serial.print(" CFG1=0x");
+            Serial.print(cfg1, HEX);
+            Serial.print(" CFG2=0x");
+            Serial.println(cfg2, HEX);
+        }
         Serial.println("--------------\n");
     }
     // Unknown CLI input is silently ignored for MVP.
@@ -3926,8 +4463,20 @@ static void onCliLine(char *line, int length, void *userData) {
 // ============================================================================
 
 void setup() {
+    // Hardware-reset both codecs at boot. SHDNZ is active-low and shared
+    // between the TAC5212 and the TLV320ADC6140 on this board, so a single
+    // LOW→HIGH edge here re-initialises both chips' analog and digital
+    // sections from a known cold state — fixes the "stuck after soft
+    // reboot" mode where the chip retains a half-configured DSP image.
+    // Per the SHDNZ-shared rule (memory: project_shdnz_pin) this is the
+    // ONLY place we may toggle this pin; codec drivers must use SW_RESET
+    // from here on.
     pinMode(TAC5212_EN_PIN, OUTPUT);
+    digitalWrite(TAC5212_EN_PIN, LOW);
+    delay(5);                            // > 100 µs SHDNZ low spec, generous
     digitalWrite(TAC5212_EN_PIN, HIGH);
+    delay(10);                           // let internal supplies settle
+                                          // before I²C bring-up touches them
 
     Serial.begin(115200);
     pinMode(LED_BUILTIN, OUTPUT);
@@ -3956,6 +4505,79 @@ void setup() {
     // Tac5212Panel without a re-init. Never call g_codec.begin() — that
     // would SW-reset the chip and wipe the hand-rolled init.
     setupCodecHandRolled();
+
+    // --- TLV320ADC6140 bring-up (external XLR preamp) --------------------
+    //
+    // The 6140 shares SHDNZ with the TAC5212 (same TAC5212_EN_PIN), so by
+    // this point it's already out of hardware shutdown. We use the lib
+    // driver's begin() here (unlike TAC5212 which uses hand-rolled init)
+    // because the driver is known-good against the datasheet init flow.
+    //
+    // ASI format MUST match the TAC5212 bit-for-bit: TDM, 32-bit, BCLK
+    // inverted, TX_FILL=Hi-Z (shared bus — tri-state slots we don't own).
+    // Slots 4-7 for our 4 analog channels. SM58 dynamic mics: differential
+    // AC-coupled, 10k input impedance (standard for dynamic mic loading),
+    // MICBIAS off. Analog gain starts at 24 dB — a reasonable SM58 preamp
+    // level for quiet-to-moderate vocals; the web UI overrides per-channel.
+    {
+        using namespace tlv320adc6140;
+
+        Serial.println("Initializing TLV320ADC6140 (lib begin)...");
+        Result r = g_adc6140.begin();
+        if (!r.isOk()) {
+            Serial.print("  begin failed: ");
+            Serial.println(r.message ? r.message : "(unknown)");
+        }
+
+        TLV320ADC6140::SerialFormat sf;
+        sf.format    = Format::Tdm;
+        sf.wordLen   = WordLen::Bits32;
+        sf.fsyncPol  = Polarity::Normal;
+        sf.bclkPol   = Polarity::Inverted;
+        sf.txFillHiZ = true;
+        // CRITICAL: must match TAC5212's PASI_OFFSET_1 (slot 0 starts 1
+        // BCLK after FSYNC). With offset=0 here, ADC6140 slot 4 starts
+        // 1 BCLK earlier than TAC5212 slot 3 ends → bus contention at the
+        // slot boundary → garbled MSB on every XLR sample → full-scale
+        // white noise on the headphones.
+        sf.txOffset  = 1;
+        g_adc6140.setSerialFormat(sf);
+
+        // Slots 4, 5, 6, 7 for channels 1..4 (TAC5212 owns 0..3).
+        g_adc6140.setChannelSlot(1, 4);
+        g_adc6140.setChannelSlot(2, 5);
+        g_adc6140.setChannelSlot(3, 6);
+        g_adc6140.setChannelSlot(4, 7);
+
+        // Per-channel front-end config. SM58 dynamic mics on all four:
+        for (uint8_t ch = 1; ch <= 4; ++ch) {
+            auto c = g_adc6140.channel(ch);
+            c.setType      (InputType::Microphone);
+            c.setSource    (InputSource::Differential);
+            c.setCoupling  (Coupling::Ac);
+            c.setImpedance (Impedance::K10);   // 10 kΩ — good for dynamic mics
+            c.setDreEnable (false);            // DRE off by default for dynamic
+            c.setGainDb    (24);               // moderate preamp gain
+            c.setDvolDb    (0.0f);
+        }
+
+        // Chip-global defaults suited to vocal mic recording.
+        g_adc6140.setMicBias           (MicBias::Off);      // dynamic mics
+        g_adc6140.setFullScale         (FullScale::V2Rms275);
+        g_adc6140.setDecimationFilter  (DecimationFilter::LinearPhase);
+        g_adc6140.setHpf               (HpfCutoff::Cutoff12Hz);  // 12 Hz rumble cut
+        g_adc6140.setDreAgcMode        (DreAgcMode::Dre);
+
+        // Enable channels 1..4 and their ASI output slots.
+        const uint8_t mask4 = 0xF0;  // bits 7..4 = ch 1..4
+        g_adc6140.setChannelEnable(mask4, mask4);
+
+        // Power up ADC + PLL (MICBIAS stays off for dynamic mics).
+        g_adc6140.powerUp(/*adc=*/true, /*micbias=*/false, /*pll=*/true);
+
+        delay(5);
+        g_adc6140.dumpStatus(Serial);
+    }
 
     // Pool sized for all taps + fan-outs in the graph. Was 96 for the
     // pre-synth graph; bumped to 144 for Phase 2c when Dexed (8 voices,
@@ -4107,6 +4729,33 @@ void setup() {
     applyLooperSource();
     applyLooperLevel(g_looperLevel);
 
+    // --- Metronome init -----------------------------------------------
+    //
+    // Short pitched blip with a fast attack and a ~40ms decay — matches
+    // a mechanical-wood-block metronome more than a beep. Amplitude is
+    // driven by g_metroLevel (set 0 when off so the osc is silent
+    // between triggers too — no bleed from the continuously-running
+    // wave source). Envelope sustain = 0 so noteOff isn't needed; the
+    // decay finishes in well under a beat at any sane tempo.
+    metroOsc.begin(WAVEFORM_SINE);
+    metroOsc.frequency(1000.0f);
+    metroOsc.amplitude(0.0f);
+    metroEnv.attack(1.0f);
+    metroEnv.hold(0.0f);
+    metroEnv.decay(40.0f);
+    metroEnv.sustain(0.0f);
+    metroEnv.release(30.0f);
+
+    // postMix slot 2 = metronome bus. Unity; g_metroLevel controls the
+    // oscillator amplitude so muting is clean (no residual).
+    postMixL.gain(2, 1.0f);
+    postMixR.gain(2, 1.0f);
+
+    // postMix slot 3 = TLV320ADC6140 XLR bus. Unity; per-channel faders
+    // are applied earlier inside adcMixL/R via SignalGraphBinding.
+    postMixL.gain(3, 1.0f);
+    postMixR.gain(3, 1.0f);
+
     // --- Beats drum machine init --------------------------------------
     //
     // SD card: used for sample tracks (2 = HAT.WAV, 3 = CLAP.WAV by
@@ -4180,6 +4829,18 @@ void setup() {
     g_binding.setChannel(4, &mixR, 2, nullptr);  // Line R
     g_binding.setChannel(5, &mixL, 1, nullptr);  // Mic L
     g_binding.setChannel(6, &mixR, 1, nullptr);  // Mic R
+
+    // XLR 1..4 (TLV320ADC6140): each mono channel feeds BOTH adcMixL and
+    // adcMixR at the same slot (dual-mono via stereo-mirror binding).
+    g_binding.setChannel           (7,  &adcMixL, 0, nullptr);
+    g_binding.setChannelStereoMirror(7, &adcMixR, 0);
+    g_binding.setChannel           (8,  &adcMixL, 1, nullptr);
+    g_binding.setChannelStereoMirror(8, &adcMixR, 1);
+    g_binding.setChannel           (9,  &adcMixL, 2, nullptr);
+    g_binding.setChannelStereoMirror(9, &adcMixR, 2);
+    g_binding.setChannel           (10, &adcMixL, 3, nullptr);
+    g_binding.setChannelStereoMirror(10,&adcMixR, 3);
+
     g_binding.setMain(&mainAmpL, &mainAmpR);
     g_binding.setMainHostvol(&hostvolAmpL, &hostvolAmpR);
     // Per-source USB record-send amps and main loop tap. Gain is 0/1,
@@ -4190,6 +4851,10 @@ void setup() {
     g_binding.setChannelRecAmp(4, &recLineR);
     g_binding.setChannelRecAmp(5, &recMicL);
     g_binding.setChannelRecAmp(6, &recMicR);
+    g_binding.setChannelRecAmp(7, &recXlr1);
+    g_binding.setChannelRecAmp(8, &recXlr2);
+    g_binding.setChannelRecAmp(9, &recXlr3);
+    g_binding.setChannelRecAmp(10, &recXlr4);
     g_binding.setMainLoop(&loopL, &loopR);
     g_binding.applyAll();  // push initial model defaults into audio objects
 
@@ -4198,6 +4863,11 @@ void setup() {
     g_dispatcher.setMeterEngine(&g_meters);
     g_dispatcher.setSpectrumEngine(&g_spectrum);
     g_dispatcher.registerCodecPanel(&g_codecPanel);
+    g_dispatcher.registerCodecPanel(&g_adc6140Panel);
+
+    // Wire the panel's "Initialize" action to the full bring-up function
+    // so the user can re-run it from the System tab without rebooting.
+    g_codecPanel.setInitializeCallback(&setupCodecHandRolled);
 
     g_transport.begin(115200);
     g_transport.setOscMessageHandler(&onOscMessage, nullptr);
@@ -4210,6 +4880,10 @@ void setup() {
     g_meters.setChannel(4, &peakCh4, &rmsCh4);
     g_meters.setChannel(5, &peakCh5, &rmsCh5);
     g_meters.setChannel(6, &peakCh6, &rmsCh6);
+    g_meters.setChannel(7, &peakCh7, &rmsCh7);
+    g_meters.setChannel(8, &peakCh8, &rmsCh8);
+    g_meters.setChannel(9, &peakCh9, &rmsCh9);
+    g_meters.setChannel(10,&peakCh10,&rmsCh10);
     g_meters.setMain(&peakMainL, &rmsMainL, &peakMainR, &rmsMainR);
     g_meters.setHost(&peakHostL, &rmsHostL, &peakHostR, &rmsHostR);
 
@@ -4277,6 +4951,16 @@ void setup() {
     // only; step timing comes from the router's 24-PPQN onClock tick).
     g_midiRouter.addSink(&g_arpFilter);
     g_arpFilter.setClock(&g_clock);
+
+    // When the shared Clock is driving itself (Source = Internal), fan
+    // each synthetic 24-PPQN tick back out through the router so the
+    // arpeggiator (and any other onClock()-driven sink) steps at the
+    // slider BPM. Without this hook Internal mode only updates the
+    // Clock's own counters — the arp would run only when an external
+    // 0xF8 source happened to be connected.
+    g_clock.setInternalTickHook(
+        +[](void *) { g_midiRouter.handleClock(); },
+        nullptr);
 
     // --- Shared FX bus init -------------------------------------------
     //
@@ -4424,10 +5108,11 @@ void setup() {
     g_neuroSink.setLfoDest    (NeuroSink::LfoOff);
     g_neuroSink.setLfoWaveform(1);  // triangle — smoothest wobble
     g_neuroSink.setPortamentoMs(0.0f);
-    // Channel 3 so the auto-follow resolver can route ch-3 traffic to
-    // Neuro without an explicit user override. (Dexed=1, MPE=2, Neuro=3,
-    // Acid=4, Supersaw=5, Chip=6 — see resolveAutoTarget in main.ts.)
-    g_neuroSink.setMidiChannel(3);
+    // Listen omni — the active sub-tab's midiAuto enforcer mutes every
+    // other synth, so whichever tab the user has open is the only one
+    // audible regardless of incoming channel. Users layering synths on
+    // a multi-zone controller can narrow via /synth/neuro/midi/ch.
+    g_neuroSink.setMidiChannel(0);
     applyNeuroVolume(g_neuroVolume);
     applyNeuroSend  (g_neuroSendAmount);
 
@@ -4457,10 +5142,10 @@ void setup() {
 
     // --- Acid (303) init --------------------------------------------
     //
-    // Mono voice — all timbre params inside AcidSink. Default listen
-    // channel 4 (Dexed=1, MPE=2, Neuro=3, Acid=4). Starting preset is
-    // a moderately bright classic acid bass.
-    g_acidSink.setMidiChannel(4);
+    // Mono voice — all timbre params inside AcidSink. Listens omni so
+    // the active sub-tab's midiAuto enforcer alone decides audibility.
+    // Starting preset is a moderately bright classic acid bass.
+    g_acidSink.setMidiChannel(0);
     g_acidSink.setWaveform(0);           // saw
     g_acidSink.setCutoff(500.0f);
     g_acidSink.setResonance(3.8f);
@@ -4474,7 +5159,8 @@ void setup() {
     g_arpFilter.addDownstream(&g_acidSink);
 
     // --- Supersaw init ----------------------------------------------
-    g_supersawSink.setMidiChannel(5);
+    // Omni — active-tab enforcer handles routing (see Neuro init note).
+    g_supersawSink.setMidiChannel(0);
     g_supersawSink.setDetuneCents(18.0f);
     g_supersawSink.setMixCenter(0.4f);
     g_supersawSink.setCutoff(9000.0f);
@@ -4488,7 +5174,8 @@ void setup() {
     g_arpFilter.addDownstream(&g_supersawSink);
 
     // --- Chip init --------------------------------------------------
-    g_chipSink.setMidiChannel(6);
+    // Omni — active-tab enforcer handles routing (see Neuro init note).
+    g_chipSink.setMidiChannel(0);
     g_chipSink.setPulse1Duty(2);      // 50%
     g_chipSink.setPulse2Duty(1);      // 25%
     g_chipSink.setPulse2Detune(7.0f);
@@ -4947,6 +5634,26 @@ static void broadcastSnapshot(OSCBundle &reply) {
     {
         OSCMessage m("/loop/length"); m.add(g_looper.lengthSeconds()); reply.add(m);
     }
+    {
+        OSCMessage m("/loop/lengthBeats"); m.add(looperLengthBeats()); reply.add(m);
+    }
+    {
+        OSCMessage m("/loop/clockFollow"); m.add((int)(g_looperClockFollow ? 1 : 0)); reply.add(m);
+    }
+    {
+        OSCMessage m("/loop/recordedBpm"); m.add(g_looperRecordedBpm); reply.add(m);
+    }
+    {
+        OSCMessage m("/loop/cued"); m.add((int)g_looperCuedAction); reply.add(m);
+    }
+
+    // Metronome — on-state + output level.
+    {
+        OSCMessage m("/metro/on"); m.add((int)(g_metroOn ? 1 : 0)); reply.add(m);
+    }
+    {
+        OSCMessage m("/metro/level"); m.add(g_metroLevel); reply.add(m);
+    }
 
     // Beats state: transport, group level, pattern grid (one message
     // per on-step — off-steps are implicit). 4 tracks × 16 steps = 64
@@ -5027,6 +5734,7 @@ static void broadcastSnapshot(OSCBundle &reply) {
 
     // Codec panel state.
     g_codecPanel.snapshot(reply);
+    g_adc6140Panel.snapshot(reply);
 }
 
 // ============================================================================
@@ -5101,14 +5809,45 @@ void loop() {
     // g_looperArmedAction until the next beat boundary, then committed
     // here. One beat = quarter note at the clock's current tempo.
     if (g_looperArmedAction != 0 && g_clock.consumeBeatEdge()) {
-        switch (g_looperArmedAction) {
-            case 1: g_looper.record(); break;
-            case 2: g_looper.play();   break;
-            case 3: g_looper.stop();   break;
-            case 4: g_looper.clear();  break;
-            default: break;
-        }
+        fireLooperAction(g_looperArmedAction);
         g_looperArmedAction = 0;
+    }
+
+    // Metronome — independent beat tracker (doesn't consume the clock's
+    // beat-edge latch, so the looper's arm-fire still works). On a new
+    // beat we trigger the envelope with higher pitch on beat 1 of the
+    // bar so the downbeat is unmistakable. Amplitude stays at g_metroLevel
+    // so toggling the enable mid-bar cleanly mutes / unmutes.
+    if (g_clock.running()) {
+        const uint32_t curBeat = g_clock.beatCount();
+        if (curBeat != g_metroLastBeat) {
+            g_metroLastBeat = curBeat;
+            if (g_metroOn) {
+                const bool accent = (g_clock.beatInBar() == 0);
+                metroOsc.frequency(accent ? 1500.0f : 1000.0f);
+                metroOsc.amplitude(g_metroLevel);
+                metroEnv.noteOn();
+            }
+        }
+    } else {
+        // Reset tracker so the first beat after Start re-fires.
+        g_metroLastBeat = UINT32_MAX;
+    }
+
+    // Clock-follow: keep playback rate = currentBpm / recordedBpm while
+    // the loop is playing. Recomputed every loop() tick — cheap, and
+    // lets tempo changes take effect smoothly without waiting for a
+    // transport event. Skipped when clock-follow is off, when we don't
+    // have a recording reference, or when the clock isn't running
+    // (rate stays at whatever was last set).
+    if (g_looperClockFollow
+        && g_looperRecordedBpm > 0.0f
+        && g_clock.running()
+        && g_looper.state() == tdsp::Looper::Playing) {
+        const float cur = g_clock.bpm();
+        if (cur > 0.0f) {
+            g_looper.setPlaybackRate(cur / g_looperRecordedBpm);
+        }
     }
 
     g_transport.poll();

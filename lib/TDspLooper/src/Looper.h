@@ -71,9 +71,37 @@ public:
     void stop();     // -> Stopped  (keeps buffer); -> Idle if nothing was ever recorded
     void clear();    // -> Idle     (length=0)
 
+    // Beat-aware play: same as play(), but on a Recording->Playing
+    // transition, the recorded length is rounded to the nearest multiple
+    // of `snapSamples` (never below `minSamples`, never above capacity).
+    // Passing snapSamples==0 is equivalent to plain play().
+    //
+    // Rationale: the sketch knows the current samples-per-beat from the
+    // shared Clock; passing that in here lets the loop land on a whole
+    // number of beats regardless of how coarse the beat-edge arm timing
+    // was. Extra/short tail samples are truncated or zero-padded so the
+    // loop boundary aligns exactly — avoids the tempo drift you'd get
+    // from "close enough" beat detection.
+    void play(uint32_t snapSamples, uint32_t minSamples);
+
     // Output gain applied to playback samples (q15 internally). Does not
     // affect the buffer contents. 0..1, clamped.
     void setReturnLevel(float g01);
+
+    // Playback rate multiplier. 1.0 = play at recording sample rate (no
+    // pitch shift). >1 plays faster and pitches up; <1 plays slower and
+    // pitches down. Clamped to [0.25, 4.0] which covers ±2 octaves; past
+    // that, simple linear-interp resampling has too much aliasing to be
+    // musically useful without a proper antialias filter.
+    //
+    // Used for clock-follow: the sketch computes
+    //   rate = currentBpm / recordedBpm
+    // and calls this from loop(). Pitch shifts with tempo — same
+    // trade-off as a DJ turntable. Pitch-invariant time-stretch would
+    // need a phase-vocoder or PSOLA, which is out of scope for the
+    // current DSP budget on Teensy 4.1.
+    void setPlaybackRate(float rate);
+    float playbackRate() const { return _playbackRate; }
 
     // Read-back — snapshot / echo helpers. All return values are safe
     // to read from foreground; the ISR may write them concurrently but
@@ -94,6 +122,11 @@ private:
     volatile uint8_t   _state          = Idle;
     float              _returnLevel    = 1.0f;
     int32_t            _returnScaleQ15 = 32767;
+    // Variable-rate playback state. _playFrac is the fractional
+    // position between _playPos and _playPos+1 (in [0,1)); it's not
+    // `volatile` because only the ISR touches it.
+    float              _playbackRate   = 1.0f;
+    float              _playFrac       = 0.0f;
     audio_block_t     *_inputQueueArray[1];
 };
 

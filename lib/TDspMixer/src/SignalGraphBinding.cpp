@@ -37,6 +37,12 @@ void SignalGraphBinding::setChannelRecAmp(int n, AudioAmplifier *amp) {
     _channels[n].recAmp = amp;
 }
 
+void SignalGraphBinding::setChannelStereoMirror(int n, AudioMixer4 *mixerR, int slotR) {
+    if (n < 1 || n > kChannelCount) return;
+    _channels[n].mixerR = mixerR;
+    _channels[n].slotR  = slotR;
+}
+
 void SignalGraphBinding::setMainLoop(AudioAmplifier *loopL, AudioAmplifier *loopR) {
     _loopAmpL = loopL;
     _loopAmpR = loopR;
@@ -57,14 +63,17 @@ void SignalGraphBinding::applyChannel(int n) {
     ChannelBinding &b = _channels[n];
     if (!b.mixer) return;
 
-    // Mono mirror: muted channel forced to 0, source channel mirrored.
+    // Mono mirror (legacy singleton): muted channel forced to 0, source
+    // channel mirrored to a secondary slot.
     if (_mirrorActive && n == _mirrorMuteCh) {
         b.mixer->gain(b.slot, 0.0f);
+        if (b.mixerR) b.mixerR->gain(b.slotR, 0.0f);
         applyChannelHpf(n);
         return;
     }
     const float gain = _model->effectiveChannelGain(n);
     b.mixer->gain(b.slot, gain);
+    if (b.mixerR) b.mixerR->gain(b.slotR, gain);
     if (_mirrorActive && n == _mirrorSrcCh && _mirrorMixer) {
         _mirrorMixer->gain(_mirrorSlot, gain);
     }
@@ -80,10 +89,12 @@ void SignalGraphBinding::applyAllChannelGains() {
         if (!b.mixer) continue;
         if (_mirrorActive && n == _mirrorMuteCh) {
             b.mixer->gain(b.slot, 0.0f);
+            if (b.mixerR) b.mixerR->gain(b.slotR, 0.0f);
             continue;
         }
         const float gain = _model->effectiveChannelGain(n);
         b.mixer->gain(b.slot, gain);
+        if (b.mixerR) b.mixerR->gain(b.slotR, gain);
         if (_mirrorActive && n == _mirrorSrcCh && _mirrorMixer) {
             _mirrorMixer->gain(_mirrorSlot, gain);
         }

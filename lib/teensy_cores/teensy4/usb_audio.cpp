@@ -33,6 +33,19 @@
 #include "usb_audio.h"
 #include "debug/printf.h"
 
+// M4a: F32-native USB audio plumbing. When AUDIO_SUBSLOT_SIZE == 3, the
+// ISR callbacks below divert into the Q31 ring buffers declared in
+// usb_audio_f32_buffers.cpp instead of running the int16 deinterleave.
+// Default (flag unset, or 2) leaves the int16 path bit-identical.
+#include "usb_audio_f32_buffers.h"
+
+#if defined(AUDIO_SUBSLOT_SIZE) && AUDIO_SUBSLOT_SIZE == 3
+// M4e diagnostic counters. Incremented once per callback entry in the
+// F32 path. ISR-only writers; main thread is the reader.
+volatile uint32_t usb_audio_f32_rx_packets = 0;
+volatile uint32_t usb_audio_f32_tx_packets = 0;
+#endif
+
 #ifdef AUDIO_INTERFACE
 
 bool AudioInputUSB::update_responsibility;
@@ -134,6 +147,7 @@ void AudioInputUSB::begin(void)
 	update_responsibility = false;
 }
 
+#if !defined(AUDIO_SUBSLOT_SIZE) || AUDIO_SUBSLOT_SIZE != 3
 static void copy_to_buffers(const uint32_t *src, int16_t *left, int16_t *right, unsigned int len)
 {
 	uint32_t *target = (uint32_t*) src + len; 
@@ -158,6 +172,7 @@ static void copy_to_buffers(const uint32_t *src, int16_t *left, int16_t *right, 
 		*right++ = n >> 16;
 	}
 }
+#endif  // !AUDIO_SUBSLOT_SIZE == 3 -- copy_to_buffers (int16 only)
 
 // Called from the USB interrupt when an isochronous packet arrives
 // we must completely remove it from the receive buffer before returning
@@ -165,6 +180,14 @@ static void copy_to_buffers(const uint32_t *src, int16_t *left, int16_t *right, 
 #if 1
 void usb_audio_receive_callback(unsigned int len)
 {
+#if defined(AUDIO_SUBSLOT_SIZE) && AUDIO_SUBSLOT_SIZE == 3
+	// F32-native path: write Q31 directly into the F32 RX ring and skip
+	// the int16 deinterleave entirely. AudioInputUSB (int16) is dormant
+	// in this configuration -- AudioInputUSB_F32 (M4b) consumes the ring.
+	usb_audio_f32_rx_packets++;
+	usb_audio_f32_rx_isr_write(rx_buffer, len);
+	return;
+#else
 	unsigned int count, avail;
 	audio_block_t *left, *right;
 	const uint32_t *data;
@@ -234,6 +257,7 @@ void usb_audio_receive_callback(unsigned int len)
 		}
 	}
 	AudioInputUSB::incoming_count = count;
+#endif  // AUDIO_SUBSLOT_SIZE == 3 (F32 path) / else int16 path
 }
 #endif
 
@@ -319,6 +343,7 @@ void AudioOutputUSB::begin(void)
 	right_1st = NULL;
 }
 
+#if !defined(AUDIO_SUBSLOT_SIZE) || AUDIO_SUBSLOT_SIZE != 3
 static void copy_from_buffers(uint32_t *dst, int16_t *left, int16_t *right, unsigned int len)
 {
 	// TODO: optimize...
@@ -327,6 +352,7 @@ static void copy_from_buffers(uint32_t *dst, int16_t *left, int16_t *right, unsi
 		len--;
 	}
 }
+#endif  // !AUDIO_SUBSLOT_SIZE == 3 -- copy_from_buffers (int16 only)
 
 void AudioOutputUSB::update(void)
 {
@@ -394,6 +420,18 @@ void AudioOutputUSB::update(void)
 // no data to transmit
 unsigned int usb_audio_transmit_callback(void)
 {
+#if defined(AUDIO_SUBSLOT_SIZE) && AUDIO_SUBSLOT_SIZE == 3
+	// F32-native path: pull Q31 from the F32 TX ring and emit 24-bit
+	// samples directly into usb_audio_transmit_buffer. 48 stereo
+	// samples/packet at 48 kHz nominal (= 96 mono = 288 bytes).
+	// AUDIO_TX_SIZE == 294 has room for one jitter sample (M5 rate-
+	// matching can use it). AudioOutputUSB (int16) is dormant in
+	// this configuration.
+	usb_audio_f32_tx_packets++;
+	constexpr unsigned int target_stereo = 48;
+	return usb_audio_f32_tx_isr_read(
+		(uint8_t *)usb_audio_transmit_buffer, target_stereo);
+#else
 	static uint32_t count=5;
 	uint32_t avail, num, target, offset, len=0;
 	audio_block_t *left, *right;
@@ -436,6 +474,7 @@ unsigned int usb_audio_transmit_callback(void)
 		}
 	}
 	return target * 4;
+#endif  // AUDIO_SUBSLOT_SIZE == 3 (F32 path) / else int16 path
 }
 #endif
 
