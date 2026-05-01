@@ -831,23 +831,15 @@ static void setupCodec() {
     //      default.
     // Biquads: 3 slots per channel, all initialized to bypass. The
     //      chip's BQ_CFG default is 2 — we bump to 3 for the maximum
-    //      slot count the dev surface can address. Bypass coefs land
-    //      in the correct registers now that BQ_BASE = 0x0A in the
-    //      lib (was 0x08 — that misalignment is what killed the DAC
-    //      in commit b8ad626 before the lib fix in fcff26a).
+    //      slot count the dev surface can address. BQ_BASE = 0x08
+    //      per references/tac5212.csv §8.2.7 (the TI register table).
     g_codec.setAdcHpf(true);
     g_codec.setAdcDecimationFilter(tac5212::AdcDecimationFilter::LinearPhase);
 
-    // Wire up all 3 ADC biquad slots per channel. With BQ_BASE
-    // restored to 0x08 (the value the TI register CSV confirms), the
-    // lib's writeBurst lands on the actual coefficient registers
-    // instead of the offset addresses my misread of the PDF text
-    // extraction had picked. clearBiquad writes BiquadCoeffs::bypass()
-    // = {0x7FFFFFFF, 0, 0, 0, 0} which is a true unity passthrough
-    // and matches the chip POR — so audio flows unchanged but the
-    // slots are explicitly programmed. Dev surface OSC can drive
-    // real EQ coefs into them later without worrying about whether
-    // the previous boot left some garbage state behind.
+    // clearBiquad writes BiquadCoeffs::bypass() which is unity
+    // passthrough and matches chip POR — audio flows unchanged but
+    // the slots are explicitly programmed so the dev surface can
+    // drive real EQ coefs without inheriting garbage from a prior boot.
     for (uint8_t ch = 1; ch <= 2; ++ch) {
         for (uint8_t idx = 1; idx <= 3; ++idx) {
             g_codec.adc(ch).clearBiquad(idx);
@@ -863,6 +855,21 @@ static void setupCodec() {
         }
     }
     g_codec.setDacBiquadsPerChannel(3);
+
+    // DAC distortion limiter intentionally OFF.
+    //
+    // Datasheet §8.2 says "TI recommends using the PPC3 GUI for
+    // configuring the programmable coefficients" and never publishes
+    // the Q-format encoding for the limiter coefs. The Table 8-219
+    // POR defaults are loaded in coef RAM at boot but are NOT safe
+    // to engage on real audio — interpreted as Q1.31 the release TC
+    // lands around 24 kHz, putting the gain-modulation loop in the
+    // audio band, and the chip squeals at its low (~-39 dBFS)
+    // threshold whenever EN_DISTORTION is flipped. Empirically this
+    // also bootlooped the Teensy when enabled in setupCodec().
+    //
+    // Re-enabling requires importing PPC3-generated coefs into a new
+    // LimiterCoeffs preset (see memory: TAC5212 Limiter needs PPC3).
 
     Serial.print("DEV_STS0: 0x");
     Serial.println(g_codec.readRegister(0, 0x79), HEX);
