@@ -138,7 +138,7 @@ export function plaitsSlotPanel(state: MixerState, dispatcher: Dispatcher): HTML
     state.plaits.harmonics,
     0, 1,
     (v) => {
-      let best = HARMONICS_SNAPS[0];
+      let best: typeof HARMONICS_SNAPS[number] = HARMONICS_SNAPS[0];
       let bestDist = Math.abs(v - best.v);
       for (const s of HARMONICS_SNAPS) {
         const d = Math.abs(v - s.v);
