@@ -793,11 +793,13 @@ static void setupCodec() {
     g_codec.setChannelEnable(/*inMask=*/0xF, /*outMask=*/0xC);
     g_codec.powerAdc(true);
     g_codec.powerDac(true);
-    // MICBIAS-on matches the production project (PWR_CFG = 0xE0). PDM
-    // mics on the TAC5212 front-end share the analog mic-bias supply
-    // rail — without this bit, IN_CH3 / IN_CH4 enable correctly but
-    // produce silence on the TDM bus.
-    g_codec.setMicbiasEnable(true);
+    // MICBIAS stays OFF: on this hardware the on-board PDM mics use
+    // their own digital interface and don't need the analog mic-bias
+    // rail. Production happened to set MICBIAS via the catch-all
+    // PWR_CFG = 0xE0 write but it wasn't load-bearing for PDM audio
+    // — what was actually missing was IN_CH3 / IN_CH4 in CH_EN
+    // (fixed in 5b7dc32). External condenser mics on a future XLR
+    // path will engage MICBIAS via /codec/tac5212/micbias/enable.
     delay(100);  // let analog blocks settle before any audio hits the DAC
 
     // Arm DSP_AVDD_SEL before any DSP-resident block (limiter, BOP, DRC)

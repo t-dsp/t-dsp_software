@@ -143,8 +143,11 @@ export class Dispatcher {
     this.sendMsg(`/ch/${pad2(idx + 1)}/rec/enable`, 'i', [on ? 1 : 0]);
   }
 
-  // Toggle stereo link on a channel pair. The address only accepts an
-  // odd channel (1, 3, 5) — the even side's link flag is implicit.
+  // Toggle stereo link on a channel pair. The X32-shape address is
+  // global config: /config/chlink/N-M where N=odd, M=N+1. The OSC.md
+  // spec moved link state out of per-channel /ch/.../config/link into
+  // /config/chlink so a write to either pair member is canonical.
+  // oddIdx here is 0-indexed (oddIdx=0 means ch1-ch2).
   setChannelLink(oddIdx: number, linked: boolean): void {
     this.state.channels[oddIdx].link.set(linked);
     // Propagate optimistically to the even partner so its UI
@@ -155,7 +158,9 @@ export class Dispatcher {
       partner.on.set(this.state.channels[oddIdx].on.get());
       partner.solo.set(this.state.channels[oddIdx].solo.get());
     }
-    this.sendMsg(`/ch/${pad2(oddIdx + 1)}/config/link`, 'i', [linked ? 1 : 0]);
+    const n = oddIdx + 1;       // 1-based ch number
+    const m = n + 1;
+    this.sendMsg(`/config/chlink/${n}-${m}`, 'i', [linked ? 1 : 0]);
   }
 
   setMainFaderL(v: number): void {
@@ -1107,11 +1112,19 @@ export class Dispatcher {
       return;
     }
 
-    m = a.match(/^\/ch\/(\d+)\/config\/link$/);
+    // X32-shape stereo link is /config/chlink/N-M where N=odd, M=N+1.
+    // Update the link signal on BOTH the odd-indexed strip (canonical
+    // owner) AND the even partner so any UI element keyed on the
+    // partner's link state also reacts.
+    m = a.match(/^\/config\/chlink\/(\d+)-(\d+)$/);
     if (m && msg.types === 'i') {
-      const idx = parseInt(m[1], 10) - 1;
-      const ch = this.state.channels[idx];
-      if (ch) ch.link.set((msg.args[0] as number) !== 0);
+      const oddIdx = parseInt(m[1], 10) - 1;   // 0-indexed
+      const evenIdx = parseInt(m[2], 10) - 1;
+      const linked = (msg.args[0] as number) !== 0;
+      const oddCh = this.state.channels[oddIdx];
+      const evenCh = this.state.channels[evenIdx];
+      if (oddCh)  oddCh.link.set(linked);
+      if (evenCh) evenCh.link.set(linked);
       return;
     }
 
