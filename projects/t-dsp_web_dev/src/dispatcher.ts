@@ -659,14 +659,19 @@ export class Dispatcher {
   }
 
   // ---------- Chip (NES/Gameboy) controls ----------
+  //
+  // Slot 7 of the new synth-slot architecture. Outbound paths follow
+  // the sampler-style convention (mix/fader, mix/on, midi/ch); the
+  // legacy /synth/chip/volume + /synth/chip/on paths retired with the
+  // Phase-3 firmware rewrite.
 
   setChipVolume(v: number): void {
     this.state.chip.volume.set(v);
-    this.sendThrottled('/synth/chip/volume', 'f', [v]);
+    this.sendThrottled('/synth/chip/mix/fader', 'f', [v]);
   }
   setChipOn(on: boolean): void {
     this.state.chip.on.set(on);
-    this.sendMsg('/synth/chip/on', 'i', [on ? 1 : 0]);
+    this.sendMsg('/synth/chip/mix/on', 'i', [on ? 1 : 0]);
   }
   setChipMidiChannel(ch: number): void {
     this.state.chip.midiChannel.set(ch);
@@ -885,6 +890,50 @@ export class Dispatcher {
     this.sendMsg('/synth/bus/mix/on', 'i', [on ? 1 : 0]);
   }
 
+  // ---------- Synth slot picker (single-active-slot switcher) ----------
+  //
+  // Phase 0/2 model: exactly one of 4 slots is audible. /synth/active
+  // selects; /synth/slots enumerates id+displayName pairs for the picker
+  // UI. The firmware panics held notes on the outgoing slot and ramps
+  // the incoming slot's gain up to its stored fader value.
+
+  setSynthActive(slot: number): void {
+    this.state.synthSlot.active.set(slot);
+    this.sendMsg('/synth/active', 'i', [slot]);
+  }
+
+  // One-shot enumeration on connect — returns 4 packed "id|displayName"
+  // strings. /snapshot also includes /synth/slots so this is mostly for
+  // explicit refreshes.
+  querySynthSlots(): void {
+    this.sendMsg('/synth/slots', '', []);
+  }
+
+  // ---------- Sampler slot (slot 1) controls ----------
+  //
+  // Backed by firmware MultisampleSlot. /snapshot covers the full state
+  // on connect; these setters drive runtime changes and the OSC echoes
+  // come back through handleIncoming() to update state.sampler.
+
+  setSamplerOn(on: boolean): void {
+    this.state.sampler.on.set(on);
+    this.sendMsg('/synth/sampler/mix/on', 'i', [on ? 1 : 0]);
+  }
+
+  setSamplerVolume(v: number): void {
+    this.state.sampler.volume.set(v);
+    this.sendThrottled('/synth/sampler/mix/fader', 'f', [v]);
+  }
+
+  setSamplerMidiChannel(ch: number): void {
+    this.state.sampler.midiChannel.set(ch);
+    this.sendMsg('/synth/sampler/midi/ch', 'i', [ch]);
+  }
+
+  querySamplerInfo(): void {
+    this.sendMsg('/synth/sampler/info', '', []);
+  }
+
   // ---------- Looper ----------
   //
   // Transport actions (/loop/record, /loop/play, /loop/stop, /loop/clear)
@@ -1057,6 +1106,14 @@ export class Dispatcher {
   // can override to target a specific engine.
   sendMidiNote(note: number, velocity: number, channel: number = 1): void {
     this.sendMsg('/midi/note/in', 'iii', [note, velocity, channel]);
+  }
+
+  // UI-originated control change. Used today for spacebar-as-sustain-
+  // pedal (CC#64) — the firmware's MidiRouter dispatches CC#64 to
+  // every sink's onSustain(), so the active synth slot picks it up
+  // identically to a hardware sustain pedal.
+  sendMidiCC(cc: number, value: number, channel: number = 1): void {
+    this.sendMsg('/midi/cc/in', 'iii', [cc, value, channel]);
   }
 
   // Used by the raw OSC input field. Bypasses the typed setters above.
@@ -1258,6 +1315,49 @@ export class Dispatcher {
       this.state.dexed.volume.set(msg.args[0] as number);
       return;
     }
+    // Sampler slot 1 — config + bank info echoes.
+    if (a === '/synth/sampler/mix/fader' && msg.types === 'f') {
+      this.state.sampler.volume.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/sampler/mix/on' && msg.types === 'i') {
+      this.state.sampler.on.set((msg.args[0] as number) !== 0);
+      return;
+    }
+    if (a === '/synth/sampler/midi/ch' && msg.types === 'i') {
+      this.state.sampler.midiChannel.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/sampler/info' && msg.args.length >= 3) {
+      this.state.sampler.bankName         .set(msg.args[0] as string);
+      this.state.sampler.numSamples       .set(msg.args[1] as number);
+      this.state.sampler.numReleaseSamples.set(msg.args[2] as number);
+      return;
+    }
+
+    // Synth slot picker — /synth/active i and /synth/slots s s s s.
+    if (a === '/synth/active' && msg.types === 'i') {
+      this.state.synthSlot.active.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/slots') {
+      // Each arg is a packed "id|displayName" string. Tolerate fewer
+      // than 4 args (shouldn't happen, but defensive) by leaving any
+      // missing slot at its previous value.
+      const next = [...this.state.synthSlot.slots.get()];
+      for (let i = 0; i < msg.args.length && i < next.length; i++) {
+        const raw = msg.args[i] as string;
+        const sep = raw.indexOf('|');
+        if (sep < 0) {
+          next[i] = { id: raw, displayName: raw };
+        } else {
+          next[i] = { id: raw.slice(0, sep), displayName: raw.slice(sep + 1) };
+        }
+      }
+      this.state.synthSlot.slots.set(next);
+      return;
+    }
+
     if (a === '/synth/dexed/mix/on' && msg.types === 'i') {
       this.state.dexed.on.set((msg.args[0] as number) !== 0);
       return;
@@ -1528,9 +1628,10 @@ export class Dispatcher {
     if (a === '/synth/supersaw/chorus_depth' && msg.types === 'f') { this.state.supersaw.chorusDepth.set(msg.args[0] as number); return; }
     if (a === '/synth/supersaw/portamento' && msg.types === 'f') { this.state.supersaw.portamentoMs.set(msg.args[0] as number); return; }
 
-    // Chip echoes
-    if (a === '/synth/chip/volume' && msg.types === 'f') { this.state.chip.volume.set(msg.args[0] as number); return; }
-    if (a === '/synth/chip/on' && msg.types === 'i') { this.state.chip.on.set((msg.args[0] as number) !== 0); return; }
+    // Chip echoes — slot 7. /synth/chip/mix/{fader,on} replace the
+    // legacy /synth/chip/{volume,on} paths in the Phase-3 firmware.
+    if (a === '/synth/chip/mix/fader' && msg.types === 'f') { this.state.chip.volume.set(msg.args[0] as number); return; }
+    if (a === '/synth/chip/mix/on' && msg.types === 'i') { this.state.chip.on.set((msg.args[0] as number) !== 0); return; }
     if (a === '/synth/chip/midi/ch' && msg.types === 'i') { this.state.chip.midiChannel.set(msg.args[0] as number); return; }
     if (a === '/synth/chip/pulse1_duty' && msg.types === 'i') { this.state.chip.pulse1Duty.set(msg.args[0] as number); return; }
     if (a === '/synth/chip/pulse2_duty' && msg.types === 'i') { this.state.chip.pulse2Duty.set(msg.args[0] as number); return; }

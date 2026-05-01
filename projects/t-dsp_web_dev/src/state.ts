@@ -380,6 +380,35 @@ export interface SynthBusState {
   on:     Signal<boolean>;  // X32-style mix-on
 }
 
+// Synth slot metadata — one entry per slot in the firmware's
+// SynthSwitcher (kMaxSlots=4). Driven by /synth/slots reply, which
+// packs each slot as "id|displayName". Empty slots come back as
+// "silent|(empty)".
+export interface SynthSlotMeta {
+  id: string;            // stable short identifier ("dexed", "sampler", "silent")
+  displayName: string;   // user-facing label ("Dexed FM", "Sampler", "(empty)")
+}
+
+// Single-active-slot synth selection model (Phase 0/2). The firmware
+// guarantees exactly one slot is audible at a time; switching panics
+// held notes on the outgoing slot and zero-gains it. The /synth/active
+// echo lands here; the slot-picker UI subscribes for highlight state.
+export interface SynthSlotState {
+  active: Signal<number>;             // 0..3, -1 = none / unknown
+  slots:  Signal<SynthSlotMeta[]>;    // length 4
+}
+
+// Slot 1 — multisample sampler (loads /samples/<bank>/ from SD).
+// Mirrors the firmware's MultisampleSlot config + read-only info.
+export interface SamplerState {
+  on:                Signal<boolean>;
+  volume:            Signal<number>;   // X32 0..1
+  midiChannel:       Signal<number>;   // 0 = omni, 1..16 = single-channel
+  bankName:          Signal<string>;   // e.g. "piano"
+  numSamples:        Signal<number>;
+  numReleaseSamples: Signal<number>;
+}
+
 // Arpeggiator filter state — mirror of firmware tdsp::ArpFilter. All
 // enums encoded as ints matching the C++ enum values.
 // See lib/TDspArp/src/ArpFilter.h for the canonical definitions.
@@ -421,6 +450,8 @@ export interface MixerState {
   processing: ProcessingState;
   fx: FxState;
   synthBus: SynthBusState;
+  synthSlot: SynthSlotState;
+  sampler: SamplerState;
   looper: LooperState;
   clock: ClockState;
   beats: BeatsState;
@@ -670,6 +701,29 @@ export function createMixerState(channelCount: number): MixerState {
       // Defaults match main.cpp cold-boot (g_synthBusVolume=0.8, g_synthBusOn=true).
       volume: new Signal(0.8),
       on:     new Signal(true),
+    },
+    synthSlot: {
+      // Defaults: slot 0 active (Dexed audible at boot in main.cpp).
+      // 8 slots match the firmware's SynthSwitcher::kMaxSlots. Metadata
+      // fills via the /synth/slots reply on connect; until then the
+      // labels fall back to "Slot N".
+      active: new Signal(0),
+      slots:  new Signal<SynthSlotMeta[]>(
+        Array.from({ length: 8 }, (_, i) => ({
+          id: 'unknown',
+          displayName: `Slot ${i}`,
+        })),
+      ),
+    },
+    sampler: {
+      // Defaults match firmware MultisampleSlot cold-boot. Bank info
+      // lands via /snapshot or /synth/sampler/info on connect.
+      on:                new Signal(true),
+      volume:            new Signal(0.75),
+      midiChannel:       new Signal(0),
+      bankName:          new Signal(''),
+      numSamples:        new Signal(0),
+      numReleaseSamples: new Signal(0),
     },
     looper: {
       // Defaults match main.cpp cold-boot (g_looperSource=0, g_looperLevel=1.0,

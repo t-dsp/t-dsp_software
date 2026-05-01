@@ -25,7 +25,9 @@ namespace tdsp_synth {
 
 class SynthSwitcher : public tdsp::MidiSink {
 public:
-    static constexpr int kMaxSlots = 4;
+    // Capped at 8 to fit a chained AudioMixer4_F32 pair on each channel
+    // (4 + 4 = 8 inputs). Bumping further requires another mixer stage.
+    static constexpr int kMaxSlots = 8;
 
     // Register a slot at index `idx`. Slots may be registered in any
     // order; unset entries stay nullptr and the switcher treats them

@@ -725,6 +725,19 @@ select, input[type="text"] {
 .codec-section-body .codec-row-control input[type="range"] {
   flex: 1;
 }
+.codec-section-body .radio-group {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.codec-section-body .radio-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #ddd;
+  cursor: pointer;
+}
 .codec-section-body .codec-control-help {
   grid-column: 2;
   font-size: 10.5px;
@@ -893,6 +906,157 @@ select, input[type="text"] {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+
+/* ---- Empty-slot placeholder (slots 2..7 until agents wire them) ---- */
+.empty-slot-panel {
+  padding: 32px 16px;
+  background: #1a1a1a;
+  border: 1px dashed #2c2c2c;
+  border-radius: 4px;
+  color: #666;
+  font-size: 13px;
+  text-align: center;
+  max-width: 480px;
+}
+.empty-slot-text {
+  font-weight: 500;
+  margin-bottom: 4px;
+}
+.empty-slot-hint {
+  font-size: 11px;
+  color: #555;
+  font-style: italic;
+}
+
+/* ---- Sampler config panel (slot 1) ---- */
+.sampler-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: #1a1a1a;
+  border: 1px solid #2c2c2c;
+  border-radius: 4px;
+  font-size: 13px;
+  color: #ddd;
+  max-width: 480px;
+}
+.sampler-panel .synth-on-row {
+  margin-bottom: 4px;
+}
+.sampler-info-row,
+.sampler-control-row {
+  display: grid;
+  grid-template-columns: 80px 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 0;
+}
+.sampler-info-row label,
+.sampler-control-row label {
+  color: #888;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.sampler-info-value {
+  color: #ddd;
+  font-weight: 500;
+  grid-column: 2 / span 2;
+}
+.sampler-info-note {
+  color: #777;
+  font-size: 12px;
+}
+.sampler-info-note .sampler-info-value {
+  color: #aaa;
+  font-style: italic;
+  font-weight: 400;
+}
+.sampler-volume-slider {
+  width: 100%;
+}
+.sampler-volume-readout {
+  color: #aaa;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  min-width: 56px;
+  text-align: right;
+}
+.sampler-midi-channel {
+  background: #2c2c2c;
+  color: #ddd;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  padding: 4px 8px;
+  font-size: 12px;
+  grid-column: 2 / span 2;
+}
+
+/* ---- Sustain pedal pill (spacebar = sustain) ---- */
+.sustain-pill {
+  display: inline-block;
+  align-self: flex-start;
+  background: #1f1f1f;
+  color: #888;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  font-weight: 500;
+  padding: 4px 10px;
+  margin: 4px 8px;
+  user-select: none;
+  transition: background 0.06s, color 0.06s, border-color 0.06s, box-shadow 0.06s;
+}
+.sustain-pill.active {
+  background: #b86a30;
+  color: #111;
+  border-color: #d68038;
+  box-shadow: 0 0 6px rgba(184, 106, 48, 0.6);
+}
+
+/* ---- Synth slot picker (single-active-slot switcher) ---- */
+.synth-slot-picker {
+  display: flex;
+  flex-direction: row;
+  gap: 6px;
+  background: #1a1a1a;
+  border: 1px solid #2c2c2c;
+  border-radius: 3px;
+  padding: 6px 10px;
+  min-height: 36px;
+  align-items: center;
+}
+.synth-slot-btn {
+  background: #2c2c2c;
+  color: #ddd;
+  border: 1px solid #3a3a3a;
+  border-radius: 3px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 6px 14px;
+  cursor: pointer;
+  min-width: 96px;
+}
+.synth-slot-btn:hover:not(:disabled) {
+  background: #353535;
+  border-color: #4a4a4a;
+}
+.synth-slot-btn.active {
+  background: #3868b0;
+  color: #fff;
+  border-color: #4a82d0;
+}
+.synth-slot-btn.empty,
+.synth-slot-btn:disabled {
+  color: #555;
+  background: #1f1f1f;
+  cursor: not-allowed;
+  font-style: italic;
 }
 
 .synth-subnav {

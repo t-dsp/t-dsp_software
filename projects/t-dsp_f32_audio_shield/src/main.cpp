@@ -88,11 +88,13 @@
 #include "synth/SilentSlot.h"
 #include "synth/MultisampleSlot.h"
 #include "synth/MpeSlot.h"
+#include "synth/NeuroSlot.h"
 #include "synth/SupersawSlot.h"
 #include "synth/ChipSlot.h"
 #include "synth/AcidSlot.h"
 #include "synth/SynthSwitcher.h"
 
+#include <TDspNeuro.h>
 #include <TDspSupersaw.h>
 #include <TDspChip.h>
 
@@ -209,6 +211,36 @@ MpeVaSink::VoicePorts g_mpeVoices[4] = {
     { &g_mpeOsc[3], &g_mpeEnv[3], &g_mpeFilter[3] },
 };
 MpeVaSink g_mpeSink(g_mpeVoices, 4);
+
+// --- Slot 4 (Neuro) ---
+//
+// Reese / neuro bass voice via lib/TDspNeuro/NeuroSink. Mono engine —
+// 3 saws (osc1/2/3) + sub sine (oscSub) feed a 4-input mixer, into a
+// state-variable LP filter, into an ADSR envelope. Last-note-priority
+// note stack with portamento; LFO can target cutoff/pitch/amp. Mono
+// int16 chain; one I16->F32 bridge fans dual-mono into sub-mixer slot
+// 4 (g_synthSumLB[0] / g_synthSumRB[0]) — same shape Dexed/MPE/Supersaw
+// use.
+//
+// Stink chain (multiband destruction) lives in the legacy project but
+// is intentionally out of scope for this slot rebuild — see
+// planning/synth-slot-rebuild/.
+//
+// NeuroSink owns the note stack, portamento glide, and parameter
+// state; NeuroSlot just gates the per-slot F32 gain on active/on.
+AudioSynthWaveform        g_neuroOsc1, g_neuroOsc2, g_neuroOsc3;  // saws
+AudioSynthWaveform        g_neuroOscSub;                          // sub sine
+AudioMixer4               g_neuroVoiceMix;
+AudioFilterStateVariable  g_neuroFilt;
+AudioEffectEnvelope       g_neuroEnv;
+AudioConvert_I16toF32     g_neuroToF32;
+AudioEffectGain_F32       g_neuroGain;       // mono, post-bridge
+
+NeuroSink::VoicePorts g_neuroPorts = {
+    &g_neuroOsc1, &g_neuroOsc2, &g_neuroOsc3, &g_neuroOscSub,
+    &g_neuroVoiceMix, &g_neuroFilt, &g_neuroEnv,
+};
+NeuroSink g_neuroSink(g_neuroPorts);
 
 // --- Slot 6 (Supersaw) ---
 //
@@ -442,6 +474,23 @@ AudioConnection_F32  c_mpe_toF32_gain(g_mpeToF32,  0, g_mpeGain,  0);
 AudioConnection_F32  c_mpe_gain_sumL (g_mpeGain,   0, g_synthSumLA, 3);
 AudioConnection_F32  c_mpe_gain_sumR (g_mpeGain,   0, g_synthSumRA, 3);
 
+// --- Slot 4 (Neuro) audio graph ---
+//
+// 3 saws + sub sine -> voiceMix -> SVF lowpass -> ADSR envelope ->
+// I16->F32 bridge -> per-slot mono F32 gain -> dual-mono fan-out into
+// sub-mixer slot 4 (input 0 of the stage-B mixer per side).
+AudioConnection      c_neuro_o1_mix  (g_neuroOsc1,    0, g_neuroVoiceMix, 0);
+AudioConnection      c_neuro_o2_mix  (g_neuroOsc2,    0, g_neuroVoiceMix, 1);
+AudioConnection      c_neuro_o3_mix  (g_neuroOsc3,    0, g_neuroVoiceMix, 2);
+AudioConnection      c_neuro_os_mix  (g_neuroOscSub,  0, g_neuroVoiceMix, 3);
+AudioConnection      c_neuro_mix_f   (g_neuroVoiceMix,0, g_neuroFilt,     0);
+// SVF lowpass output (channel 0). Bandpass / highpass unused.
+AudioConnection      c_neuro_f_env   (g_neuroFilt,    0, g_neuroEnv,      0);
+AudioConnection      c_neuro_env_toF32(g_neuroEnv,    0, g_neuroToF32,    0);
+AudioConnection_F32  c_neuro_toF32_gain(g_neuroToF32, 0, g_neuroGain,     0);
+AudioConnection_F32  c_neuro_gain_sumL(g_neuroGain,   0, g_synthSumLB,    0);
+AudioConnection_F32  c_neuro_gain_sumR(g_neuroGain,   0, g_synthSumRB,    0);
+
 // --- Slot 6 (Supersaw) audio graph ---
 //
 // 5 oscs -> mixAB (osc1..osc4) -> mixFinal (mixAB + osc5) -> SVF -> ADSR
@@ -472,6 +521,21 @@ AudioConnection      c_acid_env_toF32 (g_acidAmpEnv, 0, g_acidToF32,  0);
 AudioConnection_F32  c_acid_toF32_gain(g_acidToF32,  0, g_acidGain,   0);
 AudioConnection_F32  c_acid_gain_sumL (g_acidGain,   0, g_synthSumLB, 1);
 AudioConnection_F32  c_acid_gain_sumR (g_acidGain,   0, g_synthSumRB, 1);
+
+// --- Slot 7 (Chip) audio graph ---
+//
+// pulse1 / pulse2 / triangle / noise -> 4-into-1 mixer -> ADSR envelope ->
+// I16->F32 bridge -> per-slot mono F32 gain -> dual-mono fan-out into
+// sub-mixer slot 7 (input 3 of the stage-B mixer per side).
+AudioConnection      c_chip_p1_mix   (g_chipPulse1,   0, g_chipMix,    0);
+AudioConnection      c_chip_p2_mix   (g_chipPulse2,   0, g_chipMix,    1);
+AudioConnection      c_chip_tr_mix   (g_chipTriangle, 0, g_chipMix,    2);
+AudioConnection      c_chip_no_mix   (g_chipNoise,    0, g_chipMix,    3);
+AudioConnection      c_chip_mix_env  (g_chipMix,      0, g_chipEnv,    0);
+AudioConnection      c_chip_env_toF32(g_chipEnv,      0, g_chipToF32,  0);
+AudioConnection_F32  c_chip_toF32_gain(g_chipToF32,   0, g_chipGain,   0);
+AudioConnection_F32  c_chip_gain_sumL(g_chipGain,     0, g_synthSumLB, 3);
+AudioConnection_F32  c_chip_gain_sumR(g_chipGain,     0, g_synthSumRB, 3);
 
 // --- Synth sub-mixer chain (8 slots) ---
 //
@@ -605,6 +669,17 @@ static const tdsp_synth::MpeSlot::AudioContext kMpeCtx{
 };
 tdsp_synth::MpeSlot       g_mpeSlot(kMpeCtx);
 
+// Slot 4 — Neuro (reese / DnB neuro bass). Wraps the NeuroSink
+// instantiated above (g_neuroSink), gating its output through
+// g_neuroGain based on slot-active state. Engine knobs (detune /
+// sub / cutoff / ADSR / LFO / portamento) round-trip through OSC
+// directly into the sink.
+static const tdsp_synth::NeuroSlot::AudioContext kNeuroCtx{
+    &g_neuroSink,
+    &g_neuroGain,
+};
+tdsp_synth::NeuroSlot     g_neuroSlot(kNeuroCtx);
+
 // Slot 6 — Supersaw (JP-8000-style 5-osc detuned-saw lead). Wraps the
 // SupersawSink instantiated above (g_supersawSink), gating its output
 // through g_supersawGain based on slot-active state. Engine knobs
@@ -627,9 +702,19 @@ static const tdsp_synth::AcidSlot::AudioContext kAcidCtx{
 };
 tdsp_synth::AcidSlot      g_acidSlot(kAcidCtx);
 
+// Slot 7 — Chip (NES/Gameboy chiptune lead). Wraps the ChipSink
+// instantiated above (g_chipSink), gating its output through g_chipGain
+// based on slot-active state. Engine knobs (pulse duties / detune /
+// triangle+noise levels / voicing / arpeggio / ADSR) round-trip through
+// OSC directly into the sink.
+static const tdsp_synth::ChipSlot::AudioContext kChipCtx{
+    &g_chipSink,
+    &g_chipGain,
+};
+tdsp_synth::ChipSlot      g_chipSlot(kChipCtx);
+
 tdsp_synth::SilentSlot    g_silentSlot2("silent", "(empty)");
 tdsp_synth::SilentSlot    g_silentSlot4("silent", "(empty)");
-tdsp_synth::SilentSlot    g_silentSlot7("silent", "(empty)");
 tdsp_synth::SynthSwitcher g_synthSwitcher;
 
 // Stereo-link state — global config, X32 convention. Index 0 = pair
@@ -1033,6 +1118,26 @@ static void broadcastSnapshot(OSCBundle &reply) {
     { OSCMessage m("/synth/mpe/lfo/dest");        m.add((int)g_mpeSlot.sink()->lfoDest());    reply.add(m); }
     { OSCMessage m("/synth/mpe/lfo/waveform");    m.add((int)g_mpeSlot.sink()->lfoWaveform());reply.add(m); }
 
+    // Slot 4 — Neuro. /synth/neuro/* paths match the legacy
+    // dispatcher (set via dispatcher.setNeuro*). Stink-chain leaves
+    // are intentionally omitted — that part of the engine is out of
+    // scope for the slot rebuild and will be re-added later.
+    { OSCMessage m("/synth/neuro/volume");           m.add(g_neuroSlot.volume());                       reply.add(m); }
+    { OSCMessage m("/synth/neuro/on");               m.add((int)(g_neuroSlot.on() ? 1 : 0));            reply.add(m); }
+    { OSCMessage m("/synth/neuro/midi/ch");          m.add((int)g_neuroSlot.listenChannel());           reply.add(m); }
+    { OSCMessage m("/synth/neuro/attack");           m.add(g_neuroSlot.sink()->attack());               reply.add(m); }
+    { OSCMessage m("/synth/neuro/release");          m.add(g_neuroSlot.sink()->release());              reply.add(m); }
+    { OSCMessage m("/synth/neuro/detune");           m.add(g_neuroSlot.sink()->detuneCents());          reply.add(m); }
+    { OSCMessage m("/synth/neuro/sub");              m.add(g_neuroSlot.sink()->subLevel());             reply.add(m); }
+    { OSCMessage m("/synth/neuro/osc3");             m.add(g_neuroSlot.sink()->osc3Level());            reply.add(m); }
+    { OSCMessage m("/synth/neuro/filter/cutoff");    m.add(g_neuroSlot.sink()->filterCutoff());         reply.add(m); }
+    { OSCMessage m("/synth/neuro/filter/resonance"); m.add(g_neuroSlot.sink()->filterResonance());      reply.add(m); }
+    { OSCMessage m("/synth/neuro/lfo/rate");         m.add(g_neuroSlot.sink()->lfoRate());              reply.add(m); }
+    { OSCMessage m("/synth/neuro/lfo/depth");        m.add(g_neuroSlot.sink()->lfoDepth());             reply.add(m); }
+    { OSCMessage m("/synth/neuro/lfo/dest");         m.add((int)g_neuroSlot.sink()->lfoDest());         reply.add(m); }
+    { OSCMessage m("/synth/neuro/lfo/waveform");     m.add((int)g_neuroSlot.sink()->lfoWaveform());     reply.add(m); }
+    { OSCMessage m("/synth/neuro/portamento");       m.add(g_neuroSlot.sink()->portamentoMs());         reply.add(m); }
+
     // Slot 6 — Supersaw. /synth/supersaw/* paths match the legacy
     // dispatcher (set via dispatcher.setSupersaw*). Engine knobs
     // round-trip through OSC; including them in the snapshot means a
@@ -1066,6 +1171,25 @@ static void broadcastSnapshot(OSCBundle &reply) {
     { OSCMessage m("/synth/acid/amp_decay");  m.add(g_acidSlot.sink()->ampDecay());             reply.add(m); }
     { OSCMessage m("/synth/acid/accent");     m.add(g_acidSlot.sink()->accent());               reply.add(m); }
     { OSCMessage m("/synth/acid/slide");      m.add(g_acidSlot.sink()->slideMs());              reply.add(m); }
+
+    // Slot 7 — Chip (NES/Gameboy chiptune). Slot housekeeping + every
+    // engine knob the panel exposes; included so a fresh-connect dev
+    // surface populates without per-leaf reads.
+    { OSCMessage m("/synth/chip/mix/fader");     m.add(g_chipSlot.volume());                       reply.add(m); }
+    { OSCMessage m("/synth/chip/mix/on");        m.add((int)(g_chipSlot.on() ? 1 : 0));            reply.add(m); }
+    { OSCMessage m("/synth/chip/midi/ch");       m.add((int)g_chipSlot.listenChannel());           reply.add(m); }
+    { OSCMessage m("/synth/chip/pulse1_duty");   m.add((int)g_chipSlot.sink()->pulse1Duty());      reply.add(m); }
+    { OSCMessage m("/synth/chip/pulse2_duty");   m.add((int)g_chipSlot.sink()->pulse2Duty());      reply.add(m); }
+    { OSCMessage m("/synth/chip/pulse2_detune"); m.add(g_chipSlot.sink()->pulse2Detune());         reply.add(m); }
+    { OSCMessage m("/synth/chip/tri_level");     m.add(g_chipSlot.sink()->triangleLevel());        reply.add(m); }
+    { OSCMessage m("/synth/chip/noise_level");   m.add(g_chipSlot.sink()->noiseLevel());           reply.add(m); }
+    { OSCMessage m("/synth/chip/voicing");       m.add((int)g_chipSlot.sink()->voicing());         reply.add(m); }
+    { OSCMessage m("/synth/chip/arpeggio");      m.add((int)g_chipSlot.sink()->arpeggio());        reply.add(m); }
+    { OSCMessage m("/synth/chip/arp_rate");      m.add(g_chipSlot.sink()->arpRate());              reply.add(m); }
+    { OSCMessage m("/synth/chip/attack");        m.add(g_chipSlot.sink()->attack());               reply.add(m); }
+    { OSCMessage m("/synth/chip/decay");         m.add(g_chipSlot.sink()->decay());                reply.add(m); }
+    { OSCMessage m("/synth/chip/sustain");       m.add(g_chipSlot.sink()->sustain());              reply.add(m); }
+    { OSCMessage m("/synth/chip/release");       m.add(g_chipSlot.sink()->release());              reply.add(m); }
 
     {
         OSCMessage m("/synth/sampler/info");
@@ -1814,6 +1938,100 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
+    // ---- /synth/neuro/* — reese / DnB neuro bass (slot 4) -----------
+    //
+    // Read/write/echo pattern, ported from the legacy
+    // projects/t-dsp_tac5212_audio_shield_adaptor wiring. Existing
+    // dispatcher.ts (state.neuro.*, dispatcher.setNeuro*) already
+    // targets these paths, so the dev surface populates without changes.
+    // /mix/fader and /mix/on aliases mirror the slot housekeeping
+    // convention used by the sampler/MPE/Supersaw slots.
+    //
+    // /synth/neuro/stink/* (multiband destruction chain) is intentionally
+    // out of scope for this slot rebuild — see planning/synth-slot-rebuild/.
+    if (strcmp(address, "/synth/neuro/mix/fader") == 0 ||
+        strcmp(address, "/synth/neuro/volume")    == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isFloat(0)) {
+            g_neuroSlot.setVolume(msg.getFloat(0));
+        }
+        OSCMessage echo("/synth/neuro/volume");
+        echo.add(g_neuroSlot.volume());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/neuro/mix/on") == 0 ||
+        strcmp(address, "/synth/neuro/on")     == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            g_neuroSlot.setOn(msg.getInt(0) != 0);
+        }
+        OSCMessage echo("/synth/neuro/on");
+        echo.add((int)(g_neuroSlot.on() ? 1 : 0));
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/neuro/midi/ch") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            int ch = msg.getInt(0);
+            if (ch < 0 || ch > 16) ch = 0;
+            g_neuroSlot.setListenChannel((uint8_t)ch);
+        }
+        OSCMessage echo("/synth/neuro/midi/ch");
+        echo.add((int)g_neuroSlot.listenChannel());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+#define NEURO_FLOAT_HANDLER(addr, setFn, getExpr)                         \
+    if (strcmp(address, addr) == 0) {                                     \
+        OSCBundle reply;                                                  \
+        if (msg.size() > 0 && msg.isFloat(0)) {                           \
+            g_neuroSlot.sink()->setFn(msg.getFloat(0));                   \
+        }                                                                 \
+        OSCMessage echo(addr);                                            \
+        echo.add(getExpr);                                                \
+        reply.add(echo);                                                  \
+        g_transport.sendBundle(reply);                                    \
+        return;                                                           \
+    }
+    NEURO_FLOAT_HANDLER("/synth/neuro/attack",           setAttack,          g_neuroSlot.sink()->attack())
+    NEURO_FLOAT_HANDLER("/synth/neuro/release",          setRelease,         g_neuroSlot.sink()->release())
+    NEURO_FLOAT_HANDLER("/synth/neuro/detune",           setDetuneCents,     g_neuroSlot.sink()->detuneCents())
+    NEURO_FLOAT_HANDLER("/synth/neuro/sub",              setSubLevel,        g_neuroSlot.sink()->subLevel())
+    NEURO_FLOAT_HANDLER("/synth/neuro/osc3",             setOsc3Level,       g_neuroSlot.sink()->osc3Level())
+    NEURO_FLOAT_HANDLER("/synth/neuro/filter/cutoff",    setFilterCutoff,    g_neuroSlot.sink()->filterCutoff())
+    NEURO_FLOAT_HANDLER("/synth/neuro/filter/resonance", setFilterResonance, g_neuroSlot.sink()->filterResonance())
+    NEURO_FLOAT_HANDLER("/synth/neuro/lfo/rate",         setLfoRate,         g_neuroSlot.sink()->lfoRate())
+    NEURO_FLOAT_HANDLER("/synth/neuro/lfo/depth",        setLfoDepth,        g_neuroSlot.sink()->lfoDepth())
+    NEURO_FLOAT_HANDLER("/synth/neuro/portamento",       setPortamentoMs,    g_neuroSlot.sink()->portamentoMs())
+#undef NEURO_FLOAT_HANDLER
+    if (strcmp(address, "/synth/neuro/lfo/dest") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            g_neuroSlot.sink()->setLfoDest((uint8_t)msg.getInt(0));
+        }
+        OSCMessage echo("/synth/neuro/lfo/dest");
+        echo.add((int)g_neuroSlot.sink()->lfoDest());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/neuro/lfo/waveform") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            g_neuroSlot.sink()->setLfoWaveform((uint8_t)msg.getInt(0));
+        }
+        OSCMessage echo("/synth/neuro/lfo/waveform");
+        echo.add((int)g_neuroSlot.sink()->lfoWaveform());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
     // ---- /synth/supersaw/* — JP-8000 lead (slot 6) ------------------
     //
     // Read/write/echo pattern, ported from the legacy
@@ -1997,6 +2215,89 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
     ACID_FLOAT_HANDLER("/synth/acid/accent",    setAccent,       g_acidSlot.sink()->accent())
     ACID_FLOAT_HANDLER("/synth/acid/slide",     setSlideMs,      g_acidSlot.sink()->slideMs())
 #undef ACID_FLOAT_HANDLER
+
+    // ---- /synth/chip/* — NES/Gameboy chiptune (slot 7) -------------------
+    //
+    // Read/write/echo pattern. Slot housekeeping (mix/fader, mix/on,
+    // midi/ch) follows the new sampler-style convention; engine knobs
+    // (pulse duty / detune / triangle+noise levels / voicing / arp /
+    // ADSR) round-trip through OSC directly into ChipSink.
+    if (strcmp(address, "/synth/chip/mix/fader") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isFloat(0)) {
+            g_chipSlot.setVolume(msg.getFloat(0));
+        }
+        OSCMessage echo("/synth/chip/mix/fader");
+        echo.add(g_chipSlot.volume());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/chip/mix/on") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            g_chipSlot.setOn(msg.getInt(0) != 0);
+        }
+        OSCMessage echo("/synth/chip/mix/on");
+        echo.add((int)(g_chipSlot.on() ? 1 : 0));
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/chip/midi/ch") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            int ch = msg.getInt(0);
+            if (ch < 0 || ch > 16) ch = 0;
+            g_chipSlot.setListenChannel((uint8_t)ch);
+        }
+        OSCMessage echo("/synth/chip/midi/ch");
+        echo.add((int)g_chipSlot.listenChannel());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    // Engine int-arg setters (clamp inside ChipSink).
+#define CHIP_INT_HANDLER(addr, setFn, getExpr)                            \
+    if (strcmp(address, addr) == 0) {                                     \
+        OSCBundle reply;                                                  \
+        if (msg.size() > 0 && msg.isInt(0)) {                             \
+            g_chipSlot.sink()->setFn((uint8_t)msg.getInt(0));             \
+        }                                                                 \
+        OSCMessage echo(addr);                                            \
+        echo.add((int)(getExpr));                                         \
+        reply.add(echo);                                                  \
+        g_transport.sendBundle(reply);                                    \
+        return;                                                           \
+    }
+    CHIP_INT_HANDLER("/synth/chip/pulse1_duty", setPulse1Duty, g_chipSlot.sink()->pulse1Duty())
+    CHIP_INT_HANDLER("/synth/chip/pulse2_duty", setPulse2Duty, g_chipSlot.sink()->pulse2Duty())
+    CHIP_INT_HANDLER("/synth/chip/voicing",     setVoicing,    g_chipSlot.sink()->voicing())
+    CHIP_INT_HANDLER("/synth/chip/arpeggio",    setArpeggio,   g_chipSlot.sink()->arpeggio())
+#undef CHIP_INT_HANDLER
+
+    // Engine float-arg setters (clamp inside ChipSink).
+#define CHIP_FLOAT_HANDLER(addr, setFn, getExpr)                          \
+    if (strcmp(address, addr) == 0) {                                     \
+        OSCBundle reply;                                                  \
+        if (msg.size() > 0 && msg.isFloat(0)) {                           \
+            g_chipSlot.sink()->setFn(msg.getFloat(0));                    \
+        }                                                                 \
+        OSCMessage echo(addr);                                            \
+        echo.add(getExpr);                                                \
+        reply.add(echo);                                                  \
+        g_transport.sendBundle(reply);                                    \
+        return;                                                           \
+    }
+    CHIP_FLOAT_HANDLER("/synth/chip/pulse2_detune", setPulse2Detune,  g_chipSlot.sink()->pulse2Detune())
+    CHIP_FLOAT_HANDLER("/synth/chip/tri_level",     setTriangleLevel, g_chipSlot.sink()->triangleLevel())
+    CHIP_FLOAT_HANDLER("/synth/chip/noise_level",   setNoiseLevel,    g_chipSlot.sink()->noiseLevel())
+    CHIP_FLOAT_HANDLER("/synth/chip/arp_rate",      setArpRate,       g_chipSlot.sink()->arpRate())
+    CHIP_FLOAT_HANDLER("/synth/chip/attack",        setAttack,        g_chipSlot.sink()->attack())
+    CHIP_FLOAT_HANDLER("/synth/chip/decay",         setDecay,         g_chipSlot.sink()->decay())
+    CHIP_FLOAT_HANDLER("/synth/chip/sustain",       setSustain,       g_chipSlot.sink()->sustain())
+    CHIP_FLOAT_HANDLER("/synth/chip/release",       setRelease,       g_chipSlot.sink()->release())
+#undef CHIP_FLOAT_HANDLER
 
     // ---- /synth/dexed/bank/names ----  (dev surface populates the bank dropdown)
     if (strcmp(address, "/synth/dexed/bank/names") == 0) {
@@ -2498,12 +2799,14 @@ void setup() {
     g_synthSwitcher.setSlot(1, &g_multisampleSlot);
     g_synthSwitcher.setSlot(2, &g_silentSlot2);  // placeholder until Plaits agent wires slot 2
     g_synthSwitcher.setSlot(3, &g_mpeSlot);
-    g_synthSwitcher.setSlot(4, &g_silentSlot4);
-    g_synthSwitcher.setSlot(5, &g_acidSlot);      // was: &g_silentSlot5
+    g_synthSwitcher.setSlot(4, &g_neuroSlot);  // was: &g_silentSlot4
+    g_neuroSlot.begin();
+    g_synthSwitcher.setSlot(5, &g_acidSlot);   // was: &g_silentSlot5
     g_acidSlot.begin();
     g_synthSwitcher.setSlot(6, &g_supersawSlot);  // was: &g_silentSlot6
     g_supersawSlot.begin();
-    g_synthSwitcher.setSlot(7, &g_silentSlot7);
+    g_synthSwitcher.setSlot(7, &g_chipSlot);  // was: &g_silentSlot7
+    g_chipSlot.begin();
     g_arpFilter.addDownstream(&g_synthSwitcher);
     g_synthSwitcher.setActive(0);  // Dexed audible at boot
 
@@ -2567,6 +2870,14 @@ void loop() {
     // glide. No-op when the voice is idle and no glide is in flight
     // (early-return inside AcidSink::tick).
     g_acidSlot.tick(millis());
+
+    // Neuro slot: advance portamento glide + LFO. No-op when no key is
+    // held and the LFO is off (early-return inside NeuroSink::tick).
+    g_neuroSink.tick(millis());
+
+    // Chip slot: advance the triangle-voice arpeggiator. No-op when arp
+    // mode is off / no held note (early-return inside ChipSink::tick).
+    g_chipSink.tick(millis());
 
     // 1 Hz LED heartbeat — proves the main loop hasn't wedged.
     static uint32_t s_lastBlinkMs = 0;
