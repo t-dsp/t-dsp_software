@@ -357,6 +357,64 @@ function renderSimpleControl(
       dispatcher.sendRaw(ctl.address, '', []);
     });
     wrap.appendChild(btn);
+  } else if (ctl.kind === 'radio') {
+    // Track current value of every address this radio writes. An option is
+    // "selected" only when every one of its writes matches the live value.
+    const options = ctl.options;
+    const currentByAddress = new Map<string, string | null>();
+    const addresses = new Set<string>();
+    for (const opt of options) {
+      for (const w of opt.writes) addresses.add(w.address);
+    }
+    for (const a of addresses) currentByAddress.set(a, null);
+
+    const radios: HTMLInputElement[] = [];
+    const groupName = `radio-${ctl.label.replace(/\s+/g, '-')}-` +
+      Math.random().toString(36).slice(2, 8);
+
+    const refresh = (): void => {
+      options.forEach((opt, i) => {
+        let allMatch = true;
+        for (const w of opt.writes) {
+          if (currentByAddress.get(w.address) !== w.value) {
+            allMatch = false;
+            break;
+          }
+        }
+        if (radios[i].checked !== allMatch) radios[i].checked = allMatch;
+      });
+    };
+
+    const group = document.createElement('div');
+    group.className = 'radio-group';
+    options.forEach((opt) => {
+      const optLabel = document.createElement('label');
+      optLabel.className = 'radio-option';
+      const r = document.createElement('input');
+      r.type = 'radio';
+      r.name = groupName;
+      r.addEventListener('change', () => {
+        if (!r.checked) return;
+        for (const w of opt.writes) {
+          dispatcher.sendRaw(w.address, 's', [w.value]);
+        }
+      });
+      radios.push(r);
+      optLabel.appendChild(r);
+      optLabel.appendChild(document.createTextNode(' ' + opt.label));
+      group.appendChild(optLabel);
+    });
+
+    for (const addr of addresses) {
+      dispatcher.registerCodecListener(addr, (msg: OscMessage) => {
+        if (msg.types === 's' && typeof msg.args[0] === 'string') {
+          currentByAddress.set(addr, msg.args[0]);
+          refresh();
+        }
+      });
+    }
+
+    wrap.appendChild(group);
   } else if (ctl.kind === 'client_toggle') {
     // Client-only toggle. signalKey selects which in-browser signal it
     // drives. Currently 'eq_link' is the only one; add cases as needed.
