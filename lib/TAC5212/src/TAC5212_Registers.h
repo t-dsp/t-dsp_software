@@ -470,7 +470,15 @@ namespace dsp_cfg1 {
 namespace adc_biquad {
     constexpr uint8_t PAGE_LO   = 8;
     constexpr uint8_t PAGE_HI   = 9;
-    constexpr uint8_t BQ_BASE   = 0x08;
+    // Biquad 1 N0 byte[31:24] starts at register 0x0A on each
+    // coefficient page (datasheet SLASF23A §8.2.1, Table 8-210).
+    // Registers 0x01-0x09 are reserved on these pages — writing them
+    // is explicitly called out as "do not modify" and corrupts chip
+    // state. An older incorrect value of 0x08 silenced the DAC the
+    // moment the chip's BQ_CFG was set non-zero because writes
+    // landed two bytes early and missed the actual coefficient
+    // registers entirely.
+    constexpr uint8_t BQ_BASE   = 0x0A;
     constexpr uint8_t BQ_STRIDE = 0x14;  // 20 bytes per biquad
     constexpr uint8_t COEF_SIZE = 4;
 
@@ -495,7 +503,11 @@ namespace adc_biquad {
 namespace dac_biquad {
     constexpr uint8_t PAGE_LO   = 15;
     constexpr uint8_t PAGE_HI   = 16;
-    constexpr uint8_t BQ_BASE   = 0x08;
+    // Biquad 1 N0 byte[31:24] starts at register 0x0A on each
+    // coefficient page (datasheet SLASF23A §8.2.5, Table 8-214).
+    // Same reserved-register hazard as adc_biquad — see that
+    // namespace's comment.
+    constexpr uint8_t BQ_BASE   = 0x0A;
     constexpr uint8_t BQ_STRIDE = 0x14;
     constexpr uint8_t COEF_SIZE = 4;
 
