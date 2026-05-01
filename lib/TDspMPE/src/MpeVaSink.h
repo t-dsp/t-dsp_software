@@ -242,7 +242,7 @@ private:
     Voice       _state[kMaxVoices];   // parallel per-voice state
     int         _voiceCount;          // effective count, clamped
     uint32_t    _counter = 0;         // monotonic increment for LRU
-    uint8_t     _masterChannel = 1;
+    uint8_t     _masterChannel = 0;  // default: every channel allocates voices (plain-keyboard friendly); user flips MPE Mode ON to set master=1
     uint8_t     _waveform      = 0;   // OSC code 0 = saw (default)
     float       _attackSec     = 0.005f;
     float       _releaseSec    = 0.300f;

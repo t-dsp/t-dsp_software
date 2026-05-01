@@ -1,4 +1,4 @@
-// MPE slot panel — config UI for slot 2 (MPE-aware virtual analog).
+// MPE slot panel — config UI for slot 3 (MPE-aware virtual analog).
 //
 // New panel built for the slot-architecture rebuild. Layout follows
 // sampler-panel.ts: ON/OFF header, then a vertical stack of labeled
@@ -57,31 +57,58 @@ export function mpeSlotPanel(state: MixerState, dispatcher: Dispatcher): HTMLEle
     (v) => dispatcher.setMpeVolume(v),
   );
 
-  // ---- MPE master channel selector ------------------------------------
-  // 0 = "no master" (every channel allocates voices — for non-MPE
-  // controllers); 1..16 = standard MPE master channel.
+  // ---- MPE Mode toggle + collapsible master channel picker -----------
+  // Off  → master=0: every channel 1..16 allocates voices (plain-keyboard
+  //                  friendly; per-channel pitch bend / pressure / CC74
+  //                  still routes per voice, so a real MPE controller
+  //                  also works — just with no "global" channel).
+  // On   → master=N (default 1): standard MPE — notes on N ignored,
+  //                  only mod wheel + sustain there.
+  // Channel picker is hidden until MPE Mode is on; even then defaults
+  // to ch 1 since virtually every MPE controller uses ch 1.
+  const mpeModeRow = document.createElement('div');
+  mpeModeRow.className = 'sampler-control-row';
+  const mpeModeLabel = document.createElement('label');
+  mpeModeLabel.textContent = 'MPE Mode';
+  mpeModeLabel.title = 'On: standard MPE (per-finger expression on member channels, master channel reserved for global mod/sustain). Off: every channel allocates voices — works with any keyboard, including the on-screen one.';
+  const mpeModeToggle = document.createElement('input');
+  mpeModeToggle.type = 'checkbox';
+  mpeModeToggle.className = 'sampler-toggle';
+  mpeModeRow.append(mpeModeLabel, mpeModeToggle);
+
   const masterRow = document.createElement('div');
   masterRow.className = 'sampler-control-row';
   const masterLabel = document.createElement('label');
-  masterLabel.textContent = 'Master';
-  masterLabel.title = 'MPE master channel — 1..16: notes ignored, only mod wheel + sustain. None: every channel allocates voices (non-MPE mode).';
+  masterLabel.textContent = 'Master ch';
+  masterLabel.title = 'MPE master channel — global mod wheel / sustain go here, notes on this channel are ignored. Almost every MPE controller uses channel 1.';
   const masterSelect = document.createElement('select');
   masterSelect.className = 'sampler-midi-channel';
-  const noneOpt = document.createElement('option');
-  noneOpt.value = '0';
-  noneOpt.textContent = 'None (non-MPE)';
-  masterSelect.appendChild(noneOpt);
   for (let ch = 1; ch <= 16; ++ch) {
     const opt = document.createElement('option');
     opt.value = String(ch);
     opt.textContent = `Channel ${ch}`;
     masterSelect.appendChild(opt);
   }
-  state.mpe.masterChannel.subscribe((ch) => { masterSelect.value = String(ch); });
+  masterRow.append(masterLabel, masterSelect);
+
+  // Track the user's last MPE master selection so toggling Off→On
+  // restores their pick (default ch 1 if they've never set one).
+  let lastMpeMaster = 1;
+  state.mpe.masterChannel.subscribe((ch) => {
+    const mpeOn = ch !== 0;
+    mpeModeToggle.checked = mpeOn;
+    masterRow.style.display = mpeOn ? '' : 'none';
+    if (mpeOn) {
+      lastMpeMaster = ch;
+      masterSelect.value = String(ch);
+    }
+  });
+  mpeModeToggle.addEventListener('change', () => {
+    dispatcher.setMpeMasterChannel(mpeModeToggle.checked ? lastMpeMaster : 0);
+  });
   masterSelect.addEventListener('change', () => {
     dispatcher.setMpeMasterChannel(parseInt(masterSelect.value, 10));
   });
-  masterRow.append(masterLabel, masterSelect);
 
   // ---- Waveform picker (4 segmented tiles) ---------------------------
   const waveRow = document.createElement('div');
@@ -145,6 +172,7 @@ export function mpeSlotPanel(state: MixerState, dispatcher: Dispatcher): HTMLEle
   root.append(
     onRow,
     volRow,
+    mpeModeRow,
     masterRow,
     waveRow,
     attackRow,
