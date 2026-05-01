@@ -114,7 +114,14 @@ export class Dispatcher {
     this.state.channels[idx].fader.set(v);
     const p = this.linkedPartner(idx);
     if (p >= 0) this.state.channels[p].fader.set(v);
-    this.sendMsg(`/ch/${pad2(idx + 1)}/mix/fader`, 'f', [v]);
+    // Throttle: a slider drag fires pointermove at 60+ Hz; without
+    // coalescing, the bridge's TX_GAP queues the burst and the
+    // firmware fader appears to "catch up" several seconds after the
+    // user releases. sendThrottled holds the latest value and emits
+    // at most once per 33 ms (~30 Hz) — local Signal.set still fires
+    // every gesture so the UI updates instantly; only the wire is
+    // throttled.
+    this.sendThrottled(`/ch/${pad2(idx + 1)}/mix/fader`, 'f', [v]);
   }
 
   setChannelOn(idx: number, on: boolean): void {
@@ -166,13 +173,13 @@ export class Dispatcher {
   setMainFaderL(v: number): void {
     this.state.main.faderL.set(v);
     if (this.state.main.link.get()) this.state.main.faderR.set(v);
-    this.sendMsg('/main/st/mix/faderL', 'f', [v]);
+    this.sendThrottled('/main/st/mix/faderL', 'f', [v]);
   }
 
   setMainFaderR(v: number): void {
     this.state.main.faderR.set(v);
     if (this.state.main.link.get()) this.state.main.faderL.set(v);
-    this.sendMsg('/main/st/mix/faderR', 'f', [v]);
+    this.sendThrottled('/main/st/mix/faderR', 'f', [v]);
   }
 
   setMainLink(linked: boolean): void {
