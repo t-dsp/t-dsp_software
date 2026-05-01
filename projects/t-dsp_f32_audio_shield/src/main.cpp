@@ -77,6 +77,7 @@
 #include <TDspClock.h>
 #include <TDspArp.h>
 #include <TDspMPE.h>
+#include <TDspPlaits.h>
 #include <TDspAcid.h>
 
 #include "Tac5212Panel.h"
@@ -88,6 +89,7 @@
 #include "synth/SilentSlot.h"
 #include "synth/MultisampleSlot.h"
 #include "synth/MpeSlot.h"
+#include "synth/PlaitsSlot.h"
 #include "synth/NeuroSlot.h"
 #include "synth/SupersawSlot.h"
 #include "synth/ChipSlot.h"
@@ -211,6 +213,37 @@ MpeVaSink::VoicePorts g_mpeVoices[4] = {
     { &g_mpeOsc[3], &g_mpeEnv[3], &g_mpeFilter[3] },
 };
 MpeVaSink g_mpeSink(g_mpeVoices, 4);
+
+// --- Slot 2 (Plaits) ---
+//
+// 4-voice Plaits-inspired macro oscillator via lib/TDspPlaits/PlaitsSink.
+// Per voice: two AudioSynthWaveform oscs into a 4-input AudioMixer4
+// (osc1@0, osc2@1; MORPH writes the input gains as an equal-power
+// crossfade), then AudioFilterStateVariable (LP), then
+// AudioEffectEnvelope. Mono int16 voice path; one I16->F32 bridge fans
+// dual-mono into sub-mixer slot 2 (g_synthSumLA[2] / g_synthSumRA[2])
+// — same shape MPE uses.
+//
+// PlaitsSink is MPE-aware (channel-per-voice routing); defaults to
+// master=0 so the on-screen keyboard (which sends ch 1) plays without
+// configuration.
+AudioSynthWaveform        g_plaitsOsc1[4];
+AudioSynthWaveform        g_plaitsOsc2[4];
+AudioMixer4               g_plaitsVoiceMix[4];
+AudioFilterStateVariable  g_plaitsFilter[4];
+AudioEffectEnvelope       g_plaitsEnv[4];
+AudioMixer4               g_plaitsMix;       // sums 4 voices to mono
+AudioConvert_I16toF32     g_plaitsToF32;
+AudioEffectGain_F32       g_plaitsGain;      // mono, post-bridge
+
+// PlaitsSink voice ports — pointers into the file-scope arrays above.
+PlaitsSink::VoicePorts g_plaitsVoices[4] = {
+    { &g_plaitsOsc1[0], &g_plaitsOsc2[0], &g_plaitsVoiceMix[0], &g_plaitsFilter[0], &g_plaitsEnv[0] },
+    { &g_plaitsOsc1[1], &g_plaitsOsc2[1], &g_plaitsVoiceMix[1], &g_plaitsFilter[1], &g_plaitsEnv[1] },
+    { &g_plaitsOsc1[2], &g_plaitsOsc2[2], &g_plaitsVoiceMix[2], &g_plaitsFilter[2], &g_plaitsEnv[2] },
+    { &g_plaitsOsc1[3], &g_plaitsOsc2[3], &g_plaitsVoiceMix[3], &g_plaitsFilter[3], &g_plaitsEnv[3] },
+};
+PlaitsSink g_plaitsSink(g_plaitsVoices, 4);
 
 // --- Slot 4 (Neuro) ---
 //
@@ -474,6 +507,43 @@ AudioConnection_F32  c_mpe_toF32_gain(g_mpeToF32,  0, g_mpeGain,  0);
 AudioConnection_F32  c_mpe_gain_sumL (g_mpeGain,   0, g_synthSumLA, 3);
 AudioConnection_F32  c_mpe_gain_sumR (g_mpeGain,   0, g_synthSumRA, 3);
 
+// --- Slot 2 (Plaits) audio graph ---
+//
+// Per voice: osc1 + osc2 -> voiceMix (osc1@0, osc2@1, MORPH controls
+// gains) -> SVF lowpass -> envelope. All four envelopes sum into a
+// single 4-into-1 mono mixer (g_plaitsMix), then I16->F32 bridge ->
+// per-slot mono F32 gain -> dual-mono fan-out into sub-mixer slot 2
+// (g_synthSumLA[2] / g_synthSumRA[2]).
+AudioConnection c_pl_o1_0_mix(g_plaitsOsc1[0], 0, g_plaitsVoiceMix[0], 0);
+AudioConnection c_pl_o2_0_mix(g_plaitsOsc2[0], 0, g_plaitsVoiceMix[0], 1);
+AudioConnection c_pl_o1_1_mix(g_plaitsOsc1[1], 0, g_plaitsVoiceMix[1], 0);
+AudioConnection c_pl_o2_1_mix(g_plaitsOsc2[1], 0, g_plaitsVoiceMix[1], 1);
+AudioConnection c_pl_o1_2_mix(g_plaitsOsc1[2], 0, g_plaitsVoiceMix[2], 0);
+AudioConnection c_pl_o2_2_mix(g_plaitsOsc2[2], 0, g_plaitsVoiceMix[2], 1);
+AudioConnection c_pl_o1_3_mix(g_plaitsOsc1[3], 0, g_plaitsVoiceMix[3], 0);
+AudioConnection c_pl_o2_3_mix(g_plaitsOsc2[3], 0, g_plaitsVoiceMix[3], 1);
+
+AudioConnection c_pl_mix_f0(g_plaitsVoiceMix[0], 0, g_plaitsFilter[0], 0);
+AudioConnection c_pl_mix_f1(g_plaitsVoiceMix[1], 0, g_plaitsFilter[1], 0);
+AudioConnection c_pl_mix_f2(g_plaitsVoiceMix[2], 0, g_plaitsFilter[2], 0);
+AudioConnection c_pl_mix_f3(g_plaitsVoiceMix[3], 0, g_plaitsFilter[3], 0);
+
+// SVF lowpass output (channel 0).
+AudioConnection c_pl_f_e0(g_plaitsFilter[0], 0, g_plaitsEnv[0], 0);
+AudioConnection c_pl_f_e1(g_plaitsFilter[1], 0, g_plaitsEnv[1], 0);
+AudioConnection c_pl_f_e2(g_plaitsFilter[2], 0, g_plaitsEnv[2], 0);
+AudioConnection c_pl_f_e3(g_plaitsFilter[3], 0, g_plaitsEnv[3], 0);
+
+AudioConnection c_pl_e_sum0(g_plaitsEnv[0], 0, g_plaitsMix, 0);
+AudioConnection c_pl_e_sum1(g_plaitsEnv[1], 0, g_plaitsMix, 1);
+AudioConnection c_pl_e_sum2(g_plaitsEnv[2], 0, g_plaitsMix, 2);
+AudioConnection c_pl_e_sum3(g_plaitsEnv[3], 0, g_plaitsMix, 3);
+
+AudioConnection      c_pl_sum_toF32  (g_plaitsMix,   0, g_plaitsToF32, 0);
+AudioConnection_F32  c_pl_toF32_gain (g_plaitsToF32, 0, g_plaitsGain,  0);
+AudioConnection_F32  c_pl_gain_sumL  (g_plaitsGain,  0, g_synthSumLA,  2);
+AudioConnection_F32  c_pl_gain_sumR  (g_plaitsGain,  0, g_synthSumRA,  2);
+
 // --- Slot 4 (Neuro) audio graph ---
 //
 // 3 saws + sub sine -> voiceMix -> SVF lowpass -> ADSR envelope ->
@@ -669,6 +739,17 @@ static const tdsp_synth::MpeSlot::AudioContext kMpeCtx{
 };
 tdsp_synth::MpeSlot       g_mpeSlot(kMpeCtx);
 
+// Slot 2 — Plaits (Plaits-inspired polyphonic macro oscillator). Wraps
+// the PlaitsSink instantiated above (g_plaitsSink), gating its output
+// through g_plaitsGain based on slot-active state. Macro knobs (model /
+// harmonics / timbre / morph / decay / resonance) round-trip through
+// OSC directly into the sink.
+static const tdsp_synth::PlaitsSlot::AudioContext kPlaitsCtx{
+    &g_plaitsSink,
+    &g_plaitsGain,
+};
+tdsp_synth::PlaitsSlot    g_plaitsSlot(kPlaitsCtx);
+
 // Slot 4 — Neuro (reese / DnB neuro bass). Wraps the NeuroSink
 // instantiated above (g_neuroSink), gating its output through
 // g_neuroGain based on slot-active state. Engine knobs (detune /
@@ -713,7 +794,6 @@ static const tdsp_synth::ChipSlot::AudioContext kChipCtx{
 };
 tdsp_synth::ChipSlot      g_chipSlot(kChipCtx);
 
-tdsp_synth::SilentSlot    g_silentSlot2("silent", "(empty)");
 tdsp_synth::SilentSlot    g_silentSlot4("silent", "(empty)");
 tdsp_synth::SynthSwitcher g_synthSwitcher;
 
@@ -1117,6 +1197,19 @@ static void broadcastSnapshot(OSCBundle &reply) {
     { OSCMessage m("/synth/mpe/lfo/depth");       m.add(g_mpeSlot.sink()->lfoDepth());        reply.add(m); }
     { OSCMessage m("/synth/mpe/lfo/dest");        m.add((int)g_mpeSlot.sink()->lfoDest());    reply.add(m); }
     { OSCMessage m("/synth/mpe/lfo/waveform");    m.add((int)g_mpeSlot.sink()->lfoWaveform());reply.add(m); }
+
+    // Slot 2 — Plaits (Plaits-inspired polyphonic macro oscillator).
+    // /synth/plaits/* paths follow the slot-architecture convention
+    // (mix/fader, mix/on, midi/ch) plus engine-specific macros.
+    { OSCMessage m("/synth/plaits/mix/fader");  m.add(g_plaitsSlot.volume());                  reply.add(m); }
+    { OSCMessage m("/synth/plaits/mix/on");     m.add((int)(g_plaitsSlot.on() ? 1 : 0));       reply.add(m); }
+    { OSCMessage m("/synth/plaits/midi/master");m.add((int)g_plaitsSlot.masterChannel());      reply.add(m); }
+    { OSCMessage m("/synth/plaits/model");      m.add((int)g_plaitsSlot.sink()->model());      reply.add(m); }
+    { OSCMessage m("/synth/plaits/harmonics"); m.add(g_plaitsSlot.sink()->harmonics());        reply.add(m); }
+    { OSCMessage m("/synth/plaits/timbre");    m.add(g_plaitsSlot.sink()->timbre());           reply.add(m); }
+    { OSCMessage m("/synth/plaits/morph");     m.add(g_plaitsSlot.sink()->morph());            reply.add(m); }
+    { OSCMessage m("/synth/plaits/decay");     m.add(g_plaitsSlot.sink()->decay());            reply.add(m); }
+    { OSCMessage m("/synth/plaits/resonance"); m.add(g_plaitsSlot.sink()->resonance());        reply.add(m); }
 
     // Slot 4 — Neuro. /synth/neuro/* paths match the legacy
     // dispatcher (set via dispatcher.setNeuro*). Stink-chain leaves
@@ -1937,6 +2030,80 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         g_transport.sendBundle(reply);
         return;
     }
+
+    // ---- /synth/plaits/* — Plaits macro oscillator (slot 2) ---------
+    //
+    // Slot housekeeping + engine macros. Mix paths use the new
+    // slot-architecture form (/mix/fader, /mix/on, /midi/master); engine
+    // knobs are direct float/int writes that round-trip into PlaitsSink.
+    if (strcmp(address, "/synth/plaits/mix/fader") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isFloat(0)) {
+            g_plaitsSlot.setVolume(msg.getFloat(0));
+        }
+        OSCMessage echo("/synth/plaits/mix/fader");
+        echo.add(g_plaitsSlot.volume());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/plaits/mix/on") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            g_plaitsSlot.setOn(msg.getInt(0) != 0);
+        }
+        OSCMessage echo("/synth/plaits/mix/on");
+        echo.add((int)(g_plaitsSlot.on() ? 1 : 0));
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/plaits/midi/master") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            int ch = msg.getInt(0);
+            if (ch < 0 || ch > 16) ch = 0;
+            g_plaitsSlot.setMasterChannel((uint8_t)ch);
+        }
+        OSCMessage echo("/synth/plaits/midi/master");
+        echo.add((int)g_plaitsSlot.masterChannel());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+    if (strcmp(address, "/synth/plaits/model") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            g_plaitsSlot.sink()->setModel((uint8_t)msg.getInt(0));
+        }
+        OSCMessage echo("/synth/plaits/model");
+        echo.add((int)g_plaitsSlot.sink()->model());
+        reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    // Float-typed macro setters share a small macro to keep this section
+    // a flat list of 1-line entries (mirrors the SS_FLOAT_HANDLER block
+    // in the supersaw section).
+#define PLAITS_FLOAT_HANDLER(addr, setFn, getExpr)                        \
+    if (strcmp(address, (addr)) == 0) {                                   \
+        OSCBundle reply;                                                  \
+        if (msg.size() > 0 && msg.isFloat(0)) {                           \
+            g_plaitsSlot.sink()->setFn(msg.getFloat(0));                  \
+        }                                                                 \
+        OSCMessage echo((addr));                                          \
+        echo.add((float)(getExpr));                                       \
+        reply.add(echo);                                                  \
+        g_transport.sendBundle(reply);                                    \
+        return;                                                           \
+    }
+    PLAITS_FLOAT_HANDLER("/synth/plaits/harmonics", setHarmonics, g_plaitsSlot.sink()->harmonics())
+    PLAITS_FLOAT_HANDLER("/synth/plaits/timbre",    setTimbre,    g_plaitsSlot.sink()->timbre())
+    PLAITS_FLOAT_HANDLER("/synth/plaits/morph",     setMorph,     g_plaitsSlot.sink()->morph())
+    PLAITS_FLOAT_HANDLER("/synth/plaits/decay",     setDecay,     g_plaitsSlot.sink()->decay())
+    PLAITS_FLOAT_HANDLER("/synth/plaits/resonance", setResonance, g_plaitsSlot.sink()->resonance())
+#undef PLAITS_FLOAT_HANDLER
 
     // ---- /synth/neuro/* — reese / DnB neuro bass (slot 4) -----------
     //
@@ -2793,11 +2960,13 @@ void setup() {
     // of the arp filter. Engines register through the switcher rather
     // than directly with the arp so the active-slot model controls
     // which engine hears the keyboard. Slot 0 = Dexed, slot 1 = sampler,
-    // slot 3 = MPE; slot 2 (Plaits) and 4..7 are SilentSlot placeholders
-    // until later phases / per-slot agents bring more engines online.
+    // slot 2 = Plaits, slot 3 = MPE, slot 4 = Neuro, slot 5 = Acid,
+    // slot 6 = Supersaw, slot 7 = Chip. SilentSlot4 remains as a
+    // future-proofing placeholder for the dynamic slot count.
     g_synthSwitcher.setSlot(0, &g_dexedSlot);
     g_synthSwitcher.setSlot(1, &g_multisampleSlot);
-    g_synthSwitcher.setSlot(2, &g_silentSlot2);  // placeholder until Plaits agent wires slot 2
+    g_synthSwitcher.setSlot(2, &g_plaitsSlot);  // was: &g_silentSlot2
+    g_plaitsSlot.begin();
     g_synthSwitcher.setSlot(3, &g_mpeSlot);
     g_synthSwitcher.setSlot(4, &g_neuroSlot);     // was: &g_silentSlot4
     g_neuroSlot.begin();

@@ -390,6 +390,53 @@ export class Dispatcher {
     this.sendThrottled('/synth/mpe/fx/send', 'f', [v]);
   }
 
+  // ---------- Plaits macro oscillator controls (slot 2) ----------
+
+  setPlaitsVolume(v: number): void {
+    this.state.plaits.volume.set(v);
+    this.sendThrottled('/synth/plaits/mix/fader', 'f', [v]);
+  }
+
+  setPlaitsOn(on: boolean): void {
+    this.state.plaits.on.set(on);
+    this.sendMsg('/synth/plaits/mix/on', 'i', [on ? 1 : 0]);
+  }
+
+  setPlaitsMasterChannel(ch: number): void {
+    this.state.plaits.masterChannel.set(ch);
+    this.sendMsg('/synth/plaits/midi/master', 'i', [ch]);
+  }
+
+  setPlaitsModel(m: number): void {
+    this.state.plaits.model.set(m);
+    this.sendMsg('/synth/plaits/model', 'i', [m]);
+  }
+
+  setPlaitsHarmonics(v: number): void {
+    this.state.plaits.harmonics.set(v);
+    this.sendThrottled('/synth/plaits/harmonics', 'f', [v]);
+  }
+
+  setPlaitsTimbre(v: number): void {
+    this.state.plaits.timbre.set(v);
+    this.sendThrottled('/synth/plaits/timbre', 'f', [v]);
+  }
+
+  setPlaitsMorph(v: number): void {
+    this.state.plaits.morph.set(v);
+    this.sendThrottled('/synth/plaits/morph', 'f', [v]);
+  }
+
+  setPlaitsDecay(v: number): void {
+    this.state.plaits.decay.set(v);
+    this.sendThrottled('/synth/plaits/decay', 'f', [v]);
+  }
+
+  setPlaitsResonance(q: number): void {
+    this.state.plaits.resonance.set(q);
+    this.sendThrottled('/synth/plaits/resonance', 'f', [q]);
+  }
+
   // Subscribe / unsubscribe the voice-telemetry broadcast. The
   // panel opens the firehose on tab-enter and closes it on leave
   // so unwatched tabs don't waste CDC bandwidth.
@@ -1450,6 +1497,44 @@ export class Dispatcher {
     }
     if (a === '/synth/mpe/fx/send' && msg.types === 'f') {
       this.state.mpe.fxSend.set(msg.args[0] as number);
+      return;
+    }
+
+    // Plaits macro oscillator echoes — slot housekeeping + 6 macro params.
+    if (a === '/synth/plaits/mix/fader' && msg.types === 'f') {
+      this.state.plaits.volume.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/plaits/mix/on' && msg.types === 'i') {
+      this.state.plaits.on.set((msg.args[0] as number) !== 0);
+      return;
+    }
+    if (a === '/synth/plaits/midi/master' && msg.types === 'i') {
+      this.state.plaits.masterChannel.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/plaits/model' && msg.types === 'i') {
+      this.state.plaits.model.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/plaits/harmonics' && msg.types === 'f') {
+      this.state.plaits.harmonics.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/plaits/timbre' && msg.types === 'f') {
+      this.state.plaits.timbre.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/plaits/morph' && msg.types === 'f') {
+      this.state.plaits.morph.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/plaits/decay' && msg.types === 'f') {
+      this.state.plaits.decay.set(msg.args[0] as number);
+      return;
+    }
+    if (a === '/synth/plaits/resonance' && msg.types === 'f') {
+      this.state.plaits.resonance.set(msg.args[0] as number);
       return;
     }
     // /synth/mpe/voices i i i f f f × kVoiceCount — 6 args per voice.

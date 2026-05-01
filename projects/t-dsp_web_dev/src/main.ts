@@ -35,6 +35,7 @@ import { dexedPanel } from './ui/dexed-panel';
 import { samplerPanel } from './ui/sampler-panel';
 import { synthSlotPicker } from './ui/synth-slot-picker';
 import { mpeSlotPanel } from './ui/mpe-slot-panel';
+import { plaitsSlotPanel } from './ui/plaits-slot-panel';
 import { neuroSlotPanel } from './ui/neuro-slot-panel';
 import { acidSlotPanel } from './ui/acid-slot-panel';
 import { supersawSlotPanel } from './ui/supersaw-slot-panel';
@@ -443,6 +444,7 @@ synthContent.className = 'synth-content';
 
 const dexedPanelEl    = dexedPanel(state, dispatcher);
 const samplerPanelEl  = samplerPanel(state, dispatcher);
+const plaitsPanelEl   = plaitsSlotPanel(state, dispatcher);
 const mpePanelEl      = mpeSlotPanel(state, dispatcher);
 const neuroPanelEl    = neuroSlotPanel(state, dispatcher);
 const acidPanelEl     = acidSlotPanel(state, dispatcher);
@@ -464,12 +466,13 @@ emptySlotPanelEl.append(emptyLabel, emptyHint);
 emptySlotPanelEl.style.display = 'none';
 
 samplerPanelEl.style.display = 'none';
+plaitsPanelEl.style.display = 'none';
 mpePanelEl.style.display = 'none';
 neuroPanelEl.style.display = 'none';
 acidPanelEl.style.display = 'none';
 supersawPanelEl.style.display = 'none';
 chipPanelEl.style.display = 'none';
-synthContent.append(dexedPanelEl, samplerPanelEl, mpePanelEl, neuroPanelEl, acidPanelEl, supersawPanelEl, chipPanelEl, emptySlotPanelEl);
+synthContent.append(dexedPanelEl, samplerPanelEl, plaitsPanelEl, mpePanelEl, neuroPanelEl, acidPanelEl, supersawPanelEl, chipPanelEl, emptySlotPanelEl);
 
 const synthKeyboardDock = document.createElement('div');
 synthKeyboardDock.className = 'synth-keyboard-dock';
@@ -532,12 +535,13 @@ const synthSlotPickerEl = synthSlotPicker(state, dispatcher);
 state.synthSlot.active.subscribe((active) => {
   dexedPanelEl    .style.display = active === 0 ? '' : 'none';
   samplerPanelEl  .style.display = active === 1 ? '' : 'none';
+  plaitsPanelEl   .style.display = active === 2 ? '' : 'none';
   mpePanelEl      .style.display = active === 3 ? '' : 'none';
   neuroPanelEl    .style.display = active === 4 ? '' : 'none';
   acidPanelEl     .style.display = active === 5 ? '' : 'none';
   supersawPanelEl .style.display = active === 6 ? '' : 'none';
   chipPanelEl     .style.display = active === 7 ? '' : 'none';
-  emptySlotPanelEl.style.display = (active === 2) ? '' : 'none';
+  emptySlotPanelEl.style.display = 'none';
 });
 
 synthSection.append(synthSlotPickerEl, synthContent, synthKeyboardDock);

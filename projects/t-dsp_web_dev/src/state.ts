@@ -167,6 +167,22 @@ export interface MpeState {
   activePresetId:   Signal<string>;
 }
 
+// Plaits (Plaits-inspired macro oscillator, slot 2) synth state —
+// mirror of PlaitsSink's controls. Polyphonic + MPE-aware; macros
+// (HARMONICS / TIMBRE / MORPH) drive the engine's character.
+export interface PlaitsState {
+  volume:           Signal<number>;  // 0..1 linear
+  on:               Signal<boolean>;
+  midiAuto:         Signal<boolean>;
+  masterChannel:    Signal<number>;  // 0 = omni, 1..16 (MPE master)
+  model:            Signal<number>;  // 0..4 — see PlaitsSink::Model
+  harmonics:        Signal<number>;  // 0..1 (snapped to musical intervals)
+  timbre:           Signal<number>;  // 0..1 (filter cutoff macro)
+  morph:            Signal<number>;  // 0..1 (osc1/osc2 mix balance)
+  decay:            Signal<number>;  // 0..1 (envelope decay/release)
+  resonance:        Signal<number>;  // 0.707..5.0
+}
+
 // Neuro (reese/neuro bass) synth state — mirror of the firmware's
 // NeuroSink controls. Mono engine, so no per-voice telemetry; every
 // field is a simple scalar param.
@@ -443,6 +459,7 @@ export interface MixerState {
   main: BusState;
   dexed: DexedState;
   mpe: MpeState;
+  plaits: PlaitsState;
   neuro: NeuroState;
   acid: AcidState;
   supersaw: SupersawState;
@@ -589,6 +606,21 @@ export function createMixerState(channelCount: number): MixerState {
         timbre:    new Signal(0.5),
       })),
       activePresetId:  new Signal(''),
+    },
+    plaits: {
+      // Defaults match PlaitsSink's firmware ctor (see lib/TDspPlaits/
+      // PlaitsSink.cpp). /snapshot echoes overwrite these on connect;
+      // matching here keeps the UI sane before then.
+      volume:        new Signal(0.7),
+      on:            new Signal(true),
+      midiAuto:      new Signal(true),   // follow sub-tab by default
+      masterChannel: new Signal(0),      // omni — plain-keyboard friendly
+      model:         new Signal(0),      // VA Saw
+      harmonics:     new Signal(0.5),    // octave (snapped)
+      timbre:        new Signal(0.7),    // ~5 kHz
+      morph:         new Signal(0.5),
+      decay:         new Signal(0.4),
+      resonance:     new Signal(1.0),
     },
     neuro: {
       // Defaults match NeuroSink's firmware cold-boot (see main.cpp
