@@ -196,7 +196,7 @@ Result TLV320ADC6140::setFullScale(FullScale fs) {
 Result TLV320ADC6140::setMicBias(MicBias mb) {
     // Power enable (PWR_CFG) is separate from value (BIAS_CFG). Handle value
     // here; enable/disable via powerUp().
-    uint8_t bits;
+    uint8_t bits = 0;
     switch (mb) {
       case MicBias::Off:
       case MicBias::Vref:        bits = MBIAS_VAL_VREF;  break;

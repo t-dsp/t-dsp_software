@@ -13,10 +13,16 @@
 // Out of scope (later phases):
 //   * F32 limiter / waveshaper          — Phase 3 (TAC5212 on-chip limiter
 //                                          already available via lib/TAC5212)
-//   * Adc6140Panel + 4-ch XLR preamp    — later
 //   * PDM mic                            — later
 //   * Synths (Dexed via I16->F32 bridge) — Phase 3
 //   * Arpeggiator + MIDI router          — Phase 4
+//
+// On-board TLV320ADC6140 (4-ch XLR preamp): ported from
+// projects/t-dsp_tac5212_audio_shield_adaptor. Drives TDM slots 4..7
+// (TAC5212 owns 0..3 — both chips share the SAI1 RX_DATA line). Each
+// XLR channel is mono and lands as ch7..10 on the dev surface; per-
+// channel faders mirror to both adcMixL and adcMixR (dual-mono) and
+// the summed XLR bus feeds mixL/mixR slot 3.
 //
 // Audio graph (F32 throughout, no int16 conversion at any stage):
 //
@@ -50,9 +56,11 @@
 //   * Pin 35 is SHDNZ for BOTH the TAC5212 and the on-board TLV320ADC6140.
 //     We toggle it LOW->HIGH exactly once at boot. After that, codec
 //     drivers must use SW_RESET via I2C only — never re-toggle the pin.
-//   * The 6140's '125 buffer is always-on and would fight the TAC5212 on
-//     TDM slots 0..3 if left awake. We send it a SW_RESET early in setup()
-//     so it returns to POR sleep state and tri-states its TDM output.
+//   * The 6140's '125 buffer is always-on. The way we keep it from
+//     fighting the TAC5212 on slots 0..3 is to actively configure the
+//     6140 to drive ONLY slots 4..7 with txFillHiZ=true so its SDOUT
+//     tri-states during the slots it doesn't own. setupAdc6140() runs
+//     before any audio data hits the bus.
 
 #include <Arduino.h>
 #include <Wire.h>
@@ -72,6 +80,7 @@
 #include <TeensyVariablePlayback.h>
 
 #include <TAC5212.h>
+#include <TLV320ADC6140.h>
 #include <TDspMixer.h>
 #include <TDspMidi.h>
 #include <TDspClock.h>
@@ -81,6 +90,7 @@
 #include <TDspAcid.h>
 
 #include "Tac5212Panel.h"
+#include "Adc6140Panel.h"
 #include "DexedSink.h"
 #include "DexedVoiceBank.h"
 #include "osc/X32FaderLaw.h"
@@ -121,12 +131,25 @@ AudioOutputUSB_F32      usbOut;
 AudioOutputTDM_F32      tdmOut;
 AudioInputTDM_F32       tdmIn;
 
-// Stereo input mix bus. Slot 0 = USB host (channels 1/2). Slots 1..3 are
-// reserved — Phase 3 lands synths there via the I16->F32 bridge, Phase 2.5
-// will land Line / PDM / XLR sources once those pieces of the graph come
-// online.
+// Stereo input mix bus.
+//   slot 0 = USB host (channels 1/2)
+//   slot 1 = synth bus (g_synthBusL/R)
+//   slot 2 = on-board PDM mics (TDM slots 2/3 from TAC5212)
+//   slot 3 = TLV320ADC6140 XLR bus (adcMixL/R, dual-mono summed)
 AudioMixer4_F32         mixL;
 AudioMixer4_F32         mixR;
+
+// TLV320ADC6140 XLR sub-bus. Each of the 4 mono mic preamp channels
+// feeds BOTH adcMixL and adcMixR at the same per-channel fader, so the
+// summed mono pre lands centered in the main stereo bus. Per-channel
+// fader writes mirror across both mixers in applyChannelFader() for
+// channels 7..10.
+//   adcMixL/R[0] = XLR 1  (ch/07)
+//   adcMixL/R[1] = XLR 2  (ch/08)
+//   adcMixL/R[2] = XLR 3  (ch/09)
+//   adcMixL/R[3] = XLR 4  (ch/10)
+AudioMixer4_F32         adcMixL;
+AudioMixer4_F32         adcMixR;
 
 // Main fader. AudioEffectGain_F32 is mono; one instance per side. The
 // /main/st/mix/on toggle multiplies into this gain (on=0 -> 0.0f).
@@ -410,6 +433,26 @@ AudioConnection_F32  c_cap_R (tdmIn, 1, usbOut, 1);
 AudioConnection_F32  c_micL_mix (tdmIn, 2, mixL, 2);
 AudioConnection_F32  c_micR_mix (tdmIn, 3, mixR, 2);
 
+// TLV320ADC6140 XLR channels 1..4 → TDM slots 4..7 → adcMixL/adcMixR
+// → mixL/mixR slot 3 (centered dual-mono summed bus). AudioInputTDM_F32
+// presents one F32 channel per TDM slot (no high/low-half split like
+// the int16 path), so slot N maps directly to tdmIn output N.
+//
+// Each XLR channel fans into BOTH adcMixL and adcMixR at the same
+// per-channel fader (set in applyChannelFader for ch7..10), so a mono
+// mic ends up centered in the main stereo bus.
+AudioConnection_F32  c_xlr1_mixL (tdmIn, 4, adcMixL, 0);
+AudioConnection_F32  c_xlr1_mixR (tdmIn, 4, adcMixR, 0);
+AudioConnection_F32  c_xlr2_mixL (tdmIn, 5, adcMixL, 1);
+AudioConnection_F32  c_xlr2_mixR (tdmIn, 5, adcMixR, 1);
+AudioConnection_F32  c_xlr3_mixL (tdmIn, 6, adcMixL, 2);
+AudioConnection_F32  c_xlr3_mixR (tdmIn, 6, adcMixR, 2);
+AudioConnection_F32  c_xlr4_mixL (tdmIn, 7, adcMixL, 3);
+AudioConnection_F32  c_xlr4_mixR (tdmIn, 7, adcMixR, 3);
+
+AudioConnection_F32  c_adcL_mix  (adcMixL, 0, mixL, 3);
+AudioConnection_F32  c_adcR_mix  (adcMixR, 0, mixR, 3);
+
 // Dexed (int16) -> bridge -> F32 per-synth gain -> sub-mixer slot 0.
 // Two gain stages: per-synth gain (g_dexedGain, /synth/dexed/volume)
 // and group bus gain (g_synthBus*, /synth/bus/volume). The dev
@@ -641,21 +684,30 @@ AudioConnection_F32  c_synthbusR_mix  (g_synthBusR,  0, mixR,        1);
 //   ch4 = Line R         (TAC5212 ADC CH2, not yet wired in F32 path)
 //   ch5 = Mic L          → mixL[2] (PDM, defaults muted)
 //   ch6 = Mic R          → mixR[2] (PDM, defaults muted)
-//   ch7..ch10 = XLR 1..4 (TLV320ADC6140, not yet wired)
+//   ch7  = XLR 1         → adcMixL[0] AND adcMixR[0] (dual-mono, defaults muted)
+//   ch8  = XLR 2         → adcMixL[1] AND adcMixR[1] (dual-mono, defaults muted)
+//   ch9  = XLR 3         → adcMixL[2] AND adcMixR[2] (dual-mono, defaults muted)
+//   ch10 = XLR 4         → adcMixL[3] AND adcMixR[3] (dual-mono, defaults muted)
 //
 // Mute-by-default for ch5/ch6 because the on-board PDM mics are LIVE
 // the moment their channels are powered — we don't want unintended
-// monitoring at boot. Dev surface unmutes via /ch/05/mix/on 1.
+// monitoring at boot. Dev surface unmutes via /ch/05/mix/on 1. Same
+// rule for XLR ch7..10 — a connected mic is hot the moment its channel
+// is enabled, so default off until the user explicitly opens it.
 //
 // Faders default to 0.75 — that's X32 unity (0 dB) under the
 // 4-segment fader law; 1.0 would mean +10 dB and slam the DAC.
-static float g_chFader[7]    = {0.0f, 0.75f, 0.75f, 0.75f, 0.75f, 0.75f, 0.75f};
-static bool  g_chOn[7]       = {false, true, true, true, true, false, false};
+static float g_chFader[11]   = {0.0f, 0.75f, 0.75f, 0.75f, 0.75f, 0.75f, 0.75f,
+                                       0.75f, 0.75f, 0.75f, 0.75f};
+static bool  g_chOn[11]      = {false, true, true, true, true, false, false,
+                                       false, false, false, false};
 
 // Per-channel display name (12-char limit per X32 convention). Index 0
 // unused. /ch/NN/config/name does NOT mirror across linked pairs (the
 // spec lets a stereo pair have different L/R labels).
-static char  g_chName[7][16] = {"", "USB L", "USB R", "Line L", "Line R", "Mic L", "Mic R"};
+static char  g_chName[11][16] = {"",     "USB L", "USB R", "Line L", "Line R",
+                                 "Mic L", "Mic R",
+                                 "XLR 1", "XLR 2", "XLR 3", "XLR 4"};
 static float g_mainFaderL    = 0.75f;
 static float g_mainFaderR    = 0.75f;
 static bool  g_mainOn        = true;
@@ -798,27 +850,25 @@ tdsp_synth::SilentSlot    g_silentSlot4("silent", "(empty)");
 tdsp_synth::SynthSwitcher g_synthSwitcher;
 
 // Stereo-link state — global config, X32 convention. Index 0 = pair
-// (1,2), index 1 = pair (3,4), index 2 = pair (5,6). Set via
-// /config/chlink/{1-2,3-4,5-6}; when on, server-side mirrors writes
-// across the linked pair (see mirrorPartner / linkApplyChannelFader
-// below). Not per-channel state — link is a property of the pair.
+// (1,2), index 1 = pair (3,4), index 2 = pair (5,6), index 3 = pair
+// (7,8), index 4 = pair (9,10). Set via /config/chlink/{1-2,3-4,5-6,
+// 7-8,9-10}; when on, server-side mirrors writes across the linked
+// pair. Not per-channel state — link is a property of the pair.
 //
-// Default: all three pairs linked. The hardware lays out USB, Line,
-// and Mic as natural stereo pairs — USB host audio is L+R, the line
-// input jack is a stereo TRS, and the on-board PDM mics are a
-// stereo pair. Linking them by default means a fader/mute gesture
-// on either side of a pair affects both, which is what most users
-// expect on first touch. The dev surface's link button can break
-// the pair (set chlink to 0) for cases where independent control
-// is needed.
-static bool g_chLink[3] = {true, true, true};
+// Default: USB / Line / PDM-mic pairs linked (natural stereo). XLR
+// pairs (7-8, 9-10) DEFAULT UNLINKED — each XLR channel is a mono mic
+// preamp, so most live setups want independent gain/mute per channel.
+// The dev surface's link button can pair adjacent XLRs (e.g. for an
+// AB stereo pair on 7-8) when wanted.
+static bool g_chLink[5] = {true, true, true, false, false};
 
 // If `ch` is the L or R member of a currently-linked pair, returns the
 // partner channel number; otherwise 0. Pair (1,2) is index 0, pair
-// (3,4) is index 1, pair (5,6) is index 2.
+// (3,4) is index 1, pair (5,6) is index 2, pair (7,8) is index 3,
+// pair (9,10) is index 4.
 static int linkPartner(int ch) {
-    if (ch < 1 || ch > 6) return 0;
-    int idx = (ch - 1) / 2;        // pair index 0..2
+    if (ch < 1 || ch > 10) return 0;
+    int idx = (ch - 1) / 2;        // pair index 0..4
     if (!g_chLink[idx]) return 0;
     return (ch & 1) ? ch + 1 : ch - 1;  // odd -> +1, even -> -1
 }
@@ -826,9 +876,11 @@ static int linkPartner(int ch) {
 // Map a /config/chlink/N-M address to its g_chLink index. Returns -1
 // for an unrecognized pair token.
 static int chlinkPairIndex(const char *pair) {
-    if (strcmp(pair, "1-2") == 0) return 0;
-    if (strcmp(pair, "3-4") == 0) return 1;
-    if (strcmp(pair, "5-6") == 0) return 2;
+    if (strcmp(pair, "1-2")  == 0) return 0;
+    if (strcmp(pair, "3-4")  == 0) return 1;
+    if (strcmp(pair, "5-6")  == 0) return 2;
+    if (strcmp(pair, "7-8")  == 0) return 3;
+    if (strcmp(pair, "9-10") == 0) return 4;
     return -1;
 }
 
@@ -839,8 +891,14 @@ static int chlinkPairIndex(const char *pair) {
 tac5212::TAC5212          g_codec(Wire);
 Tac5212Panel              g_codecPanel(g_codec);
 
+// On-board TLV320ADC6140 — 4-ch XLR mic preamp ADC. Shares the I2C bus
+// with TAC5212 (0x4C vs 0x51) and the SAI1 RX_DATA TDM line (drives
+// slots 4..7, tri-states 0..3).
+tlv320adc6140::TLV320ADC6140 g_adc6140(Wire);
+Adc6140Panel                 g_adc6140Panel(g_adc6140);
+
 tdsp::MixerModel          g_model;       // unbound: we drive the F32 graph directly
-tdsp::OscDispatcher       g_dispatcher;  // routes /codec/tac5212/... to panel
+tdsp::OscDispatcher       g_dispatcher;  // routes /codec/{tac5212,adc6140}/... to panels
 tdsp::SlipOscTransport    g_transport;
 
 // USB host stack for an external MIDI keyboard plugged into the Teensy
@@ -945,9 +1003,11 @@ static void onUsbHostSysEx(const uint8_t *data, uint16_t length, bool last) {
 // Apply functions — push state into the F32 graph
 // ============================================================================
 
-// Channel -> (mixer side, slot) mapping. Channels 3/4 (Line) and 7..10
-// (XLR) reserve their slots for later phases — calling applyChannelFader
-// on them is a no-op until those audio paths are wired.
+// Channel -> (mixer side, slot) mapping. Channels 3/4 (Line) reserve
+// their slots for later phases — calling applyChannelFader on them is
+// a no-op until those audio paths are wired. Channels 7..10 are XLR
+// mono mic preamps that mirror to BOTH adcMixL and adcMixR (dual-mono);
+// applyChannelFader handles them as a special case below.
 struct ChMap { AudioMixer4_F32 *mix; int slot; };
 static ChMap chToMix(int ch) {
     switch (ch) {
@@ -963,11 +1023,23 @@ static ChMap chToMix(int ch) {
 // values stored in g_chFader[] are in 0..1 X32 form (already snapped to
 // the 1024-step grid by the OSC handler); converting to linear gain is
 // the chip's job.
+//
+// XLR ch7..10: each XLR is a single mono input that contributes to both
+// L and R sides of the summed XLR sub-bus. We write the same gain to
+// adcMixL[ch-7] AND adcMixR[ch-7] so a mono mic ends up centered.
 static void applyChannelFader(int ch) {
     if (ch < 1 || ch >= (int)(sizeof(g_chOn) / sizeof(g_chOn[0]))) return;
+    const float g = g_chOn[ch] ? tdsp::x32::faderToLinear(g_chFader[ch]) : 0.0f;
+
+    if (ch >= 7 && ch <= 10) {
+        const int slot = ch - 7;
+        adcMixL.gain(slot, g);
+        adcMixR.gain(slot, g);
+        return;
+    }
+
     ChMap m = chToMix(ch);
     if (!m.mix) return;  // channel reserved for a future audio path
-    const float g = g_chOn[ch] ? tdsp::x32::faderToLinear(g_chFader[ch]) : 0.0f;
     m.mix->gain(m.slot, g);
 }
 
@@ -1125,8 +1197,8 @@ static void applyProcShelf() {
 
 static void broadcastSnapshot(OSCBundle &reply) {
     // Per-channel state — ch1/2 (USB), ch3/4 (Line, audio path TBD),
-    // ch5/6 (PDM mic). XLR 7..10 land when the ADC6140 wires in.
-    for (int ch = 1; ch <= 6; ++ch) {
+    // ch5/6 (PDM mic), ch7..10 (XLR 1..4 via TLV320ADC6140).
+    for (int ch = 1; ch <= 10; ++ch) {
         {
             char buf[32];
             snprintf(buf, sizeof(buf), "/ch/%02d/mix/fader", ch);
@@ -1345,28 +1417,100 @@ static void broadcastSnapshot(OSCBundle &reply) {
 
     // Codec panel state (TAC5212 register read-backs).
     g_codecPanel.snapshot(reply);
+
+    // TLV320ADC6140 panel snapshot — chip status read-back. No-op on
+    // boards without the 6140 (panel just sends a status message with
+    // whatever the I2C transaction returned, including all-zeros if
+    // the chip is absent).
+    g_adc6140Panel.snapshot(reply);
 }
 
 // ============================================================================
 // Codec init — typed lib/TAC5212 only, no writeRegister fallback
 // ============================================================================
 
-// Bring the TLV320ADC6140 down. It shares SHDNZ with the TAC5212 so it
-// powers up alongside us; left awake, its always-on '125 buffer fights the
-// TAC5212 on TDM slots 0..3 and produces full-scale white noise on the
-// headphones (project_6140_buffer_contention memory). A bare SW_RESET
-// returns it to POR sleep state, where it tri-states the TDM output.
-static void shutdownAdc6140() {
+// Bring the TLV320ADC6140 up via the typed lib driver. Ported verbatim
+// from projects/t-dsp_tac5212_audio_shield_adaptor's bring-up flow.
+//
+// The 6140 shares SHDNZ with the TAC5212, so by the time we get here it
+// is already out of hardware shutdown. We use the lib's begin() (unlike
+// TAC5212 which goes through setupCodec()'s typed-method flow) — the
+// driver is known-good against the datasheet init flow.
+//
+// Critical: ASI format MUST match the TAC5212 bit-for-bit (TDM, 32-bit,
+// BCLK inverted, FSYNC normal, txOffset=1) and the 6140 must own ONLY
+// slots 4..7 with txFillHiZ=true, so its SDOUT actively tri-states
+// during slots 0..3 (where TAC5212 drives) — otherwise the 6140's
+// always-on '125 buffer fights TAC5212 on those slots and produces
+// full-scale white noise (project_6140_buffer_contention memory).
+//
+// If the 6140 is not present (unprobed I2C address NACKs), we silently
+// skip — the rest of the firmware (USB audio, TAC5212, mixer) keeps
+// working on the audio-shield-only board variant.
+static void setupAdc6140() {
+    using namespace tlv320adc6140;
+
     Wire.beginTransmission(ADC6140_I2C_ADDRESS);
     if (Wire.endTransmission() != 0) {
-        // No 6140 on this board variant — that's fine, nothing to silence.
+        Serial.println("TLV320ADC6140 not detected on I2C - skipping");
         return;
     }
-    Wire.beginTransmission(ADC6140_I2C_ADDRESS);
-    Wire.write(0x01);  // SW_RESET register
-    Wire.write(0x01);  // self-clearing reset trigger
-    Wire.endTransmission();
-    delay(20);
+
+    Serial.println("Initializing TLV320ADC6140 (typed lib path)...");
+    Result r = g_adc6140.begin();
+    if (!r.isOk()) {
+        Serial.print("  begin failed: ");
+        Serial.println(r.message ? r.message : "(unknown)");
+        return;
+    }
+
+    TLV320ADC6140::SerialFormat sf;
+    sf.format    = Format::Tdm;
+    sf.wordLen   = WordLen::Bits32;
+    sf.fsyncPol  = Polarity::Normal;
+    sf.bclkPol   = Polarity::Inverted;
+    sf.txFillHiZ = true;
+    // Must match TAC5212's PASI_OFFSET_1 (slot 0 starts 1 BCLK after
+    // FSYNC). Drift here = bus contention at the slot boundary =
+    // garbled MSB on every XLR sample.
+    sf.txOffset  = 1;
+    g_adc6140.setSerialFormat(sf);
+
+    // Slots 4..7 for channels 1..4 (TAC5212 owns 0..3).
+    g_adc6140.setChannelSlot(1, 4);
+    g_adc6140.setChannelSlot(2, 5);
+    g_adc6140.setChannelSlot(3, 6);
+    g_adc6140.setChannelSlot(4, 7);
+
+    // Per-channel front-end defaults — SM58 dynamic mics on all four.
+    // Web UI overrides per channel via /codec/adc6140/ch/N/...
+    for (uint8_t ch = 1; ch <= 4; ++ch) {
+        auto c = g_adc6140.channel(ch);
+        c.setType      (InputType::Microphone);
+        c.setSource    (InputSource::Differential);
+        c.setCoupling  (Coupling::Ac);
+        c.setImpedance (Impedance::K10);   // 10 kΩ — good for dynamic mics
+        c.setDreEnable (false);
+        c.setGainDb    (24);               // moderate preamp gain
+        c.setDvolDb    (0.0f);
+    }
+
+    // Chip-global defaults suited to vocal mic recording.
+    g_adc6140.setMicBias           (MicBias::Off);      // dynamic mics
+    g_adc6140.setFullScale         (FullScale::V2Rms275);
+    g_adc6140.setDecimationFilter  (DecimationFilter::LinearPhase);
+    g_adc6140.setHpf               (HpfCutoff::Cutoff12Hz);
+    g_adc6140.setDreAgcMode        (DreAgcMode::Dre);
+
+    // Enable channels 1..4 and their ASI output slots.
+    const uint8_t mask4 = 0xF0;  // bits 7..4 = ch 1..4
+    g_adc6140.setChannelEnable(mask4, mask4);
+
+    // Power up ADC + PLL (MICBIAS stays off for dynamic mics).
+    g_adc6140.powerUp(/*adc=*/true, /*micbias=*/false, /*pll=*/true);
+
+    delay(5);
+    g_adc6140.dumpStatus(Serial);
 }
 
 // Pulse SHDNZ low, then high, exactly once. After this, codec drivers may
@@ -1592,10 +1736,10 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         return;
     }
 
-    // Channel range covered by g_chFader / g_chOn arrays (1..6 today —
-    // USB L/R + Line L/R + Mic L/R). XLR 7..10 plug in once the
-    // ADC6140 is wired.
-    constexpr int kMaxChannel = 6;
+    // Channel range covered by g_chFader / g_chOn arrays:
+    //   1..6  — USB L/R + Line L/R + PDM Mic L/R (TAC5212)
+    //   7..10 — XLR 1..4 (TLV320ADC6140 mono mic preamps)
+    constexpr int kMaxChannel = 10;
 
     // ---- /config/chlink/N-M i ---- (X32 stereo-link convention)
     //
@@ -2755,7 +2899,7 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         // "/ch/01" => "ch01 fader-value on-flag\n"  (matches X32 packed form)
         if (strncmp(path, "ch/", 3) == 0 && strlen(path) >= 5) {
             int ch = (path[3] - '0') * 10 + (path[4] - '0');
-            if (ch >= 1 && ch <= 6) {
+            if (ch >= 1 && ch <= 10) {
                 snprintf(line, sizeof(line),
                          "/ch/%02d %.4f %d\n",
                          ch, g_chFader[ch], g_chOn[ch] ? 1 : 0);
@@ -2818,13 +2962,15 @@ void setup() {
 
     Wire.begin();
 
-    // Quiet the 6140 first. The TAC5212 begin() also probes via I2C and we
-    // want a clean bus, plus we want the 6140's TDM output tri-stated
-    // before any audio data hits the bus.
-    shutdownAdc6140();
-
     // Bring up the TAC5212 — typed-driver path, no writeRegister fallback.
     setupCodec();
+
+    // Bring up the on-board TLV320ADC6140 (XLR preamp). Order matters:
+    // TAC5212 first sets up the SAI1 master clock + slot 0..3 driving;
+    // then the 6140 joins as a TDM bus participant on slots 4..7. If
+    // the 6140 is not present on this board variant, setupAdc6140()
+    // silently no-ops.
+    setupAdc6140();
 
     // Audio block pools. Sized generously — block starvation in either
     // pool surfaces as cumulative noise floor degradation and tiny
@@ -2868,8 +3014,9 @@ void setup() {
 
     // Push initial mixer state into the audio graph. ch3/4 reserve
     // their slots (no audio path yet); applyChannelFader is a no-op
-    // for those today.
-    for (int ch = 1; ch <= 6; ++ch) applyChannelFader(ch);
+    // for those today. ch7..10 mirror per-channel gain to both adcMixL
+    // and adcMixR (dual-mono XLR sub-bus).
+    for (int ch = 1; ch <= 10; ++ch) applyChannelFader(ch);
     applyMain();
     applyHostvol();
     applySynthBusGain();
@@ -2887,6 +3034,7 @@ void setup() {
     // harmless because no SignalGraphBinding is attached.
     g_dispatcher.setModel(&g_model);
     g_dispatcher.registerCodecPanel(&g_codecPanel);
+    g_dispatcher.registerCodecPanel(&g_adc6140Panel);
 
     // Wire panel "Initialize" action to re-run the typed setup() flow so
     // the user can re-init from the System tab without rebooting the Teensy.
@@ -2995,8 +3143,9 @@ void setup() {
     Serial.println("\nReady!");
     Serial.println("  USB host audio: 24-bit / 48 kHz, F32 in graph");
     Serial.println("  Mixer: USB ch1/ch2 -> mixL/R -> mainAmp -> hostvol -> shelf -> DAC");
+    Serial.println("  XLR ch7..10: ADC6140 -> adcMixL/R -> mixL/R slot 3 (dual-mono)");
     Serial.println("  USB MIDI host: keyboard -> router -> viz sink (/midi/note)");
-    Serial.println("  Codec panel: /codec/tac5212/... over SLIP-OSC on USB CDC");
+    Serial.println("  Codec panels: /codec/tac5212/... + /codec/adc6140/... over SLIP-OSC");
     Serial.println("  Dev surface: projects/t-dsp_web_dev/");
 }
 
