@@ -49,12 +49,11 @@ import { arpPanel } from './ui/arp-panel';
 import { synthBusStrip } from './ui/synth-bus';
 import { bottomStrip } from './ui/bottom-strip';
 import { tuneStubPanel } from './ui/tune-stub';
-import { mountPhoneQr } from './ui/phone-qr';
+import { mountRemotePanel } from './ui/remote-panel';
 
-// Show a "scan to control from your phone" QR when the Electron shell
-// passed a configured remote URL (electron/main.js appends ?remote=…).
-const remoteForQr = new URLSearchParams(location.search).get('remote');
-if (remoteForQr) mountPhoneQr(remoteForQr);
+// In-app Remote control setup + scan-to-control QR. Desktop app only —
+// mounts when the Electron preload bridge (window.tdspCloud) is present.
+mountRemotePanel();
 
 // Channel count — 10 channels matching tdsp::kChannelCount in firmware.
 //   1  USB L         } stereo-linked by default
