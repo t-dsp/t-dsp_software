@@ -1,0 +1,23 @@
+{
+  "name": "t-dsp-cloud-relay",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Prototype cloud relay: authenticated remote control of a T-DSP mixer from a phone, via an outbound-only laptop agent. Railway-deployable.",
+  "author": "t-dsp.com",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "agent": "node agent.mjs",
+    "test:loop": "node test/relay-loop.mjs",
+    "test:agent": "node test/cloud-agent-loop.mjs"
+  },
+  "dependencies": {
+    "ws": "^8.20.0"
+  },
+  "optionalDependencies": {
+    "serialport": "^13.0.0"
+  }
+}

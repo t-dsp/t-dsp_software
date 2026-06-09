@@ -42,6 +42,7 @@
     "files": [
       "electron/**/*",
       "serial-bridge.mjs",
+      "cloud-agent.mjs",
       "dist/**/*",
       "package.json"
     ],
