@@ -1,0 +1,81 @@
+# Builds the t-dsp_web_dev Electron control surface as a single portable
+# .exe and attaches it to a GitHub Release.
+#
+# Trigger: push a tag like `dev-surface-v0.2.0`. The `dev-surface-` prefix
+# scopes this to the control surface so firmware/other tags in this
+# monorepo don't kick off a ~72 MB Electron build. `workflow_dispatch`
+# lets you run it by hand (no release is created in that case).
+#
+# Why Windows + pnpm hoisted: the portable target shells out to makensis,
+# which can't handle pnpm's default nested .pnpm/... paths (>260 chars).
+# projects/t-dsp_web_dev/.npmrc sets node-linker=hoisted to flatten them.
+name: dev-surface-release
+
+on:
+  push:
+    tags:
+      - 'dev-surface-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # required to create the release and upload the asset
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: projects/t-dsp_web_dev
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+          cache-dependency-path: projects/t-dsp_web_dev/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Derive version from tag
+        id: ver
+        shell: pwsh
+        run: |
+          $ref = "${{ github.ref_name }}"
+          if ($ref -like 'dev-surface-v*') {
+            $v = $ref -replace '^dev-surface-v', ''
+          } else {
+            $v = (Get-Content package.json -Raw | ConvertFrom-Json).version
+          }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Building version $v"
+
+      - name: Build UI
+        run: pnpm build
+
+      - name: Package portable exe
+        run: pnpm exec electron-builder --win --config.extraMetadata.version=${{ steps.ver.outputs.version }}
+
+      - name: Upload build artifact (always)
+        uses: actions/upload-artifact@v4
+        with:
+          name: t-dsp-dev-surface-${{ steps.ver.outputs.version }}
+          path: projects/t-dsp_web_dev/release/*.exe
+          if-no-files-found: error
+
+      - name: Publish to GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: projects/t-dsp_web_dev/release/*.exe
+          fail_on_unmatched_files: true
+          generate_release_notes: true

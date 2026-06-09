@@ -27,13 +27,12 @@ cd projects/t-dsp_tac5212_audio_shield_adaptor/tools/web_dev_surface
 pnpm install
 
 pnpm app:dev       # dev — Vite + bridge + window, devtools open
-pnpm app:build     # packaged app in release/win-unpacked/
+pnpm app:build     # single portable .exe in release/
 ```
 
-`app:build` produces `release/win-unpacked/T-DSP Dev Surface.exe` (181 MB)
-alongside its supporting DLLs/paks — the standard Electron distribution
-shape. Double-click to launch; the whole `win-unpacked/` folder is
-self-contained and can be copied anywhere.
+`app:build` produces `release/T-DSP-Dev-Surface-<version>.exe` (~72 MB) —
+**one self-contained file.** Double-click to launch: it unpacks to a temp
+dir and runs, no install, copyable anywhere (USB stick, another machine).
 
 The Electron main process boots the serial bridge in-process and opens a
 window on the Vite dev server (dev) or the packaged `dist/` (prod). The
@@ -44,10 +43,27 @@ Build notes (for future changes):
   ships N-API prebuilts that are ABI-stable across Node and Electron, so the
   native-module rebuild is unnecessary and only runs into Python 3.12+ /
   `node-gyp@9` / missing `distutils` on Windows.
-- `win.target: "dir"` (not `portable` / `nsis`) because `makensis.exe` can't
-  resolve `!include` paths longer than 260 chars, and pnpm's nested
-  `.pnpm/app-builder-lib@.../...` layout blows past that limit. The unpacked
-  directory is the distributable.
+- `win.target: "portable"` builds the single auto-running `.exe`. It shells
+  out to `makensis.exe`, which can't resolve `!include` paths longer than
+  260 chars — pnpm's default nested `.pnpm/app-builder-lib@.../...` layout
+  blows past that. The fix is `.npmrc`'s `node-linker=hoisted`, which
+  flattens `node_modules` (npm-style) so those paths stay short. **Don't
+  remove that `.npmrc` line** or the portable build breaks (this is why the
+  build previously fell back to the unpacked `dir` target).
+
+### Tagged releases (CI)
+
+Push a tag like `dev-surface-v0.2.0` and the
+[`dev-surface-release`](../../.github/workflows/dev-surface-release.yml)
+workflow builds the portable `.exe` on a Windows runner and attaches it to
+a GitHub Release. The `dev-surface-` prefix scopes the build to this surface
+so firmware/other tags don't trigger it. The exe's version is taken from the
+tag. `workflow_dispatch` runs it by hand (artifact only, no release).
+
+```bash
+git tag dev-surface-v0.2.0
+git push origin dev-surface-v0.2.0
+```
 
 ### Browser + bridge (two terminals)
 

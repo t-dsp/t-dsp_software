@@ -5,6 +5,7 @@
   "type": "module",
   "main": "electron/main.js",
   "description": "Chromium-only WebSerial dev surface for the TAC5212 audio shield adaptor",
+  "author": "t-dsp.com",
   "packageManager": "pnpm@9.12.0",
   "scripts": {
     "bridge": "node serial-bridge.mjs",
@@ -46,7 +47,12 @@
     ],
     "npmRebuild": false,
     "win": {
-      "target": "dir"
+      "target": "portable"
+    },
+    "portable": {
+      "artifactName": "T-DSP-Dev-Surface-${version}.${ext}",
+      "requestExecutionLevel": "user",
+      "unpackDirName": "t-dsp-dev-surface"
     }
   }
 }
