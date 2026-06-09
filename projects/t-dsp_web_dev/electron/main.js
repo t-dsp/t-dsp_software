@@ -42,8 +42,7 @@ function loadCloudConfig() {
   return null;
 }
 
-async function startCloudAgent() {
-  const cfg = loadCloudConfig();
+async function startCloudAgent(cfg) {
   if (!cfg) return;
   try {
     const mod = await import(pathToFileURL(path.join(__dirname, '..', 'cloud-agent.mjs')).href);
@@ -53,7 +52,11 @@ async function startCloudAgent() {
   }
 }
 
-function createWindow() {
+// Pass the remote URL to the renderer via a query param (no preload/IPC
+// needed) so the surface can show a "scan to control from your phone" QR.
+// The relay is reached over wss:// by the agent, but the phone opens it
+// over https://, so translate the scheme for the QR.
+function createWindow(remoteUrl) {
   const win = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -64,17 +67,22 @@ function createWindow() {
     },
   });
 
+  const search = remoteUrl ? `remote=${encodeURIComponent(remoteUrl)}` : '';
   if (app.isPackaged) {
-    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));
+    win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'), search ? { search } : undefined);
   } else {
-    win.loadURL('http://localhost:5173');
+    win.loadURL('http://localhost:5173' + (search ? `?${search}` : ''));
     win.webContents.openDevTools({ mode: 'detach' });
   }
 }
 
 app.whenReady().then(() => {
-  createWindow();
-  startCloudAgent();
+  const cfg = loadCloudConfig();
+  const remoteUrl = cfg
+    ? cfg.relayUrl.replace(/^wss:/, 'https:').replace(/^ws:/, 'http:')
+    : null;
+  createWindow(remoteUrl);
+  startCloudAgent(cfg);
 });
 
 app.on('window-all-closed', () => {

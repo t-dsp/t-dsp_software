@@ -17,6 +17,7 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.4",
+    "@types/qrcode-generator": "^1.0.6",
     "@types/w3c-web-serial": "^1.0.6",
     "@types/ws": "^8.18.1",
     "concurrently": "^9.0.0",
@@ -29,6 +30,7 @@
     "wait-on": "^8.0.0"
   },
   "dependencies": {
+    "qrcode-generator": "^2.0.4",
     "serialport": "^13.0.0",
     "solid-js": "^1.9.12",
     "ws": "^8.20.0"
