@@ -30,6 +30,16 @@
 #include "Resampler.h"
 #include <math.h>
 
+// T-DSP: definitions for the large static tables declared in Resampler.h.
+// DMAMEM places them in OCRAM2 (RAM2) instead of DTCM/RAM1, freeing ~190 KB of
+// RAM1 so the async S/PDIF input fits alongside the full synth firmware. These
+// are written (setFilter / setKaiserWindow) before being read, so the lack of
+// .bss zero-init for DMAMEM is fine. Only one Resampler instance exists.
+DMAMEM float  Resampler::filter[MAX_FILTER_SAMPLES];
+DMAMEM double Resampler::kaiserWindowSamples[NO_EXACT_KAISER_SAMPLES];
+DMAMEM double Resampler::tempRes[NO_EXACT_KAISER_SAMPLES-1];
+DMAMEM double Resampler::kaiserWindowXsq[NO_EXACT_KAISER_SAMPLES-1];
+
 Resampler::Resampler(float attenuation, int32_t minHalfFilterLength, int32_t maxHalfFilterLength, StepAdaptionParameters settings): _targetAttenuation(attenuation)
 {
 	_maxHalfFilterLength=max(1, min(MAX_HALF_FILTER_LENGTH, maxHalfFilterLength));

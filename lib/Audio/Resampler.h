@@ -200,10 +200,17 @@ class Resampler {
         void getKaiserExact(double beta);
         void setKaiserWindow(double beta, int32_t noSamples);
         void setFilter(int32_t halfFiltLength,int32_t overSampling, double cutOffFrequ, double kaiserBeta);
-        float filter[MAX_FILTER_SAMPLES];
-        double kaiserWindowSamples[NO_EXACT_KAISER_SAMPLES];
-        double tempRes[NO_EXACT_KAISER_SAMPLES-1];
-        double kaiserWindowXsq[NO_EXACT_KAISER_SAMPLES-1];
+        // T-DSP: these large coefficient / window tables (~190 KB total, mostly
+        // `filter`) are made `static` so their definitions can be placed in
+        // DMAMEM (OCRAM2) instead of DTCM/RAM1 — see Resampler.cpp. This keeps
+        // the full-quality resampler usable alongside the large synth firmware
+        // on the Teensy 4.1. SAFE because only ONE Resampler is ever
+        // instantiated (the async S/PDIF input); `static` would clobber across
+        // concurrent instances, which this project never creates.
+        static float filter[MAX_FILTER_SAMPLES];
+        static double kaiserWindowSamples[NO_EXACT_KAISER_SAMPLES];
+        static double tempRes[NO_EXACT_KAISER_SAMPLES-1];
+        static double kaiserWindowXsq[NO_EXACT_KAISER_SAMPLES-1];
         float _buffer[MAX_NO_CHANNELS][MAX_HALF_FILTER_LENGTH*2];
         float* _endOfBuffer[MAX_NO_CHANNELS];
 
