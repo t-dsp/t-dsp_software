@@ -30,10 +30,10 @@
 #define async_input_spdif3_h_
 #include "Resampler.h"
 #include "Quantizer.h"
-#include <Arduino.h>     // github.com/PaulStoffregen/cores/blob/master/teensy4/Arduino.h
-#include <AudioStream.h> // github.com/PaulStoffregen/cores/blob/master/teensy4/AudioStream.h
-#include <DMAChannel.h>  // github.com/PaulStoffregen/cores/blob/master/teensy4/DMAChannel.h
-#include <arm_math.h>    // github.com/PaulStoffregen/cores/blob/master/teensy4/arm_math.h
+#include "Arduino.h"
+#include "AudioStream.h"
+#include "DMAChannel.h"
+#include <arm_math.h>
 
 //#define DEBUG_SPDIF_IN	//activates debug output
 
@@ -58,15 +58,14 @@ protected:
 	static void isr(void);
 private:
 	void resample(int16_t* data_left, int16_t* data_right, int32_t& block_offset);
-	void monitorResampleBuffer();
-	void configure();
+	void monitorResampleBuffer(bool newConfiguration);
+	bool configure();
 	double getNewValidInputFrequ();
 	void config_spdifIn();
 
 	//accessed in isr ====
 	static volatile int32_t buffer_offset;
 	static int32_t resample_offset;
-    static volatile uint32_t microsLast;
 	//====================
 
 	Resampler _resampler;
