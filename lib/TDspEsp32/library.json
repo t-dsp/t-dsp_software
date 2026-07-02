@@ -1,0 +1,8 @@
+{
+  "name": "TDspEsp32",
+  "version": "0.1.0",
+  "description": "Teensy-side driver for the on-board ESP32-DevKitC: reset/boot-strap control and a host-driven flash bridge (PC esptool talks to the ESP32 through the Teensy over Serial7). Emulates the auto-reset EN capacitor in firmware so download-mode entry is reliable with no button presses. Drop into any T-DSP project to (re)program the ESP32 on demand.",
+  "keywords": ["esp32", "flasher", "esptool", "bridge", "t-dsp"],
+  "frameworks": "arduino",
+  "platforms": "teensy"
+}
