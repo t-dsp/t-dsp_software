@@ -21,6 +21,12 @@
 #include <Audio.h>
 #include <TAC5212.h>
 #include <TDspEsp32.h>
+// Async I2S input: async-resamples the ESP32's free-running 44.1k I2S stream to
+// the Teensy's own 44.1k audio clock, killing the steady scratch from the two
+// unsynchronized crystals. Ported from JayShoe/esp32_T4_bt_music_receiver
+// (alex6679). See lib/TDspAsyncI2S/async_input.h.
+#include "async_input.h"
+#include "input_i2s2_16bit.h"
 
 constexpr int     TAC5212_EN_PIN      = 35;     // shared SHDNZ, active-low
 constexpr uint8_t TAC5212_I2C_ADDRESS = 0x51;
@@ -28,16 +34,18 @@ constexpr uint8_t TAC5212_I2C_ADDRESS = 0x51;
 // Declaration order matters: i2sOut (SAI1 master) is constructed first so it wins
 // update_responsibility — its stable master clock drives the graph's update_all().
 // i2sIn is a SAI2 SLAVE (clocked by the ESP32); it only supplies DMA'd samples.
-// SAI1 master-clock + update driver. AudioOutputI2S alone does not drive
-// update_all() (only an I2S *input* does). Without a stable driver the graph was
-// clocked only by the ESP32's SAI2 (cpuMax=0% until it connected) and the SAI1
-// DAC never reliably clocked -> dead silence. Declaring an AudioInputI2S on SAI1
-// FIRST makes SAI1 run continuously at 44.1k: it owns update_responsibility (its
-// RX DMA ISR drives the graph) and generates MCLK/BCLK/LRCLK for the codec,
-// independent of the ESP32. Its RX data (codec ADC on pin 8) is unused.
-AudioInputI2S          i2sClk;               // SAI1 master clock + update driver
-AudioOutputI2S         i2sOut;               // SAI1 -> TAC5212 DAC
-AudioInputI2S2slave    i2sIn;                // SAI2 slave <- ESP32 I2S (pin 5 data)
+// PROVEN-STEREO path = TDM (as in t-dsp_f32_audio_shield), NOT I2S. In I2S the
+// TAC5212's 2-phase (LRCLK) handling dropped the right channel (slot 1 dead);
+// TDM gives clean per-slot stereo (ch0->slot0->OUT1, ch1->slot1->OUT2).
+// AudioInputTDM (SAI1 TDM) is declared first as the stable clock/update driver
+// (an input drives update_all(); a lone output does not). Stock int16 TDM packs
+// 16 ch x 16-bit, so the codec must be set to WordLen::Bits16 (see setupCodec).
+AudioInputTDM          tdmClk;               // SAI1 TDM clock + update driver
+AudioOutputTDM         tdmOut;               // SAI1 TDM -> TAC5212 DAC (ch0=L, ch1=R)
+// SAI2 slave <- ESP32 I2S (pin 5 data), async-resampled ESP32 rate -> Teensy rate.
+// Params match the proven spike_spdif_alex_dac AsyncAudioInputSPDIF3 (same Resampler):
+// dither=false, noiseshaping=false, attenuation=100dB, half-filter 20..80.
+AsyncAudioInput<AsyncAudioInputI2S2_16bitslave> i2sIn(false, false, 100, 20, 80);
 AudioSynthWaveformSine testTone;             // internal DAC test source
 AudioMixer4            outL, outR;           // switch ESP32 audio vs test tone
 AudioAnalyzePeak       peakIn;              // ESP32 input level
@@ -48,8 +56,8 @@ AudioConnection c_inL_mix (i2sIn,    0, outL, 0);
 AudioConnection c_inR_mix (i2sIn,    1, outR, 0);
 AudioConnection c_toneL   (testTone, 0, outL, 1);
 AudioConnection c_toneR   (testTone, 0, outR, 1);
-AudioConnection c_outL    (outL,     0, i2sOut, 0);   // -> DAC OUT1
-AudioConnection c_outR    (outR,     0, i2sOut, 1);   // -> DAC OUT2
+AudioConnection c_outL    (outL,     0, tdmOut, 0);   // ch0 -> slot0 -> OUT1 (L)
+AudioConnection c_outR    (outR,     0, tdmOut, 1);   // ch1 -> slot1 -> OUT2 (R)
 AudioConnection c_pkIn    (i2sIn,    0, peakIn,  0);
 AudioConnection c_pkOut   (outL,     0, peakOut, 0);
 
@@ -72,6 +80,12 @@ static void hardResetCodecPower() {
 static bool g_codecOk = false;
 static const char *g_codecMsg = "not run";
 
+// Bridge mode: when true, the USB serial is handed to the ESP32 (esptool
+// passthrough + auto-reset) so the ESP32 can be reprogrammed through the Teensy.
+// Set by the 'b' command; cleared by resetting the Teensy. Audio keeps running
+// (the SAI ISR is independent of loop()).
+static bool g_bridge = false;
+
 // Output volume (dB), applied to both DAC channels. -20 dB default = safe level.
 static float g_dvol = -20.0f;
 static void applyVol() {
@@ -89,7 +103,8 @@ FLASHMEM static void setupCodec() {
         Serial.println(r.message ? r.message : "(unknown)"); return; }
 
     tac5212::TAC5212::SerialFormat sf;
-    sf.format = tac5212::TAC5212::Format::I2s;   // match AudioOutputI2S framing
+    sf.format  = tac5212::TAC5212::Format::Tdm;      // proven stereo path (f32 shield)
+    sf.wordLen = tac5212::TAC5212::WordLen::Bits16;  // match stock 16-bit TDM slots
     g_codec.setSerialFormat(sf);
 
     // Board bodge: DIN/DOUT swapped+shorted -> disable codec DOUT so it can't
@@ -144,11 +159,21 @@ void setup() {
 }
 
 void loop() {
+    // Bridge mode: USB <-> ESP32 passthrough for esptool (reflash the ESP32).
+    // Reset the Teensy to leave bridge mode and resume normal audio/commands.
+    if (g_bridge) { esp.bridgeTask(Serial); return; }
+
     // USB debug commands: 'r' = reset the ESP32 into its app (then watch its
     // [esp] boot log to see whether A2DP inits / crashes / brownout-loops).
     if (Serial.available()) {
         int c = Serial.read();
         if (c == 'r') { Serial.println("[cmd] resetting ESP32 -> app"); esp.resetToApp(); }
+        else if (c == 'b') {
+            Serial.println("[cmd] BRIDGE MODE: USB now talks to the ESP32 (esptool). "
+                           "Reset the Teensy to exit.");
+            Serial.flush();
+            g_bridge = true;
+        }
         else if (c == 't') {          // test tone -> BOTH channels
             outL.gain(0, 0.0f); outL.gain(1, 1.0f);
             outR.gain(0, 0.0f); outR.gain(1, 1.0f);
@@ -171,6 +196,30 @@ void loop() {
             applyVol(); Serial.printf("[cmd] vol %.0f dB\n", g_dvol); }
         else if (c == '-') { g_dvol -= 3.0f; if (g_dvol < -60) g_dvol = -60;
             applyVol(); Serial.printf("[cmd] vol %.0f dB\n", g_dvol); }
+        // --- live codec RX-slot debug (chasing the dead right channel) ------
+        else if (c == 'd') {          // dump the actual programmed RX/out regs
+            Serial.printf("[reg] PASI_CFG0(1A)=%02X RX_OFF(26)=%02X "
+                          "RX_CH1(28)=%02X RX_CH2(29)=%02X CH_EN(76)=%02X PWR(78)=%02X\n",
+                          g_codec.readRegister(0, 0x1A), g_codec.readRegister(0, 0x26),
+                          g_codec.readRegister(0, 0x28), g_codec.readRegister(0, 0x29),
+                          g_codec.readRegister(0, 0x76), g_codec.readRegister(0, 0x78));
+        }
+        else if (c >= '0' && c <= '3') {   // OUT2 (RX_CH2) <- slot N; tone on BOTH
+            uint8_t n = (uint8_t)(c - '0');
+            g_codec.setRxChannelSlot(2, n);
+            outL.gain(0, 0.0f); outL.gain(1, 1.0f);  // both slots carry the tone
+            outR.gain(0, 0.0f); outR.gain(1, 1.0f);  // (OUT1<-slot0 = left-ear reference)
+            testTone.amplitude(0.4f);
+            Serial.printf("[cmd] OUT2 <- slot %u ; tone on BOTH -> listen RIGHT ear\n", n);
+        }
+        else if (c == 'o') {          // cycle RX slot offset 0..3, play RIGHT
+            static uint8_t off = 1; off = (uint8_t)((off + 1) & 3);
+            g_codec.setRxSlotOffset(off);
+            outL.gain(0, 0.0f); outL.gain(1, 0.0f);
+            outR.gain(0, 0.0f); outR.gain(1, 1.0f);
+            testTone.amplitude(0.4f);
+            Serial.printf("[cmd] RX slot offset = %u ; RIGHT-only tone\n", off);
+        }
         else if (c == 'a') {          // back to ESP32 audio
             testTone.amplitude(0.0f);
             outL.gain(0, 1.0f); outL.gain(1, 0.0f);
