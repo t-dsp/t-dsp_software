@@ -193,12 +193,26 @@ static void setupBle() {
   Serial.println("[ble] control service up + advertising");
 }
 
+// Onboard LED (GPIO2 on the ESP32-DevKitC). Blinked as a heartbeat in loop() so
+// you can SEE the app is actually running -- independent of the serial mirror
+// (which is unreliable when the ESP32's own USB/CP210x is unpowered) and of BT.
+static constexpr int LED_PIN = 2;
+
 void setup() {
   Serial.begin(115200);
+  pinMode(LED_PIN, OUTPUT);
   Serial.println("T-DSP ESP32: A2DP sink + BLE control, starting...");
 
   // CRITICAL: dual mode so BLE survives A2DP start() (see file header).
   a2dp_sink.set_default_bt_mode(ESP_BT_MODE_BTDM);
+
+  // On boot, actively re-establish the last A2DP connection so a reboot
+  // reconnects with NO manual step. (The stale-bond "connecting... stop" is
+  // avoided because WE initiate the reconnect instead of waiting for the phone.)
+  // The bond can still be wiped on demand -- the 'f' serial command and the BLE
+  // FORGET opcode both call clean_last_connection(), after which there is no
+  // device to auto-reconnect to and the sink is freshly pairable.
+  a2dp_sink.set_auto_reconnect(true);
 
   // Mirror A2DP connect/disconnect out to the BLE status characteristic.
   a2dp_sink.set_on_connection_state_changed(onA2dpConnState);
@@ -243,7 +257,38 @@ void setup() {
 }
 
 void loop() {
-  // A2DP runs in its own FreeRTOS task; BLE runs in the BT task + GATT
-  // callbacks. Nothing to poll here.
-  delay(1000);
+  // Host command interface over UART0. In the bridge-only setup the ESP32's own
+  // USB is unplugged, so the Teensy forwards a byte over Serial7 (mix firmware:
+  // 'P'->'p', 'F'->'f') letting the host drive pairing ON COMMAND without the BLE
+  // app. Also works from the ESP32 USB directly when connected.
+  //   p = enter pairing mode (discoverable + connectable)
+  //   f = forget last device (clear NVS bond) THEN enter pairing mode  <- clean re-pair
+  //   x = disconnect the current A2DP source
+  //   s = print status
+  // Heartbeat: blink the onboard LED ~2 Hz so it's visually obvious the app is
+  // running. If this LED is NOT blinking, the ESP32 is stuck (download mode / reset),
+  // not running the app -- the definitive "is it alive" indicator.
+  static uint32_t lastBlink = 0;
+  if (millis() - lastBlink >= 250) {
+    lastBlink = millis();
+    digitalWrite(LED_PIN, !digitalRead(LED_PIN));
+  }
+
+  while (Serial.available()) {
+    int c = Serial.read();
+    if (c == 'p') {
+      enterPairingMode("serial cmd");
+    } else if (c == 'f') {
+      Serial.println("[cmd] FORGET last device, then pairing mode");
+      a2dp_sink.clean_last_connection();
+      enterPairingMode("forget+serial");
+    } else if (c == 'x') {
+      Serial.println("[cmd] DISCONNECT source");
+      a2dp_sink.disconnect();
+    } else if (c == 's') {
+      pushStatus();
+    }
+  }
+  // A2DP + BLE run in their own FreeRTOS tasks; nothing else to poll.
+  delay(20);
 }

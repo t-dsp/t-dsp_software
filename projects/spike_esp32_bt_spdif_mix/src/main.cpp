@@ -86,6 +86,28 @@ static void hardResetCodecPower() {
     digitalWrite(TAC5212_EN_PIN, HIGH); delay(10);
 }
 
+// I2C bus recovery: if a slave (or the ESP32 sharing SDA/SCL while it brown-out-
+// loops) is holding SDA low, Wire.begin()+transactions can block forever and hang
+// setup() (solid LED, no heartbeat). Before Wire.begin() we bit-bang: pulse SCL up
+// to 9 times to clock the stuck slave past its byte, then issue a STOP. Teensy
+// Wire0 pins: SDA=18, SCL=19. Bounded (no infinite loop) so setup() always proceeds.
+static void i2cBusRecover(uint8_t sdaPin = 18, uint8_t sclPin = 19) {
+    pinMode(sclPin, INPUT_PULLUP);
+    pinMode(sdaPin, INPUT_PULLUP);
+    delayMicroseconds(10);
+    if (digitalRead(sdaPin) == HIGH) return;      // bus already free
+    for (int i = 0; i < 9 && digitalRead(sdaPin) == LOW; ++i) {
+        pinMode(sclPin, OUTPUT);
+        digitalWrite(sclPin, LOW);  delayMicroseconds(5);
+        pinMode(sclPin, INPUT_PULLUP);            // release, let it rise
+        delayMicroseconds(5);
+    }
+    // STOP: SDA low->high while SCL high
+    pinMode(sdaPin, OUTPUT); digitalWrite(sdaPin, LOW); delayMicroseconds(5);
+    pinMode(sclPin, INPUT_PULLUP);                delayMicroseconds(5);
+    pinMode(sdaPin, INPUT_PULLUP);                delayMicroseconds(5);
+}
+
 static bool g_codecOk = false;
 static const char *g_codecMsg = "not run";
 
@@ -138,6 +160,30 @@ static void setMix(float bt, float tone, float spdif) {
     outL.gain(2, spdif); outR.gain(2, spdif);
 }
 
+// Robustly boot the ESP32 into its app over the Teensy strap pins (EN=37, IO0=36).
+// Two board realities force this exact sequence:
+//   * EN and IO0 each have a 0.1uF cap (C31/C32) -> slow edges, so hold EN low LONG.
+//   * When the ESP32's own USB is unplugged its CP210x is DEAD and pulls IO0 toward
+//     download mode. So the Teensy must KEEP DRIVING IO0 HIGH -- through the reset,
+//     through the EN release, and forever after (never hi-Z / esp.release() it) --
+//     or the ESP32 samples IO0 low and drops into ROM download instead of the app.
+static void espBootApp(const char *why) {
+    // Give the ESP32 ONE clean reset-into-app pulse, then get off its strap pins.
+    esp.begin();               // claim EN/IO0 as OUTPUT + open Serial7
+    esp.setBootLow(false);     // IO0 HIGH = "boot the app" strap
+    delay(100);                // settle IO0 high against the 0.1uF cap
+    esp.assertReset(true);     // EN LOW = reset
+    delay(300);                // hold (caps + reset min)
+    esp.assertReset(false);    // EN HIGH = release -> app boots (IO0 high)
+    delay(100);                // let it sample the strap while still driven
+    // CRITICAL (per hardware): RELEASE EN/IO0 to hi-Z during normal operation. The
+    // ESP32's own pull-ups hold EN/IO0 high (runs the app), and nothing fights the
+    // CP210x auto-reset or the BOOT/EN buttons -> clean flashing + clean reset. The
+    // Teensy re-claims these pins only in bridge mode. (release() keeps Serial7 up.)
+    esp.release();
+    Serial.printf("[esp] boot-into-app (%s) done -> EN/IO0 released to hi-Z (ESP32 free-runs)\n", why);
+}
+
 void setup() {
     hardResetCodecPower();
     pinMode(LED_BUILTIN, OUTPUT);
@@ -152,14 +198,44 @@ void setup() {
     Serial.println("MIX: (A) ESP32 A2DP  +  (B) S/PDIF optical loopback tone  -> TAC5212.");
     Serial.println("Connect a TOSLINK cable pin14(OUT)->pin15(IN). Pair 'T-DSP' and play.");
 
-    // Bring up the ESP32: claim EN/IO0 + Serial7, reset it into its A2DP app.
-    esp.begin();
-    esp.resetToApp();
-    Serial.println("ESP32 reset into app (A2DP). Its serial log follows, prefixed [esp]:");
+    // Boot the ESP32 into its A2DP app FIRST -- this is the order that reliably ran
+    // the ESP32 in early bring-up. A clean reset pulse with IO0 high boots the app;
+    // then RELEASE the EN/IO0 straps to hi-Z so the ESP32 runs free on its own
+    // pull-ups (no Teensy push-pull fighting its reset button / CP210x). Give it a
+    // moment to boot and free the shared I2C bus. (Holding it in reset across codec
+    // init instead -- the previous approach -- left it stuck and silent.)
+    Serial.println("[setup] esp boot into app (long reset, IO0 held)..."); Serial.flush();
+    espBootApp("boot");
+    delay(300);              // let the ESP32 boot its app and release the shared I2C bus
 
-    Wire.begin();
-    tdspMuxAutoSelectCodec(TAC5212_I2C_ADDRESS);
-    setupCodec();
+    // Recover a still-wedged bus BEFORE Wire.begin(). Breadcrumbs + flush so the
+    // serial log shows the last step reached if anything still stalls.
+    Serial.println("[setup] i2c bus recover..."); Serial.flush();
+    i2cBusRecover();
+    // GUARANTEE loop() (and thus bridge mode) is always reachable: if SDA is STILL
+    // held low after recovery, the bus is wedged (typically the ESP32 holding it
+    // during a brown-out). Skip the mux/codec init entirely -- those Wire calls
+    // would block forever. Audio graph + USB commands + bridge still run; recover
+    // the codec later with 'i' once the bus is free (e.g. after bridge-flashing the
+    // ESP32, which holds it in reset and releases the bus).
+    pinMode(18 /*SDA0*/, INPUT_PULLUP); delayMicroseconds(20);
+    if (digitalRead(18) == LOW) {
+        g_codecOk = false; g_codecMsg = "i2c wedged - skipped";
+        Serial.println("[setup] !! I2C SDA STILL LOW -> SKIP codec init. "
+                       "Bridge/audio still run; use 'i' after the bus frees.");
+        Serial.flush();
+    } else {
+        Serial.println("[setup] Wire.begin..."); Serial.flush();
+        Wire.begin();
+        Wire.setClock(100000);
+        Serial.println("[setup] mux select..."); Serial.flush();
+        tdspMuxAutoSelectCodec(TAC5212_I2C_ADDRESS);
+        Serial.println("[setup] codec init..."); Serial.flush();
+        setupCodec();
+        Serial.println("[setup] codec init done"); Serial.flush();
+    }
+
+    Serial.println("ESP32 already booting its A2DP app. Its serial log follows, prefixed [esp]:");
 
     AudioMemory(60);                 // two async resamplers + S/PDIF out + TDM + mixers
     setMix(1.0f, 0.0f, 1.0f);        // default: BT + S/PDIF mixed, local tone off
@@ -168,10 +244,11 @@ void setup() {
     spdifTone.frequency(1000.0f);    // the tone we send out the optical port
     spdifTone.amplitude(0.25f);
 
-    applyVol();                       // unmute to the safe default level
+    if (g_codecOk) applyVol();         // unmute (skip if codec/I2C was wedged -> would hang)
 
     Serial.println("running -- cmds: t=DACtone a=BT+SPDIF mix  s=SPDIF-only  m=BT-only");
     Serial.println("                 x=toggle SPDIF tone  r=reset ESP32  b=bridge  +/-=vol  d=dump");
+    Serial.println("                 P=ESP32 pairing mode  F=ESP32 forget bond + pair");
 }
 
 void loop() {
@@ -180,11 +257,23 @@ void loop() {
 
     if (Serial.available()) {
         int c = Serial.read();
-        if (c == 'r') { Serial.println("[cmd] resetting ESP32 -> app"); esp.resetToApp(); }
+        if (c == 'r') { Serial.println("[cmd] resetting ESP32 -> app"); espBootApp("cmd"); }
+        else if (c == 'P') { esp.uart().write('p'); Serial.println("[cmd] -> ESP32: ENTER pairing mode"); }
+        else if (c == 'F') { esp.uart().write('f'); Serial.println("[cmd] -> ESP32: FORGET bond + pairing mode"); }
         else if (c == 'b') {
-            Serial.println("[cmd] BRIDGE MODE: USB now talks to the ESP32 (esptool). "
-                           "Reset the Teensy to exit.");
+            Serial.println("[cmd] BRIDGE MODE: USB <-> ESP32 (esptool @115200). "
+                           "Same USB device -> no re-enumeration. Reset the Teensy to return to audio.");
             Serial.flush();
+            esp.begin();       // re-claim EN/IO0 as OUTPUT so bridgeTask can drive reset
+                               // (they are hi-Z during normal operation, see espBootApp)
+            // RELIABILITY: raise the Serial7 UART ISR ABOVE the audio SAI/SPDIF DMA
+            // ISRs (default prio 128; update_all() runs inside the DMA ISR, see
+            // input_tdm.cpp). Otherwise a DMA ISR delays the UART service, its small
+            // hardware FIFO overflows, and a byte is dropped mid-flash ("No more
+            // data" / "Invalid head of packet"). 64 < 128 so the UART preempts the
+            // audio ISRs and its FIFO is always serviced in time. We reset the Teensy
+            // to leave bridge mode, so there's no need to restore the priority.
+            NVIC_SET_PRIORITY(IRQ_LPUART7, 64);
             g_bridge = true;
         }
         else if (c == 't') {          // local DAC self-test tone only
