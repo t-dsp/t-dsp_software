@@ -168,20 +168,27 @@ static void setMix(float bt, float tone, float spdif) {
 //     through the EN release, and forever after (never hi-Z / esp.release() it) --
 //     or the ESP32 samples IO0 low and drops into ROM download instead of the app.
 static void espBootApp(const char *why) {
-    // Give the ESP32 ONE clean reset-into-app pulse, then get off its strap pins.
-    esp.begin();               // claim EN/IO0 as OUTPUT + open Serial7
-    esp.setBootLow(false);     // IO0 HIGH = "boot the app" strap
-    delay(100);                // settle IO0 high against the 0.1uF cap
-    esp.assertReset(true);     // EN LOW = reset
-    delay(300);                // hold (caps + reset min)
-    esp.assertReset(false);    // EN HIGH = release -> app boots (IO0 high)
-    delay(100);                // let it sample the strap while still driven
-    // CRITICAL (per hardware): RELEASE EN/IO0 to hi-Z during normal operation. The
-    // ESP32's own pull-ups hold EN/IO0 high (runs the app), and nothing fights the
-    // CP210x auto-reset or the BOOT/EN buttons -> clean flashing + clean reset. The
-    // Teensy re-claims these pins only in bridge mode. (release() keeps Serial7 up.)
+    // HARDWARE BUG this works around (see schematic): IO0 has no proper pull-up
+    // (only the ESP32's weak internal ~45k) but carries C32 (0.1uF), so at COLD
+    // power-up IO0 rises ~4.5ms while EN rises ~1ms -> the ESP32 samples IO0 LOW at
+    // the EN edge and cold-boots into ROM DOWNLOAD mode (silent, no "T-DSP"). A reset
+    // at steady state (IO0 already 3.3V) boots the app fine -- hence "reset works,
+    // power-cycle fails". The real fix is a 10k pull-up on IO0; this is the firmware
+    // belt-and-suspenders so it recovers on boot without the resistor.
+    esp.begin();               // claim EN/IO0 (OUTPUT) + open Serial7
+    esp.setBootLow(false);     // drive IO0 HIGH now, and HOLD it through both resets
+    delay(400);                // let the 5V/3V3 rail FULLY settle before resetting
+    for (int i = 0; i < 2; ++i) {      // reset into the app TWICE (insurance)
+        esp.assertReset(true);         // EN LOW
+        delay(150);                    // hold (0.1uF caps + reset min)
+        esp.assertReset(false);        // EN HIGH -> boots app; IO0 is driven HIGH so
+        delay(250);                    // POR latches IO0=1 (app), not download
+    }
+    // Now the ESP32 is running its app -> release EN/IO0 to hi-Z so nothing fights the
+    // CP210x auto-reset / BOOT+EN buttons during flashing. Re-claimed only in bridge
+    // mode. (release() keeps Serial7 up for the [esp] mirror + 'F' forwarding.)
     esp.release();
-    Serial.printf("[esp] boot-into-app (%s) done -> EN/IO0 released to hi-Z (ESP32 free-runs)\n", why);
+    Serial.printf("[esp] boot-into-app (%s): IO0-high, settle 400ms, 2x EN-reset, straps released\n", why);
 }
 
 void setup() {
