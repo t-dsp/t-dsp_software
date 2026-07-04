@@ -58,6 +58,8 @@ class TDspProgrammingKit {
     uint8_t      resetPulses = 2;           // reset-into-app pulses (insurance)
     uint8_t      dlAttempts  = 5;           // download-entry retries (loose-jumper safe)
     uint16_t     dlWindowMs  = 700;         // ROM-response listen window per attempt
+    uint16_t     runBlinkMs  = 700;         // LED toggle period: slow = running
+    uint16_t     flashBlinkMs= 70;          // LED toggle period: fast = flash mode
     const char*  escape      = "@BOOTAPP@"; // host token -> leave flash mode (soft-reboot)
   };
 
@@ -139,8 +141,8 @@ class TDspProgrammingKit {
   // returns true (the host should skip its own work). Otherwise returns false.
   template <class UsbSerial>
   bool service(UsbSerial &host) {
-    if (!flash_) return false;
-    blink();
+    if (!flash_) { blink(cfg_.runBlinkMs); return false; }   // slow heartbeat = running
+    blink(cfg_.flashBlinkMs);                                // fast blink = flash mode
     HardwareSerial &u = *cfg_.esp.uart;
     const char *esc = cfg_.escape;
     while (host.available()) {
@@ -155,8 +157,8 @@ class TDspProgrammingKit {
 
  private:
   void softReboot() { SCB_AIRCR = 0x05FA0004; while (1) {} }   // Teensy self-reset -> setup()
-  void blink() {
-    if ((uint32_t)(millis() - ledT_) >= 70) {
+  void blink(uint16_t periodMs) {
+    if ((uint32_t)(millis() - ledT_) >= periodMs) {
       ledT_ = millis(); ledOn_ = !ledOn_; digitalWrite(cfg_.ledPin, ledOn_);
     }
   }
