@@ -36,6 +36,11 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 
+// Classic-BT bond list (enumerate paired phones) + NVS name storage so the app
+// can show a switchable list of saved sources with real names.
+#include <esp_gap_bt_api.h>
+#include <Preferences.h>
+
 // Discoverable Bluetooth name your phone will pair with (classic A2DP) and the
 // BLE device/advertising name the control app scans for.
 static constexpr char BT_DEVICE_NAME[] = "T-DSP";
@@ -49,6 +54,11 @@ static constexpr char BT_DEVICE_NAME[] = "T-DSP";
 #define TDSP_SVC_UUID  "7a9c0001-4a6e-4b7d-8f1a-2d3c4e5f6a70"
 #define TDSP_CMD_UUID  "7a9c0002-4a6e-4b7d-8f1a-2d3c4e5f6a70"
 #define TDSP_STAT_UUID "7a9c0003-4a6e-4b7d-8f1a-2d3c4e5f6a70"
+// Sources list (READ+NOTIFY): JSON array of paired phones, e.g.
+//   [{"a":"aabbccddeeff","n":"Pixel 7","c":1}]  (a=addr hex, n=name, c=connected)
+// NOTIFY signals "list changed" -> the app RE-READS (the full list can exceed one
+// notification's MTU, but a READ returns the whole value via ATT read-blob).
+#define TDSP_SRC_UUID  "7a9c0004-4a6e-4b7d-8f1a-2d3c4e5f6a70"
 
 // Command opcodes: the first byte of a write to the command characteristic.
 enum : uint8_t {
@@ -56,6 +66,10 @@ enum : uint8_t {
   CMD_END_PAIRING  = 0x02,  // leave pairing mode (non-discoverable)
   CMD_DISCONNECT   = 0x03,  // drop the current A2DP source
   CMD_FORGET       = 0x04,  // forget the last paired device (clears NVS bond)
+  CMD_RECONNECT    = 0x05,  // sink reconnects A2DP to the last paired phone
+  CMD_SET_VOLUME   = 0x10,  // 2nd byte = master volume 0..100 (%); relayed to the Teensy
+  CMD_CONNECT_ADDR = 0x11,  // + 6 bytes BD address: switch A2DP to that paired phone
+  CMD_FORGET_ADDR  = 0x12,  // + 6 bytes BD address: remove that specific bond
 };
 
 BluetoothA2DPSink a2dp_sink;
@@ -65,6 +79,82 @@ BluetoothA2DPSink a2dp_sink;
 static BLECharacteristic *g_statChar = nullptr;
 static volatile bool      g_bleClientConnected = false;
 static bool               g_discoverable = false;  // we track this; the A2DP lib has no getter
+static uint8_t            g_volume = 50;            // master volume 0..100 (%), last set from the app
+
+// Relay the master volume to the Teensy over UART0 as a framed line "@VOL=<n>".
+// The Teensy owns the TAC5212 codec; it parses this line and calls setDvol() on
+// the headphone output. Distinct "@VOL=" prefix so it never collides with logs.
+static void relayVolume() {
+  Serial.printf("@VOL=%u\n", g_volume);
+}
+
+// ---- Paired-source list (multi-device switch) -----------------------------
+static BLECharacteristic *g_srcChar = nullptr;
+static Preferences        g_names;                 // NVS: BD-address(hex) -> friendly name
+static esp_bd_addr_t      g_pendingConnect;        // switch target after a willful disconnect
+static bool               g_hasPendingConnect = false;
+
+// 12-char lowercase hex of a BD address; doubles as the NVS key for its name.
+static void addrHex(const uint8_t *bda, char *out /*>=13*/) {
+  snprintf(out, 13, "%02x%02x%02x%02x%02x%02x",
+           bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
+}
+
+// Remember a phone's friendly name (captured on connect) keyed by its address.
+static void storeName(const uint8_t *bda, const char *name) {
+  if (!name || !*name) return;
+  char key[13];
+  addrHex(bda, key);
+  g_names.begin("btnames", false);
+  g_names.putString(key, name);
+  g_names.end();
+}
+
+// Build the JSON sources array: every bonded phone, its stored name, and whether
+// it is the currently connected one.
+static void buildSources(char *buf, size_t n) {
+  int num = esp_bt_gap_get_bond_device_num();
+  if (num < 0) num = 0;
+  if (num > 8) num = 8;                     // cap for the fixed buffer
+  esp_bd_addr_t list[8];
+  int got = 0;
+  if (num > 0) {
+    int cnt = num;
+    if (esp_bt_gap_get_bond_device_list(&cnt, list) == ESP_OK) got = cnt;
+  }
+  const esp_bd_addr_t *cur =
+      a2dp_sink.is_connected() ? a2dp_sink.get_current_peer_address() : nullptr;
+  g_names.begin("btnames", true);
+  size_t o = 0;
+  o += snprintf(buf + o, n - o, "[");
+  for (int i = 0; i < got && o < n - 80; ++i) {
+    char key[13];
+    addrHex(list[i], key);
+    String nm = g_names.getString(key, "");
+    bool isCur = cur && memcmp(cur, list[i], sizeof(esp_bd_addr_t)) == 0;
+    o += snprintf(buf + o, n - o, "%s{\"a\":\"%s\",\"n\":\"%s\",\"c\":%d}",
+                  i ? "," : "", key, nm.length() ? nm.c_str() : key, isCur ? 1 : 0);
+  }
+  snprintf(buf + o, n - o, "]");
+  g_names.end();
+}
+
+// Refresh the sources characteristic and notify (the app re-reads the full value).
+static void pushSources() {
+  if (!g_srcChar) return;
+  static char buf[640];
+  buildSources(buf, sizeof(buf));
+  g_srcChar->setValue((uint8_t *)buf, strlen(buf));
+  if (g_bleClientConnected) g_srcChar->notify();
+  Serial.printf("[ble] sources %s\n", buf);
+}
+
+// A2DP peer name arrived (AVRCP) -> remember it for the connected address.
+static void onPeerName(char *name) {
+  const esp_bd_addr_t *a = a2dp_sink.get_current_peer_address();
+  if (a) storeName(*a, name);
+  pushSources();
+}
 
 // Build the status JSON into `buf`. Small on purpose so it fits a modest BLE
 // MTU; the app can also READ the characteristic (supports long reads) for the
@@ -73,9 +163,9 @@ static void buildStatus(char *buf, size_t n) {
   bool connected = a2dp_sink.is_connected();
   const char *peer = connected ? a2dp_sink.get_peer_name() : "";
   if (!peer) peer = "";
-  // conn: A2DP source connected?  disc: are we discoverable (pairing mode)?
-  snprintf(buf, n, "{\"conn\":%d,\"disc\":%d,\"peer\":\"%s\"}",
-           connected ? 1 : 0, g_discoverable ? 1 : 0, peer);
+  // conn: A2DP source connected?  disc: discoverable (pairing)?  vol: master 0..100
+  snprintf(buf, n, "{\"conn\":%d,\"disc\":%d,\"vol\":%u,\"peer\":\"%s\"}",
+           connected ? 1 : 0, g_discoverable ? 1 : 0, g_volume, peer);
 }
 
 // Refresh the status characteristic value and notify any subscribed client.
@@ -109,11 +199,20 @@ static void onA2dpConnState(esp_a2d_connection_state_t state, void *) {
   if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
     a2dp_sink.set_discoverability(ESP_BT_NON_DISCOVERABLE);
     g_discoverable = false;
+    const esp_bd_addr_t *a = a2dp_sink.get_current_peer_address();
+    if (a) storeName(*a, a2dp_sink.get_peer_name());  // remember this phone by name
   } else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
-    // dropped or failed -> immediately reopen for (re)pairing
-    enterPairingMode("a2dp disconnected");
+    if (g_hasPendingConnect) {
+      // Deliberate source switch: the old link just closed -> open the new one.
+      g_hasPendingConnect = false;
+      a2dp_sink.connect_to(g_pendingConnect);
+    } else {
+      // dropped or failed -> immediately reopen for (re)pairing
+      enterPairingMode("a2dp disconnected");
+    }
   }
   pushStatus();
+  pushSources();
 }
 
 // ---- BLE GATT callbacks ---------------------------------------------------
@@ -122,6 +221,7 @@ class ServerCallbacks : public BLEServerCallbacks {
     g_bleClientConnected = true;
     Serial.println("[ble] control app connected");
     pushStatus();
+    pushSources();
   }
   void onDisconnect(BLEServer *) override {
     g_bleClientConnected = false;
@@ -153,11 +253,56 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
         Serial.println("[ble] cmd: FORGET last device");
         a2dp_sink.clean_last_connection();
         break;
+      case CMD_RECONNECT: {
+        bool ok = a2dp_sink.reconnect();  // sink -> last paired phone (needs a stored bond)
+        Serial.printf("[ble] cmd: RECONNECT A2DP -> %s\n",
+                      ok ? "attempting" : "no last device (pair first)");
+        break;
+      }
+      case CMD_SET_VOLUME:
+        if (v.size() >= 2) {
+          g_volume = (uint8_t)v[1];
+          if (g_volume > 100) g_volume = 100;
+          Serial.printf("[ble] cmd: SET VOLUME %u%%\n", g_volume);
+          relayVolume();  // -> Teensy -> TAC5212 setDvol()
+        }
+        break;
+      case CMD_CONNECT_ADDR:
+        if (v.size() >= 7) {
+          esp_bd_addr_t addr;
+          for (int i = 0; i < 6; ++i) addr[i] = (uint8_t)v[1 + i];
+          Serial.printf("[ble] cmd: CONNECT %02x%02x%02x%02x%02x%02x\n",
+                        addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+          if (a2dp_sink.is_connected()) {
+            // Switch source: willful disconnect (suppresses auto-reconnect), then
+            // connect the target once the old link closes (see onA2dpConnState).
+            memcpy(g_pendingConnect, addr, sizeof(esp_bd_addr_t));
+            g_hasPendingConnect = true;
+            a2dp_sink.disconnect();
+          } else {
+            a2dp_sink.connect_to(addr);
+          }
+        }
+        break;
+      case CMD_FORGET_ADDR:
+        if (v.size() >= 7) {
+          esp_bd_addr_t addr;
+          for (int i = 0; i < 6; ++i) addr[i] = (uint8_t)v[1 + i];
+          char key[13];
+          addrHex(addr, key);
+          esp_bt_gap_remove_bond_device(addr);
+          g_names.begin("btnames", false);
+          g_names.remove(key);
+          g_names.end();
+          Serial.printf("[ble] cmd: FORGET %s\n", key);
+        }
+        break;
       default:
         Serial.printf("[ble] cmd: unknown opcode 0x%02X\n", op);
         break;
     }
     pushStatus();
+    pushSources();
   }
 };
 
@@ -179,6 +324,13 @@ static void setupBle() {
       TDSP_STAT_UUID,
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
   g_statChar->addDescriptor(new BLE2902());  // CCCD so the app can subscribe
+
+  // Sources list: READ returns the full JSON (ATT read-blob), NOTIFY signals the
+  // app to re-read when the paired-device set or connection changes.
+  g_srcChar = svc->createCharacteristic(
+      TDSP_SRC_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  g_srcChar->addDescriptor(new BLE2902());
 
   svc->start();
 
@@ -216,6 +368,8 @@ void setup() {
 
   // Mirror A2DP connect/disconnect out to the BLE status characteristic.
   a2dp_sink.set_on_connection_state_changed(onA2dpConnState);
+  // Capture each phone's friendly name on connect, for the paired-sources list.
+  a2dp_sink.set_peer_name_callback(onPeerName);
 
   // I2S peripheral: ESP32 is master and transmits the decoded audio.
   // APLL on for accurate 44.1 kHz; 8x128-byte DMA buffers.

@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "main": "index.ts",
   "dependencies": {
+    "@react-native-community/slider": "5.2.0",
     "expo": "~57.0.1",
     "expo-dev-client": "~57.0.4",
     "expo-status-bar": "~57.0.0",

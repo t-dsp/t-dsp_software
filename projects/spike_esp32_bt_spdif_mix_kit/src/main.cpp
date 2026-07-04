@@ -93,6 +93,17 @@ static void applyVol() {
     g_codec.out(2).setDvol(g_dvol);
 }
 
+// Master headphone volume from the phone app: it arrives as an "@VOL=<pct>" line
+// on the ESP32 UART (App -> BLE -> ESP32 -> here). 0..100% -> DAC dB: 0 = mute,
+// 1..100 maps linearly across -60..0 dB. Controls the TAC5212 OUT1/OUT2 (HP jack).
+static void setMasterVolumePct(int pct) {
+    if (pct < 0) pct = 0;
+    if (pct > 100) pct = 100;
+    g_dvol = (pct == 0) ? -128.0f : (-60.0f + 0.60f * (float)pct);
+    if (g_codecOk) applyVol();
+    Serial.printf("[vol] app set %d%% -> %.1f dB\n", pct, g_dvol);
+}
+
 FLASHMEM static void setupCodec() {
     Serial.println("Init TAC5212 (TDM, HP out)...");
     tdspMuxAutoSelectCodec(TAC5212_I2C_ADDRESS);
@@ -226,7 +237,12 @@ void loop() {
         char c = (char)kit.uart().read();
         if (c == '\n' || n >= sizeof(line) - 1) {
             line[n] = 0;
-            if (n) Serial.printf("[esp] %s\n", line);
+            if (n) {
+                // Control lines from the ESP32 (relayed from the BLE app) are acted
+                // on here; everything else is just mirrored to USB with an [esp] tag.
+                if (strncmp(line, "@VOL=", 5) == 0) setMasterVolumePct(atoi(line + 5));
+                else Serial.printf("[esp] %s\n", line);
+            }
             n = 0;
         } else if (c != '\r') {
             line[n++] = c;

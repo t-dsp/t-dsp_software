@@ -16,6 +16,7 @@ import { BleManager, Device, State, Subscription } from 'react-native-ble-plx';
 export const TDSP_SVC_UUID = '7a9c0001-4a6e-4b7d-8f1a-2d3c4e5f6a70';
 export const TDSP_CMD_UUID = '7a9c0002-4a6e-4b7d-8f1a-2d3c4e5f6a70';
 export const TDSP_STAT_UUID = '7a9c0003-4a6e-4b7d-8f1a-2d3c4e5f6a70';
+export const TDSP_SRC_UUID = '7a9c0004-4a6e-4b7d-8f1a-2d3c4e5f6a70';
 
 // Command opcodes — must match the firmware enum.
 export const CMD = {
@@ -23,12 +24,24 @@ export const CMD = {
   END_PAIRING: 0x02, // leave pairing mode
   DISCONNECT: 0x03, // drop the current A2DP source
   FORGET: 0x04, // forget the last paired device
+  RECONNECT: 0x05, // reconnect A2DP to the last paired phone
+  SET_VOLUME: 0x10, // + 1 byte: master volume 0..100 (%)
+  CONNECT_ADDR: 0x11, // + 6 bytes BD address: switch A2DP to that paired phone
+  FORGET_ADDR: 0x12, // + 6 bytes BD address: remove that bond
 } as const;
 
 export type TdspStatus = {
   conn: boolean; // an A2DP source is connected
   disc: boolean; // receiver is discoverable (pairing mode)
+  vol: number; // master headphone volume 0..100 (%)
   peer: string; // connected source name, if any
+};
+
+// One paired phone in the sources list (from the SRC characteristic JSON).
+export type TdspSource = {
+  a: string; // 12-char BD-address hex (stable id)
+  n: string; // friendly name (falls back to the address hex)
+  c: boolean; // is this the currently connected source
 };
 
 export type ConnState = 'idle' | 'scanning' | 'connecting' | 'connected';
@@ -69,9 +82,37 @@ function parseStatus(raw: string | null | undefined): TdspStatus | null {
   if (!raw) return null;
   try {
     const j = JSON.parse(base64ToString(raw));
-    return { conn: !!j.conn, disc: !!j.disc, peer: typeof j.peer === 'string' ? j.peer : '' };
+    return {
+      conn: !!j.conn,
+      disc: !!j.disc,
+      vol: typeof j.vol === 'number' ? j.vol : 50,
+      peer: typeof j.peer === 'string' ? j.peer : '',
+    };
   } catch {
     return null;
+  }
+}
+
+// Address hex ("aabbcc…") -> 6 bytes for the CONNECT_ADDR / FORGET_ADDR payload.
+function hexToBytes6(hex: string): number[] {
+  const out: number[] = [];
+  for (let i = 0; i + 1 < hex.length && out.length < 6; i += 2) {
+    out.push(parseInt(hex.substr(i, 2), 16) & 0xff);
+  }
+  while (out.length < 6) out.push(0);
+  return out;
+}
+
+function parseSources(raw: string | null | undefined): TdspSource[] {
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(base64ToString(raw));
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((s) => s && typeof s.a === 'string')
+      .map((s) => ({ a: s.a as string, n: typeof s.n === 'string' && s.n ? s.n : s.a, c: !!s.c }));
+  } catch {
+    return [];
   }
 }
 
@@ -101,11 +142,20 @@ export function useTdsp() {
   const managerRef = useRef<BleManager | null>(null);
   const deviceRef = useRef<Device | null>(null);
   const statusSubRef = useRef<Subscription | null>(null);
+  const srcSubRef = useRef<Subscription | null>(null);
 
   const [state, setState] = useState<ConnState>('idle');
   const [status, setStatus] = useState<TdspStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [btReady, setBtReady] = useState(false);
+  const [volume, setVolumeState] = useState(50); // slider position 0..100
+  const [sources, setSources] = useState<TdspSource[]>([]); // paired phones
+
+  // Coalescing volume writer: rapid slider drags collapse to the latest value so
+  // we never flood the BLE link; a write always converges to the final position.
+  const pendingVolRef = useRef<number | null>(null);
+  const writingVolRef = useRef(false);
+  const volInitedRef = useRef(false);
 
   // One BleManager for the app lifetime.
   useEffect(() => {
@@ -115,6 +165,7 @@ export function useTdsp() {
     return () => {
       sub.remove();
       statusSubRef.current?.remove();
+      srcSubRef.current?.remove();
       deviceRef.current?.cancelConnection().catch(() => {});
       mgr.destroy();
     };
@@ -123,19 +174,34 @@ export function useTdsp() {
   const disconnect = useCallback(async () => {
     statusSubRef.current?.remove();
     statusSubRef.current = null;
+    srcSubRef.current?.remove();
+    srcSubRef.current = null;
     try {
       await deviceRef.current?.cancelConnection();
     } catch {}
     deviceRef.current = null;
+    volInitedRef.current = false;
     setState('idle');
     setStatus(null);
+    setSources([]);
+  }, []);
+
+  // Read the full sources list (ATT read-blob returns the whole JSON value).
+  const readSources = useCallback(async () => {
+    const device = deviceRef.current;
+    if (!device) return;
+    try {
+      const c = await device.readCharacteristicForService(TDSP_SVC_UUID, TDSP_SRC_UUID);
+      setSources(parseSources(c.value));
+    } catch {}
   }, []);
 
   const subscribeStatus = useCallback(async (device: Device) => {
-    // Bigger MTU so the JSON status fits one notification (Android only).
+    // Bigger MTU so the status JSON fits one notification and the sources list
+    // fits one READ (Android; iOS negotiates/long-reads on its own).
     if (Platform.OS === 'android') {
       try {
-        await device.requestMTU(185);
+        await device.requestMTU(512);
       } catch {}
     }
     try {
@@ -152,7 +218,18 @@ export function useTdsp() {
         if (parsed) setStatus(parsed);
       }
     );
-  }, []);
+    // Sources: read once, then re-read on every "changed" notification (the full
+    // list can exceed a notification's MTU, so we re-READ rather than parse it).
+    await readSources();
+    srcSubRef.current = device.monitorCharacteristicForService(
+      TDSP_SVC_UUID,
+      TDSP_SRC_UUID,
+      (err) => {
+        if (err) return;
+        readSources();
+      }
+    );
+  }, [readSources]);
 
   const scanAndConnect = useCallback(async () => {
     const mgr = managerRef.current;
@@ -179,8 +256,12 @@ export function useTdsp() {
         connected.onDisconnected(() => {
           statusSubRef.current?.remove();
           statusSubRef.current = null;
+          srcSubRef.current?.remove();
+          srcSubRef.current = null;
           deviceRef.current = null;
+          volInitedRef.current = false;
           setStatus(null);
+          setSources([]);
           setState('idle');
         });
         await subscribeStatus(connected);
@@ -216,5 +297,96 @@ export function useTdsp() {
     }
   }, []);
 
-  return { state, status, error, btReady, scanAndConnect, disconnect, sendCommand };
+  // Command carrying a 6-byte BD address (CONNECT_ADDR / FORGET_ADDR).
+  const writeAddrCmd = useCallback(async (opcode: number, addrHex: string) => {
+    const device = deviceRef.current;
+    if (!device) {
+      setError('not connected');
+      return;
+    }
+    try {
+      await device.writeCharacteristicWithResponseForService(
+        TDSP_SVC_UUID,
+        TDSP_CMD_UUID,
+        bytesToBase64([opcode & 0xff, ...hexToBytes6(addrHex)])
+      );
+    } catch (e: any) {
+      setError(e?.message ?? 'write failed');
+    }
+  }, []);
+
+  const connectSource = useCallback(
+    (addrHex: string) => writeAddrCmd(CMD.CONNECT_ADDR, addrHex),
+    [writeAddrCmd]
+  );
+  const forgetSource = useCallback(
+    (addrHex: string) => writeAddrCmd(CMD.FORGET_ADDR, addrHex),
+    [writeAddrCmd]
+  );
+
+  // Drain the pending volume to the device, coalescing bursts into the latest
+  // value AND rate-limiting to ~11 writes/sec. The phone shares one radio between
+  // BLE and A2DP, so a burst of BLE writes while streaming audio makes the music
+  // glitch — pacing the writes keeps the slider responsive without starving A2DP.
+  const pumpVolume = useCallback(async () => {
+    const device = deviceRef.current;
+    if (!device || writingVolRef.current) return;
+    writingVolRef.current = true;
+    try {
+      while (pendingVolRef.current != null) {
+        const v = pendingVolRef.current;
+        pendingVolRef.current = null;
+        try {
+          await device.writeCharacteristicWithoutResponseForService(
+            TDSP_SVC_UUID,
+            TDSP_CMD_UUID,
+            bytesToBase64([CMD.SET_VOLUME, v & 0xff])
+          );
+        } catch (e: any) {
+          setError(e?.message ?? 'volume write failed');
+        }
+        await new Promise((r) => setTimeout(r, 90)); // pace for BLE/A2DP coexistence
+      }
+    } finally {
+      writingVolRef.current = false;
+      if (pendingVolRef.current != null) pumpVolumeRef.current?.(); // catch trailing value
+    }
+  }, []);
+  // Stable self-reference so the finally-block re-pump doesn't need pumpVolume in deps.
+  const pumpVolumeRef = useRef<typeof pumpVolume | null>(null);
+  pumpVolumeRef.current = pumpVolume;
+
+  const setVolume = useCallback(
+    (pct: number) => {
+      const v = Math.max(0, Math.min(100, Math.round(pct)));
+      setVolumeState(v);
+      pendingVolRef.current = v;
+      pumpVolume();
+    },
+    [pumpVolume]
+  );
+
+  // Sync the slider to the device's reported volume once when a connection's first
+  // status arrives; after that the local slider is the source of truth.
+  useEffect(() => {
+    if (status && !volInitedRef.current) {
+      volInitedRef.current = true;
+      setVolumeState(status.vol);
+    }
+  }, [status]);
+
+  return {
+    state,
+    status,
+    error,
+    btReady,
+    volume,
+    sources,
+    scanAndConnect,
+    disconnect,
+    sendCommand,
+    setVolume,
+    connectSource,
+    forgetSource,
+  };
 }
