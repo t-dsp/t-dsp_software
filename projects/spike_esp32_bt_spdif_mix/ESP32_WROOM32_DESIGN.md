@@ -7,7 +7,39 @@ circuit where the **Teensy is the single master** for reset/boot/programming.
 
 **Firmware is UNCHANGED** — a WROOM-32 is the same ESP32. Same GPIOs, same
 `projects/t-dsp_esp32_bt_receiver` A2DP+BLE firmware, same Teensy `TDspEsp32`
-bridge driver. Only the board around the module changes (and gets simpler).
+bridge driver / `lib/TDspProgrammingKit`. Only the board around the module changes.
+
+---
+
+## 0. Respin quick-answer: "can I just swap the DevKitC footprint for a WROOM?"
+
+**Firmware/kit: yes, unchanged** (same ESP32 silicon — same GPIO numbers for EN, GPIO0,
+UART0 = GPIO1/3, I2S = GPIO26/16/25). **Board: NO, it is not a drop-in footprint swap.**
+The DevKitC is a *dev board* with onboard parts a bare module doesn't have. You must:
+
+1. **Fix the power pin (biggest gotcha).** DevKitC pin 19 = **5V** (it has an onboard
+   AMS1117 regulator); WROOM pin 2 = **3V3** (no regulator on the module). **Add a 3.3V
+   LDO** (§2, AP2112K-3.3) and feed the module 3.3V — do NOT wire 5V to the WROOM VDD.
+2. **Add the strap circuit the DevKitC had onboard** (§3): **EN 10k pull-up + ~1µF cap**
+   and **GPIO0 10k pull-up + 0.1µF**. This is the exact thing that was broken on the
+   current board (bad EN trace / no working pull-up → the pin37→EN jumper). Done right,
+   **no jumper is needed and the ESP32 boots on its own at power-up.**
+3. **Re-route, don't just re-footprint.** The WROOM's 38 castellated pads are in
+   *different physical positions* than the DevKitC header — but the **GPIO numbers are
+   identical**, so the logical map to the Teensy (§6) is unchanged; connect the same nets
+   to the WROOM's pads.
+4. **Delete the CP210x + the 2-transistor auto-reset network** (§4, §9). The Teensy
+   programs the ESP32 now (`lib/TDspProgrammingKit`), so they're redundant — and removing
+   them *fixes* the dead-CP210x TX-loading and the EN reset contention we fought.
+5. **Strapping pins at boot:** GPIO12 (MTDI) LOW, GPIO2 low/floating, GPIO15 high (§5).
+
+**Net: a proper WROOM respin doesn't merely "work" — it eliminates the two bugs that cost
+the most time on the current board** (the EN jumper in §3, and the DevKitC's interfering
+reset circuit in §4). One master (Teensy), clean dedicated 3.3V, deterministic boot.
+
+Verified context (2026-07-04): with just the pin37→EN jumper on the *current* DevKitC
+board, the full loop already works (boot/hold/reset, esptool flash via `g`, `@BOOTAPP@`
+soft-reboot, `U` Teensy program mode). The WROOM respin makes the jumper permanent-by-design.
 
 ---
 
