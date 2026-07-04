@@ -114,6 +114,7 @@ static const char *g_codecMsg = "not run";
 // Bridge mode: hand the USB serial to the ESP32 (esptool passthrough) so the
 // ESP32 can be reflashed through the Teensy. Set by 'b'; cleared by Teensy reset.
 static bool g_bridge = false;
+static bool g_flash  = false;   // Teensy-driven download + raw passthrough (no DTR emulation)
 
 // Output volume (dB), applied to both DAC channels. -20 dB default = safe level.
 static float g_dvol = -20.0f;
@@ -179,16 +180,19 @@ static void espBootApp(const char *why) {
     esp.setBootLow(false);     // drive IO0 HIGH now, and HOLD it through both resets
     delay(400);                // let the 5V/3V3 rail FULLY settle before resetting
     for (int i = 0; i < 2; ++i) {      // reset into the app TWICE (insurance)
-        esp.assertReset(true);         // EN LOW
-        delay(150);                    // hold (0.1uF caps + reset min)
-        esp.assertReset(false);        // EN HIGH -> boots app; IO0 is driven HIGH so
+        esp.assertReset(true);         // EN LOW  (pin37 LOW)
+        delay(1000);                   // hold LONG (0.1uF caps + reset min) -- generous
+        esp.assertReset(false);        // EN HIGH (pin37 HIGH) -> boots app; IO0 held HIGH
         delay(250);                    // POR latches IO0=1 (app), not download
     }
-    // Now the ESP32 is running its app -> release EN/IO0 to hi-Z so nothing fights the
-    // CP210x auto-reset / BOOT+EN buttons during flashing. Re-claimed only in bridge
-    // mode. (release() keeps Serial7 up for the [esp] mirror + 'F' forwarding.)
-    esp.release();
-    Serial.printf("[esp] boot-into-app (%s): IO0-high, settle 400ms, 2x EN-reset, straps released\n", why);
+    // HARDWARE BUG #2 (metered 2026-07-03): ESP32_EN has NO working pull-up on this
+    // board -- when the Teensy stops driving pin37, EN collapses to 0V and the ESP32
+    // drops straight back into reset. (pin37 HIGH -> EN 3.3V; released -> EN 0V.) So we
+    // must NOT release: KEEP driving EN HIGH + IO0 HIGH forever to hold the chip out of
+    // reset and in the app. (Bridge mode re-claims the pins for flashing.)
+    esp.setBootLow(false);             // IO0 HIGH, held
+    esp.assertReset(false);            // EN  HIGH, held (pin37 stays OUTPUT HIGH)
+    Serial.printf("[esp] boot-into-app (%s): 2x EN-reset, then EN+IO0 driven HIGH and HELD (no release)\n", why);
 }
 
 void setup() {
@@ -256,17 +260,118 @@ void setup() {
     Serial.println("running -- cmds: t=DACtone a=BT+SPDIF mix  s=SPDIF-only  m=BT-only");
     Serial.println("                 x=toggle SPDIF tone  r=reset ESP32  b=bridge  +/-=vol  d=dump");
     Serial.println("                 P=ESP32 pairing mode  F=ESP32 forget bond + pair");
+
+    // LATE, SETTLED reset -- the automatic "press BOOT for you". At cold power-up the
+    // board's buses/peripherals ramp together and can pull ESP32 boot straps wrong, so
+    // it boots into download mode ("power-cycle fails, manual reset works"). Now that
+    // the Teensy + all its pins/buses are configured and the rail is settled, reset the
+    // ESP32 into its app -- same conditions as the manual BOOT/EN tap that works.
+    Serial.println("[setup] settle 2.5s, then LATE ESP32 reset (auto 'press BOOT')...");
+    Serial.flush();
+    delay(2500);
+    espBootApp("post-setup settle");
+}
+
+// Self-reset the Teensy (returns to setup() -> espBootApp boots the ESP32 into its app).
+// Used to leave flash/bridge mode without a physical power-cycle.
+static void rebootTeensy() { SCB_AIRCR = 0x05FA0004; while (1) {} }
+
+// Fast LED blink to signal "in bridge/flash passthrough" (vs the slow run-mode heartbeat).
+static inline void flashModeBlink() {
+    static uint32_t t = 0; static bool on = false;
+    if ((uint32_t)(millis() - t) >= 70) { t = millis(); on = !on; digitalWriteFast(LED_BUILTIN, on); }
 }
 
 void loop() {
+    // Flash mode: the Teensy already put the ESP32 in download; raw USB<->Serial7
+    // passthrough with NO reset emulation (esptool runs --before no_reset).
+    if (g_flash) {
+        flashModeBlink();                 // rapid heartbeat = in flash passthrough
+        // USB -> ESP32, watching for the soft-reboot escape token "@BOOTAPP@" so we can
+        // leave flash mode + boot the ESP32 into its app WITHOUT a physical power-cycle.
+        static const char MAGIC[] = "@BOOTAPP@";
+        static uint8_t mi = 0;
+        while (Serial.available()) {
+            uint8_t b = (uint8_t)Serial.read();
+            esp.uart().write(b);
+            if (b == (uint8_t)MAGIC[mi]) { if (MAGIC[++mi] == '\0') rebootTeensy(); }
+            else mi = (b == (uint8_t)MAGIC[0]) ? 1 : 0;
+        }
+        while (esp.uart().available()) Serial.write((uint8_t)esp.uart().read());
+        return;
+    }
     // Bridge mode: USB <-> ESP32 passthrough for esptool. Reset the Teensy to exit.
-    if (g_bridge) { esp.bridgeTask(Serial); return; }
+    if (g_bridge) { flashModeBlink(); esp.bridgeTask(Serial); return; }
 
     if (Serial.available()) {
         int c = Serial.read();
         if (c == 'r') { Serial.println("[cmd] resetting ESP32 -> app"); espBootApp("cmd"); }
+        else if (c == 'z') {   // DIAGNOSTIC: drive EN (pin 37) LOW as a plain GPIO, hold 5s
+            Serial.println("[test] pin37(EN) -> OUTPUT, LOW, hold 5s. Meter: Teensy pin37 pad "
+                           "should read ~0V; ESP32 EN ~0V if the trace is good. If the ESP32 is "
+                           "streaming, its audio should DROP the whole 5s if 37->EN works.");
+            Serial.flush();
+            pinMode(37, OUTPUT); digitalWrite(37, LOW);
+            delay(5000);
+            digitalWrite(37, HIGH); delayMicroseconds(50); pinMode(37, INPUT);  // release hi-Z
+            Serial.println("[test] pin37 released (hi-Z).");
+        }
+        else if (c == 'y') {   // DIAGNOSTIC: drive EN (pin 37) HIGH, hold 5s (test INVERTED EN)
+            Serial.println("[test] pin37 -> OUTPUT, HIGH, hold 5s. If EN is INVERTED, the ESP32's "
+                           "EN goes LOW -> audio should CUT OUT the whole 5s, EN meter ~0V.");
+            Serial.flush();
+            pinMode(37, OUTPUT); digitalWrite(37, HIGH);
+            delay(5000);
+            digitalWrite(37, LOW); delayMicroseconds(50); pinMode(37, INPUT);
+            Serial.println("[test] pin37 released (hi-Z).");
+        }
+        else if (c == 'Z') {   // DIAGNOSTIC: same for IO0 (pin 36)
+            Serial.println("[test] pin36(IO0) -> OUTPUT, LOW, hold 5s (meter Teensy pin36 & ESP32 IO0).");
+            Serial.flush();
+            pinMode(36, OUTPUT); digitalWrite(36, LOW);
+            delay(5000);
+            digitalWrite(36, HIGH); delayMicroseconds(50); pinMode(36, INPUT);
+            Serial.println("[test] pin36 released (hi-Z).");
+        }
         else if (c == 'P') { esp.uart().write('p'); Serial.println("[cmd] -> ESP32: ENTER pairing mode"); }
         else if (c == 'F') { esp.uart().write('f'); Serial.println("[cmd] -> ESP32: FORGET bond + pairing mode"); }
+        else if (c == 'U') {   // jump to HalfKay bootloader (Teensy PROGRAM mode) -- no button
+            Serial.println("[cmd] -> Teensy PROGRAM MODE (HalfKay). Upload now: teensy_loader_cli -w (no button).");
+            Serial.flush();
+            delay(50);
+            _reboot_Teensyduino_();        // software jump into the bootloader
+        }
+        else if (c == 'g') {   // Teensy-driven DOWNLOAD entry + raw passthrough (deterministic flash)
+            Serial.println("[cmd] FLASH MODE: Teensy drove ESP32 into DOWNLOAD; raw passthrough now. "
+                           "Run: esptool --before no_reset --after no_reset --baud 115200. "
+                           "Reset the Teensy to return to audio.");
+            Serial.flush();
+            NVIC_SET_PRIORITY(IRQ_LPUART7, 64);   // UART ISR above audio DMA (see 'b')
+            // Teensy drives IO0 low across an EN pulse -> ROM download. IO0 is native on
+            // pin36; EN reaches the chip via the pin37->EN jumper. VERIFY + RETRY: a manual
+            // jumper can be intermittent, so re-pulse until the ROM actually talks. (No
+            // esp.begin() here -- Serial7 is already open; re-init could eat the banner.)
+            bool inDl = false;
+            for (int a = 1; a <= 5 && !inDl; a++) {
+                pinMode(36, OUTPUT); digitalWrite(36, LOW);   // IO0 LOW (select download)
+                pinMode(37, OUTPUT); digitalWrite(37, LOW);   // EN LOW (reset)
+                delay(400);                                   // hold (EN cap C31)
+                while (esp.uart().available()) esp.uart().read();   // flush pre-reset noise
+                digitalWrite(37, HIGH);                       // EN HIGH, IO0 low -> latch download
+                int n = 0; uint32_t t0 = millis();
+                while ((uint32_t)(millis() - t0) < 700) {     // let the ROM banner arrive
+                    while (esp.uart().available()) { esp.uart().read(); n++; }
+                }
+                digitalWrite(36, HIGH);                       // release IO0 (strap already latched)
+                Serial.printf("[g] reset attempt %d: %d ROM bytes\n", a, n);
+                inDl = (n > 4);                               // ROM spoke -> reset landed
+            }
+            Serial.println(inDl ? "[g] ESP32 in DOWNLOAD -- passthrough ON."
+                                : "[g] WARN: no ROM response (check EN jumper) -- passthrough ON anyway.");
+            AudioNoInterrupts();   // halt the heavy audio update so loop()/passthrough
+                                   // isn't CPU-starved (cpuMax was ~213%) -> no byte drops
+            g_flash = true;
+        }
         else if (c == 'b') {
             Serial.println("[cmd] BRIDGE MODE: USB <-> ESP32 (esptool @115200). "
                            "Same USB device -> no re-enumeration. Reset the Teensy to return to audio.");

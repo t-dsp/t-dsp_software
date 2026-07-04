@@ -1,7 +1,50 @@
-# T-DSP Bluetooth bring-up — HANDOFF for the next agent
+# T-DSP Bluetooth bring-up — HANDOFF
+
+## ✅ RESOLVED 2026-07-04 — Teensy-power BT audio works + touch-free flash loop works
+
+Powered **entirely from the Teensy USB** (the hard requirement): boots, advertises
+"T-DSP", pairs, streams to the TAC5212. And the ESP32 + Teensy both reflash with
+**no buttons and no power-cycle.**
+
+### Root cause (found by metering, after a long hunt)
+The `ESP32_EN` net had a **bad on-board connection between Teensy pin 37 and the ESP32
+EN pin** — a cold joint / high-resistance trace. Measured as a ~12k divider: driving
+pin 37 low only pulled EN to **~1.8V**, which is *above* the ESP32 EN reset threshold
+(~1V), so **the Teensy could never reset the ESP32** (proved: pin37 low for 5s never
+interrupted the A2DP stream). The manual EN button works because it shorts EN straight
+to GND. Compounding it, **EN has no working pull-up on this board**, so releasing the
+pin let EN collapse to 0V → ESP32 back in reset. (The "1.8V drift" the user saw is the
+EN cap C31 + this weak/absent pull-up, NOT an inverting gate — inversion was ruled out.)
+- **HW FIX:** jumper **Teensy pin 37 → ESP32 EN** (bypasses the bad trace). Instantly
+  fixed boot, hold, AND reset. Next spin: solid EN trace + 10k EN pull-up (see
+  `ESP32_WROOM32_DESIGN.md`).
+- **FW FIX:** `espBootApp` now **drives EN+IO0 HIGH and HOLDS them** (never `release()`s)
+  so the ESP32 stays out of reset / in its app.
+- **IO0 (pin36 → ESP32 GPIO0) is native/good** — no jumper needed.
+- `flash_id` over the bridge confirms the ESP32: **ESP32-D0WD, MAC c4:dd:57:ca:b4:c8, 4MB.**
+
+### Touch-free flash loop (Teensy COM11 @115200; no BOOT/EN/PROGRAM, no power-cycle)
+- **Flash the ESP32:**
+  1. `g` → Teensy drives the ESP32 into ROM download (self-verifying: re-pulses EN until
+     the ROM banner responds — robust against a loose jumper), halts audio
+     (`AudioNoInterrupts`, else the 213% audio load starves the passthrough → dropped
+     bytes), and becomes a raw USB↔ESP32 passthrough. **LED blinks fast = flash mode.**
+  2. `esptool --chip esp32 --port COM11 --baud 115200 --before no_reset --after no_reset
+     write_flash <offsets> <bins>`
+  3. `@BOOTAPP@` → Teensy soft-reboots (`SCB_AIRCR`) → `espBootApp` boots the ESP32 into
+     the new app → audio back. **No power-cycle.**
+- **Flash the Teensy:** `U` → jumps to HalfKay (program mode) → `teensy_loader_cli -w`
+  (no PROGRAM button; retry on the occasional flaky-USB "error writing").
+- Stale bond after a flash → `F` on the Teensy + "forget T-DSP" on the phone, then pair.
+
+### Why the old bridge (`b`, esptool DTR/RTS auto-reset) was unreliable
+The DTR/RTS reset emulation never landed cleanly; the deterministic `g` path (Teensy
+resets the ESP32 itself, then just pipes bytes) is what made flashing reliable.
+
+---
 
 Self-contained brief for continuing the ESP32 A2DP Bluetooth work on the
-`teensy41_digital_audio_board`. Read this fully before touching hardware.
+`teensy41_digital_audio_board`. Historical bring-up detail below.
 
 ## The system
 `phone --A2DP("T-DSP")--> ESP32-DevKitC (I2S master, 44.1k) --SAI2--> Teensy 4.1
