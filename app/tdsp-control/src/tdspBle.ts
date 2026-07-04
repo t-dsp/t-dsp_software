@@ -388,5 +388,6 @@ export function useTdsp() {
     setVolume,
     connectSource,
     forgetSource,
+    readSources,
   };
 }

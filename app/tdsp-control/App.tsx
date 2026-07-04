@@ -32,9 +32,15 @@ export default function App() {
     setVolume,
     connectSource,
     forgetSource,
+    readSources,
   } = useTdsp();
   const [showSettings, setShowSettings] = useState(false);
   const connected = state === 'connected';
+
+  const openSettings = () => {
+    readSources(); // refresh the paired list when the menu opens
+    setShowSettings(true);
+  };
 
   return (
     <SafeAreaView style={styles.screen}>
@@ -46,7 +52,7 @@ export default function App() {
           <Text style={styles.subtitle}>ESP32 Bluetooth receiver</Text>
         </View>
         {connected && (
-          <Pressable onPress={() => setShowSettings(true)} hitSlop={14} style={styles.iconBtn}>
+          <Pressable onPress={openSettings} hitSlop={14} style={styles.iconBtn}>
             <Text style={styles.icon}>☰</Text>
           </Pressable>
         )}
@@ -78,6 +84,7 @@ export default function App() {
         visible={showSettings}
         onClose={() => setShowSettings(false)}
         sources={sources}
+        discoverable={!!status?.disc}
         onConnectSource={connectSource}
         onForgetSource={forgetSource}
         onCommand={sendCommand}
@@ -94,6 +101,7 @@ function SettingsModal({
   visible,
   onClose,
   sources,
+  discoverable,
   onConnectSource,
   onForgetSource,
   onCommand,
@@ -102,6 +110,7 @@ function SettingsModal({
   visible: boolean;
   onClose: () => void;
   sources: TdspSource[];
+  discoverable: boolean;
   onConnectSource: (addr: string) => void;
   onForgetSource: (addr: string) => void;
   onCommand: (op: number) => void;
@@ -136,8 +145,11 @@ function SettingsModal({
           )}
 
           <Text style={styles.sectionLabel}>Pairing</Text>
-          <SecondaryButton label="Enter Pairing Mode" onPress={() => onCommand(CMD.PAIRING_MODE)} />
-          <SecondaryButton label="End Pairing Mode" onPress={() => onCommand(CMD.END_PAIRING)} />
+          {discoverable && <Text style={styles.pairingHint}>● In pairing mode — discoverable as “T-DSP”</Text>}
+          <SecondaryButton
+            label={discoverable ? 'End Pairing Mode' : 'Enter Pairing Mode'}
+            onPress={() => onCommand(discoverable ? CMD.END_PAIRING : CMD.PAIRING_MODE)}
+          />
 
           <Text style={styles.sectionLabel}>App</Text>
           <SecondaryButton label="Disconnect App" onPress={onDisconnectApp} />
@@ -296,6 +308,7 @@ const styles = StyleSheet.create({
   settingsBody: { paddingBottom: 40 },
   sectionLabel: { color: '#8b949e', fontSize: 13, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 1, marginTop: 18, marginBottom: 10 },
   dim: { color: '#6e7681', fontSize: 14, lineHeight: 20 },
+  pairingHint: { color: '#3fb950', fontSize: 13, fontWeight: '600', marginBottom: 10 },
   srcRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#161b22', borderRadius: 12, borderWidth: 1, borderColor: '#21262d', marginBottom: 10 },
   srcMain: { flex: 1, paddingVertical: 14, paddingHorizontal: 16 },
   srcName: { color: '#e6edf3', fontSize: 16, fontWeight: '600' },
