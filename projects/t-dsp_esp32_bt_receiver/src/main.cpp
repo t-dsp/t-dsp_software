@@ -59,6 +59,12 @@ static constexpr char BT_DEVICE_NAME[] = "T-DSP";
 // NOTIFY signals "list changed" -> the app RE-READS (the full list can exceed one
 // notification's MTU, but a READ returns the whole value via ATT read-blob).
 #define TDSP_SRC_UUID  "7a9c0004-4a6e-4b7d-8f1a-2d3c4e5f6a70"
+// Device catalog (READ+NOTIFY): '|'-delimited name lists the Teensy streams over
+// UART (@SONGS=/@INSTR=) so the app renders its Dexed pickers dynamically — no
+// app rebuild when songs/instruments change. Each value fits one BLE char (<512B;
+// ~50 names max). NOTIFY signals "changed" -> the app RE-READS the full value.
+#define TDSP_SONGS_UUID "7a9c0005-4a6e-4b7d-8f1a-2d3c4e5f6a70"
+#define TDSP_INSTR_UUID "7a9c0006-4a6e-4b7d-8f1a-2d3c4e5f6a70"
 
 // Command opcodes: the first byte of a write to the command characteristic.
 enum : uint8_t {
@@ -100,6 +106,27 @@ static void relayDxVoice(uint8_t idx) { Serial.printf("@DXVOICE=%u\n", idx); }
 
 // ---- Paired-source list (multi-device switch) -----------------------------
 static BLECharacteristic *g_srcChar = nullptr;
+
+// ---- Device catalog (Dexed songs + instruments, streamed from the Teensy) --
+static BLECharacteristic *g_songsChar = nullptr;
+static BLECharacteristic *g_instrChar = nullptr;
+
+// Store a '|'-delimited name list into a catalog characteristic and notify.
+static void setCatalog(BLECharacteristic *ch, const char *list) {
+  if (!ch) return;
+  ch->setValue((uint8_t *)list, strlen(list));
+  if (g_bleClientConnected) ch->notify();
+}
+
+// A complete '@'-framed line arrived from the Teensy over UART. The Teensy sends
+// the catalog on our @GETCAT request; store each list into its characteristic.
+static void handleTeensyLine(const char *line) {
+  if      (strncmp(line, "@SONGS=", 7) == 0) { setCatalog(g_songsChar, line + 7); Serial.println("[cat] songs updated"); }
+  else if (strncmp(line, "@INSTR=", 7) == 0) { setCatalog(g_instrChar, line + 7); Serial.println("[cat] instruments updated"); }
+}
+
+// Ask the Teensy to (re)send its catalog over UART.
+static void requestCatalog() { Serial.print("@GETCAT\n"); }
 static Preferences        g_names;                 // NVS: BD-address(hex) -> friendly name
 static esp_bd_addr_t      g_pendingConnect;        // switch target after a willful disconnect
 static bool               g_hasPendingConnect = false;
@@ -232,6 +259,7 @@ class ServerCallbacks : public BLEServerCallbacks {
     Serial.println("[ble] control app connected");
     pushStatus();
     pushSources();
+    requestCatalog();   // pull fresh song/instrument lists from the Teensy
   }
   void onDisconnect(BLEServer *) override {
     g_bleClientConnected = false;
@@ -358,6 +386,17 @@ static void setupBle() {
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
   g_srcChar->addDescriptor(new BLE2902());
 
+  // Catalog: song + instrument name lists (streamed from the Teensy). READ +
+  // NOTIFY, same "re-read on change" contract as sources.
+  g_songsChar = svc->createCharacteristic(
+      TDSP_SONGS_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  g_songsChar->addDescriptor(new BLE2902());
+  g_instrChar = svc->createCharacteristic(
+      TDSP_INSTR_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  g_instrChar->addDescriptor(new BLE2902());
+
   svc->start();
 
   BLEAdvertising *adv = BLEDevice::getAdvertising();
@@ -433,6 +472,7 @@ void setup() {
 
   // BLE control comes up AFTER A2DP so it attaches to the running stack.
   setupBle();
+  requestCatalog();   // cache the Teensy's song/instrument lists early (also re-fetched on BLE connect)
   Serial.println("Ready: streaming audio + BLE control both live.");
 }
 
@@ -454,8 +494,24 @@ void loop() {
     digitalWrite(LED_PIN, !digitalRead(LED_PIN));
   }
 
+  // Two framings share this UART: bare single-char commands (p/f/x/s from the
+  // Teensy's P/F relay + pairing) and '@'-framed lines (e.g. @SONGS=/@INSTR=
+  // catalog). A '@' starts line mode until '\n'; other bytes are single commands.
+  static char line[600];
+  static size_t ln = 0;
+  static bool inLine = false;
   while (Serial.available()) {
     int c = Serial.read();
+    if (c == '@') { inLine = true; ln = 0; line[ln++] = '@'; continue; }
+    if (inLine) {
+      if (c == '\n' || c == '\r' || ln >= sizeof(line) - 1) {
+        line[ln] = 0; inLine = false;
+        if (ln > 1) handleTeensyLine(line);
+      } else {
+        line[ln++] = (char)c;
+      }
+      continue;
+    }
     if (c == 'p') {
       enterPairingMode("serial cmd");
     } else if (c == 'f') {

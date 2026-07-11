@@ -17,6 +17,10 @@ export const TDSP_SVC_UUID = '7a9c0001-4a6e-4b7d-8f1a-2d3c4e5f6a70';
 export const TDSP_CMD_UUID = '7a9c0002-4a6e-4b7d-8f1a-2d3c4e5f6a70';
 export const TDSP_STAT_UUID = '7a9c0003-4a6e-4b7d-8f1a-2d3c4e5f6a70';
 export const TDSP_SRC_UUID = '7a9c0004-4a6e-4b7d-8f1a-2d3c4e5f6a70';
+// Device catalog: '|'-delimited name lists the firmware serves so the app renders
+// its Dexed pickers dynamically (no app update when songs/instruments change).
+export const TDSP_SONGS_UUID = '7a9c0005-4a6e-4b7d-8f1a-2d3c4e5f6a70';
+export const TDSP_INSTR_UUID = '7a9c0006-4a6e-4b7d-8f1a-2d3c4e5f6a70';
 
 // Command opcodes — must match the firmware enum.
 export const CMD = {
@@ -181,6 +185,8 @@ export function useTdsp() {
   const deviceRef = useRef<Device | null>(null);
   const statusSubRef = useRef<Subscription | null>(null);
   const srcSubRef = useRef<Subscription | null>(null);
+  const songsSubRef = useRef<Subscription | null>(null);
+  const instrSubRef = useRef<Subscription | null>(null);
 
   const [state, setState] = useState<ConnState>('idle');
   const [status, setStatus] = useState<TdspStatus | null>(null);
@@ -188,6 +194,8 @@ export function useTdsp() {
   const [btReady, setBtReady] = useState(false);
   const [volume, setVolumeState] = useState(50); // slider position 0..100
   const [sources, setSources] = useState<TdspSource[]>([]); // paired phones
+  const [catSongs, setCatSongs] = useState<string[]>([]); // songs fetched from device
+  const [catInstruments, setCatInstruments] = useState<string[]>([]); // instruments fetched
 
   // Coalescing volume writer: rapid slider drags collapse to the latest value so
   // we never flood the BLE link; a write always converges to the final position.
@@ -204,6 +212,8 @@ export function useTdsp() {
       sub.remove();
       statusSubRef.current?.remove();
       srcSubRef.current?.remove();
+      songsSubRef.current?.remove();
+      instrSubRef.current?.remove();
       deviceRef.current?.cancelConnection().catch(() => {});
       mgr.destroy();
     };
@@ -214,6 +224,10 @@ export function useTdsp() {
     statusSubRef.current = null;
     srcSubRef.current?.remove();
     srcSubRef.current = null;
+    songsSubRef.current?.remove();
+    songsSubRef.current = null;
+    instrSubRef.current?.remove();
+    instrSubRef.current = null;
     try {
       await deviceRef.current?.cancelConnection();
     } catch {}
@@ -231,6 +245,27 @@ export function useTdsp() {
     try {
       const c = await device.readCharacteristicForService(TDSP_SVC_UUID, TDSP_SRC_UUID);
       setSources(parseSources(c.value));
+    } catch {}
+  }, []);
+
+  // Read the device catalog (song + instrument name lists). Each is a single
+  // '|'-delimited value; empty is left untouched so the UI keeps its fallback.
+  const readCatalog = useCallback(async () => {
+    const device = deviceRef.current;
+    if (!device) return;
+    const parseList = (v: string | null | undefined): string[] => {
+      const s = v ? base64ToString(v) : '';
+      return s ? s.split('|').filter((x) => x.length > 0) : [];
+    };
+    try {
+      const c = await device.readCharacteristicForService(TDSP_SVC_UUID, TDSP_SONGS_UUID);
+      const list = parseList(c.value);
+      if (list.length) setCatSongs(list);
+    } catch {}
+    try {
+      const c = await device.readCharacteristicForService(TDSP_SVC_UUID, TDSP_INSTR_UUID);
+      const list = parseList(c.value);
+      if (list.length) setCatInstruments(list);
     } catch {}
   }, []);
 
@@ -267,7 +302,25 @@ export function useTdsp() {
         readSources();
       }
     );
-  }, [readSources]);
+    // Catalog (Dexed songs + instruments): read once, re-read on "changed" notify.
+    // The ESP32 requests fresh lists from the Teensy on connect, so a notify fires
+    // shortly after we subscribe.
+    await readCatalog();
+    songsSubRef.current = device.monitorCharacteristicForService(
+      TDSP_SVC_UUID,
+      TDSP_SONGS_UUID,
+      (err) => {
+        if (!err) readCatalog();
+      }
+    );
+    instrSubRef.current = device.monitorCharacteristicForService(
+      TDSP_SVC_UUID,
+      TDSP_INSTR_UUID,
+      (err) => {
+        if (!err) readCatalog();
+      }
+    );
+  }, [readSources, readCatalog]);
 
   const scanAndConnect = useCallback(async () => {
     const mgr = managerRef.current;
@@ -296,6 +349,10 @@ export function useTdsp() {
           statusSubRef.current = null;
           srcSubRef.current?.remove();
           srcSubRef.current = null;
+          songsSubRef.current?.remove();
+          songsSubRef.current = null;
+          instrSubRef.current?.remove();
+          instrSubRef.current = null;
           deviceRef.current = null;
           volInitedRef.current = false;
           setStatus(null);
@@ -446,6 +503,10 @@ export function useTdsp() {
     btReady,
     volume,
     sources,
+    // Dexed catalog — fetched from the device, falling back to the built-in lists
+    // if the firmware is older / hasn't reported yet.
+    songs: catSongs.length ? catSongs : (DX_SONGS as unknown as string[]),
+    instruments: catInstruments.length ? catInstruments : (DX_INSTRUMENTS as unknown as string[]),
     scanAndConnect,
     disconnect,
     sendCommand,

@@ -264,6 +264,20 @@ static void songTick() {
     }
 }
 
+// Stream the device catalog (song + instrument names, '|'-delimited) to the ESP32
+// over the UART link. The ESP32 serves it on BLE so the app renders its pickers
+// from whatever the device reports — adding a song/instrument is then a firmware
+// change only, no app update. Sent when the ESP32 asks (@GETCAT, on BLE connect).
+static void sendCatalog() {
+    kit.uart().print("@SONGS=");
+    for (int i = 0; i < kNumSongs; ++i) { if (i) kit.uart().print('|'); kit.uart().print(kSongs[i].name); }
+    kit.uart().print('\n');
+    kit.uart().print("@INSTR=");
+    for (int i = 0; i < kNumInstruments; ++i) { if (i) kit.uart().print('|'); kit.uart().print(kInstruments[i].name); }
+    kit.uart().print('\n');
+    Serial.println("[cat] catalog sent to ESP32");
+}
+
 // --- MIDI IN (Serial1 DIN) -> Dexed -----------------------------------------
 static void onNoteOn(byte, byte note, byte vel) {
     if (vel == 0) { g_dexed.keyup(note); return; }
@@ -410,6 +424,7 @@ void loop() {
                     if (strcmp(line + 6, "stop") == 0) songStop();
                     else songStart(atoi(line + 6));   // @SONG=<song index>
                 }
+                else if (strcmp(line, "@GETCAT") == 0) sendCatalog();  // ESP32 wants the catalog
                 else Serial.printf("[esp] %s\n", line);
             }
             n = 0;

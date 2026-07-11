@@ -16,7 +16,7 @@ import {
   Text,
   View,
 } from 'react-native';
-import { CMD, ConnState, DX_INSTRUMENTS, DX_SONGS, TdspSource, useTdsp } from './src/tdspBle';
+import { CMD, ConnState, TdspSource, useTdsp } from './src/tdspBle';
 
 export default function App() {
   const {
@@ -26,6 +26,8 @@ export default function App() {
     btReady,
     volume,
     sources,
+    songs,
+    instruments,
     scanAndConnect,
     disconnect,
     sendCommand,
@@ -94,10 +96,13 @@ export default function App() {
         onConnectSource={connectSource}
         onForgetSource={forgetSource}
         onCommand={sendCommand}
+        audioConnected={!!status?.conn}
         onDisconnectApp={() => {
           setShowSettings(false);
           disconnect();
         }}
+        songs={songs}
+        instruments={instruments}
         onPlaySong={playSong}
         onStopSong={stopSong}
         dxVoice={dxVoice}
@@ -122,7 +127,10 @@ function SettingsModal({
   onConnectSource,
   onForgetSource,
   onCommand,
+  audioConnected,
   onDisconnectApp,
+  songs,
+  instruments,
   onPlaySong,
   onStopSong,
   dxVoice,
@@ -137,7 +145,10 @@ function SettingsModal({
   onConnectSource: (addr: string) => void;
   onForgetSource: (addr: string) => void;
   onCommand: (op: number) => void;
+  audioConnected: boolean;
   onDisconnectApp: () => void;
+  songs: string[];
+  instruments: string[];
   onPlaySong: (index: number) => void;
   onStopSong: () => void;
   dxVoice: number;
@@ -183,6 +194,16 @@ function SettingsModal({
 
           {pane === 'bluetooth' && (
             <>
+              <Text style={styles.sectionLabel}>Bluetooth Audio</Text>
+              <Text style={styles.dim}>
+                {audioConnected ? 'A source is connected and streaming.' : 'No source connected.'}
+              </Text>
+              <View style={{ height: 10 }} />
+              <SecondaryButton
+                label={audioConnected ? 'Disconnect Bluetooth Audio' : 'Reconnect Last Source'}
+                onPress={() => onCommand(audioConnected ? CMD.DISCONNECT : CMD.RECONNECT)}
+              />
+
               <Text style={styles.sectionLabel}>Paired Sources</Text>
               {sources.length === 0 ? (
                 <Text style={styles.dim}>
@@ -215,18 +236,13 @@ function SettingsModal({
               <Text style={styles.dim}>6-op FM synth, played by the MIDI IN port and the songs below.</Text>
 
               <Text style={styles.sectionLabel}>Song</Text>
-              <Dropdown label="Song" options={DX_SONGS as unknown as string[]} value={song} onSelect={onSelectSong} />
+              <Dropdown label="Song" options={songs} value={song} onSelect={onSelectSong} />
               <View style={{ height: 8 }} />
-              <PrimaryButton label={`▶  Play ${DX_SONGS[song]}`} onPress={() => onPlaySong(song)} />
+              <PrimaryButton label={`▶  Play ${songs[song] ?? 'Song'}`} onPress={() => onPlaySong(song)} />
               <SecondaryButton label="Stop" onPress={onStopSong} />
 
               <Text style={styles.sectionLabel}>Instrument</Text>
-              <Dropdown
-                label="Instrument"
-                options={DX_INSTRUMENTS as unknown as string[]}
-                value={dxVoice}
-                onSelect={onSelectVoice}
-              />
+              <Dropdown label="Instrument" options={instruments} value={dxVoice} onSelect={onSelectVoice} />
             </>
           )}
         </ScrollView>
