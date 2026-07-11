@@ -20,6 +20,7 @@
 #include <TDspProgrammingKit.h>
 #include <MIDI.h>
 #include <synth_dexed.h>
+#include <SD.h>
 #include "async_input.h"
 #include "input_i2s2_16bit.h"
 #include "DexedVoiceBank.h"
@@ -27,6 +28,7 @@
 #include "moonlight_mid.h"
 #include "billie_jean_mid.h"
 #include "bohemian_mid.h"
+#include "sd_midi.h"   // runtime .mid parser: add songs by copying files to SD /songs
 
 constexpr int     TAC5212_EN_PIN      = 35;     // shared SHDNZ, active-low
 constexpr uint8_t TAC5212_I2C_ADDRESS = 0x51;
@@ -213,31 +215,99 @@ static void setDexedInstrument(int idx) {
 // stream. Keep in sync with DX_SONGS[] in the app (tdspBle.ts). The player is
 // non-blocking (ticked every loop()) so BT audio, the ESP32 relay, and app
 // control keep running and the app can stop/switch it mid-song.
-struct Song { const char *name; const SongEv *ev; uint32_t count; };
-static const Song kSongs[] = {
+// Built-in songs baked into flash (always available, even with no SD card).
+struct BuiltinSong { const char *name; const SongEv *ev; uint32_t count; };
+static const BuiltinSong kBuiltinSongs[] = {
     {"William Tell Overture",      kWilliamTellSong, sizeof(kWilliamTellSong) / sizeof(SongEv)},
     {"Moonlight Sonata (3rd Mvt)", kMoonlightSong,   sizeof(kMoonlightSong)   / sizeof(SongEv)},
     {"Billie Jean",                kBillieJeanSong,  sizeof(kBillieJeanSong)  / sizeof(SongEv)},
     {"Bohemian Rhapsody",          kBohemianSong,    sizeof(kBohemianSong)    / sizeof(SongEv)},
 };
-static const int kNumSongs = sizeof(kSongs) / sizeof(kSongs[0]);
+static const int kNumBuiltin = sizeof(kBuiltinSongs) / sizeof(kBuiltinSongs[0]);
+
+// Unified runtime song list: built-ins first, then /songs/*.mid off the SD card.
+// SD songs are parsed on play into g_sdBuf. Adding a song = drop a .mid on the
+// card; it appears in the catalog (and the app) with no firmware rebuild.
+struct SongRef { char name[40]; const SongEv *ev; uint32_t count; char path[80]; bool sd; };
+static SongRef g_songs[48];
+static int     g_numSongs = 0;
+static bool    g_sdReady  = false;
+
+static const int MAX_SD_EVENTS = 24000;      // longest parseable SD song
+DMAMEM static SongEv g_sdBuf[MAX_SD_EVENTS]; // ~96KB in OCRAM (off the DTCM budget)
+
+static bool endsWithMid(const char *s) {
+    size_t n = strlen(s);
+    return n > 4 && strcasecmp(s + n - 4, ".mid") == 0;
+}
+static bool songNameExists(const char *name) {   // case-insensitive, for de-dup
+    for (int i = 0; i < g_numSongs; ++i)
+        if (strcasecmp(g_songs[i].name, name) == 0) return true;
+    return false;
+}
+static void buildSongList() {
+    g_numSongs = 0;
+    for (int i = 0; i < kNumBuiltin && g_numSongs < (int)(sizeof(g_songs)/sizeof(g_songs[0])); ++i) {
+        SongRef &r = g_songs[g_numSongs++];
+        strncpy(r.name, kBuiltinSongs[i].name, sizeof(r.name) - 1); r.name[sizeof(r.name) - 1] = 0;
+        r.ev = kBuiltinSongs[i].ev; r.count = kBuiltinSongs[i].count; r.sd = false; r.path[0] = 0;
+    }
+    if (!g_sdReady) return;
+    File dir = SD.open("/songs");
+    if (!dir || !dir.isDirectory()) { if (dir) dir.close(); Serial.println("[sd] no /songs dir"); return; }
+    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+        const char *nm = f.name();
+        if (!f.isDirectory() && nm && endsWithMid(nm) &&
+            g_numSongs < (int)(sizeof(g_songs)/sizeof(g_songs[0]))) {
+            char disp[40];
+            strncpy(disp, nm, sizeof(disp) - 1); disp[sizeof(disp) - 1] = 0;
+            size_t ln = strlen(disp); if (ln > 4) disp[ln - 4] = 0;       // strip ".mid"
+            // Skip if a built-in (or earlier SD file) already provides this name, so
+            // the built-in demo set stays unique and a device with no card still
+            // shows a clean list.
+            if (!songNameExists(disp)) {
+                SongRef &r = g_songs[g_numSongs++];
+                snprintf(r.path, sizeof(r.path), "/songs/%s", nm);
+                strncpy(r.name, disp, sizeof(r.name) - 1); r.name[sizeof(r.name) - 1] = 0;
+                r.ev = nullptr; r.count = 0; r.sd = true;
+            }
+        }
+        f.close();
+    }
+    dir.close();
+    Serial.printf("[sd] songs: %d total (%d built-in + %d SD)\n",
+                  g_numSongs, kNumBuiltin, g_numSongs - kNumBuiltin);
+}
 
 static bool        g_songOn   = false;
 static int         g_songSel  = 0;   // selected / currently-playing song index
 static uint32_t    g_songIdx  = 0;
 static elapsedMillis g_songClock;
 static uint32_t    g_songWait = 0;
+static const SongEv *g_curEv    = nullptr;   // active song event stream
+static uint32_t      g_curCount = 0;
 
 static void songStart(int idx) {
+    if (g_numSongs == 0) return;
     if (idx < 0) idx = 0;
-    if (idx >= kNumSongs) idx = kNumSongs - 1;
-    g_songSel  = idx;
+    if (idx >= g_numSongs) idx = g_numSongs - 1;
+    g_songSel = idx;
+    SongRef &r = g_songs[idx];
+    if (r.sd) {
+        int n = sdmidi::loadFile(r.path, g_sdBuf, MAX_SD_EVENTS);   // parse from SD (main loop)
+        if (n <= 0) { Serial.printf("[song] SD load FAILED: %s\n", r.path); return; }
+        g_curEv = g_sdBuf; g_curCount = (uint32_t)n;
+        Serial.printf("[song] %s (SD, %d events) -> Dexed (start)\n", r.name, n);
+    } else {
+        g_curEv = r.ev; g_curCount = r.count;
+        Serial.printf("[song] %s -> Dexed (start)\n", r.name);
+    }
+    if (g_curCount == 0) return;
     g_dexed.panic();
     g_songIdx  = 0;
-    g_songWait = kSongs[idx].ev[0].dms;
+    g_songWait = g_curEv[0].dms;
     g_songClock = 0;
     g_songOn   = true;
-    Serial.printf("[song] %s -> Dexed (start)\n", kSongs[idx].name);
 }
 static void songStop() {
     if (!g_songOn) return;
@@ -247,8 +317,8 @@ static void songStop() {
 }
 static void songTick() {
     if (!g_songOn) return;
-    const SongEv *ev = kSongs[g_songSel].ev;
-    const uint32_t n = kSongs[g_songSel].count;
+    const SongEv *ev = g_curEv;
+    const uint32_t n = g_curCount;
     while (g_songOn && g_songClock >= g_songWait) {
         g_songClock -= g_songWait;
         const SongEv &e = ev[g_songIdx];
@@ -270,7 +340,7 @@ static void songTick() {
 // change only, no app update. Sent when the ESP32 asks (@GETCAT, on BLE connect).
 static void sendCatalog() {
     kit.uart().print("@SONGS=");
-    for (int i = 0; i < kNumSongs; ++i) { if (i) kit.uart().print('|'); kit.uart().print(kSongs[i].name); }
+    for (int i = 0; i < g_numSongs; ++i) { if (i) kit.uart().print('|'); kit.uart().print(g_songs[i].name); }
     kit.uart().print('\n');
     kit.uart().print("@INSTR=");
     for (int i = 0; i < kNumInstruments; ++i) { if (i) kit.uart().print('|'); kit.uart().print(kInstruments[i].name); }
@@ -330,6 +400,14 @@ void setup() {
         setupCodec();
         Serial.println("[setup] codec init done"); Serial.flush();
     }
+
+    // SD card (Teensy 4.1 built-in slot): scan /songs/*.mid so songs can be added
+    // by copying files to the card. Falls back to the built-in songs if no card.
+#if TDSP_HAS_SDCARD
+    g_sdReady = SD.begin(BUILTIN_SDCARD);
+    Serial.printf("[sd] card %s\n", g_sdReady ? "ready" : "not present");
+#endif
+    buildSongList();
 
     AudioMemory(60);
     setMix(1.0f, 0.0f, 1.0f);
@@ -402,8 +480,8 @@ void loop() {
                                  Serial.printf("[cmd] codec=%s (%s), vol %.0f dB\n",
                                                g_codecOk ? "OK" : "FAIL", g_codecMsg, g_dvol); }
             else if (c == 'W') { if (g_songOn) songStop(); else songStart(g_songSel); }  // play/stop
-            else if (c == 'S') { g_songSel = (g_songSel + 1) % kNumSongs;                 // pick song
-                                 Serial.printf("[song] selected: %s\n", kSongs[g_songSel].name); }
+            else if (c == 'S') { if (g_numSongs) g_songSel = (g_songSel + 1) % g_numSongs;  // pick song
+                                 Serial.printf("[song] selected: %s\n", g_songs[g_songSel].name); }
             else if (c == 'V') { setDexedInstrument((g_dxInstrument + 1) % kNumInstruments); }
         }
     }
