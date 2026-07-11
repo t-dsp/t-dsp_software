@@ -16,7 +16,7 @@ import {
   Text,
   View,
 } from 'react-native';
-import { CMD, ConnState, DX_INSTRUMENTS, TdspSource, useTdsp } from './src/tdspBle';
+import { CMD, ConnState, DX_INSTRUMENTS, DX_SONGS, TdspSource, useTdsp } from './src/tdspBle';
 
 export default function App() {
   const {
@@ -38,8 +38,9 @@ export default function App() {
     setDxVoice,
   } = useTdsp();
   const [showSettings, setShowSettings] = useState(false);
-  // Dexed instrument index — tracked locally (the firmware has no readback yet).
+  // Dexed instrument + selected song — tracked locally (no firmware readback yet).
   const [dxVoice, setDxVoiceState] = useState(0);
+  const [song, setSong] = useState(0);
   const connected = state === 'connected';
 
   const openSettings = () => {
@@ -104,6 +105,8 @@ export default function App() {
           setDxVoiceState(i);
           setDxVoice(i);
         }}
+        song={song}
+        onSelectSong={setSong}
       />
     </SafeAreaView>
   );
@@ -124,6 +127,8 @@ function SettingsModal({
   onStopSong,
   dxVoice,
   onSelectVoice,
+  song,
+  onSelectSong,
 }: {
   visible: boolean;
   onClose: () => void;
@@ -133,10 +138,12 @@ function SettingsModal({
   onForgetSource: (addr: string) => void;
   onCommand: (op: number) => void;
   onDisconnectApp: () => void;
-  onPlaySong: () => void;
+  onPlaySong: (index: number) => void;
   onStopSong: () => void;
   dxVoice: number;
   onSelectVoice: (index: number) => void;
+  song: number;
+  onSelectSong: (index: number) => void;
 }) {
   const [pane, setPane] = useState<SettingsPane>('menu');
 
@@ -205,20 +212,21 @@ function SettingsModal({
           {pane === 'midi' && (
             <>
               <Text style={styles.sectionLabel}>Dexed</Text>
-              <Text style={styles.dim}>6-op FM synth, played by the MIDI IN port.</Text>
-              <View style={{ height: 12 }} />
-              <PrimaryButton label="▶  Play William Tell Overture" onPress={onPlaySong} />
+              <Text style={styles.dim}>6-op FM synth, played by the MIDI IN port and the songs below.</Text>
+
+              <Text style={styles.sectionLabel}>Song</Text>
+              <Dropdown label="Song" options={DX_SONGS as unknown as string[]} value={song} onSelect={onSelectSong} />
+              <View style={{ height: 8 }} />
+              <PrimaryButton label={`▶  Play ${DX_SONGS[song]}`} onPress={() => onPlaySong(song)} />
               <SecondaryButton label="Stop" onPress={onStopSong} />
 
               <Text style={styles.sectionLabel}>Instrument</Text>
-              {DX_INSTRUMENTS.map((name, i) => (
-                <InstrumentRow
-                  key={name}
-                  name={name}
-                  selected={i === dxVoice}
-                  onPress={() => onSelectVoice(i)}
-                />
-              ))}
+              <Dropdown
+                label="Instrument"
+                options={DX_INSTRUMENTS as unknown as string[]}
+                value={dxVoice}
+                onSelect={onSelectVoice}
+              />
             </>
           )}
         </ScrollView>
@@ -236,6 +244,45 @@ function MenuRow({ label, detail, onPress }: { label: string; detail: string; on
       </View>
       <Text style={styles.menuChevron}>›</Text>
     </Pressable>
+  );
+}
+
+// Collapsible dropdown: a header row showing the current value that expands the
+// option list on tap and collapses again on select (pure JS, no native picker).
+function Dropdown({
+  label,
+  options,
+  value,
+  onSelect,
+}: {
+  label: string;
+  options: string[];
+  value: number;
+  onSelect: (index: number) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <View>
+      <Pressable style={({ pressed }) => [styles.menuRow, pressed && styles.btnPressed]} onPress={() => setOpen((o) => !o)}>
+        <View style={{ flex: 1 }}>
+          <Text style={styles.menuDetail}>{label}</Text>
+          <Text style={styles.menuLabel}>{options[value] ?? '—'}</Text>
+        </View>
+        <Text style={styles.menuChevron}>{open ? '▾' : '▸'}</Text>
+      </Pressable>
+      {open &&
+        options.map((opt, i) => (
+          <InstrumentRow
+            key={opt}
+            name={opt}
+            selected={i === value}
+            onPress={() => {
+              onSelect(i);
+              setOpen(false);
+            }}
+          />
+        ))}
+    </View>
   );
 }
 

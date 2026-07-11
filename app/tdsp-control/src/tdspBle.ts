@@ -33,11 +33,39 @@ export const CMD = {
   SET_DX_VOICE: 0x22, // + 1 byte: Dexed instrument index (into DX_INSTRUMENTS)
 } as const;
 
-// Dexed instrument list — index sent via SET_DX_VOICE. MUST stay in sync with
-// kInstruments[] in projects/spike_esp32_bt_spdif_mix_kit/src/main.cpp.
+// Dexed instrument list — index sent via SET_DX_VOICE. MUST stay in sync (order
+// AND names) with kInstruments[] in
+// projects/spike_esp32_bt_spdif_mix_kit/src/main.cpp.
 export const DX_INSTRUMENTS = [
-  'E.Piano', 'Brass', 'Strings', 'Orchestra', 'Piano', 'Syn Lead',
-  'Bass', 'Organ', 'Harpsi', 'Vibes', 'Flute', 'Tub Bells',
+  // Keys
+  'E.Piano', 'Grand Piano', 'FM Rhodes', 'E.Piano 2', 'Harpsichord', 'Clav', 'Celeste',
+  // Organs
+  'Organ', 'Pipe Organ',
+  // Strings / ensemble
+  'Strings', 'String Ens', 'Orchestra', 'Pizzicato',
+  // Brass
+  'Brass', 'Trumpet', 'Synth Brass',
+  // Winds
+  'Flute', 'Pan Flute', 'Oboe', 'Clarinet', 'Sax', 'Harmonica',
+  // Guitar / plucked
+  'Guitar', 'Jazz Guitar', 'Sitar', 'Harp',
+  // Bass
+  'Bass', 'E.Bass', 'Fretless',
+  // Synth / lead
+  'Syn Lead', 'Mini Moog', 'Jupiter 8', 'Synclavier',
+  // Mallets / bells / perc
+  'Vibes', 'Marimba', 'Xylophone', 'Tub Bells', 'Glockenspiel', 'Steel Drum', 'Timpani',
+  // Voice
+  'Voice', 'Choir',
+] as const;
+
+// Built-in Dexed songs — index sent via PLAY_SONG. MUST stay in sync (order)
+// with kSongs[] in projects/spike_esp32_bt_spdif_mix_kit/src/main.cpp.
+export const DX_SONGS = [
+  'William Tell Overture',
+  'Moonlight Sonata (3rd Mvt)',
+  'Billie Jean',
+  'Bohemian Rhapsody',
 ] as const;
 
 export type TdspStatus = {
@@ -353,7 +381,7 @@ export function useTdsp() {
   }, []);
 
   // Dexed (MIDI synth) controls.
-  const playSong = useCallback(() => sendCommand(CMD.PLAY_SONG), [sendCommand]);
+  const playSong = useCallback((index: number = 0) => writeByteCmd(CMD.PLAY_SONG, index), [writeByteCmd]);
   const stopSong = useCallback(() => sendCommand(CMD.STOP_SONG), [sendCommand]);
   const setDxVoice = useCallback(
     (index: number) => writeByteCmd(CMD.SET_DX_VOICE, index),

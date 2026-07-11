@@ -92,9 +92,10 @@ static void relayVolume() {
 }
 
 // Relay Dexed controls to the Teensy over UART0, same "@VERB=<val>" framing.
-// The Teensy plays/stops the built-in William Tell sequencer and switches the
-// Dexed instrument from a curated list (index must match the app's list).
-static void relaySong(bool play)      { Serial.printf("@SONG=%s\n", play ? "williamtell" : "stop"); }
+// The Teensy plays/stops the built-in song sequencer (by song index) and
+// switches the Dexed instrument from a curated list (indices must match the app).
+static void relaySong(uint8_t idx)    { Serial.printf("@SONG=%u\n", idx); }
+static void relaySongStop()           { Serial.printf("@SONG=stop\n"); }
 static void relayDxVoice(uint8_t idx) { Serial.printf("@DXVOICE=%u\n", idx); }
 
 // ---- Paired-source list (multi-device switch) -----------------------------
@@ -306,13 +307,15 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
           Serial.printf("[ble] cmd: FORGET %s\n", key);
         }
         break;
-      case CMD_PLAY_SONG:
-        Serial.println("[ble] cmd: PLAY SONG (Dexed)");
-        relaySong(true);   // -> Teensy: @SONG=williamtell
+      case CMD_PLAY_SONG: {
+        uint8_t song = (v.size() >= 2) ? (uint8_t)v[1] : 0;   // opcode-only = song 0
+        Serial.printf("[ble] cmd: PLAY SONG %u\n", song);
+        relaySong(song);   // -> Teensy: @SONG=<index>
         break;
+      }
       case CMD_STOP_SONG:
         Serial.println("[ble] cmd: STOP SONG");
-        relaySong(false);  // -> Teensy: @SONG=stop
+        relaySongStop();   // -> Teensy: @SONG=stop
         break;
       case CMD_SET_DX_VOICE:
         if (v.size() >= 2) {

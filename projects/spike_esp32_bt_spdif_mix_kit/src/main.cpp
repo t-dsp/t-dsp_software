@@ -24,6 +24,9 @@
 #include "input_i2s2_16bit.h"
 #include "DexedVoiceBank.h"
 #include "william_tell_mid.h"
+#include "moonlight_mid.h"
+#include "billie_jean_mid.h"
+#include "bohemian_mid.h"
 
 constexpr int     TAC5212_EN_PIN      = 35;     // shared SHDNZ, active-low
 constexpr uint8_t TAC5212_I2C_ADDRESS = 0x51;
@@ -160,10 +163,34 @@ static void setMix(float bt, float tone, float spdif) {
 // cartridge. Keep this list in sync with INSTRUMENTS[] in the app (tdspBle.ts).
 struct DxInstrument { uint8_t bank, voice; const char *name; };
 static const DxInstrument kInstruments[] = {
-    {2, 10, "E.Piano"},   {2,  0, "Brass"},     {2,  3, "Strings"},
-    {2,  6, "Orchestra"}, {2,  7, "Piano"},     {2, 13, "Syn Lead"},
-    {2, 14, "Bass"},      {2, 16, "Organ"},     {2, 18, "Harpsi"},
-    {2, 20, "Vibes"},     {2, 23, "Flute"},     {2, 25, "Tub Bells"},
+    // Keys                                        (bank, voice-index)
+    {2, 10, "E.Piano"},     {2,  7, "Grand Piano"}, {0,  0, "FM Rhodes"},
+    {3,  2, "E.Piano 2"},   {2, 18, "Harpsichord"}, {2, 19, "Clav"},
+    {3,  6, "Celeste"},
+    // Organs
+    {2, 16, "Organ"},       {2, 17, "Pipe Organ"},
+    // Strings / ensemble
+    {2,  3, "Strings"},     {6,  2, "String Ens"},  {2,  6, "Orchestra"},
+    {8, 17, "Pizzicato"},
+    // Brass
+    {2,  0, "Brass"},       {6,  5, "Trumpet"},     {8, 11, "Synth Brass"},
+    // Winds
+    {2, 23, "Flute"},       {8,  5, "Pan Flute"},   {4,  2, "Oboe"},
+    {4,  3, "Clarinet"},    {4,  4, "Sax"},         {4, 17, "Harmonica"},
+    // Guitar / plucked
+    {2, 11, "Guitar"},      {6, 14, "Jazz Guitar"}, {3, 21, "Sitar"},
+    {3, 28, "Harp"},
+    // Bass
+    {2, 14, "Bass"},        {6, 11, "E.Bass"},      {6, 17, "Fretless"},
+    // Synth / lead
+    {2, 13, "Syn Lead"},    {0, 20, "Mini Moog"},   {0, 12, "Jupiter 8"},
+    {0,  7, "Synclavier"},
+    // Mallets / bells / perc
+    {2, 20, "Vibes"},       {2, 21, "Marimba"},     {4, 23, "Xylophone"},
+    {2, 25, "Tub Bells"},   {4, 21, "Glockenspiel"},{2, 26, "Steel Drum"},
+    {2, 27, "Timpani"},
+    // Voice
+    {2, 29, "Voice"},       {1, 29, "Choir"},
 };
 static const int kNumInstruments = sizeof(kInstruments) / sizeof(kInstruments[0]);
 static int g_dxInstrument = 0;
@@ -181,22 +208,36 @@ static void setDexedInstrument(int idx) {
     }
 }
 
-// --- Non-blocking William Tell sequencer ------------------------------------
-// The spike played the song with a blocking loop; here it MUST be non-blocking
-// so BT audio, the ESP32 relay, and app control keep running (and so the app
-// can stop it). Ticked every loop(): fires all events whose time has arrived.
+// --- Non-blocking song sequencer --------------------------------------------
+// Song registry: index (sent by the app as @SONG=<i>) -> a transcoded MIDI
+// stream. Keep in sync with DX_SONGS[] in the app (tdspBle.ts). The player is
+// non-blocking (ticked every loop()) so BT audio, the ESP32 relay, and app
+// control keep running and the app can stop/switch it mid-song.
+struct Song { const char *name; const SongEv *ev; uint32_t count; };
+static const Song kSongs[] = {
+    {"William Tell Overture",      kWilliamTellSong, sizeof(kWilliamTellSong) / sizeof(SongEv)},
+    {"Moonlight Sonata (3rd Mvt)", kMoonlightSong,   sizeof(kMoonlightSong)   / sizeof(SongEv)},
+    {"Billie Jean",                kBillieJeanSong,  sizeof(kBillieJeanSong)  / sizeof(SongEv)},
+    {"Bohemian Rhapsody",          kBohemianSong,    sizeof(kBohemianSong)    / sizeof(SongEv)},
+};
+static const int kNumSongs = sizeof(kSongs) / sizeof(kSongs[0]);
+
 static bool        g_songOn   = false;
+static int         g_songSel  = 0;   // selected / currently-playing song index
 static uint32_t    g_songIdx  = 0;
 static elapsedMillis g_songClock;
 static uint32_t    g_songWait = 0;
 
-static void songStart() {
+static void songStart(int idx) {
+    if (idx < 0) idx = 0;
+    if (idx >= kNumSongs) idx = kNumSongs - 1;
+    g_songSel  = idx;
     g_dexed.panic();
     g_songIdx  = 0;
-    g_songWait = kWilliamTellSong[0].dms;
+    g_songWait = kSongs[idx].ev[0].dms;
     g_songClock = 0;
     g_songOn   = true;
-    Serial.println("[song] William Tell Overture -> Dexed (start)");
+    Serial.printf("[song] %s -> Dexed (start)\n", kSongs[idx].name);
 }
 static void songStop() {
     if (!g_songOn) return;
@@ -206,10 +247,11 @@ static void songStop() {
 }
 static void songTick() {
     if (!g_songOn) return;
-    const uint32_t n = sizeof(kWilliamTellSong) / sizeof(kWilliamTellSong[0]);
+    const SongEv *ev = kSongs[g_songSel].ev;
+    const uint32_t n = kSongs[g_songSel].count;
     while (g_songOn && g_songClock >= g_songWait) {
         g_songClock -= g_songWait;
-        const SongEv &e = kWilliamTellSong[g_songIdx];
+        const SongEv &e = ev[g_songIdx];
         if (e.vel)       g_dexed.keydown(e.note, e.vel);
         else if (e.note) g_dexed.keyup(e.note);
         if (++g_songIdx >= n) {
@@ -218,7 +260,7 @@ static void songTick() {
             Serial.println("[song] done");
             return;
         }
-        g_songWait = kWilliamTellSong[g_songIdx].dms;
+        g_songWait = ev[g_songIdx].dms;
     }
 }
 
@@ -298,7 +340,7 @@ void setup() {
 
     Serial.println("running -- cmds: t=DACtone a=BT+SPDIF mix  s=SPDIF-only  m=BT-only");
     Serial.println("                 x=toggle SPDIF tone  +/-=vol  d=dump  i=re-init codec");
-    Serial.println("                 W=William Tell (Dexed)  V=next instrument   MIDI-IN on pin0");
+    Serial.println("                 W=play/stop song  S=next song  V=next instrument   MIDI-IN pin0");
     Serial.println("      ESP32/kit:  r=reset  g=flash mode  @BOOTAPP@=exit flash  U=Teensy prog");
     Serial.println("                 P=ESP32 pairing mode  F=ESP32 forget bond + pair");
 
@@ -345,7 +387,9 @@ void loop() {
             else if (c == 'i') { Serial.println("[cmd] re-init codec"); setupCodec(); applyVol();
                                  Serial.printf("[cmd] codec=%s (%s), vol %.0f dB\n",
                                                g_codecOk ? "OK" : "FAIL", g_codecMsg, g_dvol); }
-            else if (c == 'W') { if (g_songOn) songStop(); else songStart(); }   // Dexed demo
+            else if (c == 'W') { if (g_songOn) songStop(); else songStart(g_songSel); }  // play/stop
+            else if (c == 'S') { g_songSel = (g_songSel + 1) % kNumSongs;                 // pick song
+                                 Serial.printf("[song] selected: %s\n", kSongs[g_songSel].name); }
             else if (c == 'V') { setDexedInstrument((g_dxInstrument + 1) % kNumInstruments); }
         }
     }
@@ -364,7 +408,7 @@ void loop() {
                 else if (strncmp(line, "@DXVOICE=", 9) == 0) setDexedInstrument(atoi(line + 9));
                 else if (strncmp(line, "@SONG=", 6) == 0) {
                     if (strcmp(line + 6, "stop") == 0) songStop();
-                    else songStart();   // any other id (e.g. "williamtell") plays it
+                    else songStart(atoi(line + 6));   // @SONG=<song index>
                 }
                 else Serial.printf("[esp] %s\n", line);
             }
