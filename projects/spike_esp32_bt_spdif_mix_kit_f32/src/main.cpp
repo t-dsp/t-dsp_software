@@ -27,7 +27,6 @@
 #include <TAC5212.h>
 #include <TDspProgrammingKit.h>
 #include <MIDI.h>
-#include <synth_dexed.h>
 #include <SD.h>
 #include <MTP_Teensy.h>   // expose the SD card to the host over USB (Serial+MTP)
 #include "async_input.h"
@@ -37,18 +36,17 @@
 #include <AudioStream_F32.h>
 #include <AudioSettings_F32.h>
 #include <OpenAudio_ArduinoLibrary.h>
-#include "DexedVoiceBank.h"
 #include "william_tell_mid.h"
 #include "moonlight_mid.h"
 #include "billie_jean_mid.h"
 #include "bohemian_mid.h"
 #include "song_event.h"           // baked built-in songs are SongEv[] arrays
 // Synth-agnostic MIDI playback (lib/TDspMidiPlayer): the non-blocking player
-// fans events into a tdsp::MidiSink, so the same player drives Dexed here and
-// ymfm later behind a build flag. DexedSink is the MidiSink->Dexed adapter.
+// fans events into a tdsp::MidiSink. The concrete synth engine (Dexed / ymfm
+// OPM) is a build-time choice pulled in below via SynthBackend*.h; nothing in
+// this file is engine-specific.
 #include <MidiFilePlayer.h>
 #include <MidiSmfFile.h>          // runtime SD .mid parser -> MidiFileEvent[]
-#include "DexedSink.h"
 
 constexpr int     TAC5212_EN_PIN      = 35;     // shared SHDNZ, active-low
 constexpr uint8_t TAC5212_I2C_ADDRESS = 0x51;
@@ -78,39 +76,42 @@ AsyncAudioInputSPDIF3_F32 spdifIn(g_audioSettings, 100, 20, 80);  // optical IN,
 AudioOutputSPDIF3      spdifOut;                                  // optical OUT, pin 14
 AudioSynthWaveformSine spdifTone;                                // int16 tone -> optical
 
-// (C)/(D) local DAC self-test tone (F32) + Dexed (int16 engine, bridged to F32).
+// (C)/(D) local DAC self-test tone (F32). The synth engine itself (slot 3) is
+// declared by the build-selected backend header, included after the mixers.
 AudioSynthWaveformSine_F32 testTone;         // local DAC self-test source (F32)
-AudioSynthDexed        g_dexed(16, AUDIO_SAMPLE_RATE_EXACT);  // 16-voice 6-op FM (int16 out)
-AudioConvert_I16toF32  dexedToF32;           // bridge Dexed's int16 block to F32
-// Control plane: both the song player and the physical MIDI IN drive Dexed
-// through this one MidiSink, so swapping the engine later touches only the sink.
-DexedSink              g_dexedSink(&g_dexed);
 tdsp::MidiFilePlayer   g_player;             // non-blocking, synth-agnostic song player
 
-AudioMixer4_F32        outL, outR;           // F32 mix: 0=BT, 1=local tone, 2=S/PDIF-in, 3=Dexed
+AudioMixer4_F32        outL, outR;           // F32 mix: 0=BT, 1=local tone, 2=S/PDIF-in, 3=synth
 AudioAnalyzePeak_F32   peakBt, peakSpdif, peakOut;
 
 // int16 leg: optical-out tone -> SPDIF TX (self-test loopback source)
 AudioConnection     c_txL    (spdifTone,  0, spdifOut, 0);
 AudioConnection     c_txR    (spdifTone,  0, spdifOut, 1);
-// int16 -> F32 bridges (BT L/R and Dexed) — the int16 side of the convert blocks
+// int16 -> F32 bridges (BT L/R) — the int16 side of the convert blocks
 AudioConnection     c_btcL   (btIn,       0, btToF32L, 0);
 AudioConnection     c_btcR   (btIn,       1, btToF32R, 0);
-AudioConnection     c_dxc    (g_dexed,    0, dexedToF32, 0);
-// F32 mix bus and 24-bit TDM output
+// F32 mix bus and 24-bit TDM output (synth engine feeds slot 3 from its backend)
 AudioConnection_F32 c_btL    (btToF32L,   0, outL, 0);
 AudioConnection_F32 c_btR    (btToF32R,   0, outR, 0);
 AudioConnection_F32 c_toneL  (testTone,   0, outL, 1);
 AudioConnection_F32 c_toneR  (testTone,   0, outR, 1);
 AudioConnection_F32 c_spL    (spdifIn,    0, outL, 2);
 AudioConnection_F32 c_spR    (spdifIn,    1, outR, 2);
-AudioConnection_F32 c_dxL    (dexedToF32, 0, outL, 3);   // Dexed (mono) -> both channels
-AudioConnection_F32 c_dxR    (dexedToF32, 0, outR, 3);
 AudioConnection_F32 c_outL   (outL,       0, tdmOut, 0);
 AudioConnection_F32 c_outR   (outR,       0, tdmOut, 1);
 AudioConnection_F32 c_pkBt   (btToF32L,   0, peakBt,    0);
 AudioConnection_F32 c_pkSp   (spdifIn,    0, peakSpdif, 0);
 AudioConnection_F32 c_pkOut  (outL,       0, peakOut,   0);
+
+// ---- Synth backend: chosen at build time (see platformio.ini) --------------
+// Declares the engine, wires it into mix slot 3, exposes g_synthSink + the
+// synth* interface. Included HERE so outL/outR already exist for its
+// AudioConnection_F32s (same translation unit -> constructed after the mixers).
+#if defined(TDSP_SYNTH_YMFM)
+  #include "SynthBackendYmfm.h"
+#else
+  #include "SynthBackendDexed.h"
+#endif
 
 tac5212::TAC5212 g_codec(Wire);
 
@@ -213,59 +214,6 @@ static void setMix(float bt, float tone, float spdif) {
     outL.gain(2, spdif); outR.gain(2, spdif);
 }
 
-// ============================================================================
-// Dexed source — 6-op FM synth played by the physical MIDI IN and the app.
-// ============================================================================
-// Curated instrument list: index (sent by the app as @DXVOICE=<i>) -> a bundled
-// DX7 patch (bank, voice) from dexed_banks_data.h. Bank 2 = the rom1a factory
-// cartridge. Keep this list in sync with INSTRUMENTS[] in the app (tdspBle.ts).
-struct DxInstrument { uint8_t bank, voice; const char *name; };
-static const DxInstrument kInstruments[] = {
-    // Keys                                        (bank, voice-index)
-    {2, 10, "E.Piano"},     {2,  7, "Grand Piano"}, {0,  0, "FM Rhodes"},
-    {3,  2, "E.Piano 2"},   {2, 18, "Harpsichord"}, {2, 19, "Clav"},
-    {3,  6, "Celeste"},
-    // Organs
-    {2, 16, "Organ"},       {2, 17, "Pipe Organ"},
-    // Strings / ensemble
-    {2,  3, "Strings"},     {6,  2, "String Ens"},  {2,  6, "Orchestra"},
-    {8, 17, "Pizzicato"},
-    // Brass
-    {2,  0, "Brass"},       {6,  5, "Trumpet"},     {8, 11, "Synth Brass"},
-    // Winds
-    {2, 23, "Flute"},       {8,  5, "Pan Flute"},   {4,  2, "Oboe"},
-    {4,  3, "Clarinet"},    {4,  4, "Sax"},         {4, 17, "Harmonica"},
-    // Guitar / plucked
-    {2, 11, "Guitar"},      {6, 14, "Jazz Guitar"}, {3, 21, "Sitar"},
-    {3, 28, "Harp"},
-    // Bass
-    {2, 14, "Bass"},        {6, 11, "E.Bass"},      {6, 17, "Fretless"},
-    // Synth / lead
-    {2, 13, "Syn Lead"},    {0, 20, "Mini Moog"},   {0, 12, "Jupiter 8"},
-    {0,  7, "Synclavier"},
-    // Mallets / bells / perc
-    {2, 20, "Vibes"},       {2, 21, "Marimba"},     {4, 23, "Xylophone"},
-    {2, 25, "Tub Bells"},   {4, 21, "Glockenspiel"},{2, 26, "Steel Drum"},
-    {2, 27, "Timpani"},
-    // Voice
-    {2, 29, "Voice"},       {1, 29, "Choir"},
-};
-static const int kNumInstruments = sizeof(kInstruments) / sizeof(kInstruments[0]);
-static int g_dxInstrument = 0;
-
-// Load a curated instrument into Dexed (runs from loop/handlers, never the ISR).
-static void setDexedInstrument(int idx) {
-    if (idx < 0) idx = 0;
-    if (idx >= kNumInstruments) idx = kNumInstruments - 1;
-    const DxInstrument &in = kInstruments[idx];
-    g_dexed.panic();
-    if (tdsp::dexed::loadVoice(g_dexed, in.bank, in.voice)) {
-        g_dxInstrument = idx;
-        Serial.printf("[dexed] instrument %d = %s (bank %d voice %d)\n",
-                      idx, in.name, in.bank, in.voice);
-    }
-}
-
 // --- Non-blocking song sequencer --------------------------------------------
 // Song registry: index (sent by the app as @SONG=<i>) -> a transcoded MIDI
 // stream. Keep in sync with DX_SONGS[] in the app (tdspBle.ts). The player is
@@ -346,7 +294,7 @@ static int g_songSel = 0;   // selected / currently-playing song index
 // Load the selected song into g_buf and hand it to the player. Baked built-ins
 // expand from their legacy SongEv[] (channel 0); SD songs parse straight to
 // MidiFileEvent[] (full channel/program/velocity). The player is non-blocking
-// (g_player.tick() in loop) and drives Dexed via g_dexedSink.
+// (g_player.tick() in loop) and drives the synth via g_synthSink.
 static void songStart(int idx) {
     if (g_numSongs == 0) return;
     if (idx < 0) idx = 0;
@@ -358,10 +306,10 @@ static void songStart(int idx) {
         int got = tdsp::smf::loadSmfFile(r.path, g_buf, MAX_EVENTS);   // parse from SD (main loop)
         if (got <= 0) { Serial.printf("[song] SD load FAILED: %s\n", r.path); return; }
         n = (uint32_t)got;
-        Serial.printf("[song] %s (SD, %lu events) -> Dexed (start)\n", r.name, (unsigned long)n);
+        Serial.printf("[song] %s (SD, %lu events) -> %s (start)\n", r.name, (unsigned long)n, synthName());
     } else {
         n = tdsp::expandLegacyNotes(r.ev, r.count, g_buf, MAX_EVENTS);  // baked SongEv -> events
-        Serial.printf("[song] %s -> Dexed (start)\n", r.name);
+        Serial.printf("[song] %s -> %s (start)\n", r.name, synthName());
     }
     if (n == 0) return;
     g_player.play(g_buf, n);
@@ -380,10 +328,17 @@ static void sendCatalog() {
     kit.uart().print("@SONGS=");
     for (int i = 0; i < g_numSongs; ++i) { if (i) kit.uart().print('|'); kit.uart().print(g_songs[i].name); }
     kit.uart().print('\n');
-    kit.uart().print("@INSTR=");
-    for (int i = 0; i < kNumInstruments; ++i) { if (i) kit.uart().print('|'); kit.uart().print(kInstruments[i].name); }
+    // @INSTR carries an optional synth header as its first '|'-field so the app
+    // MIDI page labels itself from the engine THIS firmware was built with:
+    //   @INSTR=@<synthName>\t<synthDescription>|inst0|inst1|...
+    // ('@'-prefixed because the UART line is newline-framed; the app strips it.)
+    kit.uart().print("@INSTR=@");
+    kit.uart().print(synthName());
+    kit.uart().print('\t');
+    kit.uart().print(synthDescription());
+    for (int i = 0; i < synthNumInstruments(); ++i) { kit.uart().print('|'); kit.uart().print(synthInstrumentName(i)); }
     kit.uart().print('\n');
-    Serial.println("[cat] catalog sent to ESP32");
+    Serial.printf("[cat] catalog sent to ESP32 (synth=%s)\n", synthName());
 }
 
 // Refresh = re-scan the SD card (picking up songs just added over USB / a reader)
@@ -398,20 +353,20 @@ static void refreshCatalog() {
 }
 
 // --- MIDI IN (Serial1 DIN) -> Dexed via the shared MidiSink -----------------
-// Live MIDI now flows through the same g_dexedSink the song player uses, so the
+// Live MIDI now flows through the same g_synthSink the song player uses, so the
 // two share one control path into the engine (and one day into ymfm).
 static void onNoteOn(byte ch, byte note, byte vel) {
-    if (vel == 0) g_dexedSink.onNoteOff(ch, note, 0);
-    else          g_dexedSink.onNoteOn(ch, note, vel);
+    if (vel == 0) g_synthSink->onNoteOff(ch, note, 0);
+    else          g_synthSink->onNoteOn(ch, note, vel);
 }
-static void onNoteOff(byte ch, byte note, byte vel) { g_dexedSink.onNoteOff(ch, note, vel); }
+static void onNoteOff(byte ch, byte note, byte vel) { g_synthSink->onNoteOff(ch, note, vel); }
 static void onPitchBend(byte ch, int bend) {   // bend: -8192..+8191 -> semitones (range 2)
-    g_dexedSink.onPitchBend(ch, ((float)bend / 8192.0f) * 2.0f);
+    g_synthSink->onPitchBend(ch, ((float)bend / 8192.0f) * 2.0f);
 }
 static void onControlChange(byte ch, byte cc, byte val) {
-    if (cc == 1)  g_dexedSink.onModWheel(ch, val / 127.0f);
-    if (cc == 64) g_dexedSink.onSustain(ch, val >= 64);
-    if (cc == 123 && val == 0) g_dexedSink.onAllNotesOff(ch);
+    if (cc == 1)  g_synthSink->onModWheel(ch, val / 127.0f);
+    if (cc == 64) g_synthSink->onSustain(ch, val >= 64);
+    if (cc == 123 && val == 0) g_synthSink->onAllNotesOff(ch);
 }
 
 void setup() {
@@ -472,11 +427,8 @@ void setup() {
     AudioMemory(40);
     AudioMemory_F32(60);
     setMix(1.0f, 0.0f, 1.0f);
-    outL.gain(3, 0.62f);  outR.gain(3, 0.62f);  // Dexed mixer make-up: pairs with the
-                                                 // g_dexed.setGain(0.8) below so net level
-                                                 // ~matches the old 0.5, but the clip at
-                                                 // Dexed's float->q15 step is gone and the
-                                                 // F32 mixer never saturates the sum.
+    outL.gain(3, 0.62f);  outR.gain(3, 0.62f);  // synth (slot 3) mix make-up in the
+                                                 // F32 domain, where there's real headroom.
     testTone.frequency(440.0f);  testTone.amplitude(0.0f);
     spdifTone.frequency(1000.0f); spdifTone.amplitude(0.25f);
     if (g_codecOk) applyVol();
@@ -488,24 +440,12 @@ void setup() {
     MIDI.setHandleNoteOff(onNoteOff);
     MIDI.setHandlePitchBend(onPitchBend);
     MIDI.setHandleControlChange(onControlChange);
-    // Route the song player into Dexed via the shared sink. Omni so every song
-    // channel (and live MIDI on any channel) reaches the single Dexed patch;
-    // the player's default mask still skips channel 10 (drums), matching the
-    // old parser's behavior on this melodic engine.
-    g_dexedSink.setListenChannel(0);   // 0 = omni
-    g_player.setSink(&g_dexedSink);
-    g_dexed.setPitchbendRange(2);
-    g_dexed.setPitchbend((int16_t)0);
-    g_dexed.setModWheel(0);
-    g_dexed.setSustain(false);
-    // Dexed renders internally in float, then arm_float_to_q15() SATURATES at +/-1.0
-    // before we ever see the block. A punchy low note overshoots 1.0 and flat-tops —
-    // that was the "click". Pull the internal fx.Gain below unity so the float output
-    // stays under the q15 rail; the 0.62 mixer make-up above restores the level in the
-    // F32 domain where there is real headroom. (Set here once; loadVoice() doesn't
-    // touch fx.Gain, so runtime instrument switches keep it.)
-    g_dexed.setGain(0.8f);
-    setDexedInstrument(g_dxInstrument);        // default: E.Piano
+    // Route the song player into the build-selected synth via its shared sink.
+    // Omni so every song channel (and live MIDI on any channel) reaches the one
+    // patch; the player's default mask still skips channel 10 (drums), matching
+    // a single melodic engine. synthBegin() sets gain + loads the default patch.
+    g_player.setSink(g_synthSink);
+    synthBegin();
 
     Serial.println("running -- cmds: t=DACtone a=BT+SPDIF mix  s=SPDIF-only  m=BT-only");
     Serial.println("                 x=toggle SPDIF tone  +/-=vol  d=dump  i=re-init codec");
@@ -563,7 +503,7 @@ void loop() {
             else if (c == 'W') { if (g_player.isPlaying()) songStop(); else songStart(g_songSel); }  // play/stop
             else if (c == 'S') { if (g_numSongs) g_songSel = (g_songSel + 1) % g_numSongs;  // pick song
                                  Serial.printf("[song] selected: %s\n", g_songs[g_songSel].name); }
-            else if (c == 'V') { setDexedInstrument((g_dxInstrument + 1) % kNumInstruments); }
+            else if (c == 'V') { synthSetInstrument((synthInstrument() + 1) % synthNumInstruments()); }
         }
     }
 
@@ -578,7 +518,7 @@ void loop() {
                 // Control lines from the ESP32 (relayed from the BLE app) are acted
                 // on here; everything else is just mirrored to USB with an [esp] tag.
                 if (strncmp(line, "@VOL=", 5) == 0) setMasterVolumePct(atoi(line + 5));
-                else if (strncmp(line, "@DXVOICE=", 9) == 0) setDexedInstrument(atoi(line + 9));
+                else if (strncmp(line, "@DXVOICE=", 9) == 0) synthSetInstrument(atoi(line + 9));
                 else if (strncmp(line, "@SONG=", 6) == 0) {
                     if (strcmp(line + 6, "stop") == 0) songStop();
                     else songStart(atoi(line + 6));   // @SONG=<song index>
