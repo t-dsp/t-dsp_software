@@ -86,6 +86,34 @@ emits silence, so an instantiated-but-silent bank costs almost nothing. Measured
 chord ≈ **53 %**. So 4 banks is comfortable and 6–8 is feasible on a Teensy 4.1.
 `activeVoices()` (per engine, and summed on the manager) reports live voice count.
 
+## MPE (per-note expression)
+
+OPM is a natural MPE target: its 8 FM channels each have independent key
+code/fraction, so **per-note pitch bend is native** — the hardest MPE requirement,
+which Dexed can't do. `AudioSynthYmfmOPM` tags every note with the MIDI channel
+that owns it and applies expression per channel:
+
+```cpp
+opm.setMasterChannel(1);              // MPE zone: ch1 master, 2..16 members (0 = off)
+opm.noteOnMpe(channel, note, vel);    // each note on its own OPM channel
+opm.pitchBend(channel, semitones);    // per-note bend (master channel bends all)
+opm.pressure(channel, 0..1);          // per-note loudness (carriers)
+opm.timbre  (channel, 0..1);          // per-note brightness (CC74 -> modulators)
+```
+
+- **Pitch** is computed by `OpmPitch.h`'s `encodeOpmPitch()` (fractional MIDI note
+  → KC + 6-bit KF), so bends are smooth (64 steps/semitone) and correct across the
+  skipped-code encoding — verified on hardware via the spike's `K` dump.
+- **Pressure/timbre** move operator total levels: pressure loudens the carriers
+  (C1/C2), timbre brightens the modulators (M1/M2) — the VOPM carrier/modulator
+  naming heuristic, exact for the common algorithms.
+- **Non-MPE is the same code path** with source channel 0 (`noteOn`/`noteOff`),
+  so the multitimbral and mono paths are unaffected — both modes coexist.
+
+The standalone spike toggles MPE at runtime (`M`), simulates a controller gesture
+(`G`), and dumps pitch codes (`K`). For the synth-agnostic player, wrap the engine
+in an `MpeOpmSink` (a `tdsp::MidiSink`) — see the player integration doc.
+
 ## Patches
 
 `OpmVoice.h` defines a plain-data patch struct (per-channel algorithm/feedback +

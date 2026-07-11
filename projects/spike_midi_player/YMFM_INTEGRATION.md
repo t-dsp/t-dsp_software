@@ -253,6 +253,56 @@ slot 0 (so the engine-independent graph is untouched):
 The GPL-free `platformio.ini` env from Step 3 is unchanged — `YmfmOpmMulti.h`
 resolves through the same `lib_extra_dirs`.
 
+## Optional: MPE (per-note pitch bend / pressure / timbre)
+
+For an expressive controller (LinnStrument, Seaboard), drive the engine's MPE API
+with a routing sink. OPM gives per-note pitch bend natively (each note on its own
+OPM channel). This is a THIRD backend variant — one shared instrument on a single
+`AudioSynthYmfmOPM` whose 8 channels are the MPE voice pool.
+
+**A. add `src/MpeOpmSink.h`:**
+
+```cpp
+#pragma once
+#include <stdint.h>
+#include <AudioSynthYmfmOPM.h>
+#include <MidiSink.h>
+
+// MidiSink -> AudioSynthYmfmOPM MPE API. The router pre-scales pitch bend to
+// semitones (MidiSink convention), so onPitchBend forwards it as-is. Notes on the
+// master channel are ignored by the engine (set via setMasterChannel).
+class MpeOpmSink : public tdsp::MidiSink {
+public:
+    explicit MpeOpmSink(AudioSynthYmfmOPM *opm, uint8_t master = 1) : _opm(opm) {
+        _opm->setMasterChannel(master);
+    }
+    void onNoteOn (uint8_t ch, uint8_t note, uint8_t vel) override { _opm->noteOnMpe(ch, note, vel); }
+    void onNoteOff(uint8_t ch, uint8_t note, uint8_t)     override { _opm->noteOffMpe(ch, note); }
+    void onPitchBend(uint8_t ch, float semitones)         override { _opm->pitchBend(ch, semitones); }
+    void onPressure (uint8_t ch, float value)             override { _opm->pressure(ch, value); }
+    void onTimbre   (uint8_t ch, float value)             override { _opm->timbre(ch, value); }
+    void onAllNotesOff(uint8_t ch)                        override { _opm->allNotesOffCh(ch); }
+private:
+    AudioSynthYmfmOPM *_opm;
+};
+```
+
+**B.** In the `TDSP_SYNTH_YMFM` block use a single engine + `MpeOpmSink` instead of
+`YmfmSink`/`YmfmMultiSink`:
+
+```cpp
+  AudioSynthYmfmOPM g_opm;
+  AudioConnection   c_opmL(g_opm, 0, outL, 0), c_opmR(g_opm, 1, outR, 0);
+  MpeOpmSink        g_ymfmSink(&g_opm, /*master=*/1);
+  tdsp::MidiSink   *g_synthSink = &g_ymfmSink;
+  // synthBegin(): g_opm.begin(); g_opm.setVoice(<one MPE instrument>);
+```
+
+Notes: the router must scale member-channel bend by the MPE range (typically ±48
+semitones) — `MidiRouter::setPitchBendRange` / RPN 0. 8-voice polyphony (one OPM);
+pool multiple engines with a small cross-engine allocator for more. The standalone
+`spike_midi_ymfm_opm` verifies the engine side (`M`/`G`/`K` commands).
+
 ## Notes / gotchas
 
 - **Tuning:** the OPM note table targets ~A440 and tracks the keyboard

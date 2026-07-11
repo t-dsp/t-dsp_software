@@ -34,6 +34,7 @@
 #include <AudioSynthYmfmOPM.h>
 #include <YmfmOpmMulti.h>
 #include <OpmBank.h>          // VOPM .opm parser
+#include <OpmPitch.h>         // encodeOpmPitch() — for the KC/KF debug dump
 #include "opm_bank_data.h"    // baked demo bank (also parser test data)
 #if TDSP_HAS_SDCARD
 #include <SD.h>              // /ymfm/*.opm banks off the microSD
@@ -92,6 +93,17 @@ DMAMEM static char g_opmFileBuf[24000];   // scratch to read one .opm file (OCRA
 
 static int  g_targetBank = 0;                       // which bank 'V' re-instruments
 static int  g_bankInstr[kNumBanks] = { 0, 1, 2, 3 };// current catalog index per bank
+
+// --- MPE mode (runtime feature flag: BOTH modes live in one binary) ----------
+// OFF (default): multitimbral — MIDI channel -> bank, one patch per part.
+// ON:            MPE — every note on its own OPM channel with per-note pitch bend
+//                / pressure / timbre, one shared instrument on bank0 (its 8 OPM
+//                channels are the MPE voice pool). Master channel default 1.
+static bool    g_mpeMode      = false;
+static uint8_t g_mpeMaster    = 1;      // MPE master channel (notes there are global)
+static float   g_mpeMemberRange = 48.0f; // member-channel pitch-bend range (semitones)
+static float   g_mpeMasterRange = 2.0f;  // master-channel pitch-bend range (semitones)
+static int     g_mpeInstr     = 0;       // catalog instrument used as the MPE sound
 
 static bool endsWithOpm(const char *s) {
     size_t n = strlen(s);
@@ -212,20 +224,39 @@ FLASHMEM static void setupCodec() {
     g_codec.setDspAvddSelect(true);
 }
 
-// --- MIDI handlers (Serial1 DIN) -> multitimbral manager --------------------
+// --- MIDI handlers (Serial1 DIN) -> multitimbral manager OR MPE engine -------
+static void onNoteOff(byte ch, byte note, byte vel);   // fwd (onNoteOn calls it)
+
 static void onNoteOn(byte ch, byte note, byte vel) {
-    if (vel == 0) { g_multi.noteOff(ch, note); return; }   // running-status note-off
-    g_multi.noteOn(ch, note, vel);
+    if (vel == 0) { onNoteOff(ch, note, 0); return; }      // running-status note-off
+    if (g_mpeMode) {
+        if (g_mpeMaster && ch == g_mpeMaster) return;      // MPE: notes on master ignored
+        bank0.noteOnMpe(ch, note, vel);
+    } else {
+        g_multi.noteOn(ch, note, vel);
+    }
     g_noteOnCount++;
-    Serial.printf("[midi] noteOn  ch%-2d n%-3d v%-3d -> bank %d\n", ch, note, vel, g_multi.bankForChannel(ch));
 }
-static void onNoteOff(byte ch, byte note, byte /*vel*/) { g_multi.noteOff(ch, note); }
+static void onNoteOff(byte ch, byte note, byte /*vel*/) {
+    if (g_mpeMode) bank0.noteOffMpe(ch, note);
+    else           g_multi.noteOff(ch, note);
+}
+static void onPitchBend(byte ch, int bend) {              // bend: -8192..+8191
+    if (!g_mpeMode) return;                                // multitimbral: no global bend
+    float range = (g_mpeMaster && ch == g_mpeMaster) ? g_mpeMasterRange : g_mpeMemberRange;
+    bank0.pitchBend(ch, ((float)bend / 8192.0f) * range);
+}
+static void onAfterTouch(byte ch, byte pressure) {        // channel pressure
+    if (g_mpeMode) bank0.pressure(ch, (float)pressure / 127.0f);
+}
 static void onProgramChange(byte ch, byte prog) {
+    if (g_mpeMode) return;
     g_multi.programChange(ch, prog);
     Serial.printf("[midi] program ch%-2d -> %d (bank %d)\n", ch, prog, g_multi.bankForChannel(ch));
 }
-static void onControlChange(byte /*ch*/, byte cc, byte val) {
-    if (cc == 123 && val == 0) g_multi.allNotesOff();      // all notes off
+static void onControlChange(byte ch, byte cc, byte val) {
+    if (cc == 74 && g_mpeMode) bank0.timbre(ch, (float)val / 127.0f);   // MPE timbre (CC74)
+    if (cc == 123 && val == 0) { g_multi.allNotesOff(); bank0.allNotesOff(); }
 }
 
 // Blocking helpers for the serial demos (interruptible by any serial key).
@@ -250,6 +281,71 @@ static void playSpread() {
         g_multi.noteOn(ch, scale[i], 110);
         if (delayOrKey(200)) { g_multi.allNotesOff(); return; }
         g_multi.noteOff(ch, scale[i]);
+    }
+}
+
+// --- MPE ---------------------------------------------------------------------
+// Switch between multitimbral and MPE mode at runtime (both live in one binary).
+static void setMpeMode(bool on) {
+    g_multi.allNotesOff();
+    bank0.allNotesOff();
+    g_mpeMode = on;
+    if (on) {
+        bank0.setMasterChannel(g_mpeMaster);
+        if (g_numInstr > 0) bank0.setVoice(g_instr[g_mpeInstr % g_numInstr]);
+        Serial.printf("[mpe] ON  master=ch%d  member-bend=+/-%.0f semi  sound=\"%s\"\n",
+                      g_mpeMaster, g_mpeMemberRange,
+                      g_numInstr ? g_instr[g_mpeInstr % g_numInstr].name : "-");
+        Serial.println("[mpe] play member channels 2..16 (one note each) for per-note bend/pressure/timbre");
+    } else {
+        bank0.setMasterChannel(0);
+        if (g_numInstr >= kNumBanks) for (int i = 0; i < kNumBanks; i++) loadInstrument(i, g_bankInstr[i]);
+        Serial.println("[mpe] OFF -> multitimbral (ch->bank)");
+    }
+}
+
+// Simulate an MPE controller gesture (no LinnStrument needed): a 3-note chord,
+// each note on its OWN member channel, then independent per-note pitch bends and
+// a pressure swell — exercising the per-channel pitch + expression path. Pitch
+// bend isn't audible on the peak meter, but pressure/allocation are, and it must
+// not crash. (Use 'K' to verify the pitch math numerically.)
+static void mpeGesture() {
+    if (!g_mpeMode) { Serial.println("[cmd] enable MPE first ('M')"); return; }
+    Serial.println("[cmd] MPE gesture: 3 notes on ch2/3/4, independent bends + pressure swell");
+    bank0.noteOnMpe(2, 60, 100);   // C
+    bank0.noteOnMpe(3, 64, 100);   // E
+    bank0.noteOnMpe(4, 67, 100);   // G
+    if (delayOrKey(400)) { bank0.allNotesOff(); return; }
+    // Independent per-note bends: ch2 up +5, ch4 down -4, ch3 unchanged.
+    for (int i = 1; i <= 20; i++) {
+        bank0.pitchBend(2, +5.0f * i / 20.0f);
+        bank0.pitchBend(4, -4.0f * i / 20.0f);
+        if (delayOrKey(25)) { bank0.allNotesOff(); return; }
+    }
+    // Pressure swell on all three (each on its own channel) -> louder.
+    for (int i = 0; i <= 20; i++) {
+        float p = i / 20.0f;
+        bank0.pressure(2, p); bank0.pressure(3, p); bank0.pressure(4, p);
+        if (delayOrKey(25)) { bank0.allNotesOff(); return; }
+    }
+    if (delayOrKey(300)) { bank0.allNotesOff(); return; }
+    bank0.noteOffMpe(2, 60); bank0.noteOffMpe(3, 64); bank0.noteOffMpe(4, 67);
+    // reset bends so later notes are in tune
+    bank0.pitchBend(2, 0); bank0.pitchBend(4, 0);
+    Serial.println("[cmd] ...gesture done");
+}
+
+// Numerically verify the per-note pitch encoder: sweep note 60 across +/-2
+// semitones and print the OPM key code / key fraction. KC/KF must increase
+// monotonically and land on the right codes (C4 = KC 0x40, one code step per
+// semitone, 64 fraction steps per semitone).
+static void dumpPitch() {
+    Serial.println("[dbg] encodeOpmPitch(note 60 + bend):  bend -> KC(oct,code) KF");
+    for (float b = -2.0f; b <= 2.001f; b += 0.25f) {
+        uint8_t kc, kf;
+        tdsp::ymfmopm::encodeOpmPitch(60.0f + b, kc, kf);
+        Serial.printf("   %+5.2f -> note %6.2f  KC=0x%02X (oct%d code%2d)  KF=%2d\n",
+                      b, 60.0f + b, kc, (kc >> 4) & 7, kc & 0x0f, kf);
     }
 }
 
@@ -323,10 +419,13 @@ void setup() {
     MIDI.setHandleNoteOff(onNoteOff);
     MIDI.setHandleProgramChange(onProgramChange);
     MIDI.setHandleControlChange(onControlChange);
+    MIDI.setHandlePitchBend(onPitchBend);              // MPE per-note pitch bend
+    MIDI.setHandleAfterTouchChannel(onAfterTouch);     // MPE per-note pressure
 
     Serial.println("running -- cmds: 1/2/3/4=note on each bank  m=all banks at once");
     Serial.println("                 c=8-note chord (bank0)  W=scale spread across banks");
     Serial.println("                 b=select target bank  V=next instrument (on target bank)");
+    Serial.println("      MPE:       M=toggle MPE mode  G=MPE gesture demo  K=dump pitch codes");
     Serial.println("                 +/-=vol  d=dump codec  i=re-init codec");
     Serial.println("      ESP32/kit:  r=reset  g=flash mode  @BOOTAPP@=exit flash  U=Teensy prog");
 
@@ -372,6 +471,9 @@ void loop() {
                                      g_targetBank, g_targetBank + 1,
                                      g_numInstr ? g_instr[g_bankInstr[g_targetBank]].name : "-"); }
             else if (c == 'V') { loadInstrument(g_targetBank, g_bankInstr[g_targetBank] + 1); }
+            else if (c == 'M') { setMpeMode(!g_mpeMode); }   // toggle MPE / multitimbral
+            else if (c == 'G') { mpeGesture(); }             // simulated MPE performance
+            else if (c == 'K') { dumpPitch(); }              // verify per-note pitch codes
             else if (c == '+') { g_dvol += 3.0f; if (g_dvol > 0) g_dvol = 0;
                                  applyVol(); Serial.printf("[cmd] vol %.0f dB\n", g_dvol); }
             else if (c == '-') { g_dvol -= 3.0f; if (g_dvol < -60) g_dvol = -60;
@@ -387,10 +489,11 @@ void loop() {
     if (hb >= 1000) {
         hb = 0;
         float po = peakOut.available() ? peakOut.read() : 0.0f;
-        Serial.printf("alive up=%lus  codec=%s(%s)  instr=%d  voices[b0..3]=%d/%d/%d/%d tot=%d  "
+        Serial.printf("alive up=%lus  codec=%s(%s)  mode=%s  instr=%d  voices[b0..3]=%d/%d/%d/%d tot=%d  "
                       "outPeak=%.3f  cpuMax=%.1f%% memMax=%u\n",
                       (unsigned long)(millis() / 1000),
-                      g_codecOk ? "OK" : "FAIL", g_codecMsg, g_numInstr,
+                      g_codecOk ? "OK" : "FAIL", g_codecMsg,
+                      g_mpeMode ? "MPE" : "multi", g_numInstr,
                       bank0.activeVoices(), bank1.activeVoices(),
                       bank2.activeVoices(), bank3.activeVoices(), g_multi.activeVoices(),
                       po, AudioProcessorUsageMax(), AudioMemoryUsageMax());
