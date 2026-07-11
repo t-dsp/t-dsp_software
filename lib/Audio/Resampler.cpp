@@ -228,6 +228,14 @@ void Resampler::configure(double fs, double newFs){
             kaiserBeta=l*kaiserBeta +(1.-l)*_settings.kaiserBetaDefault;
             _attenuation=kaiserBeta/0.1102+8.7;  
         }
+    }
+
+    // Clamp the polyphase filter to filter[MAX_FILTER_SAMPLES] for BOTH branches.
+    // Upstream only clamped in the downsampling (else) branch, so an upsampling /
+    // unity input (44.1->48k BT, 48->48k S/PDIF) wrote _halfFilterLength*1024+1
+    // (~20481) coeffs unconditionally and overran filter[] whenever
+    // MAX_FILTER_SAMPLES was reduced below that -> Data Access Violation.
+    {
         int32_t noSamples=_halfFilterLength*_overSamplingFactor+1;
         if (noSamples > MAX_FILTER_SAMPLES){
             int32_t f = (noSamples-1)/(MAX_FILTER_SAMPLES-1)+1;

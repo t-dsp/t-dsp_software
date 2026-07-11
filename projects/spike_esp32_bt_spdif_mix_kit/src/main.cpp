@@ -243,6 +243,7 @@ void setup() {
     while (!Serial && millis() - t0 < 1500) {}
 
     Serial.println();
+    if (CrashReport) { Serial.println("!!! CRASH REPORT (previous run) !!!"); Serial.print(CrashReport); }
     Serial.println("=== spike_esp32_bt_spdif_mix_kit (TDspProgrammingKit) ===");
     Serial.println("MIX: (A) ESP32 A2DP  +  (B) S/PDIF optical loopback tone  -> TAC5212.");
     Serial.println("Connect a TOSLINK cable pin14(OUT)->pin15(IN). Pair 'T-DSP' and play.");
@@ -276,7 +277,8 @@ void setup() {
 
     AudioMemory(60);
     setMix(1.0f, 0.0f, 1.0f);
-    outL.gain(3, 0.8f);  outR.gain(3, 0.8f);   // Dexed source, always on
+    outL.gain(3, 0.5f);  outR.gain(3, 0.5f);   // Dexed source (0.5 = headroom for
+                                                 // dense 16-voice passages, avoid clip)
     testTone.frequency(440.0f);  testTone.amplitude(0.0f);
     spdifTone.frequency(1000.0f); spdifTone.amplitude(0.25f);
     if (g_codecOk) applyVol();
