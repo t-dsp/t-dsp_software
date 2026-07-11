@@ -291,14 +291,14 @@ export function useTdsp() {
       const c = await device.readCharacteristicForService(TDSP_SVC_UUID, TDSP_INSTR_UUID);
       // The instrument value may carry an optional synth header as its FIRST
       // '|'-field, so the MIDI page labels itself from the engine the firmware
-      // was built with:  "@<name>\t<description>|inst0|inst1|..."
-      // The header rides as a '@'-prefixed pseudo-entry because the firmware's
-      // UART catalog line is newline-framed (a '\n' can't sit inside the value)
-      // and instrument names never start with '@'. Old firmware sends no header
-      // -> synth stays at the Dexed default.
+      // was built with:  "\x1F<name>\t<description>|inst0|inst1|..."
+      // The header is marked by a leading 0x1F (unit separator). It can't be '@'
+      // (the Teensy->ESP32 relay treats '@' as a line-start and would truncate
+      // the catalog) nor '\n' (that line is newline-framed); 0x1F never appears
+      // in patch names. Old firmware sends no header -> synth stays default.
       const raw = c.value ? base64ToString(c.value) : '';
       const parts = raw.split('|').filter((x) => x.length > 0);
-      if (parts.length && parts[0].startsWith('@')) {
+      if (parts.length && parts[0].startsWith('\x1f')) {
         const header = parts.shift()!.slice(1);
         const tab = header.indexOf('\t');
         const name = (tab >= 0 ? header.slice(0, tab) : header).trim();

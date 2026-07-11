@@ -330,9 +330,13 @@ static void sendCatalog() {
     kit.uart().print('\n');
     // @INSTR carries an optional synth header as its first '|'-field so the app
     // MIDI page labels itself from the engine THIS firmware was built with:
-    //   @INSTR=@<synthName>\t<synthDescription>|inst0|inst1|...
-    // ('@'-prefixed because the UART line is newline-framed; the app strips it.)
-    kit.uart().print("@INSTR=@");
+    //   @INSTR=<0x1F><synthName>\t<synthDescription>|inst0|inst1|...
+    // The header is marked by a leading 0x1F (unit separator). It must NOT be
+    // '@' — the ESP32 relay treats every '@' as a UART line-start (see
+    // t-dsp_esp32_bt_receiver), so a '@' inside the value truncates the line and
+    // the whole catalog is dropped. 0x1F never appears in patch names.
+    kit.uart().print("@INSTR=");
+    kit.uart().write((uint8_t)0x1F);
     kit.uart().print(synthName());
     kit.uart().print('\t');
     kit.uart().print(synthDescription());
