@@ -35,6 +35,7 @@ export const CMD = {
   PLAY_SONG: 0x20, // play the built-in Dexed demo (William Tell)
   STOP_SONG: 0x21, // stop the Dexed demo
   SET_DX_VOICE: 0x22, // + 1 byte: Dexed instrument index (into DX_INSTRUMENTS)
+  REFRESH_CAT: 0x23, // re-scan SD + refresh the song/instrument catalog
 } as const;
 
 // Dexed instrument list — index sent via SET_DX_VOICE. MUST stay in sync (order
@@ -444,6 +445,13 @@ export function useTdsp() {
     (index: number) => writeByteCmd(CMD.SET_DX_VOICE, index),
     [writeByteCmd]
   );
+  // Ask the device to re-scan its SD card and re-send the catalog. The device
+  // NOTIFYs the songs/instruments chars, which re-reads via the subscription; we
+  // also re-read after a short delay in case the notify is missed.
+  const refreshCatalog = useCallback(() => {
+    sendCommand(CMD.REFRESH_CAT);
+    setTimeout(() => readCatalog(), 700);
+  }, [sendCommand, readCatalog]);
 
   // Drain the pending volume to the device, coalescing bursts into the latest
   // value AND rate-limiting to ~11 writes/sec. The phone shares one radio between
@@ -517,5 +525,6 @@ export function useTdsp() {
     playSong,
     stopSong,
     setDxVoice,
+    refreshCatalog,
   };
 }

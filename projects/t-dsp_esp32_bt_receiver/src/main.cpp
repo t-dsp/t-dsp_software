@@ -79,6 +79,7 @@ enum : uint8_t {
   CMD_PLAY_SONG    = 0x20,  // play the built-in Dexed demo (William Tell); relayed to Teensy
   CMD_STOP_SONG    = 0x21,  // stop the Dexed demo
   CMD_SET_DX_VOICE = 0x22,  // 2nd byte = Dexed instrument index; relayed to the Teensy
+  CMD_REFRESH_CAT  = 0x23,  // re-scan SD + refresh song/instrument catalog (@GETCAT to Teensy)
 };
 
 BluetoothA2DPSink a2dp_sink;
@@ -350,6 +351,10 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
           Serial.printf("[ble] cmd: SET DEXED VOICE %u\n", (uint8_t)v[1]);
           relayDxVoice((uint8_t)v[1]);  // -> Teensy: @DXVOICE=<n>
         }
+        break;
+      case CMD_REFRESH_CAT:
+        Serial.println("[ble] cmd: REFRESH CATALOG");
+        requestCatalog();   // -> Teensy re-scans SD + re-sends @SONGS/@INSTR
         break;
       default:
         Serial.printf("[ble] cmd: unknown opcode 0x%02X\n", op);

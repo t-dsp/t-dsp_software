@@ -38,6 +38,7 @@ export default function App() {
     playSong,
     stopSong,
     setDxVoice,
+    refreshCatalog,
   } = useTdsp();
   const [showSettings, setShowSettings] = useState(false);
   // Dexed instrument + selected song — tracked locally (no firmware readback yet).
@@ -112,6 +113,7 @@ export default function App() {
         }}
         song={song}
         onSelectSong={setSong}
+        onRefreshCatalog={refreshCatalog}
       />
     </SafeAreaView>
   );
@@ -137,6 +139,7 @@ function SettingsModal({
   onSelectVoice,
   song,
   onSelectSong,
+  onRefreshCatalog,
 }: {
   visible: boolean;
   onClose: () => void;
@@ -155,6 +158,7 @@ function SettingsModal({
   onSelectVoice: (index: number) => void;
   song: number;
   onSelectSong: (index: number) => void;
+  onRefreshCatalog: () => void;
 }) {
   const [pane, setPane] = useState<SettingsPane>('menu');
 
@@ -240,6 +244,7 @@ function SettingsModal({
               <View style={{ height: 8 }} />
               <PrimaryButton label={`▶  Play ${songs[song] ?? 'Song'}`} onPress={() => onPlaySong(song)} />
               <SecondaryButton label="Stop" onPress={onStopSong} />
+              <SecondaryButton label="↻  Refresh Songs (after adding via USB)" onPress={onRefreshCatalog} />
 
               <Text style={styles.sectionLabel}>Instrument</Text>
               <Dropdown label="Instrument" options={instruments} value={dxVoice} onSelect={onSelectVoice} />

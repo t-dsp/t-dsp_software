@@ -21,6 +21,7 @@
 #include <MIDI.h>
 #include <synth_dexed.h>
 #include <SD.h>
+#include <MTP_Teensy.h>   // expose the SD card to the host over USB (Serial+MTP)
 #include "async_input.h"
 #include "input_i2s2_16bit.h"
 #include "DexedVoiceBank.h"
@@ -348,6 +349,17 @@ static void sendCatalog() {
     Serial.println("[cat] catalog sent to ESP32");
 }
 
+// Refresh = re-scan the SD card (picking up songs just added over USB / a reader)
+// and re-send the catalog. Triggered by the app's Refresh button (@GETCAT) and on
+// each BLE connect. Retries SD.begin so a card inserted after boot still mounts.
+static void refreshCatalog() {
+#if TDSP_HAS_SDCARD
+    if (!g_sdReady) { g_sdReady = SD.begin(BUILTIN_SDCARD); Serial.printf("[sd] retry: %s\n", g_sdReady ? "ready" : "no card"); }
+#endif
+    buildSongList();
+    sendCatalog();
+}
+
 // --- MIDI IN (Serial1 DIN) -> Dexed -----------------------------------------
 static void onNoteOn(byte, byte note, byte vel) {
     if (vel == 0) { g_dexed.keyup(note); return; }
@@ -406,6 +418,10 @@ void setup() {
 #if TDSP_HAS_SDCARD
     g_sdReady = SD.begin(BUILTIN_SDCARD);
     Serial.printf("[sd] card %s\n", g_sdReady ? "ready" : "not present");
+    // MTP: present the SD to the host over USB so songs can be dropped into /songs
+    // without pulling the card. Serial (debug + ESP32 flash bridge) is unaffected.
+    MTP.begin();
+    if (g_sdReady) MTP.addFilesystem(SD, "T-DSP Songs");
 #endif
     buildSongList();
 
@@ -446,6 +462,10 @@ void loop() {
     // Flash-mode passthrough owns the loop (also handles @BOOTAPP@); in run mode this
     // ticks the slow LED heartbeat and returns false.
     if (kit.service(Serial)) return;
+
+#if TDSP_HAS_SDCARD
+    MTP.loop();   // service USB file transfers to/from the SD (host drag-and-drop)
+#endif
 
     // Dexed source: drain physical MIDI IN and advance the (non-blocking) song.
     while (MIDI.read()) { /* handlers fire per message */ }
@@ -502,7 +522,7 @@ void loop() {
                     if (strcmp(line + 6, "stop") == 0) songStop();
                     else songStart(atoi(line + 6));   // @SONG=<song index>
                 }
-                else if (strcmp(line, "@GETCAT") == 0) sendCatalog();  // ESP32 wants the catalog
+                else if (strcmp(line, "@GETCAT") == 0) refreshCatalog();  // re-scan SD + send catalog
                 else Serial.printf("[esp] %s\n", line);
             }
             n = 0;
