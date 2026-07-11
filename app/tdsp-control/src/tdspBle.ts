@@ -289,23 +289,23 @@ export function useTdsp() {
     } catch {}
     try {
       const c = await device.readCharacteristicForService(TDSP_SVC_UUID, TDSP_INSTR_UUID);
-      // The instrument value may carry an optional synth header so the MIDI page
-      // labels itself from the engine the firmware was built with:
-      //   "<name>\t<description>\n" + "inst0|inst1|..."
-      // Old firmware sends no header (no '\n') -> leave synth at the default.
+      // The instrument value may carry an optional synth header as its FIRST
+      // '|'-field, so the MIDI page labels itself from the engine the firmware
+      // was built with:  "@<name>\t<description>|inst0|inst1|..."
+      // The header rides as a '@'-prefixed pseudo-entry because the firmware's
+      // UART catalog line is newline-framed (a '\n' can't sit inside the value)
+      // and instrument names never start with '@'. Old firmware sends no header
+      // -> synth stays at the Dexed default.
       const raw = c.value ? base64ToString(c.value) : '';
-      let listStr = raw;
-      const nl = raw.indexOf('\n');
-      if (nl >= 0) {
-        const header = raw.slice(0, nl);
-        listStr = raw.slice(nl + 1);
+      const parts = raw.split('|').filter((x) => x.length > 0);
+      if (parts.length && parts[0].startsWith('@')) {
+        const header = parts.shift()!.slice(1);
         const tab = header.indexOf('\t');
         const name = (tab >= 0 ? header.slice(0, tab) : header).trim();
         const description = tab >= 0 ? header.slice(tab + 1).trim() : '';
         if (name) setCatSynth({ name, description: description || DEFAULT_SYNTH.description });
       }
-      const list = listStr.split('|').filter((x) => x.length > 0);
-      if (list.length) setCatInstruments(list);
+      if (parts.length) setCatInstruments(parts);
     } catch {}
   }, []);
 
