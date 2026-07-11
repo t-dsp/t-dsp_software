@@ -61,13 +61,37 @@ AudioConnection c_pkOut(outL, 0, peakOut, 0);
 //   * const char* synthName();      (label for the heartbeat)
 // ============================================================================
 #if defined(TDSP_SYNTH_YMFM)
-  // ---- ymfm backend --------------------------------------------------------
-  // Wired up when the ymfm port lands: instantiate its AudioStream engine,
-  // connect it to outL/outR slot 0, wrap it in a YmfmSink (tdsp::MidiSink),
-  // and point g_synthSink at it. See lib/TDspMidiPlayer/README.md.
-  #error "TDSP_SYNTH_YMFM selected but no ymfm engine is wired in this spike yet. \
-Provide YmfmSink (a tdsp::MidiSink) + the engine node, set g_synthSink, then \
-delete this #error. Until then build the default (Dexed) target."
+  // ---- ymfm OPM backend (BSD-3-Clause) -------------------------------------
+  // Yamaha YM2151 / OPM, 8-voice, genuinely STEREO (output 0 = L, 1 = R), so
+  // the two outputs go to outL/outR separately (not fanned like mono Dexed).
+  #include <AudioSynthYmfmOPM.h>
+  #include "YmfmSink.h"
+
+  AudioSynthYmfmOPM g_opm;                        // stereo: output 0 = L, 1 = R
+  AudioConnection   c_opmL(g_opm, 0, outL, 0);
+  AudioConnection   c_opmR(g_opm, 1, outR, 0);    // OPM IS stereo — R -> outR
+  YmfmSink          g_ymfmSink(&g_opm);
+  tdsp::MidiSink   *g_synthSink = &g_ymfmSink;
+
+  static const tdsp::ymfmopm::OpmVoice *kVoices[] = {
+      &tdsp::ymfmopm::kAdditiveOrgan,
+      &tdsp::ymfmopm::kElectricPiano,
+  };
+  static const int kNumVoices = sizeof(kVoices) / sizeof(kVoices[0]);
+  static int       g_voiceIdx = 0;
+
+  static void synthBegin() {
+      g_opm.begin();                     // reset chip, size resampler, load default voice
+      g_ymfmSink.setListenChannel(0);    // omni: one patch plays every channel
+      g_opm.setVoice(*kVoices[g_voiceIdx]);
+  }
+  static void synthNextInstrument() {
+      g_voiceIdx = (g_voiceIdx + 1) % kNumVoices;
+      g_opm.allNotesOff();
+      g_opm.setVoice(*kVoices[g_voiceIdx]);
+      Serial.printf("[opm] voice %d = %s\n", g_voiceIdx, kVoices[g_voiceIdx]->name);
+  }
+  static const char *synthName() { return "ymfm OPM"; }
 
 #else  // ---- Dexed backend (default) -----------------------------------------
   #include <synth_dexed.h>
