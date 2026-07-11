@@ -494,7 +494,13 @@ export function useTdsp() {
   // also re-read after a short delay in case the notify is missed.
   const refreshCatalog = useCallback(() => {
     sendCommand(CMD.REFRESH_CAT);
-    setTimeout(() => readCatalog(), 700);
+    // Re-read several times, staggered: the ESP32->Teensy->ESP32 round trip
+    // (which includes an SD re-scan on the Teensy) can easily exceed a single
+    // 700ms wait, so one read often fires before the fresh catalog lands. A few
+    // spaced reads converge reliably without spamming the BLE link. (The notify
+    // subscription also re-reads, but a device that re-sends an unchanged value
+    // may not notify, so we don't rely on it.)
+    [300, 900, 1800, 3000].forEach((ms) => setTimeout(() => readCatalog(), ms));
   }, [sendCommand, readCatalog]);
 
   // Drain the pending volume to the device, coalescing bursts into the latest
