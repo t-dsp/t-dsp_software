@@ -70,6 +70,9 @@ enum : uint8_t {
   CMD_SET_VOLUME   = 0x10,  // 2nd byte = master volume 0..100 (%); relayed to the Teensy
   CMD_CONNECT_ADDR = 0x11,  // + 6 bytes BD address: switch A2DP to that paired phone
   CMD_FORGET_ADDR  = 0x12,  // + 6 bytes BD address: remove that specific bond
+  CMD_PLAY_SONG    = 0x20,  // play the built-in Dexed demo (William Tell); relayed to Teensy
+  CMD_STOP_SONG    = 0x21,  // stop the Dexed demo
+  CMD_SET_DX_VOICE = 0x22,  // 2nd byte = Dexed instrument index; relayed to the Teensy
 };
 
 BluetoothA2DPSink a2dp_sink;
@@ -87,6 +90,12 @@ static uint8_t            g_volume = 50;            // master volume 0..100 (%),
 static void relayVolume() {
   Serial.printf("@VOL=%u\n", g_volume);
 }
+
+// Relay Dexed controls to the Teensy over UART0, same "@VERB=<val>" framing.
+// The Teensy plays/stops the built-in William Tell sequencer and switches the
+// Dexed instrument from a curated list (index must match the app's list).
+static void relaySong(bool play)      { Serial.printf("@SONG=%s\n", play ? "williamtell" : "stop"); }
+static void relayDxVoice(uint8_t idx) { Serial.printf("@DXVOICE=%u\n", idx); }
 
 // ---- Paired-source list (multi-device switch) -----------------------------
 static BLECharacteristic *g_srcChar = nullptr;
@@ -295,6 +304,20 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
           g_names.remove(key);
           g_names.end();
           Serial.printf("[ble] cmd: FORGET %s\n", key);
+        }
+        break;
+      case CMD_PLAY_SONG:
+        Serial.println("[ble] cmd: PLAY SONG (Dexed)");
+        relaySong(true);   // -> Teensy: @SONG=williamtell
+        break;
+      case CMD_STOP_SONG:
+        Serial.println("[ble] cmd: STOP SONG");
+        relaySong(false);  // -> Teensy: @SONG=stop
+        break;
+      case CMD_SET_DX_VOICE:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET DEXED VOICE %u\n", (uint8_t)v[1]);
+          relayDxVoice((uint8_t)v[1]);  // -> Teensy: @DXVOICE=<n>
         }
         break;
       default:

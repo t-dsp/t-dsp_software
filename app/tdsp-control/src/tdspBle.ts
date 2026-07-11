@@ -28,7 +28,17 @@ export const CMD = {
   SET_VOLUME: 0x10, // + 1 byte: master volume 0..100 (%)
   CONNECT_ADDR: 0x11, // + 6 bytes BD address: switch A2DP to that paired phone
   FORGET_ADDR: 0x12, // + 6 bytes BD address: remove that bond
+  PLAY_SONG: 0x20, // play the built-in Dexed demo (William Tell)
+  STOP_SONG: 0x21, // stop the Dexed demo
+  SET_DX_VOICE: 0x22, // + 1 byte: Dexed instrument index (into DX_INSTRUMENTS)
 } as const;
+
+// Dexed instrument list — index sent via SET_DX_VOICE. MUST stay in sync with
+// kInstruments[] in projects/spike_esp32_bt_spdif_mix_kit/src/main.cpp.
+export const DX_INSTRUMENTS = [
+  'E.Piano', 'Brass', 'Strings', 'Orchestra', 'Piano', 'Syn Lead',
+  'Bass', 'Organ', 'Harpsi', 'Vibes', 'Flute', 'Tub Bells',
+] as const;
 
 export type TdspStatus = {
   conn: boolean; // an A2DP source is connected
@@ -324,6 +334,32 @@ export function useTdsp() {
     [writeAddrCmd]
   );
 
+  // Command carrying a single data byte (e.g. SET_DX_VOICE + instrument index).
+  const writeByteCmd = useCallback(async (opcode: number, value: number) => {
+    const device = deviceRef.current;
+    if (!device) {
+      setError('not connected');
+      return;
+    }
+    try {
+      await device.writeCharacteristicWithResponseForService(
+        TDSP_SVC_UUID,
+        TDSP_CMD_UUID,
+        bytesToBase64([opcode & 0xff, value & 0xff])
+      );
+    } catch (e: any) {
+      setError(e?.message ?? 'write failed');
+    }
+  }, []);
+
+  // Dexed (MIDI synth) controls.
+  const playSong = useCallback(() => sendCommand(CMD.PLAY_SONG), [sendCommand]);
+  const stopSong = useCallback(() => sendCommand(CMD.STOP_SONG), [sendCommand]);
+  const setDxVoice = useCallback(
+    (index: number) => writeByteCmd(CMD.SET_DX_VOICE, index),
+    [writeByteCmd]
+  );
+
   // Drain the pending volume to the device, coalescing bursts into the latest
   // value AND rate-limiting to ~11 writes/sec. The phone shares one radio between
   // BLE and A2DP, so a burst of BLE writes while streaming audio makes the music
@@ -389,5 +425,8 @@ export function useTdsp() {
     connectSource,
     forgetSource,
     readSources,
+    playSong,
+    stopSong,
+    setDxVoice,
   };
 }

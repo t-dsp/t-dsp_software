@@ -107,9 +107,11 @@ with open(out, "w") as f:
     f.write("// {deltaMs since prev event, note, vel}  vel 0 = note-off.\n")
     f.write("#pragma once\n#include <stdint.h>\n\n")
     f.write("struct SongEv { uint16_t dms; uint8_t note; uint8_t vel; };\n\n")
+    f.write("// PROGMEM keeps the table in flash on Teensy 4 (else the linker copies it to\n")
+    f.write("// DTCM/RAM1). Flash is memory-mapped, so direct [] access still works.\n")
     f.write(f"// {len(out_rows)} events, {dur/1000:.0f}s, notes "
             f"{min(n[2] for n in note_ons)}..{max(n[2] for n in note_ons)}, maxPoly {poly}\n")
-    f.write("static const SongEv kWilliamTellSong[] = {\n")
+    f.write("static const SongEv kWilliamTellSong[] PROGMEM = {\n")
     for k in range(0, len(out_rows), 8):
         f.write("  " + " ".join(f"{{{d},{n},{v}}}," for (d, n, v) in out_rows[k:k+8]) + "\n")
     f.write("};\n")

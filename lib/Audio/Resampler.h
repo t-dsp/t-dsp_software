@@ -34,7 +34,15 @@
 #include "Arduino.h"
 //#define DEBUG_RESAMPLER  //activates debug output
 
+// MAX_FILTER_SAMPLES sizes the per-Resampler `filter[]` array (4 bytes each), so
+// the default 40961 costs ~160KB of RAM per resampler. That length is only ever
+// needed for large-factor DOWNSAMPLING; for near-unity/upsampling (e.g. 44.1->48
+// BT, 48->48 S/PDIF) the used filter is only ~2*maxHalfFilterLength+1 taps. A
+// build can override this (e.g. -D MAX_FILTER_SAMPLES=4097) to reclaim RAM when
+// only near-unity resampling is used. Default is unchanged for other projects.
+#ifndef MAX_FILTER_SAMPLES
 #define MAX_FILTER_SAMPLES 40961 //=1024*20 +1
+#endif
 #define NO_EXACT_KAISER_SAMPLES 4097
 #define MAX_HALF_FILTER_LENGTH 80
 #define MAX_NO_CHANNELS 8

@@ -16,7 +16,7 @@ import {
   Text,
   View,
 } from 'react-native';
-import { CMD, ConnState, TdspSource, useTdsp } from './src/tdspBle';
+import { CMD, ConnState, DX_INSTRUMENTS, TdspSource, useTdsp } from './src/tdspBle';
 
 export default function App() {
   const {
@@ -33,8 +33,13 @@ export default function App() {
     connectSource,
     forgetSource,
     readSources,
+    playSong,
+    stopSong,
+    setDxVoice,
   } = useTdsp();
   const [showSettings, setShowSettings] = useState(false);
+  // Dexed instrument index — tracked locally (the firmware has no readback yet).
+  const [dxVoice, setDxVoiceState] = useState(0);
   const connected = state === 'connected';
 
   const openSettings = () => {
@@ -92,10 +97,19 @@ export default function App() {
           setShowSettings(false);
           disconnect();
         }}
+        onPlaySong={playSong}
+        onStopSong={stopSong}
+        dxVoice={dxVoice}
+        onSelectVoice={(i) => {
+          setDxVoiceState(i);
+          setDxVoice(i);
+        }}
       />
     </SafeAreaView>
   );
 }
+
+type SettingsPane = 'menu' | 'bluetooth' | 'midi';
 
 function SettingsModal({
   visible,
@@ -106,6 +120,10 @@ function SettingsModal({
   onForgetSource,
   onCommand,
   onDisconnectApp,
+  onPlaySong,
+  onStopSong,
+  dxVoice,
+  onSelectVoice,
 }: {
   visible: boolean;
   onClose: () => void;
@@ -115,47 +133,118 @@ function SettingsModal({
   onForgetSource: (addr: string) => void;
   onCommand: (op: number) => void;
   onDisconnectApp: () => void;
+  onPlaySong: () => void;
+  onStopSong: () => void;
+  dxVoice: number;
+  onSelectVoice: (index: number) => void;
 }) {
+  const [pane, setPane] = useState<SettingsPane>('menu');
+
+  // Always reopen on the top-level menu.
+  const close = () => {
+    setPane('menu');
+    onClose();
+  };
+  const title = pane === 'bluetooth' ? 'Bluetooth' : pane === 'midi' ? 'MIDI' : 'Settings';
+
   return (
-    <Modal visible={visible} animationType="slide" onRequestClose={onClose}>
+    <Modal visible={visible} animationType="slide" onRequestClose={close}>
       <SafeAreaView style={styles.screen}>
         <View style={styles.header}>
-          <Text style={styles.title}>Settings</Text>
-          <Pressable onPress={onClose} hitSlop={14} style={styles.iconBtn}>
+          {pane === 'menu' ? (
+            <Text style={styles.title}>{title}</Text>
+          ) : (
+            <Pressable onPress={() => setPane('menu')} hitSlop={14} style={styles.backBtn}>
+              <Text style={styles.icon}>‹</Text>
+              <Text style={styles.backTitle}>{title}</Text>
+            </Pressable>
+          )}
+          <Pressable onPress={close} hitSlop={14} style={styles.iconBtn}>
             <Text style={styles.icon}>✕</Text>
           </Pressable>
         </View>
 
         <ScrollView contentContainerStyle={styles.settingsBody}>
-          <Text style={styles.sectionLabel}>Paired Sources</Text>
-          {sources.length === 0 ? (
-            <Text style={styles.dim}>
-              No paired phones yet. Use “Enter Pairing Mode” below, then pair T-DSP from your phone’s
-              Bluetooth settings.
-            </Text>
-          ) : (
-            sources.map((s) => (
-              <SourceRow
-                key={s.a}
-                source={s}
-                onConnect={() => onConnectSource(s.a)}
-                onForget={() => onForgetSource(s.a)}
-              />
-            ))
+          {pane === 'menu' && (
+            <>
+              <MenuRow label="Bluetooth" detail="Pairing & paired sources" onPress={() => setPane('bluetooth')} />
+              <MenuRow label="MIDI" detail="Dexed synth" onPress={() => setPane('midi')} />
+              <Text style={styles.sectionLabel}>App</Text>
+              <SecondaryButton label="Disconnect App" onPress={onDisconnectApp} />
+            </>
           )}
 
-          <Text style={styles.sectionLabel}>Pairing</Text>
-          {discoverable && <Text style={styles.pairingHint}>● In pairing mode — discoverable as “T-DSP”</Text>}
-          <SecondaryButton
-            label={discoverable ? 'End Pairing Mode' : 'Enter Pairing Mode'}
-            onPress={() => onCommand(discoverable ? CMD.END_PAIRING : CMD.PAIRING_MODE)}
-          />
+          {pane === 'bluetooth' && (
+            <>
+              <Text style={styles.sectionLabel}>Paired Sources</Text>
+              {sources.length === 0 ? (
+                <Text style={styles.dim}>
+                  No paired phones yet. Use “Enter Pairing Mode” below, then pair T-DSP from your phone’s
+                  Bluetooth settings.
+                </Text>
+              ) : (
+                sources.map((s) => (
+                  <SourceRow
+                    key={s.a}
+                    source={s}
+                    onConnect={() => onConnectSource(s.a)}
+                    onForget={() => onForgetSource(s.a)}
+                  />
+                ))
+              )}
 
-          <Text style={styles.sectionLabel}>App</Text>
-          <SecondaryButton label="Disconnect App" onPress={onDisconnectApp} />
+              <Text style={styles.sectionLabel}>Pairing</Text>
+              {discoverable && <Text style={styles.pairingHint}>● In pairing mode — discoverable as “T-DSP”</Text>}
+              <SecondaryButton
+                label={discoverable ? 'End Pairing Mode' : 'Enter Pairing Mode'}
+                onPress={() => onCommand(discoverable ? CMD.END_PAIRING : CMD.PAIRING_MODE)}
+              />
+            </>
+          )}
+
+          {pane === 'midi' && (
+            <>
+              <Text style={styles.sectionLabel}>Dexed</Text>
+              <Text style={styles.dim}>6-op FM synth, played by the MIDI IN port.</Text>
+              <View style={{ height: 12 }} />
+              <PrimaryButton label="▶  Play William Tell Overture" onPress={onPlaySong} />
+              <SecondaryButton label="Stop" onPress={onStopSong} />
+
+              <Text style={styles.sectionLabel}>Instrument</Text>
+              {DX_INSTRUMENTS.map((name, i) => (
+                <InstrumentRow
+                  key={name}
+                  name={name}
+                  selected={i === dxVoice}
+                  onPress={() => onSelectVoice(i)}
+                />
+              ))}
+            </>
+          )}
         </ScrollView>
       </SafeAreaView>
     </Modal>
+  );
+}
+
+function MenuRow({ label, detail, onPress }: { label: string; detail: string; onPress: () => void }) {
+  return (
+    <Pressable style={({ pressed }) => [styles.menuRow, pressed && styles.btnPressed]} onPress={onPress}>
+      <View style={{ flex: 1 }}>
+        <Text style={styles.menuLabel}>{label}</Text>
+        <Text style={styles.menuDetail}>{detail}</Text>
+      </View>
+      <Text style={styles.menuChevron}>›</Text>
+    </Pressable>
+  );
+}
+
+function InstrumentRow({ name, selected, onPress }: { name: string; selected: boolean; onPress: () => void }) {
+  return (
+    <Pressable style={({ pressed }) => [styles.instRow, selected && styles.instRowOn, pressed && styles.btnPressed]} onPress={onPress}>
+      <Text style={[styles.instName, selected && styles.instNameOn]}>{name}</Text>
+      {selected && <Text style={styles.instCheck}>✓</Text>}
+    </Pressable>
   );
 }
 
@@ -306,6 +395,17 @@ const styles = StyleSheet.create({
   warn: { color: '#d29922', fontSize: 14, marginTop: 8 },
   error: { color: '#f85149', fontSize: 14, marginTop: 12 },
   settingsBody: { paddingBottom: 40 },
+  backBtn: { flexDirection: 'row', alignItems: 'center', flex: 1 },
+  backTitle: { color: '#fff', fontSize: 32, fontWeight: '700', marginLeft: 4 },
+  menuRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#161b22', borderRadius: 12, borderWidth: 1, borderColor: '#21262d', paddingVertical: 16, paddingHorizontal: 16, marginBottom: 12 },
+  menuLabel: { color: '#e6edf3', fontSize: 17, fontWeight: '600' },
+  menuDetail: { color: '#8b949e', fontSize: 13, marginTop: 2 },
+  menuChevron: { color: '#6e7681', fontSize: 24, fontWeight: '700' },
+  instRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#161b22', borderRadius: 12, borderWidth: 1, borderColor: '#21262d', paddingVertical: 14, paddingHorizontal: 16, marginBottom: 10 },
+  instRowOn: { borderColor: '#238636', backgroundColor: '#12261a' },
+  instName: { color: '#e6edf3', fontSize: 16, fontWeight: '600' },
+  instNameOn: { color: '#3fb950' },
+  instCheck: { color: '#3fb950', fontSize: 18, fontWeight: '700' },
   sectionLabel: { color: '#8b949e', fontSize: 13, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 1, marginTop: 18, marginBottom: 10 },
   dim: { color: '#6e7681', fontSize: 14, lineHeight: 20 },
   pairingHint: { color: '#3fb950', fontSize: 13, fontWeight: '600', marginBottom: 10 },

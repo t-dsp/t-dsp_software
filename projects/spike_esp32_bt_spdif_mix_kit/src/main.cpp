@@ -18,17 +18,27 @@
 #include <Audio.h>
 #include <TAC5212.h>
 #include <TDspProgrammingKit.h>
+#include <MIDI.h>
+#include <synth_dexed.h>
 #include "async_input.h"
 #include "input_i2s2_16bit.h"
+#include "DexedVoiceBank.h"
+#include "william_tell_mid.h"
 
 constexpr int     TAC5212_EN_PIN      = 35;     // shared SHDNZ, active-low
 constexpr uint8_t TAC5212_I2C_ADDRESS = 0x51;
+
+// Physical MIDI IN: schematic MIDI_RX = Teensy pin 0 (Serial1 RX) via the H11L1
+// opto. Drives the Dexed source below. (See projects/spike_midi_dexed.)
+MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
 
 // --- Audio graph (unchanged from spike_esp32_bt_spdif_mix) ------------------
 // tdmClk (SAI1 TDM input) is constructed FIRST so it owns update_responsibility.
 AudioInputTDM          tdmClk;               // SAI1 TDM clock + update driver
 AudioOutputTDM         tdmOut;               // SAI1 TDM -> TAC5212 DAC (ch0=L, ch1=R)
 
+// Resamplers stay in fast DTCM. They fit alongside Dexed because this build caps
+// MAX_FILTER_SAMPLES (see platformio.ini) so each filter[] is ~16KB not ~160KB.
 AsyncAudioInputSPDIF3  spdifIn(false, false, 100, 20, 80);  // optical IN, pin 15
 AudioOutputSPDIF3      spdifOut;                            // optical OUT, pin 14
 AudioSynthWaveformSine spdifTone;                          // tone sent out the optical port
@@ -36,7 +46,8 @@ AudioSynthWaveformSine spdifTone;                          // tone sent out the 
 AsyncAudioInput<AsyncAudioInputI2S2_16bitslave> btIn(false, false, 100, 20, 80);
 
 AudioSynthWaveformSine testTone;             // local DAC self-test source
-AudioMixer4            outL, outR;           // mix: 0=BT, 1=local tone, 2=S/PDIF-in
+AudioSynthDexed        g_dexed(16, AUDIO_SAMPLE_RATE_EXACT);  // 16-voice 6-op FM
+AudioMixer4            outL, outR;           // mix: 0=BT, 1=local tone, 2=S/PDIF-in, 3=Dexed
 AudioAnalyzePeak       peakBt, peakSpdif, peakOut;
 
 AudioConnection c_txL    (spdifTone, 0, spdifOut, 0);
@@ -47,6 +58,8 @@ AudioConnection c_toneL  (testTone,  0, outL, 1);
 AudioConnection c_toneR  (testTone,  0, outR, 1);
 AudioConnection c_spL    (spdifIn,   0, outL, 2);
 AudioConnection c_spR    (spdifIn,   1, outR, 2);
+AudioConnection c_dxL    (g_dexed,   0, outL, 3);   // Dexed (mono) -> both channels
+AudioConnection c_dxR    (g_dexed,   0, outR, 3);
 AudioConnection c_outL   (outL,      0, tdmOut, 0);
 AudioConnection c_outR   (outR,      0, tdmOut, 1);
 AudioConnection c_pkBt   (btIn,      0, peakBt,    0);
@@ -131,11 +144,95 @@ FLASHMEM static void setupCodec() {
     g_codec.setDspAvddSelect(true);
 }
 
-// mixer helper: 0=BT, 1=local test tone, 2=S/PDIF-in
+// mixer helper: 0=BT, 1=local test tone, 2=S/PDIF-in (slot 3 = Dexed, set once,
+// stays on independently of source-mode switches)
 static void setMix(float bt, float tone, float spdif) {
     outL.gain(0, bt);    outR.gain(0, bt);
     outL.gain(1, tone);  outR.gain(1, tone);
     outL.gain(2, spdif); outR.gain(2, spdif);
+}
+
+// ============================================================================
+// Dexed source — 6-op FM synth played by the physical MIDI IN and the app.
+// ============================================================================
+// Curated instrument list: index (sent by the app as @DXVOICE=<i>) -> a bundled
+// DX7 patch (bank, voice) from dexed_banks_data.h. Bank 2 = the rom1a factory
+// cartridge. Keep this list in sync with INSTRUMENTS[] in the app (tdspBle.ts).
+struct DxInstrument { uint8_t bank, voice; const char *name; };
+static const DxInstrument kInstruments[] = {
+    {2, 10, "E.Piano"},   {2,  0, "Brass"},     {2,  3, "Strings"},
+    {2,  6, "Orchestra"}, {2,  7, "Piano"},     {2, 13, "Syn Lead"},
+    {2, 14, "Bass"},      {2, 16, "Organ"},     {2, 18, "Harpsi"},
+    {2, 20, "Vibes"},     {2, 23, "Flute"},     {2, 25, "Tub Bells"},
+};
+static const int kNumInstruments = sizeof(kInstruments) / sizeof(kInstruments[0]);
+static int g_dxInstrument = 0;
+
+// Load a curated instrument into Dexed (runs from loop/handlers, never the ISR).
+static void setDexedInstrument(int idx) {
+    if (idx < 0) idx = 0;
+    if (idx >= kNumInstruments) idx = kNumInstruments - 1;
+    const DxInstrument &in = kInstruments[idx];
+    g_dexed.panic();
+    if (tdsp::dexed::loadVoice(g_dexed, in.bank, in.voice)) {
+        g_dxInstrument = idx;
+        Serial.printf("[dexed] instrument %d = %s (bank %d voice %d)\n",
+                      idx, in.name, in.bank, in.voice);
+    }
+}
+
+// --- Non-blocking William Tell sequencer ------------------------------------
+// The spike played the song with a blocking loop; here it MUST be non-blocking
+// so BT audio, the ESP32 relay, and app control keep running (and so the app
+// can stop it). Ticked every loop(): fires all events whose time has arrived.
+static bool        g_songOn   = false;
+static uint32_t    g_songIdx  = 0;
+static elapsedMillis g_songClock;
+static uint32_t    g_songWait = 0;
+
+static void songStart() {
+    g_dexed.panic();
+    g_songIdx  = 0;
+    g_songWait = kWilliamTellSong[0].dms;
+    g_songClock = 0;
+    g_songOn   = true;
+    Serial.println("[song] William Tell Overture -> Dexed (start)");
+}
+static void songStop() {
+    if (!g_songOn) return;
+    g_songOn = false;
+    g_dexed.panic();
+    Serial.println("[song] stopped");
+}
+static void songTick() {
+    if (!g_songOn) return;
+    const uint32_t n = sizeof(kWilliamTellSong) / sizeof(kWilliamTellSong[0]);
+    while (g_songOn && g_songClock >= g_songWait) {
+        g_songClock -= g_songWait;
+        const SongEv &e = kWilliamTellSong[g_songIdx];
+        if (e.vel)       g_dexed.keydown(e.note, e.vel);
+        else if (e.note) g_dexed.keyup(e.note);
+        if (++g_songIdx >= n) {
+            g_dexed.panic();
+            g_songOn = false;
+            Serial.println("[song] done");
+            return;
+        }
+        g_songWait = kWilliamTellSong[g_songIdx].dms;
+    }
+}
+
+// --- MIDI IN (Serial1 DIN) -> Dexed -----------------------------------------
+static void onNoteOn(byte, byte note, byte vel) {
+    if (vel == 0) { g_dexed.keyup(note); return; }
+    g_dexed.keydown(note, vel);
+}
+static void onNoteOff(byte, byte note, byte) { g_dexed.keyup(note); }
+static void onPitchBend(byte, int bend) { g_dexed.setPitchbendRange(2); g_dexed.setPitchbend((int16_t)bend); }
+static void onControlChange(byte, byte cc, byte val) {
+    if (cc == 1)  g_dexed.setModWheel(val);
+    if (cc == 64) g_dexed.setSustain(val >= 64);
+    if (cc == 123 && val == 0) g_dexed.panic();
 }
 
 void setup() {
@@ -179,12 +276,27 @@ void setup() {
 
     AudioMemory(60);
     setMix(1.0f, 0.0f, 1.0f);
+    outL.gain(3, 0.8f);  outR.gain(3, 0.8f);   // Dexed source, always on
     testTone.frequency(440.0f);  testTone.amplitude(0.0f);
     spdifTone.frequency(1000.0f); spdifTone.amplitude(0.25f);
     if (g_codecOk) applyVol();
 
+    // Physical MIDI IN on Serial1 (pin 0) -> Dexed, omni. Soft-thru off.
+    MIDI.begin(MIDI_CHANNEL_OMNI);
+    MIDI.turnThruOff();
+    MIDI.setHandleNoteOn(onNoteOn);
+    MIDI.setHandleNoteOff(onNoteOff);
+    MIDI.setHandlePitchBend(onPitchBend);
+    MIDI.setHandleControlChange(onControlChange);
+    g_dexed.setPitchbendRange(2);
+    g_dexed.setPitchbend((int16_t)0);
+    g_dexed.setModWheel(0);
+    g_dexed.setSustain(false);
+    setDexedInstrument(g_dxInstrument);        // default: E.Piano
+
     Serial.println("running -- cmds: t=DACtone a=BT+SPDIF mix  s=SPDIF-only  m=BT-only");
     Serial.println("                 x=toggle SPDIF tone  +/-=vol  d=dump  i=re-init codec");
+    Serial.println("                 W=William Tell (Dexed)  V=next instrument   MIDI-IN on pin0");
     Serial.println("      ESP32/kit:  r=reset  g=flash mode  @BOOTAPP@=exit flash  U=Teensy prog");
     Serial.println("                 P=ESP32 pairing mode  F=ESP32 forget bond + pair");
 
@@ -198,6 +310,10 @@ void loop() {
     // Flash-mode passthrough owns the loop (also handles @BOOTAPP@); in run mode this
     // ticks the slow LED heartbeat and returns false.
     if (kit.service(Serial)) return;
+
+    // Dexed source: drain physical MIDI IN and advance the (non-blocking) song.
+    while (MIDI.read()) { /* handlers fire per message */ }
+    songTick();
 
     if (Serial.available()) {
         int c = Serial.read();
@@ -227,6 +343,8 @@ void loop() {
             else if (c == 'i') { Serial.println("[cmd] re-init codec"); setupCodec(); applyVol();
                                  Serial.printf("[cmd] codec=%s (%s), vol %.0f dB\n",
                                                g_codecOk ? "OK" : "FAIL", g_codecMsg, g_dvol); }
+            else if (c == 'W') { if (g_songOn) songStop(); else songStart(); }   // Dexed demo
+            else if (c == 'V') { setDexedInstrument((g_dxInstrument + 1) % kNumInstruments); }
         }
     }
 
@@ -241,6 +359,11 @@ void loop() {
                 // Control lines from the ESP32 (relayed from the BLE app) are acted
                 // on here; everything else is just mirrored to USB with an [esp] tag.
                 if (strncmp(line, "@VOL=", 5) == 0) setMasterVolumePct(atoi(line + 5));
+                else if (strncmp(line, "@DXVOICE=", 9) == 0) setDexedInstrument(atoi(line + 9));
+                else if (strncmp(line, "@SONG=", 6) == 0) {
+                    if (strcmp(line + 6, "stop") == 0) songStop();
+                    else songStart();   // any other id (e.g. "williamtell") plays it
+                }
                 else Serial.printf("[esp] %s\n", line);
             }
             n = 0;
@@ -262,5 +385,7 @@ void loop() {
                       AsyncAudioInputSPDIF3::isLocked() ? "LOCKED" : "no-signal",
                       spdifIn.getInputFrequency(), pbt, psp, po,
                       AudioProcessorUsageMax(), AudioMemoryUsageMax());
+        AudioProcessorUsageMaxReset();   // make cpuMax a per-second rolling peak
+        AudioMemoryUsageMaxReset();
     }
 }
