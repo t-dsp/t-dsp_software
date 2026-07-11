@@ -229,7 +229,7 @@ static const int kNumBuiltin = sizeof(kBuiltinSongs) / sizeof(kBuiltinSongs[0]);
 // Unified runtime song list: built-ins first, then /songs/*.mid off the SD card.
 // SD songs are parsed on play into g_sdBuf. Adding a song = drop a .mid on the
 // card; it appears in the catalog (and the app) with no firmware rebuild.
-struct SongRef { char name[40]; const SongEv *ev; uint32_t count; char path[80]; bool sd; };
+struct SongRef { char name[48]; const SongEv *ev; uint32_t count; char path[96]; bool sd; };
 static SongRef g_songs[48];
 static int     g_numSongs = 0;
 static bool    g_sdReady  = false;
@@ -246,6 +246,31 @@ static bool songNameExists(const char *name) {   // case-insensitive, for de-dup
         if (strcasecmp(g_songs[i].name, name) == 0) return true;
     return false;
 }
+// Scan one directory for *.mid and append each (deduped by display name). `dir`
+// is "/songs" or "/" (the card root, so files dropped at the top level also work).
+static void scanSongDir(const char *dir) {
+    File d = SD.open(dir);
+    if (!d || !d.isDirectory()) { if (d) d.close(); return; }
+    const int cap = (int)(sizeof(g_songs) / sizeof(g_songs[0]));
+    for (File f = d.openNextFile(); f && g_numSongs < cap; f = d.openNextFile()) {
+        const char *nm = f.name();
+        if (!f.isDirectory() && nm && endsWithMid(nm)) {
+            char disp[48];                                  // display name = filename minus ".mid"
+            size_t copy = strlen(nm) - 4;                   // (endsWithMid guarantees len > 4)
+            if (copy > sizeof(disp) - 1) copy = sizeof(disp) - 1;
+            memcpy(disp, nm, copy); disp[copy] = 0;
+            if (!songNameExists(disp)) {                    // keep the list unique (built-ins win)
+                SongRef &r = g_songs[g_numSongs++];
+                if (strcmp(dir, "/") == 0) snprintf(r.path, sizeof(r.path), "/%s", nm);
+                else                       snprintf(r.path, sizeof(r.path), "%s/%s", dir, nm);
+                strncpy(r.name, disp, sizeof(r.name) - 1); r.name[sizeof(r.name) - 1] = 0;
+                r.ev = nullptr; r.count = 0; r.sd = true;
+            }
+        }
+        f.close();
+    }
+    d.close();
+}
 static void buildSongList() {
     g_numSongs = 0;
     for (int i = 0; i < kNumBuiltin && g_numSongs < (int)(sizeof(g_songs)/sizeof(g_songs[0])); ++i) {
@@ -254,28 +279,9 @@ static void buildSongList() {
         r.ev = kBuiltinSongs[i].ev; r.count = kBuiltinSongs[i].count; r.sd = false; r.path[0] = 0;
     }
     if (!g_sdReady) return;
-    File dir = SD.open("/songs");
-    if (!dir || !dir.isDirectory()) { if (dir) dir.close(); Serial.println("[sd] no /songs dir"); return; }
-    for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
-        const char *nm = f.name();
-        if (!f.isDirectory() && nm && endsWithMid(nm) &&
-            g_numSongs < (int)(sizeof(g_songs)/sizeof(g_songs[0]))) {
-            char disp[40];
-            strncpy(disp, nm, sizeof(disp) - 1); disp[sizeof(disp) - 1] = 0;
-            size_t ln = strlen(disp); if (ln > 4) disp[ln - 4] = 0;       // strip ".mid"
-            // Skip if a built-in (or earlier SD file) already provides this name, so
-            // the built-in demo set stays unique and a device with no card still
-            // shows a clean list.
-            if (!songNameExists(disp)) {
-                SongRef &r = g_songs[g_numSongs++];
-                snprintf(r.path, sizeof(r.path), "/songs/%s", nm);
-                strncpy(r.name, disp, sizeof(r.name) - 1); r.name[sizeof(r.name) - 1] = 0;
-                r.ev = nullptr; r.count = 0; r.sd = true;
-            }
-        }
-        f.close();
-    }
-    dir.close();
+    if (!SD.exists("/songs")) SD.mkdir("/songs");   // create it so there's a home to drop songs into
+    scanSongDir("/songs");
+    scanSongDir("/");                               // also accept .mid files dropped at the card root
     Serial.printf("[sd] songs: %d total (%d built-in + %d SD)\n",
                   g_numSongs, kNumBuiltin, g_numSongs - kNumBuiltin);
 }
