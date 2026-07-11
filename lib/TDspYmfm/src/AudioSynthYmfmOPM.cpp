@@ -1,6 +1,7 @@
 // AudioSynthYmfmOPM.cpp — see header. Wraps ymfm::ym2151 as a Teensy audio source.
 
 #include "AudioSynthYmfmOPM.h"
+#include "OpmPitch.h"    // encodeOpmPitch() + kOpmNote — shared, host-testable
 
 // AudioNoInterrupts()/AudioInterrupts() live in Audio.h (not AudioStream.h); they
 // just gate the audio-update software IRQ so a register write can't be preempted
@@ -13,13 +14,6 @@
 
 using namespace tdsp::ymfmopm;
 
-// MIDI semitone (0=C .. 11=B) -> OPM key-code low nibble. The OPM divides each
-// octave into 12 of 16 codes, skipping 3/7/11/15, so the sequence low->high is
-// 0,1,2, 4,5,6, 8,9,10, 12,13,14. Octave goes in bits 4-6 of the key code.
-// (Global concert-pitch alignment is a one-constant trim; monotonic + ~A440 is
-// what milestone-1 needs, and this table delivers that.)
-static const uint8_t kOpmNote[12] = { 0, 1, 2, 4, 5, 6, 8, 9, 10, 12, 13, 14 };
-
 static inline int16_t clamp16(int32_t v) {
     if (v > 32767)  return 32767;
     if (v < -32768) return -32768;
@@ -28,7 +22,9 @@ static inline int16_t clamp16(int32_t v) {
 
 AudioSynthYmfmOPM::AudioSynthYmfmOPM()
     : AudioStream(0, nullptr), m_chip(m_intf) {
-    for (int i = 0; i < kNumChannels; i++) { m_note[i] = -1; m_age[i] = 0; }
+    for (int i = 0; i < kNumChannels; i++) {
+        m_note[i] = -1; m_age[i] = 0; m_srcChan[i] = 0; m_velTl[i] = 0;
+    }
 }
 
 void AudioSynthYmfmOPM::begin() {
@@ -86,52 +82,105 @@ int AudioSynthYmfmOPM::allocChannel(uint8_t note) {
     return oldest;
 }
 
-void AudioSynthYmfmOPM::noteOn(uint8_t note, uint8_t vel) {
-    if (vel == 0) { noteOff(note); return; }
-    if (!m_haveVoice) return;
+// Sum of this note's channel bend and (in MPE) the master channel's bend, which
+// applies to every note. Non-MPE path: srcCh 0, masterChan 0 -> just m_bend[0].
+float AudioSynthYmfmOPM::effectiveBend(uint8_t srcCh) const {
+    float b = m_bend[srcCh <= 16 ? srcCh : 0];
+    if (m_masterChan && srcCh != m_masterChan) b += m_bend[m_masterChan];
+    return b;
+}
 
-    int oct = (int)note / 12 - 1;                 // MIDI 60 -> OPM octave 4
-    if (oct < 0) oct = 0; else if (oct > 7) oct = 7;
-    uint8_t kc = (uint8_t)((oct << 4) | kOpmNote[note % 12]);
+// Write KC/KF for one sounding OPM channel from its base note + effective bend.
+void AudioSynthYmfmOPM::applyPitch(int ch) {
+    if (m_note[ch] < 0) return;
+    uint8_t kc, kf;
+    encodeOpmPitch((float)m_note[ch] + effectiveBend(m_srcChan[ch]), kc, kf);
+    writeReg(0x28 + ch, kc & 0x7f);           // key code (block + note)
+    writeReg(0x30 + ch, (uint8_t)(kf << 2));  // key fraction (6 bits in [7:2])
+}
 
-    // Velocity -> total-level attenuation added to every operator. For the default
-    // additive (alg 7) patch all four operators are carriers, so this is a clean
-    // loudness map; for modulator-carrier patches it also softens brightness at low
-    // velocity, which is musically reasonable. (A per-algorithm carrier mask would
-    // make FM patches respond in loudness only — a later refinement.)
-    uint8_t tlAdd = (uint8_t)(((127 - vel) * 40) / 127);
-
-    AudioNoInterrupts();
-    int ch = allocChannel(note);
-    writeReg(0x08, ch);                           // key OFF (retrigger cleanly)
-    writeReg(0x28 + ch, kc & 0x7f);               // key code (block/note)
-    writeReg(0x30 + ch, 0x00);                    // key fraction (no fine detune)
-    for (int s = 0; s < 4; s++) {                 // apply velocity to operator TLs
-        int tl = (int)m_voiceStore.op[s].tl + tlAdd;
-        if (tl > 127) tl = 127;
+// Write the four operator TLs for one channel from the voice, plus velocity, plus
+// per-channel expression: pressure loudens the carriers (C1/C2 = slots 2,3),
+// timbre (CC74) brightens the modulators (M1/M2 = slots 0,1). The carrier/
+// modulator split is the VOPM naming heuristic — exact for the common algorithms;
+// on the all-carrier alg 7 "timbre" simply trims two of the four carriers.
+void AudioSynthYmfmOPM::applyExpression(int ch) {
+    uint8_t sc = m_srcChan[ch] <= 16 ? m_srcChan[ch] : 0;
+    int pressAtt  = (int)(m_press[sc]  * kPressDepth);   // subtracted from carriers -> louder
+    int timbreAtt = (int)(m_timbre[sc] * kTimbreDepth);  // subtracted from modulators -> brighter
+    for (int s = 0; s < 4; s++) {
+        int tl = (int)m_voiceStore.op[s].tl + (int)m_velTl[ch];
+        tl -= (s >= 2) ? pressAtt : timbreAtt;           // slots 2,3 carriers; 0,1 modulators
+        if (tl < 0) tl = 0; else if (tl > 127) tl = 127;
         writeReg(0x60 + (uint8_t)(s * 8 + ch), (uint8_t)tl);
     }
-    writeReg(0x08, 0x78 | ch);                    // key ON, all four operators
+}
+
+void AudioSynthYmfmOPM::noteOnCh(uint8_t srcCh, uint8_t note, uint8_t vel) {
+    if (vel == 0) { noteOffCh(srcCh, note); return; }
+    if (!m_haveVoice) return;
+    AudioNoInterrupts();
+    int ch = allocChannel(note);
+    m_srcChan[ch] = srcCh;
+    m_velTl[ch] = (uint8_t)(((127 - vel) * kVelDepth) / 127);   // low velocity attenuates
+    writeReg(0x08, ch);            // key OFF first (clean envelope retrigger)
+    applyPitch(ch);                // KC/KF from note + bend
+    applyExpression(ch);           // per-op TL from voice + velocity + pressure/timbre
+    writeReg(0x08, 0x78 | ch);     // key ON, all four operators
     AudioInterrupts();
 }
 
-void AudioSynthYmfmOPM::noteOff(uint8_t note) {
+void AudioSynthYmfmOPM::noteOffCh(uint8_t srcCh, uint8_t note) {
     AudioNoInterrupts();
-    for (int ch = 0; ch < kNumChannels; ch++) {
-        if (m_note[ch] == (int8_t)note) {
-            writeReg(0x08, ch);                   // key OFF (all operators)
+    for (int ch = 0; ch < kNumChannels; ch++)
+        if (m_note[ch] == (int8_t)note && m_srcChan[ch] == srcCh) {
+            writeReg(0x08, ch);    // key OFF (all operators)
             m_note[ch] = -1;
         }
-    }
     AudioInterrupts();
 }
 
 void AudioSynthYmfmOPM::allNotesOff() {
     AudioNoInterrupts();
-    for (int ch = 0; ch < kNumChannels; ch++) {
-        writeReg(0x08, ch);
-        m_note[ch] = -1;
-    }
+    for (int ch = 0; ch < kNumChannels; ch++) { writeReg(0x08, ch); m_note[ch] = -1; }
+    AudioInterrupts();
+}
+
+void AudioSynthYmfmOPM::allNotesOffCh(uint8_t srcCh) {
+    AudioNoInterrupts();
+    for (int ch = 0; ch < kNumChannels; ch++)
+        if (m_srcChan[ch] == srcCh && m_note[ch] >= 0) { writeReg(0x08, ch); m_note[ch] = -1; }
+    AudioInterrupts();
+}
+
+// --- per-channel expression: restate the affected sounding channels ----------
+void AudioSynthYmfmOPM::pitchBend(uint8_t srcCh, float semitones) {
+    if (srcCh > 16) return;
+    m_bend[srcCh] = semitones;
+    bool master = (m_masterChan && srcCh == m_masterChan);   // master bend -> all notes
+    AudioNoInterrupts();
+    for (int ch = 0; ch < kNumChannels; ch++)
+        if (m_note[ch] >= 0 && (master || m_srcChan[ch] == srcCh)) applyPitch(ch);
+    AudioInterrupts();
+}
+
+void AudioSynthYmfmOPM::pressure(uint8_t srcCh, float value) {
+    if (srcCh > 16) return;
+    m_press[srcCh] = value;
+    bool master = (m_masterChan && srcCh == m_masterChan);
+    AudioNoInterrupts();
+    for (int ch = 0; ch < kNumChannels; ch++)
+        if (m_note[ch] >= 0 && (master || m_srcChan[ch] == srcCh)) applyExpression(ch);
+    AudioInterrupts();
+}
+
+void AudioSynthYmfmOPM::timbre(uint8_t srcCh, float value) {
+    if (srcCh > 16) return;
+    m_timbre[srcCh] = value;
+    bool master = (m_masterChan && srcCh == m_masterChan);
+    AudioNoInterrupts();
+    for (int ch = 0; ch < kNumChannels; ch++)
+        if (m_note[ch] >= 0 && (master || m_srcChan[ch] == srcCh)) applyExpression(ch);
     AudioInterrupts();
 }
 

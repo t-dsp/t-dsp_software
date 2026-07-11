@@ -54,11 +54,32 @@ public:
     void begin();
 
     // --- performance API (call from loop / MIDI handlers, not the ISR) ---------
-    void noteOn(uint8_t note, uint8_t vel);
-    void noteOff(uint8_t note);
+    // Non-MPE (mono-timbral) note API: notes carry no source channel, so a global
+    // bend/pressure/timbre (source channel 0) applies to all — unchanged behaviour.
+    void noteOn(uint8_t note, uint8_t vel) { noteOnCh(0, note, vel); }
+    void noteOff(uint8_t note)             { noteOffCh(0, note); }
     void allNotesOff();
     void setVoice(const tdsp::ymfmopm::OpmVoice &voice);  // apply patch to all channels
     void setGain(float g) { m_gain = g; }                 // output trim (default kDefaultGain)
+
+    // --- MPE / per-note expression -------------------------------------------
+    // Each note is tagged with the MIDI channel (1..16) that owns it; expression
+    // messages on that channel steer only that note's OPM channel — OPM's per-
+    // channel key code/fraction makes true per-note pitch bend native. Semitones
+    // are already pitch-bend-range-scaled by the caller (the MidiSink convention);
+    // pressure/timbre are 0..1. Set the MPE master channel with setMasterChannel:
+    // 1..16 = a member-channel note steers only itself while the master channel's
+    // bend applies to ALL notes; 0 = no master (plain keyboard, every channel
+    // allocates and behaves like the global path).
+    void setMasterChannel(uint8_t ch) { m_masterChan = (ch <= 16) ? ch : 0; }
+    uint8_t masterChannel() const { return m_masterChan; }
+
+    void noteOnMpe (uint8_t srcCh, uint8_t note, uint8_t vel) { noteOnCh(srcCh, note, vel); }
+    void noteOffMpe(uint8_t srcCh, uint8_t note)              { noteOffCh(srcCh, note); }
+    void pitchBend (uint8_t srcCh, float semitones);   // per-channel (or master = all)
+    void pressure  (uint8_t srcCh, float value);       // 0..1 -> loudness (carriers)
+    void timbre    (uint8_t srcCh, float value);       // 0..1 -> brightness (modulators)
+    void allNotesOffCh(uint8_t srcCh);
 
     // Number of channels currently holding a note (0..kNumChannels). Cheap scan;
     // used for the idle gate and for multi-bank telemetry.
@@ -80,6 +101,19 @@ private:
     void applyVoiceToChannel(int ch, const tdsp::ymfmopm::OpmVoice &v);
     int  allocChannel(uint8_t note);   // pick a free channel or steal the oldest
 
+    // channel-tagged note on/off (source channel 0 = non-MPE / global)
+    void  noteOnCh(uint8_t srcCh, uint8_t note, uint8_t vel);
+    void  noteOffCh(uint8_t srcCh, uint8_t note);
+    void  applyPitch(int ch);          // write KC/KF for one OPM channel (note + bend)
+    void  applyExpression(int ch);     // write per-op TL (voice + velocity + pressure/timbre)
+    float effectiveBend(uint8_t srcCh) const;
+
+    // TL depths (register units; each ~0.75 dB): how far velocity/pressure/timbre
+    // can move an operator's total level.
+    static constexpr int kVelDepth    = 40;   // low velocity attenuates
+    static constexpr int kPressDepth  = 40;   // pressure brightens/loudens carriers
+    static constexpr int kTimbreDepth = 30;   // CC74 brightens modulators
+
     ymfm::ymfm_interface m_intf;       // default no-op interface (timers unused for a MIDI synth)
     ymfm::ym2151         m_chip;       // the emulated OPM
     ymfm::ym2151::output_data m_prev, m_cur;   // resampler taps (chip-rate samples)
@@ -89,10 +123,18 @@ private:
     float m_gain  = kDefaultGain;   // linear output gain applied before clamp
     uint32_t m_idleBlocks = kIdleHoldBlocks;  // blocks since last active note (starts idle)
 
-    // per-channel voice-allocation state
+    // per-OPM-channel voice-allocation state
     int8_t   m_note[kNumChannels];     // MIDI note sounding on each channel, -1 = free
     uint32_t m_age[kNumChannels];      // note-on order (for oldest-note stealing)
     uint32_t m_ageCounter = 0;
+    uint8_t  m_srcChan[kNumChannels];  // MIDI channel that owns each note (0 = global/non-MPE)
+    uint8_t  m_velTl[kNumChannels];    // velocity TL offset captured at note-on
+
+    // per-MIDI-channel MPE expression state (index 1..16; index 0 = global/non-MPE)
+    float    m_bend[17]   = {0};       // pitch bend, semitones
+    float    m_press[17]  = {0};       // channel pressure, 0..1
+    float    m_timbre[17] = {0};       // CC74 timbre, 0..1
+    uint8_t  m_masterChan = 0;         // MPE master channel (0 = none)
 
     // The engine keeps its OWN copy of the active voice so callers may pass a
     // temporary (e.g. a voice just parsed from an SD .opm file) without keeping
