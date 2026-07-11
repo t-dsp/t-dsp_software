@@ -36,7 +36,27 @@ export const CMD = {
   STOP_SONG: 0x21, // stop the Dexed demo
   SET_DX_VOICE: 0x22, // + 1 byte: Dexed instrument index (into DX_INSTRUMENTS)
   REFRESH_CAT: 0x23, // re-scan SD + refresh the song/instrument catalog
+  SET_HPF: 0x24, // + 1 byte: TAC5212 DAC highpass mode (0=off,1=1Hz,2=12Hz,3=96Hz)
 } as const;
+
+// TAC5212 DAC highpass filter modes — byte sent via SET_HPF. Maps to the
+// tac5212::DacHpf enum on the Teensy (0=Programmable/all-pass = off).
+export const HPF_MODE = {
+  OFF: 0,
+  CUT_1HZ: 1,
+  CUT_12HZ: 2,
+  CUT_96HZ: 3,
+} as const;
+
+// Synth descriptor shown on the MIDI page. The firmware reports the engine it
+// was BUILT with (Dexed vs ymfm OPM, …) as an optional header on the instrument
+// catalog (see readCatalog); this is the fallback for firmware that predates
+// that header, so the UI still reads correctly against an old device.
+export type SynthInfo = { name: string; description: string };
+export const DEFAULT_SYNTH: SynthInfo = {
+  name: 'Dexed',
+  description: '6-op FM synth, played by the MIDI IN port and the songs below.',
+};
 
 // Dexed instrument list — index sent via SET_DX_VOICE. MUST stay in sync (order
 // AND names) with kInstruments[] in
@@ -77,6 +97,7 @@ export type TdspStatus = {
   conn: boolean; // an A2DP source is connected
   disc: boolean; // receiver is discoverable (pairing mode)
   vol: number; // master headphone volume 0..100 (%)
+  hpf: number; // TAC5212 DAC highpass mode 0..3 (0=off) — reported by the device
   peer: string; // connected source name, if any
 };
 
@@ -129,6 +150,7 @@ function parseStatus(raw: string | null | undefined): TdspStatus | null {
       conn: !!j.conn,
       disc: !!j.disc,
       vol: typeof j.vol === 'number' ? j.vol : 50,
+      hpf: typeof j.hpf === 'number' ? j.hpf : 0,
       peer: typeof j.peer === 'string' ? j.peer : '',
     };
   } catch {
@@ -197,6 +219,7 @@ export function useTdsp() {
   const [sources, setSources] = useState<TdspSource[]>([]); // paired phones
   const [catSongs, setCatSongs] = useState<string[]>([]); // songs fetched from device
   const [catInstruments, setCatInstruments] = useState<string[]>([]); // instruments fetched
+  const [catSynth, setCatSynth] = useState<SynthInfo | null>(null); // engine the firmware was built with
 
   // Coalescing volume writer: rapid slider drags collapse to the latest value so
   // we never flood the BLE link; a write always converges to the final position.
@@ -237,6 +260,7 @@ export function useTdsp() {
     setState('idle');
     setStatus(null);
     setSources([]);
+    setCatSynth(null); // next device re-reports its own engine
   }, []);
 
   // Read the full sources list (ATT read-blob returns the whole JSON value).
@@ -265,7 +289,22 @@ export function useTdsp() {
     } catch {}
     try {
       const c = await device.readCharacteristicForService(TDSP_SVC_UUID, TDSP_INSTR_UUID);
-      const list = parseList(c.value);
+      // The instrument value may carry an optional synth header so the MIDI page
+      // labels itself from the engine the firmware was built with:
+      //   "<name>\t<description>\n" + "inst0|inst1|..."
+      // Old firmware sends no header (no '\n') -> leave synth at the default.
+      const raw = c.value ? base64ToString(c.value) : '';
+      let listStr = raw;
+      const nl = raw.indexOf('\n');
+      if (nl >= 0) {
+        const header = raw.slice(0, nl);
+        listStr = raw.slice(nl + 1);
+        const tab = header.indexOf('\t');
+        const name = (tab >= 0 ? header.slice(0, tab) : header).trim();
+        const description = tab >= 0 ? header.slice(tab + 1).trim() : '';
+        if (name) setCatSynth({ name, description: description || DEFAULT_SYNTH.description });
+      }
+      const list = listStr.split('|').filter((x) => x.length > 0);
       if (list.length) setCatInstruments(list);
     } catch {}
   }, []);
@@ -445,6 +484,11 @@ export function useTdsp() {
     (index: number) => writeByteCmd(CMD.SET_DX_VOICE, index),
     [writeByteCmd]
   );
+  // TAC5212 DAC highpass filter — mode 0=off, 1/2/3 = 1/12/96 Hz cutoff.
+  const setHpf = useCallback(
+    (mode: number) => writeByteCmd(CMD.SET_HPF, mode),
+    [writeByteCmd]
+  );
   // Ask the device to re-scan its SD card and re-send the catalog. The device
   // NOTIFYs the songs/instruments chars, which re-reads via the subscription; we
   // also re-read after a short delay in case the notify is missed.
@@ -515,6 +559,9 @@ export function useTdsp() {
     // if the firmware is older / hasn't reported yet.
     songs: catSongs.length ? catSongs : (DX_SONGS as unknown as string[]),
     instruments: catInstruments.length ? catInstruments : (DX_INSTRUMENTS as unknown as string[]),
+    // Synth engine the connected firmware was built with (Dexed / ymfm OPM / …),
+    // reported by the device; falls back to Dexed for firmware without the header.
+    synth: catSynth ?? DEFAULT_SYNTH,
     scanAndConnect,
     disconnect,
     sendCommand,
@@ -525,6 +572,7 @@ export function useTdsp() {
     playSong,
     stopSong,
     setDxVoice,
+    setHpf,
     refreshCatalog,
   };
 }

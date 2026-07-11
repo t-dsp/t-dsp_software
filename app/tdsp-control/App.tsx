@@ -5,7 +5,7 @@
 
 import Slider from '@react-native-community/slider';
 import { StatusBar } from 'expo-status-bar';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Modal,
@@ -16,7 +16,7 @@ import {
   Text,
   View,
 } from 'react-native';
-import { CMD, ConnState, TdspSource, useTdsp } from './src/tdspBle';
+import { CMD, ConnState, SynthInfo, TdspSource, useTdsp } from './src/tdspBle';
 
 export default function App() {
   const {
@@ -28,6 +28,7 @@ export default function App() {
     sources,
     songs,
     instruments,
+    synth,
     scanAndConnect,
     disconnect,
     sendCommand,
@@ -38,13 +39,35 @@ export default function App() {
     playSong,
     stopSong,
     setDxVoice,
+    setHpf,
     refreshCatalog,
   } = useTdsp();
   const [showSettings, setShowSettings] = useState(false);
   // Dexed instrument + selected song — tracked locally (no firmware readback yet).
   const [dxVoice, setDxVoiceState] = useState(0);
   const [song, setSong] = useState(0);
+  // TAC5212 DAC highpass — tracked locally (no firmware readback yet). Default off;
+  // hpfCutIdx is the last-picked cutoff (0=1Hz, 1=12Hz, 2=96Hz) → filter mode idx+1.
+  const [hpfOn, setHpfOn] = useState(false);
+  const [hpfCutIdx, setHpfCutIdx] = useState(1); // 12 Hz
   const connected = state === 'connected';
+
+  // Initialize the HPF controls from the device's reported state once per
+  // connection (status.hpf: 0=off, 1/2/3 = 1/12/96 Hz). Mirrors the volume-init
+  // pattern in useTdsp; after this the local toggle is the source of truth.
+  const hpfInitedRef = useRef(false);
+  useEffect(() => {
+    if (!connected) {
+      hpfInitedRef.current = false;
+      return;
+    }
+    if (status && !hpfInitedRef.current) {
+      hpfInitedRef.current = true;
+      const m = status.hpf ?? 0;
+      setHpfOn(m !== 0);
+      if (m > 0) setHpfCutIdx(m - 1);
+    }
+  }, [connected, status]);
 
   const openSettings = () => {
     readSources(); // refresh the paired list when the menu opens
@@ -104,6 +127,7 @@ export default function App() {
         }}
         songs={songs}
         instruments={instruments}
+        synth={synth}
         onPlaySong={playSong}
         onStopSong={stopSong}
         dxVoice={dxVoice}
@@ -114,12 +138,27 @@ export default function App() {
         song={song}
         onSelectSong={setSong}
         onRefreshCatalog={refreshCatalog}
+        hpfOn={hpfOn}
+        hpfCutIdx={hpfCutIdx}
+        onToggleHpf={() => {
+          const next = !hpfOn;
+          setHpfOn(next);
+          setHpf(next ? hpfCutIdx + 1 : 0);
+        }}
+        onSelectHpfCut={(i) => {
+          setHpfCutIdx(i);
+          if (hpfOn) setHpf(i + 1);
+        }}
       />
     </SafeAreaView>
   );
 }
 
-type SettingsPane = 'menu' | 'bluetooth' | 'midi';
+type SettingsPane = 'menu' | 'bluetooth' | 'midi' | 'tac5212';
+
+// TAC5212 DAC highpass cutoffs — dropdown index maps to filter mode (index + 1),
+// i.e. 0→1 Hz (mode 1), 1→12 Hz (mode 2), 2→96 Hz (mode 3). Mode 0 = off.
+const HPF_CUTOFFS = ['1 Hz', '12 Hz', '96 Hz'];
 
 function SettingsModal({
   visible,
@@ -133,6 +172,7 @@ function SettingsModal({
   onDisconnectApp,
   songs,
   instruments,
+  synth,
   onPlaySong,
   onStopSong,
   dxVoice,
@@ -140,6 +180,10 @@ function SettingsModal({
   song,
   onSelectSong,
   onRefreshCatalog,
+  hpfOn,
+  hpfCutIdx,
+  onToggleHpf,
+  onSelectHpfCut,
 }: {
   visible: boolean;
   onClose: () => void;
@@ -152,6 +196,7 @@ function SettingsModal({
   onDisconnectApp: () => void;
   songs: string[];
   instruments: string[];
+  synth: SynthInfo;
   onPlaySong: (index: number) => void;
   onStopSong: () => void;
   dxVoice: number;
@@ -159,6 +204,10 @@ function SettingsModal({
   song: number;
   onSelectSong: (index: number) => void;
   onRefreshCatalog: () => void;
+  hpfOn: boolean;
+  hpfCutIdx: number;
+  onToggleHpf: () => void;
+  onSelectHpfCut: (index: number) => void;
 }) {
   const [pane, setPane] = useState<SettingsPane>('menu');
 
@@ -167,7 +216,8 @@ function SettingsModal({
     setPane('menu');
     onClose();
   };
-  const title = pane === 'bluetooth' ? 'Bluetooth' : pane === 'midi' ? 'MIDI' : 'Settings';
+  const title =
+    pane === 'bluetooth' ? 'Bluetooth' : pane === 'midi' ? 'MIDI' : pane === 'tac5212' ? 'TAC5212' : 'Settings';
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={close}>
@@ -190,7 +240,8 @@ function SettingsModal({
           {pane === 'menu' && (
             <>
               <MenuRow label="Bluetooth" detail="Pairing & paired sources" onPress={() => setPane('bluetooth')} />
-              <MenuRow label="MIDI" detail="Dexed synth" onPress={() => setPane('midi')} />
+              <MenuRow label="MIDI" detail={`${synth.name} synth`} onPress={() => setPane('midi')} />
+              <MenuRow label="TAC5212" detail="Codec highpass filter" onPress={() => setPane('tac5212')} />
               <Text style={styles.sectionLabel}>App</Text>
               <SecondaryButton label="Disconnect App" onPress={onDisconnectApp} />
             </>
@@ -236,8 +287,8 @@ function SettingsModal({
 
           {pane === 'midi' && (
             <>
-              <Text style={styles.sectionLabel}>Dexed</Text>
-              <Text style={styles.dim}>6-op FM synth, played by the MIDI IN port and the songs below.</Text>
+              <Text style={styles.sectionLabel}>{synth.name}</Text>
+              <Text style={styles.dim}>{synth.description}</Text>
 
               <Text style={styles.sectionLabel}>Song</Text>
               <Dropdown label="Song" options={songs} value={song} onSelect={onSelectSong} />
@@ -248,6 +299,27 @@ function SettingsModal({
 
               <Text style={styles.sectionLabel}>Instrument</Text>
               <Dropdown label="Instrument" options={instruments} value={dxVoice} onSelect={onSelectVoice} />
+            </>
+          )}
+
+          {pane === 'tac5212' && (
+            <>
+              <Text style={styles.sectionLabel}>Highpass Filter</Text>
+              <Text style={styles.dim}>
+                Removes low-frequency rumble from the DAC output. Off passes the full range through.
+              </Text>
+              <View style={{ height: 10 }} />
+              <SecondaryButton
+                label={hpfOn ? 'Highpass: On' : 'Highpass: Off'}
+                onPress={onToggleHpf}
+              />
+
+              {hpfOn && (
+                <>
+                  <Text style={styles.sectionLabel}>Cutoff</Text>
+                  <Dropdown label="Cutoff" options={HPF_CUTOFFS} value={hpfCutIdx} onSelect={onSelectHpfCut} />
+                </>
+              )}
             </>
           )}
         </ScrollView>
