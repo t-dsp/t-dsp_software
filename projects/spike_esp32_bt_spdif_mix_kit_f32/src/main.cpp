@@ -42,7 +42,13 @@
 #include "moonlight_mid.h"
 #include "billie_jean_mid.h"
 #include "bohemian_mid.h"
-#include "sd_midi.h"   // runtime .mid parser: add songs by copying files to SD /songs
+#include "song_event.h"           // baked built-in songs are SongEv[] arrays
+// Synth-agnostic MIDI playback (lib/TDspMidiPlayer): the non-blocking player
+// fans events into a tdsp::MidiSink, so the same player drives Dexed here and
+// ymfm later behind a build flag. DexedSink is the MidiSink->Dexed adapter.
+#include <MidiFilePlayer.h>
+#include <MidiSmfFile.h>          // runtime SD .mid parser -> MidiFileEvent[]
+#include "DexedSink.h"
 
 constexpr int     TAC5212_EN_PIN      = 35;     // shared SHDNZ, active-low
 constexpr uint8_t TAC5212_I2C_ADDRESS = 0x51;
@@ -76,6 +82,10 @@ AudioSynthWaveformSine spdifTone;                                // int16 tone -
 AudioSynthWaveformSine_F32 testTone;         // local DAC self-test source (F32)
 AudioSynthDexed        g_dexed(16, AUDIO_SAMPLE_RATE_EXACT);  // 16-voice 6-op FM (int16 out)
 AudioConvert_I16toF32  dexedToF32;           // bridge Dexed's int16 block to F32
+// Control plane: both the song player and the physical MIDI IN drive Dexed
+// through this one MidiSink, so swapping the engine later touches only the sink.
+DexedSink              g_dexedSink(&g_dexed);
+tdsp::MidiFilePlayer   g_player;             // non-blocking, synth-agnostic song player
 
 AudioMixer4_F32        outL, outR;           // F32 mix: 0=BT, 1=local tone, 2=S/PDIF-in, 3=Dexed
 AudioAnalyzePeak_F32   peakBt, peakSpdif, peakOut;
@@ -151,6 +161,21 @@ static void setMasterVolumePct(int pct) {
     g_dvol = (pct == 0) ? -128.0f : (-60.0f + 0.60f * (float)pct);
     if (g_codecOk) applyVol();
     Serial.printf("[vol] app set %d%% -> %.1f dB\n", pct, g_dvol);
+}
+
+// TAC5212 DAC highpass filter from the phone app: arrives as "@HPF=<mode>" on the
+// ESP32 UART. mode 0 = off (all-pass), 1/2/3 = 1/12/96 Hz cutoff. Chip-global,
+// applied to the DAC output (the ADC path is disabled in this firmware).
+static void setDacHpfMode(int mode) {
+    tac5212::DacHpf hpf;
+    switch (mode) {
+        case 1:  hpf = tac5212::DacHpf::Cut1Hz;  break;
+        case 2:  hpf = tac5212::DacHpf::Cut12Hz; break;
+        case 3:  hpf = tac5212::DacHpf::Cut96Hz; break;
+        default: hpf = tac5212::DacHpf::Programmable; break;  // 0 / unknown = off
+    }
+    if (g_codecOk) g_codec.setDacHpf(hpf);
+    Serial.printf("[hpf] app set DAC HPF mode %d\n", mode);
 }
 
 FLASHMEM static void setupCodec() {
@@ -257,15 +282,15 @@ static const BuiltinSong kBuiltinSongs[] = {
 static const int kNumBuiltin = sizeof(kBuiltinSongs) / sizeof(kBuiltinSongs[0]);
 
 // Unified runtime song list: built-ins first, then /songs/*.mid off the SD card.
-// SD songs are parsed on play into g_sdBuf. Adding a song = drop a .mid on the
+// SD songs are parsed on play into g_buf. Adding a song = drop a .mid on the
 // card; it appears in the catalog (and the app) with no firmware rebuild.
 struct SongRef { char name[48]; const SongEv *ev; uint32_t count; char path[96]; bool sd; };
 static SongRef g_songs[48];
 static int     g_numSongs = 0;
 static bool    g_sdReady  = false;
 
-static const int MAX_SD_EVENTS = 24000;      // longest parseable SD song
-DMAMEM static SongEv g_sdBuf[MAX_SD_EVENTS]; // ~96KB in OCRAM (off the DTCM budget)
+static const int MAX_EVENTS = 24000;                 // longest playable song (baked or SD)
+DMAMEM static tdsp::MidiFileEvent g_buf[MAX_EVENTS];  // ~144KB in OCRAM (off the DTCM budget)
 
 static bool endsWithMid(const char *s) {
     size_t n = strlen(s);
@@ -316,59 +341,35 @@ static void buildSongList() {
                   g_numSongs, kNumBuiltin, g_numSongs - kNumBuiltin);
 }
 
-static bool        g_songOn   = false;
-static int         g_songSel  = 0;   // selected / currently-playing song index
-static uint32_t    g_songIdx  = 0;
-static elapsedMillis g_songClock;
-static uint32_t    g_songWait = 0;
-static const SongEv *g_curEv    = nullptr;   // active song event stream
-static uint32_t      g_curCount = 0;
+static int g_songSel = 0;   // selected / currently-playing song index
 
+// Load the selected song into g_buf and hand it to the player. Baked built-ins
+// expand from their legacy SongEv[] (channel 0); SD songs parse straight to
+// MidiFileEvent[] (full channel/program/velocity). The player is non-blocking
+// (g_player.tick() in loop) and drives Dexed via g_dexedSink.
 static void songStart(int idx) {
     if (g_numSongs == 0) return;
     if (idx < 0) idx = 0;
     if (idx >= g_numSongs) idx = g_numSongs - 1;
     g_songSel = idx;
     SongRef &r = g_songs[idx];
+    uint32_t n = 0;
     if (r.sd) {
-        int n = sdmidi::loadFile(r.path, g_sdBuf, MAX_SD_EVENTS);   // parse from SD (main loop)
-        if (n <= 0) { Serial.printf("[song] SD load FAILED: %s\n", r.path); return; }
-        g_curEv = g_sdBuf; g_curCount = (uint32_t)n;
-        Serial.printf("[song] %s (SD, %d events) -> Dexed (start)\n", r.name, n);
+        int got = tdsp::smf::loadSmfFile(r.path, g_buf, MAX_EVENTS);   // parse from SD (main loop)
+        if (got <= 0) { Serial.printf("[song] SD load FAILED: %s\n", r.path); return; }
+        n = (uint32_t)got;
+        Serial.printf("[song] %s (SD, %lu events) -> Dexed (start)\n", r.name, (unsigned long)n);
     } else {
-        g_curEv = r.ev; g_curCount = r.count;
+        n = tdsp::expandLegacyNotes(r.ev, r.count, g_buf, MAX_EVENTS);  // baked SongEv -> events
         Serial.printf("[song] %s -> Dexed (start)\n", r.name);
     }
-    if (g_curCount == 0) return;
-    g_dexed.panic();
-    g_songIdx  = 0;
-    g_songWait = g_curEv[0].dms;
-    g_songClock = 0;
-    g_songOn   = true;
+    if (n == 0) return;
+    g_player.play(g_buf, n);
 }
 static void songStop() {
-    if (!g_songOn) return;
-    g_songOn = false;
-    g_dexed.panic();
+    if (!g_player.isPlaying()) return;
+    g_player.stop();
     Serial.println("[song] stopped");
-}
-static void songTick() {
-    if (!g_songOn) return;
-    const SongEv *ev = g_curEv;
-    const uint32_t n = g_curCount;
-    while (g_songOn && g_songClock >= g_songWait) {
-        g_songClock -= g_songWait;
-        const SongEv &e = ev[g_songIdx];
-        if (e.vel)       g_dexed.keydown(e.note, e.vel);
-        else if (e.note) g_dexed.keyup(e.note);
-        if (++g_songIdx >= n) {
-            g_dexed.panic();
-            g_songOn = false;
-            Serial.println("[song] done");
-            return;
-        }
-        g_songWait = ev[g_songIdx].dms;
-    }
 }
 
 // Stream the device catalog (song + instrument names, '|'-delimited) to the ESP32
@@ -396,17 +397,21 @@ static void refreshCatalog() {
     sendCatalog();
 }
 
-// --- MIDI IN (Serial1 DIN) -> Dexed -----------------------------------------
-static void onNoteOn(byte, byte note, byte vel) {
-    if (vel == 0) { g_dexed.keyup(note); return; }
-    g_dexed.keydown(note, vel);
+// --- MIDI IN (Serial1 DIN) -> Dexed via the shared MidiSink -----------------
+// Live MIDI now flows through the same g_dexedSink the song player uses, so the
+// two share one control path into the engine (and one day into ymfm).
+static void onNoteOn(byte ch, byte note, byte vel) {
+    if (vel == 0) g_dexedSink.onNoteOff(ch, note, 0);
+    else          g_dexedSink.onNoteOn(ch, note, vel);
 }
-static void onNoteOff(byte, byte note, byte) { g_dexed.keyup(note); }
-static void onPitchBend(byte, int bend) { g_dexed.setPitchbendRange(2); g_dexed.setPitchbend((int16_t)bend); }
-static void onControlChange(byte, byte cc, byte val) {
-    if (cc == 1)  g_dexed.setModWheel(val);
-    if (cc == 64) g_dexed.setSustain(val >= 64);
-    if (cc == 123 && val == 0) g_dexed.panic();
+static void onNoteOff(byte ch, byte note, byte vel) { g_dexedSink.onNoteOff(ch, note, vel); }
+static void onPitchBend(byte ch, int bend) {   // bend: -8192..+8191 -> semitones (range 2)
+    g_dexedSink.onPitchBend(ch, ((float)bend / 8192.0f) * 2.0f);
+}
+static void onControlChange(byte ch, byte cc, byte val) {
+    if (cc == 1)  g_dexedSink.onModWheel(ch, val / 127.0f);
+    if (cc == 64) g_dexedSink.onSustain(ch, val >= 64);
+    if (cc == 123 && val == 0) g_dexedSink.onAllNotesOff(ch);
 }
 
 void setup() {
@@ -483,6 +488,12 @@ void setup() {
     MIDI.setHandleNoteOff(onNoteOff);
     MIDI.setHandlePitchBend(onPitchBend);
     MIDI.setHandleControlChange(onControlChange);
+    // Route the song player into Dexed via the shared sink. Omni so every song
+    // channel (and live MIDI on any channel) reaches the single Dexed patch;
+    // the player's default mask still skips channel 10 (drums), matching the
+    // old parser's behavior on this melodic engine.
+    g_dexedSink.setListenChannel(0);   // 0 = omni
+    g_player.setSink(&g_dexedSink);
     g_dexed.setPitchbendRange(2);
     g_dexed.setPitchbend((int16_t)0);
     g_dexed.setModWheel(0);
@@ -519,7 +530,7 @@ void loop() {
 
     // Dexed source: drain physical MIDI IN and advance the (non-blocking) song.
     while (MIDI.read()) { /* handlers fire per message */ }
-    songTick();
+    g_player.tick();
 
     if (Serial.available()) {
         int c = Serial.read();
@@ -549,7 +560,7 @@ void loop() {
             else if (c == 'i') { Serial.println("[cmd] re-init codec"); setupCodec(); applyVol();
                                  Serial.printf("[cmd] codec=%s (%s), vol %.0f dB\n",
                                                g_codecOk ? "OK" : "FAIL", g_codecMsg, g_dvol); }
-            else if (c == 'W') { if (g_songOn) songStop(); else songStart(g_songSel); }  // play/stop
+            else if (c == 'W') { if (g_player.isPlaying()) songStop(); else songStart(g_songSel); }  // play/stop
             else if (c == 'S') { if (g_numSongs) g_songSel = (g_songSel + 1) % g_numSongs;  // pick song
                                  Serial.printf("[song] selected: %s\n", g_songs[g_songSel].name); }
             else if (c == 'V') { setDexedInstrument((g_dxInstrument + 1) % kNumInstruments); }
@@ -573,6 +584,7 @@ void loop() {
                     else songStart(atoi(line + 6));   // @SONG=<song index>
                 }
                 else if (strcmp(line, "@GETCAT") == 0) refreshCatalog();  // re-scan SD + send catalog
+                else if (strncmp(line, "@HPF=", 5) == 0) setDacHpfMode(atoi(line + 5));
                 else Serial.printf("[esp] %s\n", line);
             }
             n = 0;
