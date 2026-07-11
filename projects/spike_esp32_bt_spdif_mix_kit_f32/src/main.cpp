@@ -103,6 +103,11 @@ AudioConnection_F32 c_pkBt   (btToF32L,   0, peakBt,    0);
 AudioConnection_F32 c_pkSp   (spdifIn,    0, peakSpdif, 0);
 AudioConnection_F32 c_pkOut  (outL,       0, peakOut,   0);
 
+// SD-card ready flag — declared before the synth backend so the ymfm backend
+// can load its /ymfm/*.opm instrument banks in synthBegin() (set by SD.begin()
+// in setup(), which runs before synthBegin() is called).
+static bool g_sdReady = false;
+
 // ---- Synth backend: chosen at build time (see platformio.ini) --------------
 // Declares the engine, wires it into mix slot 3, exposes g_synthSink + the
 // synth* interface. Included HERE so outL/outR already exist for its
@@ -235,7 +240,7 @@ static const int kNumBuiltin = sizeof(kBuiltinSongs) / sizeof(kBuiltinSongs[0]);
 struct SongRef { char name[48]; const SongEv *ev; uint32_t count; char path[96]; bool sd; };
 static SongRef g_songs[48];
 static int     g_numSongs = 0;
-static bool    g_sdReady  = false;
+// g_sdReady is declared earlier (before the synth backend include).
 
 static const int MAX_EVENTS = 24000;                 // longest playable song (baked or SD)
 DMAMEM static tdsp::MidiFileEvent g_buf[MAX_EVENTS];  // ~144KB in OCRAM (off the DTCM budget)
