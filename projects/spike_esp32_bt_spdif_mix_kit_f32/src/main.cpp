@@ -428,7 +428,7 @@ void setup() {
     // Two pools now: the int16 pool feeds Dexed, the BT resampler, the optical-out
     // tone, and the input side of the convert blocks; the F32 pool feeds the mix
     // bus, converts, S/PDIF-in and the TDM output.
-    AudioMemory(40);
+    AudioMemory(80);   // headroom for up to 4 OPM banks (ymfm multitimbral); Dexed uses far less
     AudioMemory_F32(60);
     setMix(1.0f, 0.0f, 1.0f);
     outL.gain(3, 0.62f);  outR.gain(3, 0.62f);  // synth (slot 3) mix make-up in the
