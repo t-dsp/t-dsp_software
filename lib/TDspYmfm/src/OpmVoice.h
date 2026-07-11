@@ -32,11 +32,16 @@ struct OpmOp {
     uint8_t sl, rr;     // 0xE0: sustain level (0-15), release rate (0-15)
 };
 
+// Voice name is a fixed inline buffer (not a pointer) so a voice parsed at runtime
+// from an SD .opm file owns its own name and can be freely copied/stored — the
+// engine keeps its own copy of the active voice (see AudioSynthYmfmOPM::setVoice).
+static constexpr int kVoiceNameLen = 25;
+
 struct OpmVoice {
-    const char *name;
+    char    name[kVoiceNameLen];
     uint8_t alg;        // 0-7 operator connection algorithm
     uint8_t feedback;   // 0-7 operator-1 self-feedback
-    OpmOp   op[4];      // register slots ch+0, ch+8, ch+16, ch+24
+    OpmOp   op[4];      // register slots ch+0(M1), +8(M2), +16(C1), +24(C2)
 };
 
 // --- Preset 0: "Additive Organ" ------------------------------------------------
@@ -67,6 +72,35 @@ static const OpmVoice kElectricPiano = {
         {   0,  1,  0x10,   1, 31,   0,  8,    0,  4,    2, 8 },  // carrier
         {   0, 14,  0x28,   1, 31,   0, 14,    0,  6,    4, 8 },  // modulator: metallic partial
         {   0,  1,  0x14,   1, 31,   0,  6,    0,  3,    2, 8 },  // carrier
+    }
+};
+
+// --- Preset 2: "FM Bass" -------------------------------------------------------
+// Algorithm 4 (two 2-operator stacks summed) with heavy operator-1 feedback for a
+// buzzy, harmonically rich low end, and a fast decay to a lower sustain so notes
+// pluck rather than drone. Timbre is approximate (feedback + algorithm carry it,
+// not exact modulator tuning), but it reads clearly distinct from the organ/EP.
+static const OpmVoice kFmBass = {
+    "FM Bass", /*alg=*/4, /*fb=*/7,
+    {   //  dt1 mul   tl   ks ar   ams d1r   dt2 d2r   sl rr
+        {   0,  1,  0x14,   0, 31,   0, 14,    0,  6,    6, 9 },
+        {   0,  1,  0x08,   0, 31,   0, 10,    0,  4,    4, 9 },
+        {   0,  2,  0x1A,   0, 31,   0, 14,    0,  6,    6, 9 },
+        {   0,  1,  0x0A,   0, 31,   0, 10,    0,  4,    4, 9 },
+    }
+};
+
+// --- Preset 3: "Bell / Vibes" --------------------------------------------------
+// Algorithm 5 with high-multiple modulators (MUL 14) produces the inharmonic,
+// metallic partials of a struck bell/vibraphone, with a long release so notes
+// ring. Bright attack, slow decay.
+static const OpmVoice kBellVibes = {
+    "Bell/Vibes", /*alg=*/5, /*fb=*/2,
+    {   //  dt1 mul   tl   ks ar   ams d1r   dt2 d2r   sl rr
+        {   1, 14,  0x22,   0, 31,   0,  9,    0,  4,    3, 4 },  // metallic partial
+        {   0,  1,  0x0E,   0, 31,   0,  7,    0,  3,    2, 4 },  // body
+        {   2, 14,  0x26,   0, 31,   0, 10,    0,  4,    3, 4 },  // metallic partial
+        {   0,  1,  0x12,   0, 31,   0,  7,    0,  3,    2, 4 },  // body
     }
 };
 

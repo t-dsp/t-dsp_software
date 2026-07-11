@@ -14,6 +14,34 @@ player, SD catalog, codec, and MIDI handlers are engine-independent.
 
 ---
 
+## Status & what changed since this doc was written
+
+**The single-bank path (Steps 1–3) is essentially done** — `src/YmfmSink.h`,
+the `TDSP_SYNTH_YMFM` branch in `main.cpp`, and the `teensy41_ymfm` env (with
+`lib_deps =` empty + `build_src_filter … -<DexedVoiceBank.cpp>`) are all in
+place. Remaining: build/run it (Step 4), and optionally pick up the two new
+presets below.
+
+The `lib/TDspYmfm` library has since grown three things the integration can use:
+
+- **Two more presets** — `kFmBass`, `kBellVibes` (now four total). Add them to the
+  `kVoices[]` table so `V` cycles a fuller instrument set.
+- **`AudioSynthYmfmOPM::activeVoices()`** — live voice count; handy in the
+  heartbeat.
+- **An idle gate** — a silent OPM bank now stops calling the chip and costs
+  ≈nothing. No action needed; it's why idle CPU is ~0 and why running *several*
+  banks (below) is cheap. Measured: 4 banks idle ≈ 0.1 % CPU, all 4 sounding
+  ≈ 43 %, one bank's 8-note chord ≈ 53 %.
+- **`YmfmOpmMulti`** — a multitimbral manager (see the optional upgrade at the
+  bottom). This is also the substrate a future MPE sink would build on.
+
+The single-bank backend is mono-timbral/omni (one patch across all channels),
+exactly like the Dexed backend — a fine default. The player's songs are
+multi-channel with per-channel programs, though, so if you want the OPM to play
+them as a **multi-instrument** module, take the multitimbral upgrade at the end.
+
+---
+
 ## Step 1 — add `src/YmfmSink.h`
 
 A thin `tdsp::MidiSink` adapter (mirrors the existing `DexedSink.h`). The OPM
@@ -145,6 +173,85 @@ Runtime check over serial (115200): `n` = test note, `V` = next voice, `W` =
 play the baked song. Watch the heartbeat — `synth=ymfm OPM`, `outPeak` should go
 non-zero on notes (single note ≈ 0.09, chord ≈ 0.34 with the default gain), CPU
 ~10–18 %.
+
+## Optional: multitimbral (YmfmOpmMulti) — one instrument per MIDI channel
+
+Turns the OPM backend into a multi-part module: N independent banks (each a full
+OPM chip + patch + 8 voices), routed by MIDI channel, so the player's
+multi-channel songs play with a different instrument per part. Hardware-verified
+in `spike_midi_ymfm_opm` (4 banks). This *replaces* the single-bank `TDSP_SYNTH_YMFM`
+block; everything else in `main.cpp` still stands.
+
+**A. add `src/YmfmMultiSink.h`** — a routing sink (note: it does NOT channel-filter
+like `YmfmSink`; routing-by-channel is the whole point):
+
+```cpp
+#pragma once
+#include <stdint.h>
+#include <YmfmOpmMulti.h>
+#include <MidiSink.h>
+
+class YmfmMultiSink : public tdsp::MidiSink {
+public:
+    explicit YmfmMultiSink(tdsp::ymfmopm::YmfmOpmMulti *m) : _m(m) {}
+    void onNoteOn (uint8_t ch, uint8_t note, uint8_t vel) override { _m->noteOn(ch, note, vel); }
+    void onNoteOff(uint8_t ch, uint8_t note, uint8_t)     override { _m->noteOff(ch, note); }
+    void onProgramChange(uint8_t ch, uint8_t prog)        override { _m->programChange(ch, prog); }
+    void onAllNotesOff(uint8_t)                           override { _m->allNotesOff(); }
+private:
+    tdsp::ymfmopm::YmfmOpmMulti *_m;
+};
+```
+
+**B. the `TDSP_SYNTH_YMFM` block** — 4 banks sub-mixed into the player's `outL/outR`
+slot 0 (so the engine-independent graph is untouched):
+
+```cpp
+  #include <AudioSynthYmfmOPM.h>
+  #include <YmfmOpmMulti.h>
+  #include "YmfmMultiSink.h"
+
+  constexpr int kBanks = 4;
+  AudioSynthYmfmOPM g_b0, g_b1, g_b2, g_b3;
+  AudioMixer4       g_synMixL, g_synMixR;                 // sub-mix of the 4 banks
+  AudioConnection   sb0L(g_b0,0,g_synMixL,0), sb0R(g_b0,1,g_synMixR,0);
+  AudioConnection   sb1L(g_b1,0,g_synMixL,1), sb1R(g_b1,1,g_synMixR,1);
+  AudioConnection   sb2L(g_b2,0,g_synMixL,2), sb2R(g_b2,1,g_synMixR,2);
+  AudioConnection   sb3L(g_b3,0,g_synMixL,3), sb3R(g_b3,1,g_synMixR,3);
+  AudioConnection   syL(g_synMixL,0,outL,0), syR(g_synMixR,0,outR,0);  // -> player mixer slot 0
+
+  AudioSynthYmfmOPM *g_banks[kBanks] = { &g_b0, &g_b1, &g_b2, &g_b3 };
+  tdsp::ymfmopm::YmfmOpmMulti g_multi(g_banks, kBanks);
+  YmfmMultiSink   g_ymfmSink(&g_multi);
+  tdsp::MidiSink *g_synthSink = &g_ymfmSink;
+
+  static const tdsp::ymfmopm::OpmVoice *kVoices[] = {
+      &tdsp::ymfmopm::kAdditiveOrgan, &tdsp::ymfmopm::kElectricPiano,
+      &tdsp::ymfmopm::kFmBass,        &tdsp::ymfmopm::kBellVibes };
+  static const int kNumVoices = sizeof(kVoices)/sizeof(kVoices[0]);
+
+  static void synthBegin() {
+      g_multi.begin();
+      for (int i = 0; i < kBanks; i++) g_multi.setBankVoice(i, *kVoices[i]);
+      g_multi.setVoiceTable(kVoices, kNumVoices);   // song Program Change -> voice
+      g_synMixL.gain(0,0.7f); g_synMixL.gain(1,0.7f); g_synMixL.gain(2,0.7f); g_synMixL.gain(3,0.7f);
+      g_synMixR.gain(0,0.7f); g_synMixR.gain(1,0.7f); g_synMixR.gain(2,0.7f); g_synMixR.gain(3,0.7f);
+  }
+  static void synthNextInstrument() { /* per-channel via Program Change; no global cycle */ }
+  static const char *synthName() { return "ymfm OPM x4"; }
+```
+
+**C. three `setup()` tweaks:**
+- **`AudioMemory(80)`** (was 40) — four banks each grab 2 blocks/update plus the
+  sub-mix.
+- Channel→bank map defaults to `(ch-1) % 4`; call `g_multi.setChannelBank(ch, bank)`
+  to customize. `setVoiceTable` means song Program-Change events pick voices.
+- The player defaults to `kMaskNoDrums` (skips ch 10). Multitimbral can handle more
+  parts — either keep skipping drums, or `g_player.setChannelMask(kMaskAll)` and
+  route a percussive bank to ch 10.
+
+The GPL-free `platformio.ini` env from Step 3 is unchanged — `YmfmOpmMulti.h`
+resolves through the same `lib_extra_dirs`.
 
 ## Notes / gotchas
 

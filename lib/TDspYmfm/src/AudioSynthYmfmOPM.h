@@ -34,6 +34,13 @@ public:
     static constexpr uint32_t kClockHz = 3579545;
     static constexpr int      kNumChannels = 8;   // OPM FM channels
 
+    // Idle gate: once no notes are held, keep generating for this many audio
+    // blocks (to let envelope release tails ring out), then stop calling the chip
+    // and emit silence. This makes an *instantiated but silent* bank cost ~nothing
+    // — essential when several banks run at once (see YmfmOpmMulti). ~500 blocks
+    // ≈ 1.5 s at 128-sample blocks, comfortably longer than any preset's release.
+    static constexpr uint32_t kIdleHoldBlocks = 500;
+
     // Default output gain. The raw OPM sum is conservative (a single note peaks
     // ~0.045 full-scale, a 4-note chord ~0.17), so a 2x lift gives a usable level
     // while leaving headroom: dense high-velocity chords only graze the int16
@@ -52,6 +59,14 @@ public:
     void allNotesOff();
     void setVoice(const tdsp::ymfmopm::OpmVoice &voice);  // apply patch to all channels
     void setGain(float g) { m_gain = g; }                 // output trim (default kDefaultGain)
+
+    // Number of channels currently holding a note (0..kNumChannels). Cheap scan;
+    // used for the idle gate and for multi-bank telemetry.
+    int activeVoices() const {
+        int n = 0;
+        for (int i = 0; i < kNumChannels; i++) if (m_note[i] >= 0) n++;
+        return n;
+    }
 
     // Teensy Audio Library render callback (runs in the audio software ISR).
     virtual void update(void) override;
@@ -72,11 +87,16 @@ private:
     float m_ratio = 1.0f;   // chip native rate / AUDIO_SAMPLE_RATE (samples to advance per output)
     float m_pos   = 0.0f;   // fractional resampler position
     float m_gain  = kDefaultGain;   // linear output gain applied before clamp
+    uint32_t m_idleBlocks = kIdleHoldBlocks;  // blocks since last active note (starts idle)
 
     // per-channel voice-allocation state
     int8_t   m_note[kNumChannels];     // MIDI note sounding on each channel, -1 = free
     uint32_t m_age[kNumChannels];      // note-on order (for oldest-note stealing)
     uint32_t m_ageCounter = 0;
 
-    const tdsp::ymfmopm::OpmVoice *m_voice = nullptr;
+    // The engine keeps its OWN copy of the active voice so callers may pass a
+    // temporary (e.g. a voice just parsed from an SD .opm file) without keeping
+    // it alive. noteOn() reads operator TLs from here for velocity scaling.
+    tdsp::ymfmopm::OpmVoice m_voiceStore;
+    bool                    m_haveVoice = false;
 };

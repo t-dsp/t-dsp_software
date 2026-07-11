@@ -67,9 +67,10 @@ void AudioSynthYmfmOPM::applyVoiceToChannel(int ch, const OpmVoice &v) {
 }
 
 void AudioSynthYmfmOPM::setVoice(const OpmVoice &voice) {
-    m_voice = &voice;
+    m_voiceStore = voice;        // keep our own copy (caller's may be a temporary)
+    m_haveVoice = true;
     AudioNoInterrupts();
-    for (int ch = 0; ch < kNumChannels; ch++) applyVoiceToChannel(ch, voice);
+    for (int ch = 0; ch < kNumChannels; ch++) applyVoiceToChannel(ch, m_voiceStore);
     AudioInterrupts();
 }
 
@@ -87,7 +88,7 @@ int AudioSynthYmfmOPM::allocChannel(uint8_t note) {
 
 void AudioSynthYmfmOPM::noteOn(uint8_t note, uint8_t vel) {
     if (vel == 0) { noteOff(note); return; }
-    if (!m_voice) return;
+    if (!m_haveVoice) return;
 
     int oct = (int)note / 12 - 1;                 // MIDI 60 -> OPM octave 4
     if (oct < 0) oct = 0; else if (oct > 7) oct = 7;
@@ -106,7 +107,7 @@ void AudioSynthYmfmOPM::noteOn(uint8_t note, uint8_t vel) {
     writeReg(0x28 + ch, kc & 0x7f);               // key code (block/note)
     writeReg(0x30 + ch, 0x00);                    // key fraction (no fine detune)
     for (int s = 0; s < 4; s++) {                 // apply velocity to operator TLs
-        int tl = (int)m_voice->op[s].tl + tlAdd;
+        int tl = (int)m_voiceStore.op[s].tl + tlAdd;
         if (tl > 127) tl = 127;
         writeReg(0x60 + (uint8_t)(s * 8 + ch), (uint8_t)tl);
     }
@@ -135,6 +136,16 @@ void AudioSynthYmfmOPM::allNotesOff() {
 }
 
 void AudioSynthYmfmOPM::update(void) {
+    // Idle gate: when nothing is held, keep rendering for kIdleHoldBlocks (so
+    // release tails finish), then emit nothing — transmitting no block reads as
+    // silence downstream and skips the chip entirely, so a silent bank is free.
+    if (activeVoices() == 0) {
+        if (m_idleBlocks >= kIdleHoldBlocks) return;    // fully idle: no output, no work
+        m_idleBlocks++;
+    } else {
+        m_idleBlocks = 0;
+    }
+
     audio_block_t *blockL = allocate();
     audio_block_t *blockR = allocate();
     if (!blockL || !blockR) {                     // out of audio blocks: bail cleanly

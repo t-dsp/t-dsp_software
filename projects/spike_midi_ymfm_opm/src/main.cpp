@@ -1,18 +1,26 @@
-// spike_midi_ymfm_opm — MIDI-IN driving a ymfm YM2151 (OPM) FM synth.
+// spike_midi_ymfm_opm — MIDI-IN driving a MULTITIMBRAL bank of ymfm YM2151 (OPM)
+// FM synths. Four independent emulated OPM chips ("banks"), each with its own
+// patch and 8 voices, are routed by MIDI channel and mixed to the DAC:
 //
-//   MIDI DIN/TRS --opto(H11L1)--> pin 0 (Serial1 RX, 31250)
-//     --> Arduino MIDI Library --> AudioSynthYmfmOPM (ymfm ym2151, 8ch x 4-op FM)
-//     --> AudioOutputTDM (SAI1, int16) --> TAC5212 DAC --> OUT1/OUT2 (HP jack).
+//   MIDI IN (pin 0) / serial demo ─▶ YmfmOpmMulti ─▶ bank0 (Organ)     ─┐
+//                                     channel→bank    bank1 (E.Piano)   ├─▶ mixL/mixR
+//                                                     bank2 (FM Bass)   │   (AudioMixer4)
+//                                                     bank3 (Bell/Vibes)┘        │
+//                                              AudioOutputTDM (SAI1) ─▶ TAC5212 ─▶ HP out
+//
+// Four banks = four distinct simultaneous timbres and up to 32-voice total
+// polyphony. AudioSynthYmfmOPM's idle gate means a bank with no notes costs
+// ~nothing, so running four is cheap until they actually play (watch cpuMax).
 //
 // The codec / TDM / ESP32-kit setup is copied verbatim from spike_midi_dexed
-// (known-good on this board), so the only new moving parts are the OPM engine and
-// its MIDI->register layer — if audio is silent it's the ymfm code, not plumbing.
+// (known-good on this board), so the only new moving parts are the OPM engines
+// and the multitimbral manager.
 //
 // Bring-up path:
-//   1. 'n' plays a local OPM note (middle C) — proves audio+OPM with NO MIDI.
-//   2. 'c' plays a 4-note chord — proves the 8-voice allocator / polyphony.
-//   3. 'W' plays a C-major scale demo.  'v' toggles the two starter voices.
-//   4. Play a MIDI keyboard into the DIN — notes should sound + count in heartbeat.
+//   1. '1'..'4' play a note on each bank — proves all four chips sound + distinct.
+//   2. 'm' plays a note on all four banks AT ONCE — the multi-bank headline.
+//   3. 'c' plays an 8-note chord on one bank; 'W' spreads a scale across banks.
+//   4. Play a MIDI keyboard into the DIN (omni → ch1 → bank0), or set its channel.
 //
 // ESP32/kit:  r=reset->app  g=flash mode  @BOOTAPP@=exit flash  U=Teensy prog.
 
@@ -24,6 +32,12 @@
 #include <TDspProgrammingKit.h>
 #include <MIDI.h>
 #include <AudioSynthYmfmOPM.h>
+#include <YmfmOpmMulti.h>
+#include <OpmBank.h>          // VOPM .opm parser
+#include "opm_bank_data.h"    // baked demo bank (also parser test data)
+#if TDSP_HAS_SDCARD
+#include <SD.h>              // /ymfm/*.opm banks off the microSD
+#endif
 
 constexpr int     TAC5212_EN_PIN      = 35;     // shared SHDNZ, active-low
 constexpr uint8_t TAC5212_I2C_ADDRESS = 0x51;
@@ -35,19 +49,99 @@ MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
 // --- Audio graph ------------------------------------------------------------
 // tdmClk (SAI1 TDM input) is constructed FIRST so it owns update_responsibility
 // exactly as in spike_midi_dexed; tdmOut is the actual DAC feed. tdmClk is left
-// unconnected — it exists only to keep the SAI1 clock/update wiring identical.
+// unconnected — it only keeps the SAI1 clock/update wiring identical.
 AudioInputTDM          tdmClk;               // SAI1 TDM clock + update driver
 AudioOutputTDM         tdmOut;               // SAI1 TDM -> TAC5212 DAC (ch0=L, ch1=R)
 
-AudioSynthYmfmOPM      g_opm;                // ymfm YM2151 (stereo: 0=L, 1=R)
-AudioMixer4            outL, outR;           // slot 0 = OPM L / R
+constexpr int kNumBanks = 4;
+AudioSynthYmfmOPM      bank0, bank1, bank2, bank3;   // four independent OPM chips
+AudioMixer4            mixL, mixR;                    // one input per bank (stereo)
 AudioAnalyzePeak       peakOut;
 
-AudioConnection c_opmL  (g_opm,   0, outL, 0);
-AudioConnection c_opmR  (g_opm,   1, outR, 0);
-AudioConnection c_outL  (outL,    0, tdmOut, 0);
-AudioConnection c_outR  (outR,    0, tdmOut, 1);
-AudioConnection c_pkOut (outL,    0, peakOut, 0);
+// Each bank is stereo (output 0 = L, 1 = R) -> mixer input = bank index.
+AudioConnection c_b0L(bank0, 0, mixL, 0);  AudioConnection c_b0R(bank0, 1, mixR, 0);
+AudioConnection c_b1L(bank1, 0, mixL, 1);  AudioConnection c_b1R(bank1, 1, mixR, 1);
+AudioConnection c_b2L(bank2, 0, mixL, 2);  AudioConnection c_b2R(bank2, 1, mixR, 2);
+AudioConnection c_b3L(bank3, 0, mixL, 3);  AudioConnection c_b3R(bank3, 1, mixR, 3);
+AudioConnection c_outL(mixL, 0, tdmOut, 0);
+AudioConnection c_outR(mixR, 0, tdmOut, 1);
+AudioConnection c_pkOut(mixL, 0, peakOut, 0);
+
+AudioSynthYmfmOPM *g_bankPtrs[kNumBanks] = { &bank0, &bank1, &bank2, &bank3 };
+tdsp::ymfmopm::YmfmOpmMulti g_multi(g_bankPtrs, kNumBanks);
+
+// Per-bank default instruments (also the Program Change voice table).
+static const tdsp::ymfmopm::OpmVoice *kVoices[] = {
+    &tdsp::ymfmopm::kAdditiveOrgan,   // bank 0 / ch 1
+    &tdsp::ymfmopm::kElectricPiano,   // bank 1 / ch 2
+    &tdsp::ymfmopm::kFmBass,          // bank 2 / ch 3
+    &tdsp::ymfmopm::kBellVibes,       // bank 3 / ch 4
+};
+static const int kNumVoices = sizeof(kVoices) / sizeof(kVoices[0]);
+
+// --- Instrument catalog: baked .opm bank + SD /ymfm/*.opm -------------------
+// All available instruments are parsed once into g_instr[] (baked bank first,
+// then every /ymfm/*.opm on the card). Loading an instrument is then just
+// setVoice(g_instr[i]) — the engine keeps its own copy. Drop VOPM .opm files
+// into /ymfm on the SD card (via a reader) to add instruments with no rebuild.
+static const int kMaxInstr = 64;
+DMAMEM static tdsp::ymfmopm::OpmVoice g_instr[kMaxInstr];   // parsed instruments (OCRAM)
+static int  g_numInstr = 0;
+static bool g_sdReady  = false;
+DMAMEM static char g_opmFileBuf[24000];   // scratch to read one .opm file (OCRAM)
+
+static int  g_targetBank = 0;                       // which bank 'V' re-instruments
+static int  g_bankInstr[kNumBanks] = { 0, 1, 2, 3 };// current catalog index per bank
+
+static bool endsWithOpm(const char *s) {
+    size_t n = strlen(s);
+    return n > 4 && strcasecmp(s + n - 4, ".opm") == 0;
+}
+
+#if TDSP_HAS_SDCARD
+// Read every *.opm in `dir`, parsing each file's voices onto the end of g_instr[].
+static void scanYmfmDir(const char *dir) {
+    File d = SD.open(dir);
+    if (!d || !d.isDirectory()) { if (d) d.close(); return; }
+    for (File f = d.openNextFile(); f && g_numInstr < kMaxInstr; f = d.openNextFile()) {
+        const char *nm = f.name();
+        if (!f.isDirectory() && nm && endsWithOpm(nm)) {
+            size_t n = f.read(g_opmFileBuf, sizeof(g_opmFileBuf) - 1);
+            g_opmFileBuf[n] = 0;
+            int got = tdsp::ymfmopm::parseOpmBank(g_opmFileBuf, n,
+                                                  g_instr + g_numInstr, kMaxInstr - g_numInstr);
+            Serial.printf("[ymfm] %s: +%d instruments\n", nm, got);
+            g_numInstr += got;
+        }
+        f.close();
+    }
+    d.close();
+}
+#endif
+
+// Build the whole instrument catalog: baked bank, then SD /ymfm.
+static void buildInstruments() {
+    g_numInstr = tdsp::ymfmopm::parseOpmBank(kBakedOpmBank, strlen(kBakedOpmBank),
+                                             g_instr, kMaxInstr);
+    Serial.printf("[opm] baked bank parsed: %d instruments\n", g_numInstr);
+#if TDSP_HAS_SDCARD
+    if (g_sdReady) {
+        if (!SD.exists("/ymfm")) SD.mkdir("/ymfm");   // a home to drop .opm banks into
+        scanYmfmDir("/ymfm");
+    }
+#endif
+    Serial.printf("[opm] catalog total: %d instruments\n", g_numInstr);
+    for (int i = 0; i < g_numInstr; ++i) Serial.printf("   %2d: %s\n", i, g_instr[i].name);
+}
+
+// Load catalog instrument `idx` into `bank` (wraps).
+static void loadInstrument(int bank, int idx) {
+    if (g_numInstr == 0 || bank < 0 || bank >= kNumBanks) return;
+    idx = ((idx % g_numInstr) + g_numInstr) % g_numInstr;
+    g_bankInstr[bank] = idx;
+    g_multi.setBankVoice(bank, g_instr[idx]);
+    Serial.printf("[opm] bank %d (ch%d) = instrument %d \"%s\"\n", bank, bank + 1, idx, g_instr[idx].name);
+}
 
 tac5212::TAC5212 g_codec(Wire);
 
@@ -56,14 +150,7 @@ tac5212::TAC5212 g_codec(Wire);
 TDspProgrammingKit kit;
 elapsedMillis hb;
 
-// --- OPM / MIDI state -------------------------------------------------------
-static const tdsp::ymfmopm::OpmVoice *kVoices[] = {
-    &tdsp::ymfmopm::kAdditiveOrgan,
-    &tdsp::ymfmopm::kElectricPiano,
-};
-static const int kNumVoices  = sizeof(kVoices) / sizeof(kVoices[0]);
-static int       g_voiceIdx  = 0;
-static uint32_t  g_noteOnCount = 0;      // lifetime note-on tally (heartbeat)
+static uint32_t g_noteOnCount = 0;      // lifetime note-on tally (heartbeat)
 
 static void hardResetCodecPower() {
     pinMode(TAC5212_EN_PIN, OUTPUT);
@@ -125,43 +212,44 @@ FLASHMEM static void setupCodec() {
     g_codec.setDspAvddSelect(true);
 }
 
-static void applyVoice(int idx) {
-    if (idx < 0) idx = kNumVoices - 1;
-    if (idx >= kNumVoices) idx = 0;
-    g_voiceIdx = idx;
-    g_opm.allNotesOff();
-    g_opm.setVoice(*kVoices[idx]);
-    Serial.printf("[opm] voice %d = %s\n", idx, kVoices[idx]->name);
-}
-
-// --- MIDI handlers (Serial1 DIN) --------------------------------------------
+// --- MIDI handlers (Serial1 DIN) -> multitimbral manager --------------------
 static void onNoteOn(byte ch, byte note, byte vel) {
-    if (vel == 0) { g_opm.noteOff(note); return; }   // running-status note-off
-    g_opm.noteOn(note, vel);
+    if (vel == 0) { g_multi.noteOff(ch, note); return; }   // running-status note-off
+    g_multi.noteOn(ch, note, vel);
     g_noteOnCount++;
-    Serial.printf("[midi] noteOn  ch%-2d n%-3d v%-3d\n", ch, note, vel);
+    Serial.printf("[midi] noteOn  ch%-2d n%-3d v%-3d -> bank %d\n", ch, note, vel, g_multi.bankForChannel(ch));
 }
-static void onNoteOff(byte ch, byte note, byte /*vel*/) {
-    g_opm.noteOff(note);
-    Serial.printf("[midi] noteOff ch%-2d n%-3d\n", ch, note);
+static void onNoteOff(byte ch, byte note, byte /*vel*/) { g_multi.noteOff(ch, note); }
+static void onProgramChange(byte ch, byte prog) {
+    g_multi.programChange(ch, prog);
+    Serial.printf("[midi] program ch%-2d -> %d (bank %d)\n", ch, prog, g_multi.bankForChannel(ch));
 }
 static void onControlChange(byte /*ch*/, byte cc, byte val) {
-    if (cc == 123 && val == 0) g_opm.allNotesOff();      // all notes off
+    if (cc == 123 && val == 0) g_multi.allNotesOff();      // all notes off
 }
 
-// Blocking C-major scale demo (interruptible by any serial key).
+// Blocking helpers for the serial demos (interruptible by any serial key).
 static bool delayOrKey(uint16_t ms) {
     uint32_t t0 = millis();
     while (millis() - t0 < ms) { if (Serial.available()) { Serial.read(); return true; } }
     return false;
 }
-static void playScale() {
-    static const uint8_t scale[] = { 60, 62, 64, 65, 67, 69, 71, 72 };  // C4..C5
-    Serial.println("[cmd] C-major scale (press any key to stop)");
-    for (uint8_t n : scale) {
-        g_opm.noteOn(n, 100);
-        if (delayOrKey(220)) { g_opm.allNotesOff(); return; }
-        g_opm.noteOff(n);
+// One quick note on a given channel (its bank's timbre).
+static void demoNote(uint8_t ch, uint8_t note, uint16_t ms) {
+    g_multi.noteOn(ch, note, 110);
+    delayOrKey(ms);
+    g_multi.noteOff(ch, note);
+}
+// A scale whose successive notes hop across the four banks, so you hear all four
+// timbres interleaved from one melody.
+static void playSpread() {
+    static const uint8_t scale[] = { 60, 62, 64, 65, 67, 69, 71, 72 };
+    Serial.println("[cmd] scale spread across 4 banks (press any key to stop)");
+    for (int i = 0; i < (int)(sizeof(scale)); i++) {
+        uint8_t ch = (uint8_t)(1 + (i % kNumBanks));   // ch 1..4 -> bank 0..3
+        g_multi.noteOn(ch, scale[i], 110);
+        if (delayOrKey(200)) { g_multi.allNotesOff(); return; }
+        g_multi.noteOff(ch, scale[i]);
     }
 }
 
@@ -174,7 +262,7 @@ void setup() {
 
     Serial.println();
     if (CrashReport) { Serial.println("!!! CRASH REPORT (previous run) !!!"); Serial.print(CrashReport); }
-    Serial.println("=== spike_midi_ymfm_opm (MIDI-IN -> ymfm YM2151/OPM -> TAC5212) ===");
+    Serial.println("=== spike_midi_ymfm_opm (MULTITIMBRAL: 4x ymfm YM2151/OPM -> TAC5212) ===");
     Serial.println("Physical MIDI IN on pin 0 (Serial1 RX, 31250) via the H11L1 opto.");
 
     // Pause audio while flashing the ESP32 (kit passthrough must not be starved).
@@ -201,23 +289,44 @@ void setup() {
         Serial.println("[setup] codec init done"); Serial.flush();
     }
 
-    AudioMemory(40);
-    outL.gain(0, 1.0f);  outR.gain(0, 1.0f);
+    // Bigger pool than a single bank: four engines each allocate 2 blocks/update.
+    AudioMemory(80);
+    // Per-bank make-up. Four banks summed at once must stay under full scale, so
+    // 0.7 per input keeps a 4-bank fff pile-up (~4 x 0.34) just under 1.0 while a
+    // single bank still lands at a usable level.
+    for (int i = 0; i < kNumBanks; i++) { mixL.gain(i, 0.7f); mixR.gain(i, 0.7f); }
     if (g_codecOk) applyVol();
 
-    // Bring up the OPM: reset the chip, compute the resample ratio, load a voice.
-    g_opm.begin();
-    applyVoice(g_voiceIdx);
+    // Bring up all four OPM banks.
+    g_multi.begin();
 
-    // MIDI: consume all channels (omni). Note-off is handled inside onNoteOn too
-    // (vel==0) for controllers that use running-status note-offs.
+    // SD card + instrument catalog: baked .opm bank, then /ymfm/*.opm off the card.
+#if TDSP_HAS_SDCARD
+    g_sdReady = SD.begin(BUILTIN_SDCARD);
+    Serial.printf("[sd] card %s\n", g_sdReady ? "ready" : "not present");
+#endif
+    buildInstruments();
+
+    // Seed the four banks from the catalog (fallback to the code presets if empty).
+    if (g_numInstr >= kNumBanks) {
+        for (int i = 0; i < kNumBanks; i++) loadInstrument(i, i);
+    } else {
+        for (int i = 0; i < kNumBanks; i++) g_multi.setBankVoice(i, *kVoices[i]);
+    }
+    g_multi.setVoiceTable(kVoices, kNumVoices);   // MIDI Program Change -> code preset
+
+    // MIDI: consume all channels (omni). A plain keyboard sends ch1 -> bank 0;
+    // set the keyboard's channel (or use Program Change) to reach other banks.
     MIDI.begin(MIDI_CHANNEL_OMNI);
-    MIDI.turnThruOff();      // no OUT->IN echo/feedback with a loopback cable
+    MIDI.turnThruOff();
     MIDI.setHandleNoteOn(onNoteOn);
     MIDI.setHandleNoteOff(onNoteOff);
+    MIDI.setHandleProgramChange(onProgramChange);
     MIDI.setHandleControlChange(onControlChange);
 
-    Serial.println("running -- cmds: n=test note  c=chord  W=scale  v=next voice");
+    Serial.println("running -- cmds: 1/2/3/4=note on each bank  m=all banks at once");
+    Serial.println("                 c=8-note chord (bank0)  W=scale spread across banks");
+    Serial.println("                 b=select target bank  V=next instrument (on target bank)");
     Serial.println("                 +/-=vol  d=dump codec  i=re-init codec");
     Serial.println("      ESP32/kit:  r=reset  g=flash mode  @BOOTAPP@=exit flash  U=Teensy prog");
 
@@ -237,19 +346,32 @@ void loop() {
     if (Serial.available()) {
         int c = Serial.read();
         if (!kit.handleChar(Serial, c)) {     // g / r / U handled by the kit
-            if (c == 'n') {                    // local test note — no MIDI needed
-                Serial.println("[cmd] test note: middle C, 400ms");
-                g_opm.noteOn(60, 100); delay(400); g_opm.noteOff(60);
+            if (c >= '1' && c <= '4') {        // note on one bank (its own timbre)
+                uint8_t ch = (uint8_t)(c - '0');
+                Serial.printf("[cmd] note on bank %d (ch%d), 500ms\n", ch - 1, ch);
+                demoNote(ch, 60, 500);
             }
-            else if (c == 'c') {               // 4-note chord (tests polyphony)
-                Serial.println("[cmd] C major chord (C E G C), 600ms");
-                g_opm.noteOn(60, 100); g_opm.noteOn(64, 100);
-                g_opm.noteOn(67, 100); g_opm.noteOn(72, 100);
-                delay(600);
-                g_opm.noteOff(60); g_opm.noteOff(64); g_opm.noteOff(67); g_opm.noteOff(72);
+            else if (c == 'm') {               // ALL banks at once — the headline
+                Serial.println("[cmd] all 4 banks at once (C E G C across banks), 800ms");
+                g_multi.noteOn(1, 60, 110); g_multi.noteOn(2, 64, 110);
+                g_multi.noteOn(3, 43, 110); g_multi.noteOn(4, 72, 110);
+                delay(800);
+                g_multi.noteOff(1, 60); g_multi.noteOff(2, 64);
+                g_multi.noteOff(3, 43); g_multi.noteOff(4, 72);
             }
-            else if (c == 'W') { playScale(); }
-            else if (c == 'v') { applyVoice(g_voiceIdx + 1); }
+            else if (c == 'c') {               // 8-note chord within bank 0
+                Serial.println("[cmd] 8-note chord on bank0 (ch1), 700ms");
+                static const uint8_t chord[] = { 48, 52, 55, 60, 64, 67, 72, 76 };
+                for (uint8_t n : chord) g_multi.noteOn(1, n, 100);
+                delay(700);
+                for (uint8_t n : chord) g_multi.noteOff(1, n);
+            }
+            else if (c == 'W') { playSpread(); }
+            else if (c == 'b') { g_targetBank = (g_targetBank + 1) % kNumBanks;
+                                 Serial.printf("[cmd] target bank = %d (ch%d), instrument \"%s\"\n",
+                                     g_targetBank, g_targetBank + 1,
+                                     g_numInstr ? g_instr[g_bankInstr[g_targetBank]].name : "-"); }
+            else if (c == 'V') { loadInstrument(g_targetBank, g_bankInstr[g_targetBank] + 1); }
             else if (c == '+') { g_dvol += 3.0f; if (g_dvol > 0) g_dvol = 0;
                                  applyVol(); Serial.printf("[cmd] vol %.0f dB\n", g_dvol); }
             else if (c == '-') { g_dvol -= 3.0f; if (g_dvol < -60) g_dvol = -60;
@@ -265,12 +387,13 @@ void loop() {
     if (hb >= 1000) {
         hb = 0;
         float po = peakOut.available() ? peakOut.read() : 0.0f;
-        Serial.printf("alive up=%lus  codec=%s(%s)  voice=%s  notes=%lu  outPeak=%.3f  "
-                      "cpuMax=%.1f%% memMax=%u\n",
+        Serial.printf("alive up=%lus  codec=%s(%s)  instr=%d  voices[b0..3]=%d/%d/%d/%d tot=%d  "
+                      "outPeak=%.3f  cpuMax=%.1f%% memMax=%u\n",
                       (unsigned long)(millis() / 1000),
-                      g_codecOk ? "OK" : "FAIL", g_codecMsg, kVoices[g_voiceIdx]->name,
-                      (unsigned long)g_noteOnCount, po,
-                      AudioProcessorUsageMax(), AudioMemoryUsageMax());
+                      g_codecOk ? "OK" : "FAIL", g_codecMsg, g_numInstr,
+                      bank0.activeVoices(), bank1.activeVoices(),
+                      bank2.activeVoices(), bank3.activeVoices(), g_multi.activeVoices(),
+                      po, AudioProcessorUsageMax(), AudioMemoryUsageMax());
         AudioProcessorUsageMaxReset();
     }
 }
