@@ -37,6 +37,7 @@ export const CMD = {
   SET_DX_VOICE: 0x22, // + 1 byte: Dexed instrument index (into DX_INSTRUMENTS)
   REFRESH_CAT: 0x23, // re-scan SD + refresh the song/instrument catalog
   SET_HPF: 0x24, // + 1 byte: TAC5212 DAC highpass mode (0=off,1=1Hz,2=12Hz,3=96Hz)
+  SET_MIDI_MODE: 0x25, // + 1 byte: 0 = normal MIDI, 1 = MPE (per-note expression)
 } as const;
 
 // TAC5212 DAC highpass filter modes — byte sent via SET_HPF. Maps to the
@@ -130,6 +131,7 @@ export type TdspStatus = {
   disc: boolean; // receiver is discoverable (pairing mode)
   vol: number; // master headphone volume 0..100 (%)
   hpf: number; // TAC5212 DAC highpass mode 0..3 (0=off) — reported by the device
+  mpe: boolean; // false = normal MIDI, true = MPE (per-note expression)
   peer: string; // connected source name, if any
 };
 
@@ -183,6 +185,7 @@ function parseStatus(raw: string | null | undefined): TdspStatus | null {
       disc: !!j.disc,
       vol: typeof j.vol === 'number' ? j.vol : 50,
       hpf: typeof j.hpf === 'number' ? j.hpf : 0,
+      mpe: !!j.mpe,
       peer: typeof j.peer === 'string' ? j.peer : '',
     };
   } catch {
@@ -526,6 +529,11 @@ export function useTdsp() {
     (mode: number) => writeByteCmd(CMD.SET_HPF, mode),
     [writeByteCmd]
   );
+  // Switch the device between normal MIDI and MPE (per-note expression, e.g. LinnStrument).
+  const setMidiMode = useCallback(
+    (mpe: boolean) => writeByteCmd(CMD.SET_MIDI_MODE, mpe ? 1 : 0),
+    [writeByteCmd]
+  );
   // Ask the device to re-scan its SD card and re-send the catalog. The device
   // NOTIFYs the songs/instruments chars, which re-reads via the subscription; we
   // also re-read after a short delay in case the notify is missed.
@@ -616,6 +624,7 @@ export function useTdsp() {
     stopSong,
     setDxVoice,
     setHpf,
+    setMidiMode,
     refreshCatalog,
   };
 }

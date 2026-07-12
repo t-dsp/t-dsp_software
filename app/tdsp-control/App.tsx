@@ -40,6 +40,7 @@ export default function App() {
     stopSong,
     setDxVoice,
     setHpf,
+    setMidiMode,
     refreshCatalog,
   } = useTdsp();
   const [showSettings, setShowSettings] = useState(false);
@@ -50,6 +51,8 @@ export default function App() {
   // hpfCutIdx is the last-picked cutoff (0=1Hz, 1=12Hz, 2=96Hz) → filter mode idx+1.
   const [hpfOn, setHpfOn] = useState(false);
   const [hpfCutIdx, setHpfCutIdx] = useState(1); // 12 Hz
+  // MIDI vs MPE mode — mirrors status.mpe once per connection, then local toggle wins.
+  const [mpe, setMpe] = useState(false);
   const connected = state === 'connected';
 
   // Initialize the HPF controls from the device's reported state once per
@@ -66,8 +69,15 @@ export default function App() {
       const m = status.hpf ?? 0;
       setHpfOn(m !== 0);
       if (m > 0) setHpfCutIdx(m - 1);
+      setMpe(!!status.mpe);
     }
   }, [connected, status]);
+
+  const onToggleMpe = () => {
+    const next = !mpe;
+    setMpe(next);
+    setMidiMode(next);
+  };
 
   const openSettings = () => {
     readSources(); // refresh the paired list when the menu opens
@@ -146,6 +156,8 @@ export default function App() {
           setHpfCutIdx(i);
           if (hpfOn) setHpf(i + 1);
         }}
+        mpe={mpe}
+        onToggleMpe={onToggleMpe}
       />
     </SafeAreaView>
   );
@@ -180,6 +192,8 @@ function SettingsModal({
   hpfCutIdx,
   onToggleHpf,
   onSelectHpfCut,
+  mpe,
+  onToggleMpe,
 }: {
   visible: boolean;
   onClose: () => void;
@@ -203,6 +217,8 @@ function SettingsModal({
   hpfCutIdx: number;
   onToggleHpf: () => void;
   onSelectHpfCut: (index: number) => void;
+  mpe: boolean;
+  onToggleMpe: () => void;
 }) {
   const [pane, setPane] = useState<SettingsPane>('menu');
 
@@ -282,6 +298,17 @@ function SettingsModal({
             <>
               <Text style={styles.sectionLabel}>{synth.name}</Text>
               <Text style={styles.dim}>{synth.description}</Text>
+
+              <Text style={styles.sectionLabel}>Input Mode</Text>
+              <Text style={styles.dim}>
+                MPE gives per-note pitch bend + pressure for expressive controllers
+                (e.g. LinnStrument over USB or DIN). Normal MIDI keeps channel 10 as GM drums.
+              </Text>
+              <View style={{ height: 10 }} />
+              <SecondaryButton
+                label={mpe ? 'Mode: MPE (per-note expression)' : 'Mode: Normal MIDI'}
+                onPress={onToggleMpe}
+              />
 
               <Text style={styles.sectionLabel}>Song</Text>
               <Dropdown label="Song" options={songs} value={song} onSelect={onSelectSong} />
