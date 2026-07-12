@@ -41,8 +41,33 @@ tdsp::MidiSink *g_synthSink = &g_ymfmSink;
 // Instrument catalog: baked VOPM bank + SD /ymfm/*.opm, parsed once at boot.
 static const int kMaxInstr = 48;
 DMAMEM static tdsp::ymfmopm::OpmVoice        g_instr[kMaxInstr];      // OCRAM
-static const tdsp::ymfmopm::OpmVoice        *g_instrPtrs[kMaxInstr];  // for setVoiceTable
+static const tdsp::ymfmopm::OpmVoice        *g_gmVoices[128];         // GM program -> voice (setVoiceTable)
 static int  g_numInstr = 0;
+
+// GM program (0..127) -> baked-catalog index, by GM family (each family = 8
+// programs). Maps a song's Program Change onto a roughly-right patch (a pad
+// stays pad-ish, a bass stays bass) instead of the raw `program % n` scramble.
+// Baked bank order: 0 Grand Piano, 1 Bright Brass, 2 E.Bass, 3 Strings,
+// 4 Tubular Bell, 5 Clav, 6 Vibraphone, 7 Synth Lead.
+static uint8_t gmToVoiceIndex(uint8_t prog) {
+    switch (prog >> 3) {          // GM family 0..15
+        case 0:  return 0;        // Piano
+        case 1:  return 6;        // Chromatic Perc -> Vibraphone
+        case 2:  return 5;        // Organ -> Clav
+        case 3:  return 5;        // Guitar -> Clav
+        case 4:  return 2;        // Bass -> E.Bass
+        case 5:  return 3;        // Strings -> Strings
+        case 6:  return 3;        // Ensemble -> Strings
+        case 7:  return 1;        // Brass -> Bright Brass
+        case 8:  return 1;        // Reed -> Bright Brass
+        case 9:  return 7;        // Pipe/Flute -> Synth Lead
+        case 10: return 7;        // Synth Lead
+        case 11: return 3;        // Synth Pad -> Strings
+        case 13: return 5;        // Ethnic -> Clav
+        case 14: return 4;        // Percussive -> Tubular Bell
+        default: return 7;        // Synth FX / Sound FX -> Synth Lead
+    }
+}
 static int  g_synthInstrument = 0;
 DMAMEM static char g_opmFileBuf[24000];   // scratch to read one .opm file (OCRAM)
 
@@ -95,8 +120,15 @@ static void synthBegin() {
         synthScanOpmDir("/ymfm");
     }
 #endif
-    for (int i = 0; i < g_numInstr; i++) g_instrPtrs[i] = &g_instr[i];
-    g_multi.setVoiceTable(g_instrPtrs, g_numInstr);   // song Program Change -> catalog voice
+    // GM-faithful Program Change: build a 128-entry table (index = GM program)
+    // pointing at the category-matched catalog patch. The manager selects
+    // table[program % size]; size = 128 makes that table[program] exactly.
+    for (int p = 0; p < 128; p++) {
+        int idx = gmToVoiceIndex((uint8_t)p);
+        if (idx >= g_numInstr) idx = 0;
+        g_gmVoices[p] = &g_instr[idx];
+    }
+    g_multi.setVoiceTable(g_gmVoices, 128);
     // Seed each bank with a distinct patch so a multi-channel song is instantly
     // multi-instrument even before its first Program Change.
     if (g_numInstr > 0)
