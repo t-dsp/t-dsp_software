@@ -1,0 +1,16 @@
+{
+  "name": "TDspSF2",
+  "version": "0.1.0",
+  "description": "General-MIDI sampled-instrument engine for Teensy 4.1. Drives a pool of AudioSynthWavetable voices (Teensy Audio Library) from GM MIDI, loading real SF2 instruments at runtime into PSRAM via manicken/sf22aswt (vendored under src/sf22aswt, MIT). Adds the GM layer sf22aswt lacks: program/bank -> SF2-instrument resolution (phdr/pbag/pgen), a voice allocator, per-channel program + pitch bend, drums on channel 10, and a PSRAM-adaptive resident-instrument cache (8 MB / 16 MB auto). Slots behind the same tdsp::MidiSink seam as the Dexed/OPL3/OPM backends.",
+  "keywords": ["sf2", "soundfont", "general-midi", "gm", "wavetable", "sampler", "psram", "teensy", "t-dsp"],
+  "frameworks": "arduino",
+  "platforms": "teensy",
+  "dependencies": {
+    "Audio": "*",
+    "SD": "*"
+  },
+  "license": "MIT",
+  "build": {
+    "flags": ["-I src", "-I src/sf22aswt"]
+  }
+}

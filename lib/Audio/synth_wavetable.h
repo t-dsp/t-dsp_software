@@ -164,6 +164,10 @@ public:
 	// TODO: amplitude should be 0 to 1.0 scale
 	void playFrequency(float freq, int amp = DEFAULT_AMPLITUDE);
 	void playNote(int note, int amp = DEFAULT_AMPLITUDE);
+	// Like playNote (selects the sample by `note`) but pitches it at an explicit
+	// frequency instead of noteToFreq(note). Lets a caller apply SF2 scaleTuning
+	// (compressed key tracking) without disturbing note-range sample selection.
+	void playNoteFreq(int note, float freq, int amp = DEFAULT_AMPLITUDE) { setState(note, amp, freq); }
 	bool isPlaying(void) { return env_state != STATE_IDLE; }
 	void setFrequency(float freq);
 	virtual void update(void);
