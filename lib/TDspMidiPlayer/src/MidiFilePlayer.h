@@ -109,6 +109,7 @@ private:
                 sink_->onPitchBend(ch, ((float)(value - 8192) / 8192.0f) * pbRange_[e.channel]);
                 break;
             }
+            case kChannelPressure: sink_->onPressure(ch, e.data1 / 127.0f); break;  // MPE Z-axis
             default: break;
         }
     }

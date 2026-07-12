@@ -55,6 +55,7 @@ static inline int sortRank(uint8_t kind) {
         case kProgramChange: return 0;
         case kControlChange: return 1;
         case kPitchBend:     return 2;
+        case kChannelPressure: return 2;
         case kNoteOff:       return 3;
         case kNoteOn:        return 4;
         default:             return 5;
@@ -134,7 +135,7 @@ static int parseSmf(const uint8_t *d, size_t len, MidiFileEvent *out, int maxOut
             else if (status == 0xF0 || status == 0xF7) { uint32_t sl = readVar(d, e, &i); i += sl; }
             else {
                 uint8_t hi = status & 0xF0;
-                if (hi == 0x80 || hi == 0x90 || hi == 0xB0 || hi == 0xC0 || hi == 0xE0) total++;
+                if (hi == 0x80 || hi == 0x90 || hi == 0xB0 || hi == 0xC0 || hi == 0xD0 || hi == 0xE0) total++;
                 i += (hi == 0xC0 || hi == 0xD0) ? 1 : 2;
             }
         }
@@ -157,7 +158,8 @@ static int parseSmf(const uint8_t *d, size_t len, MidiFileEvent *out, int maxOut
                 if (hi == 0xC0 || hi == 0xD0) {                 // 1 data byte
                     if (i + 1 > e) break;
                     uint8_t d1 = d[i]; i += 1;
-                    if (hi == 0xC0) ev[ne++] = {tick, kProgramChange, ch, d1, 0};
+                    if      (hi == 0xC0) ev[ne++] = {tick, kProgramChange,   ch, d1, 0};
+                    else if (hi == 0xD0) ev[ne++] = {tick, kChannelPressure, ch, d1, 0};  // MPE Z-axis
                 } else {                                        // 2 data bytes
                     if (i + 2 > e) break;
                     uint8_t d1 = d[i], d2 = d[i + 1]; i += 2;

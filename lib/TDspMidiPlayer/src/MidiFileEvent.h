@@ -21,6 +21,7 @@ enum MidiFileEventKind : uint8_t {
     kControlChange = 3,   // data1 = controller, data2 = value (mapped by the player)
     kPitchBend     = 4,   // data1 = LSB (0..127), data2 = MSB (0..127); center = 8192
     kRest          = 5,   // padding for gaps > 60000 ms; only deltaMs is meaningful
+    kChannelPressure = 6, // data1 = pressure (0..127); MPE Z-axis -> onPressure
 };
 
 // 6 bytes, naturally aligned (no padding). At ~24k events that is ~144 KB, so
