@@ -1,0 +1,9 @@
+{
+  "name": "TDspMidiPlayer",
+  "version": "0.1.0",
+  "description": "Synth-agnostic MIDI file player: runtime SMF parser + non-blocking sequencer that drives a tdsp::MidiSink. Backend (Dexed / ymfm / ...) is chosen on the sink side.",
+  "keywords": ["midi", "smf", "player", "teensy", "tdsp"],
+  "//": "Depends on the TDspMidi library (tdsp::MidiSink). Resolved locally by PlatformIO LDF include-scanning of lib_extra_dirs; not declared here to avoid a registry lookup on the local-only name.",
+  "frameworks": ["arduino"],
+  "platforms": ["teensy"]
+}

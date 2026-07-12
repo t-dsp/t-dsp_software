@@ -95,6 +95,9 @@ export interface BusState {
   // amps to 0 so nothing double-counts; the UI greys each channel's
   // Rec button to match.
   loopEnable: Signal<boolean>;
+  // Mono fold-down — when true, L+R are summed (each at 0.5) into both
+  // outputs at the firmware's monoMixL/R stage. Default false (stereo).
+  mono: Signal<boolean>;
 }
 
 // Dexed synth state — mirror of the firmware's AudioSynthDexed controls
@@ -509,6 +512,8 @@ const DEFAULT_CHANNEL_NAMES = [
   'XLR 2',  // 8
   'XLR 3',  // 9
   'XLR 4',  // 10
+  'Opt L',  // 11 optical S/PDIF input L (Teensy SPDIF pin 15)
+  'Opt R',  // 12 optical S/PDIF input R
 ];
 
 export function createMixerState(channelCount: number): MixerState {
@@ -559,6 +564,7 @@ export function createMixerState(channelCount: number): MixerState {
       captureHostvolValue: new Signal(0),
       captureHostvolMute: new Signal(false),
       loopEnable: new Signal(false),
+      mono: new Signal(false),
     },
     dexed: {
       bank: new Signal(0),

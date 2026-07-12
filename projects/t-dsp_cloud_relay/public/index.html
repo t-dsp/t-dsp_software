@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#0b0e14" />
+  <title>T-DSP Remote</title>
+  <style>
+    :root { --bg:#0b0e14; --panel:#151a23; --line:#222b38; --fg:#e6edf3; --muted:#7d8aa0; --accent:#4f8cff; --on:#2ea043; --off:#3a4252; }
+    * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+      font: 15px/1.4 -apple-system, system-ui, Segoe UI, Roboto, sans-serif; }
+    #app { max-width: 560px; margin: 0 auto; padding: 16px; }
+    h1 { font-size: 18px; margin: 0 0 2px; }
+    .sub { color: var(--muted); font-size: 13px; margin-bottom: 16px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 16px; margin-bottom: 14px; }
+    label { display: block; color: var(--muted); font-size: 13px; margin-bottom: 6px; }
+    input[type=text], input[type=password], input[type=number], select {
+      width: 100%; padding: 12px; font-size: 16px; background: #0e131b; color: var(--fg);
+      border: 1px solid var(--line); border-radius: 10px; }
+    input[type=range] { width: 100%; height: 38px; accent-color: var(--accent); }
+    button { font: inherit; font-weight: 600; border: none; border-radius: 10px; padding: 12px 16px;
+      color: #fff; background: var(--accent); cursor: pointer; }
+    button.ghost { background: #232c3a; }
+    button.toggle { background: var(--off); }
+    button.toggle.on { background: var(--on); }
+    .row { display: flex; gap: 10px; align-items: center; }
+    .row > * { flex: 1; }
+    .grow { flex: 3; }
+    .val { flex: 0 0 56px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+    .dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--off); margin-right: 7px; }
+    .dot.on { background: var(--on); } .dot.warn { background: #d29922; }
+    .statusbar { display: flex; align-items: center; justify-content: space-between; font-size: 13px; color: var(--muted); margin-bottom: 14px; }
+    #log { height: 150px; overflow: auto; background: #0e131b; border: 1px solid var(--line); border-radius: 10px;
+      padding: 10px; font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; color: #9fb0c8; white-space: pre-wrap; }
+    .hidden { display: none; }
+    .err { color: #f47067; font-size: 13px; min-height: 18px; }
+    .controls-grid { display: grid; gap: 16px; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <h1>T-DSP Remote</h1>
+    <div class="sub">cloud control prototype</div>
+
+    <!-- LOGIN -->
+    <section id="login" class="panel hidden">
+      <label for="user">Username</label>
+      <input id="user" type="text" autocomplete="username" value="admin" />
+      <label for="pass" style="margin-top:12px">Password</label>
+      <input id="pass" type="password" autocomplete="current-password" />
+      <div class="err" id="login-err"></div>
+      <button id="login-btn" style="width:100%; margin-top:8px">Log in</button>
+    </section>
+
+    <!-- CONTROL SURFACE -->
+    <section id="surface" class="hidden">
+      <div class="statusbar">
+        <span><span class="dot" id="link-dot"></span><span id="link-text">connecting…</span></span>
+        <span><span class="dot" id="dev-dot"></span><span id="dev-text">device ?</span>
+          &nbsp;·&nbsp; <a href="#" id="logout" style="color:var(--muted)">log out</a></span>
+      </div>
+
+      <div class="panel controls-grid">
+        <div>
+          <label>Main fader</label>
+          <div class="row">
+            <input class="grow" type="range" id="main-fader" min="0" max="1" step="0.001" value="0.75" />
+            <span class="val" id="main-fader-val">0.75</span>
+          </div>
+        </div>
+        <div class="row">
+          <button class="toggle on" id="main-on">Main On</button>
+          <button class="ghost" id="snapshot">Sync state</button>
+        </div>
+      </div>
+
+      <div class="panel controls-grid">
+        <div>
+          <label>Channel 1 fader</label>
+          <div class="row">
+            <input class="grow" type="range" id="ch1-fader" min="0" max="1" step="0.001" value="0.75" />
+            <span class="val" id="ch1-fader-val">0.75</span>
+          </div>
+        </div>
+        <button class="toggle on" id="ch1-on">Ch 1 On</button>
+      </div>
+
+      <div class="panel">
+        <label>Raw OSC</label>
+        <div class="row">
+          <input class="grow" type="text" id="raw-addr" placeholder="/synth/dexed/mix/on" />
+          <select id="raw-type" style="flex:0 0 70px">
+            <option value="">(none)</option>
+            <option value="i">i</option>
+            <option value="f">f</option>
+            <option value="s">s</option>
+          </select>
+        </div>
+        <div class="row" style="margin-top:10px">
+          <input class="grow" type="text" id="raw-val" placeholder="value" />
+          <button id="raw-send" style="flex:0 0 90px">Send</button>
+        </div>
+      </div>
+
+      <div class="panel">
+        <label>Incoming</label>
+        <div id="log"></div>
+      </div>
+    </section>
+  </div>
+  <script src="./app.js"></script>
+</body>
+</html>

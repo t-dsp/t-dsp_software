@@ -1,0 +1,51 @@
+{
+  "expo": {
+    "name": "T-DSP Control",
+    "slug": "tdsp-control",
+    "owner": "jayshoes-team",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.tdsp.control",
+      "infoPlist": {
+        "NSBluetoothAlwaysUsageDescription": "T-DSP Control connects to your T-DSP audio device over Bluetooth LE to put it in pairing mode and read its status."
+      }
+    },
+    "android": {
+      "package": "com.tdsp.control",
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/android-icon-foreground.png",
+        "backgroundImage": "./assets/android-icon-background.png",
+        "monochromeImage": "./assets/android-icon-monochrome.png"
+      },
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.BLUETOOTH",
+        "android.permission.BLUETOOTH_ADMIN",
+        "android.permission.BLUETOOTH_CONNECT"
+      ]
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": false,
+          "neverForLocation": true,
+          "bluetoothAlwaysPermission": "T-DSP Control connects to your T-DSP audio device over Bluetooth LE to put it in pairing mode and read its status."
+        }
+      ]
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "393b3396-686e-4a96-8c0d-f203068436f6"
+      }
+    }
+  }
+}

@@ -49,8 +49,13 @@ import { arpPanel } from './ui/arp-panel';
 import { synthBusStrip } from './ui/synth-bus';
 import { bottomStrip } from './ui/bottom-strip';
 import { tuneStubPanel } from './ui/tune-stub';
+import { mountRemotePanel } from './ui/remote-panel';
 
-// Channel count — 10 channels matching tdsp::kChannelCount in firmware.
+// In-app Remote control setup + scan-to-control QR. Desktop app only —
+// mounts when the Electron preload bridge (window.tdspCloud) is present.
+mountRemotePanel();
+
+// Channel count — 12 channels matching kMaxChannel in firmware.
 //   1  USB L         } stereo-linked by default
 //   2  USB R         }
 //   3  Line L        } stereo-linked by default
@@ -61,7 +66,9 @@ import { tuneStubPanel } from './ui/tune-stub';
 //   8  XLR 2         } defaults link=false so they behave as independent
 //   9  XLR 3         } mono channels — each XLR strip's fader/mute/solo
 //  10  XLR 4         } moves on its own).
-const CHANNEL_COUNT = 10;
+//  11  Opt L         } optical S/PDIF input — two independent mono strips
+//  12  Opt R         } (firmware ch11/12 drive optInMix input-1 gains).
+const CHANNEL_COUNT = 12;
 
 const state = createMixerState(CHANNEL_COUNT);
 const console_ = serialConsole({ onSubmit: (line) => sendText(line) });

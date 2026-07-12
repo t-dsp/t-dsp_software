@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "PowerShell(pio --version)",
-      "PowerShell(Get-NetTCPConnection -LocalPort 5173 -ErrorAction SilentlyContinue | Select-Object -First 3 LocalPort, State, OwningProcess; Get-NetTCPConnection -LocalPort 5173 -ErrorAction SilentlyContinue | ForEach-Object { Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue } | Select-Object -Unique Id, ProcessName)"
+      "PowerShell(Get-NetTCPConnection -LocalPort 5173 -ErrorAction SilentlyContinue | Select-Object -First 3 LocalPort, State, OwningProcess; Get-NetTCPConnection -LocalPort 5173 -ErrorAction SilentlyContinue | ForEach-Object { Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue } | Select-Object -Unique Id, ProcessName)",
+      "PowerShell(git push origin master)",
+      "Bash(git -C \"C:/github/t-dsp/t-dsp_software\" log --oneline -3)",
+      "Bash(git -C \"C:/github/t-dsp/t-dsp_software\" status)",
+      "Bash(git -C \"C:/github/t-dsp/t-dsp_software\" ls-files --error-unmatch lib/TAC5212/BOARD_NOTES.md)",
+      "Bash(git -C \"C:/github/t-dsp/t-dsp_software\" check-ignore -v lib/TAC5212/BOARD_NOTES.md)",
+      "Bash(git -C \"C:/github/t-dsp/t-dsp_software\" diff -- lib/TAC5212/BOARD_NOTES.md)"
     ]
   }
 }

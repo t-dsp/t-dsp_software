@@ -48,6 +48,10 @@ audio_block_f32_t * AudioInputSPDIF3_F32::block_right = NULL;
 uint16_t AudioInputSPDIF3_F32::block_offset = 0;
 bool AudioInputSPDIF3_F32::update_responsibility = false;
 DMAChannel AudioInputSPDIF3_F32::dma(false);
+// T-DSP fix: this static member was declared in the header and used in begin()
+// (config_spdif3(sample_rate_Hz)) but never defined here -> linker error. The
+// synchronous F32 S/PDIF input was effectively unbuildable until this was added.
+float AudioInputSPDIF3_F32::sample_rate_Hz = AUDIO_SAMPLE_RATE_EXACT;
 
 FLASHMEM
 void AudioInputSPDIF3_F32::begin(void)

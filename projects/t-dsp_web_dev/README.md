@@ -65,6 +65,32 @@ git tag dev-surface-v0.2.0
 git push origin dev-surface-v0.2.0
 ```
 
+### Remote control from a phone (cloud agent)
+
+The desktop app can also act as the **cloud agent** for the remote-control
+prototype in [`../t-dsp_cloud_relay`](../t-dsp_cloud_relay): when configured,
+it dials OUT to your relay so a phone can drive this mixer from anywhere —
+no firewall changes, no LAN. It does this without touching the serial port:
+[`cloud-agent.mjs`](cloud-agent.mjs) taps the in-process bridge over
+`ws://localhost:8765` (the bridge stays the sole serial owner) and relays
+raw bytes to/from the cloud.
+
+Configure it one of two ways:
+
+- **Dev** — set env vars before launching:
+  ```bash
+  RELAY_URL=wss://your-app.up.railway.app DEVICE_TOKEN=<token> pnpm app:dev
+  ```
+- **Packaged app** — drop a `cloud-config.json` in Electron's userData dir
+  (the app logs the exact path on startup when unconfigured):
+  ```json
+  { "enabled": true, "relayUrl": "wss://your-app.up.railway.app",
+    "deviceToken": "<token>", "deviceId": "mixer-1" }
+  ```
+
+Unconfigured, the agent stays dormant and the app behaves exactly as before.
+Deploy + relay details are in the cloud-relay README.
+
 ### Browser + bridge (two terminals)
 
 ```bash

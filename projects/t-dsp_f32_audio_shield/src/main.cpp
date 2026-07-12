@@ -65,9 +65,18 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+#include "tdsp_hw_config.h"  // board / SD / I2C-mux build-flag config
+
 #include <OpenAudio_ArduinoLibrary.h>
 #include <AudioInputUSB_F32.h>
 #include <AudioOutputUSB_F32.h>
+
+#if TDSP_HAS_SPDIF
+#include <output_spdif3_f32.h>       // optical TOSLINK out (Teensy SPDIF pin 14)
+#endif
+#if TDSP_HAS_SPDIF_IN
+#include <async_input_spdif3_F32.h>  // optical TOSLINK in  (Teensy SPDIF pin 15)
+#endif
 
 #include <OSCMessage.h>
 #include <OSCBundle.h>
@@ -151,6 +160,18 @@ AudioMixer4_F32         mixR;
 AudioMixer4_F32         adcMixL;
 AudioMixer4_F32         adcMixR;
 
+// Mono-fold crossfeed. Two AudioMixer4_F32 stages sit between the
+// per-side mix bus and the main fader so /main/st/mix/mono can fold
+// L+R into both outputs without losing either channel's content.
+//   Stereo: monoMixL = 1*mixL + 0*mixR ; monoMixR = 0*mixL + 1*mixR
+//   Mono:   monoMixL = monoMixR = 0.5*mixL + 0.5*mixR
+// 0.5 scaling avoids clipping when both sides are at full level (a
+// pure mono source already centered would arrive equal on L+R, so the
+// fold preserves its level; a hard-panned source attenuates 6 dB,
+// which is the unavoidable cost of stereo->mono summing).
+AudioMixer4_F32         monoMixL;
+AudioMixer4_F32         monoMixR;
+
 // Main fader. AudioEffectGain_F32 is mono; one instance per side. The
 // /main/st/mix/on toggle multiplies into this gain (on=0 -> 0.0f).
 AudioEffectGain_F32     mainAmpL;
@@ -169,6 +190,40 @@ AudioEffectGain_F32     hostvolAmpR;
 // through unmodified.
 AudioFilterBiquad_F32   procShelfL;
 AudioFilterBiquad_F32   procShelfR;
+
+// --- Test tone / output verification ------------------------------------
+//
+// A sine generator injected AFTER the entire mixer/shelf chain, summed
+// straight into the TDM output. Because it sits downstream of EVERYTHING
+// (USB, faders, mono-fold, host volume, shelf), it proves the
+// Teensy SAI -> TAC5212 DAC -> headphone jack path on its own — the minimal
+// signal path you need when bringing up a new board / mux configuration.
+// Off by default (sine amplitude 0); toggled live via the 'tone' CLI
+// command. g_outMix slot 0 carries the normal program audio at unity, slot
+// 1 carries the test tone; the sine's own amplitude is what gates it.
+AudioSynthWaveformSine_F32  g_testTone;
+AudioMixer4_F32             g_outMixL;
+AudioMixer4_F32             g_outMixR;
+
+// --- Optical S/PDIF (TOSLINK) — teensy41_digital_audio_board only ---------
+//
+// OUT mirrors the main mix: g_outMix (program + test tone) fans into spdifOut,
+// so the optical jack carries exactly what the TAC5212 DAC does. Useful as a
+// working output path even while the TAC5212 TDM data swap is unfixed, since
+// S/PDIF bypasses the codec entirely.
+//
+// IN is a new source channel: the async input resamples the (asynchronous)
+// optical stream to our 48 kHz graph, then optInMix sums it with USB into the
+// main mix bus slot 0 (USB on input 0, optical on input 1).
+#if TDSP_HAS_SPDIF
+AudioSettings_F32           g_audioSettings(AUDIO_SAMPLE_RATE_EXACT, AUDIO_BLOCK_SAMPLES);
+AudioOutputSPDIF3_F32       spdifOut(g_audioSettings);
+#endif
+#if TDSP_HAS_SPDIF_IN
+AsyncAudioInputSPDIF3_F32   spdifIn(g_audioSettings);
+AudioMixer4_F32             optInMixL;   // [0]=USB L, [1]=optical L
+AudioMixer4_F32             optInMixR;   // [0]=USB R, [1]=optical R
+#endif
 
 // --- Dexed FM synth (int16 engine, dual-mono into the F32 mix bus) -----
 //
@@ -403,19 +458,48 @@ AudioMixer4_F32         g_synthSumRC;
 AudioEffectGain_F32     g_synthBusL;
 AudioEffectGain_F32     g_synthBusR;
 
-// USB chans 0/1 (F32) -> per-side mix bus slot 0.
+// USB chans 0/1 (F32) -> per-side mix bus slot 0. With optical enabled, USB
+// and the optical-in channel sum through optInMix first, then into slot 0.
+#if TDSP_HAS_SPDIF_IN
+AudioConnection_F32  c_usbL_in     (usbIn,     0, optInMixL, 0);
+AudioConnection_F32  c_usbR_in     (usbIn,     1, optInMixR, 0);
+AudioConnection_F32  c_optL_in     (spdifIn,   0, optInMixL, 1);
+AudioConnection_F32  c_optR_in     (spdifIn,   1, optInMixR, 1);
+AudioConnection_F32  c_inL_mix     (optInMixL, 0, mixL,      0);
+AudioConnection_F32  c_inR_mix     (optInMixR, 0, mixR,      0);
+#else
 AudioConnection_F32  c_usbL_mix    (usbIn, 0, mixL, 0);
 AudioConnection_F32  c_usbR_mix    (usbIn, 1, mixR, 0);
+#endif
 
-// Mix -> main fader -> hostvol -> shelf -> TDM out.
-AudioConnection_F32  c_mixL_main    (mixL,        0, mainAmpL,    0);
-AudioConnection_F32  c_mixR_main    (mixR,        0, mainAmpR,    0);
+// Mix -> mono crossfeed -> main fader -> hostvol -> shelf -> TDM out.
+// Each side's monoMix takes both mixL and mixR; gain coefficients flip
+// between stereo (passthrough) and mono (0.5 sum) in applyMainMono().
+AudioConnection_F32  c_mixL_monoL   (mixL,        0, monoMixL,    0);
+AudioConnection_F32  c_mixR_monoL   (mixR,        0, monoMixL,    1);
+AudioConnection_F32  c_mixL_monoR   (mixL,        0, monoMixR,    0);
+AudioConnection_F32  c_mixR_monoR   (mixR,        0, monoMixR,    1);
+AudioConnection_F32  c_monoL_main   (monoMixL,    0, mainAmpL,    0);
+AudioConnection_F32  c_monoR_main   (monoMixR,    0, mainAmpR,    0);
 AudioConnection_F32  c_mainL_host   (mainAmpL,    0, hostvolAmpL, 0);
 AudioConnection_F32  c_mainR_host   (mainAmpR,    0, hostvolAmpR, 0);
 AudioConnection_F32  c_hostL_shelf  (hostvolAmpL, 0, procShelfL,  0);
 AudioConnection_F32  c_hostR_shelf  (hostvolAmpR, 0, procShelfR,  0);
-AudioConnection_F32  c_shelfL_tdm   (procShelfL,  0, tdmOut,      0);
-AudioConnection_F32  c_shelfR_tdm   (procShelfR,  0, tdmOut,      1);
+// Output summer: program audio (shelf out) on slot 0, test tone on slot 1,
+// then into the TDM output. The single sine output fans out to both sides.
+// (See g_outMix / g_testTone notes above.)
+AudioConnection_F32  c_shelfL_out   (procShelfL,  0, g_outMixL,   0);
+AudioConnection_F32  c_shelfR_out   (procShelfR,  0, g_outMixR,   0);
+AudioConnection_F32  c_toneL_out    (g_testTone,  0, g_outMixL,   1);
+AudioConnection_F32  c_toneR_out    (g_testTone,  0, g_outMixR,   1);
+AudioConnection_F32  c_outL_tdm     (g_outMixL,   0, tdmOut,      0);
+AudioConnection_F32  c_outR_tdm     (g_outMixR,   0, tdmOut,      1);
+
+// Optical OUT mirrors the main mix: fan g_outMix into the S/PDIF transmitter.
+#if TDSP_HAS_SPDIF
+AudioConnection_F32  c_outL_spdif   (g_outMixL,   0, spdifOut,    0);
+AudioConnection_F32  c_outR_spdif   (g_outMixR,   0, spdifOut,    1);
+#endif
 
 // TDM slots 0/1 -> USB chans 0/1 (F32). Capture path stays direct in
 // Phase 2 — adding meter taps / processing on capture is later work.
@@ -697,20 +781,26 @@ AudioConnection_F32  c_synthbusR_mix  (g_synthBusR,  0, mixR,        1);
 //
 // Faders default to 0.75 — that's X32 unity (0 dB) under the
 // 4-segment fader law; 1.0 would mean +10 dB and slam the DAC.
-static float g_chFader[11]   = {0.0f, 0.75f, 0.75f, 0.75f, 0.75f, 0.75f, 0.75f,
-                                       0.75f, 0.75f, 0.75f, 0.75f};
-static bool  g_chOn[11]      = {false, true, true, true, true, false, false,
-                                       false, false, false, false};
+// Index 0 unused. ch1..10 as before; ch11/12 = Optical L/R (S/PDIF in),
+// default ON at unity — optical contributes only when a stream is locked.
+static float g_chFader[13]   = {0.0f, 0.75f, 0.75f, 0.75f, 0.75f, 0.75f, 0.75f,
+                                       0.75f, 0.75f, 0.75f, 0.75f, 0.75f, 0.75f};
+static bool  g_chOn[13]      = {false, true, true, true, true, false, false,
+                                       false, false, false, false, true, true};
 
 // Per-channel display name (12-char limit per X32 convention). Index 0
 // unused. /ch/NN/config/name does NOT mirror across linked pairs (the
 // spec lets a stereo pair have different L/R labels).
-static char  g_chName[11][16] = {"",     "USB L", "USB R", "Line L", "Line R",
+static char  g_chName[13][16] = {"",     "USB L", "USB R", "Line L", "Line R",
                                  "Mic L", "Mic R",
-                                 "XLR 1", "XLR 2", "XLR 3", "XLR 4"};
+                                 "XLR 1", "XLR 2", "XLR 3", "XLR 4",
+                                 "Opt L", "Opt R"};
 static float g_mainFaderL    = 0.75f;
 static float g_mainFaderR    = 0.75f;
 static bool  g_mainOn        = true;
+// Mono fold-down — when true, L+R are summed (each at 0.5) into both
+// outputs so the main bus is monaural. Driven by /main/st/mix/mono.
+static bool  g_mainMono      = false;
 
 // Playback hostvol — Windows speaker slider, USB FU 0x31. Engaged by
 // default: dragging the Windows slider always attenuates the master
@@ -721,6 +811,22 @@ static bool  g_mainOn        = true;
 // dev surface fader to be the only volume control.
 static bool  g_hostvolEnable = true;
 static float g_hostvolValue  = 1.0f;
+
+// Test-tone state — driven by the 'tone' CLI command. Off at boot. Default
+// 440 Hz at ~-12 dBFS (0.25 peak), a safe headphone level. applyTestTone()
+// pushes these into g_testTone.
+static bool  g_toneOn   = false;
+static float g_toneFreq = 440.0f;
+static float g_toneAmp  = 0.25f;
+
+// Live serial-format (I2S/TDM) tuning, for bringing up a new board where the
+// header wiring / clock polarity is uncertain. Defaults mirror setupCodec()'s
+// SerialFormat so the 'fmt' CLI command starts from the real boot state.
+// Sweep these while a test tone plays to find the combo that yields audio.
+static bool g_fmtBclkInv  = true;   // BCLK polarity inverted (TAC5212 default)
+static bool g_fmtFsyncInv = false;  // FSYNC polarity normal
+static int  g_fmtSlotOff  = 1;      // RX/TX slot offset, in BCLKs after FSYNC
+static bool g_fmtI2s      = false;  // false = TDM, true = I2S framing
 
 // Capture hostvol — Windows recording slider, USB FU 0x30. Drives
 // listenback monitor amps (added later, alongside Line/PDM/XLR
@@ -1031,6 +1137,19 @@ static void applyChannelFader(int ch) {
     if (ch < 1 || ch >= (int)(sizeof(g_chOn) / sizeof(g_chOn[0]))) return;
     const float g = g_chOn[ch] ? tdsp::x32::faderToLinear(g_chFader[ch]) : 0.0f;
 
+#if TDSP_HAS_SPDIF_IN
+    // USB and optical share main-mix slot 0 via optInMix (USB on input 0,
+    // optical on input 1), so each gets an independent fader/mute. mixL/R
+    // slot 0 stays at unity (set in setup) to pass the summed sub-bus through.
+    switch (ch) {
+        case 1:  optInMixL.gain(0, g); return;  // USB L
+        case 2:  optInMixR.gain(0, g); return;  // USB R
+        case 11: optInMixL.gain(1, g); return;  // Optical L
+        case 12: optInMixR.gain(1, g); return;  // Optical R
+        default: break;
+    }
+#endif
+
     if (ch >= 7 && ch <= 10) {
         const int slot = ch - 7;
         adcMixL.gain(slot, g);
@@ -1053,11 +1172,54 @@ static void applyMain() {
     mainAmpR.setGain(gR);
 }
 
+// Apply the stereo/mono crossfeed gains. Stereo passes each side
+// through unattenuated; mono sums L+R at 0.5 each into both outputs.
+static void applyMainMono() {
+    if (g_mainMono) {
+        monoMixL.gain(0, 0.5f); monoMixL.gain(1, 0.5f);
+        monoMixR.gain(0, 0.5f); monoMixR.gain(1, 0.5f);
+    } else {
+        monoMixL.gain(0, 1.0f); monoMixL.gain(1, 0.0f);
+        monoMixR.gain(0, 0.0f); monoMixR.gain(1, 1.0f);
+    }
+}
+
 // Push g_hostvolValue (or 1.0 when disabled) into both hostvol amps.
 static void applyHostvol() {
     const float g = g_hostvolEnable ? g_hostvolValue : 1.0f;
     hostvolAmpL.setGain(g);
     hostvolAmpR.setGain(g);
+}
+
+// Push the test-tone state into g_testTone. frequency() can clear the
+// generator's enabled flag for very low freqs, so we re-begin() each time
+// to guarantee it's running; amplitude 0 keeps it silent when off.
+static void applyTestTone() {
+    g_testTone.frequency(g_toneFreq);
+    g_testTone.amplitude(g_toneOn ? g_toneAmp : 0.0f);
+    g_testTone.begin();
+}
+
+// Re-apply the audio serial-interface format from the g_fmt* globals, then
+// re-assert the DAC/ADC slot map (setSerialFormat doesn't touch it). Safe to
+// call live while the codec is powered — used by the 'fmt' CLI sweep to hunt
+// for the clock polarity / slot offset that a new board's header wiring needs.
+static void applyCodecFormat() {
+    tac5212::TAC5212::SerialFormat sf;
+    sf.format   = g_fmtI2s ? tac5212::TAC5212::Format::I2s
+                           : tac5212::TAC5212::Format::Tdm;
+    sf.fsyncPol = g_fmtFsyncInv ? tac5212::TAC5212::Polarity::Inverted
+                                : tac5212::TAC5212::Polarity::Normal;
+    sf.bclkPol  = g_fmtBclkInv  ? tac5212::TAC5212::Polarity::Inverted
+                                : tac5212::TAC5212::Polarity::Normal;
+    g_codec.setSerialFormat(sf);
+    g_codec.setRxSlotOffset((uint8_t)g_fmtSlotOff);
+    g_codec.setTxSlotOffset((uint8_t)g_fmtSlotOff);
+    // Slot routing: RX CH1<-slot0, RX CH2<-slot1, TX CH1->slot0, TX CH2->slot1
+    g_codec.setRxChannelSlot(1, 0);
+    g_codec.setRxChannelSlot(2, 1);
+    g_codec.setTxChannelSlot(1, 0);
+    g_codec.setTxChannelSlot(2, 1);
 }
 
 // Poll Windows playback Feature Unit. Reads via the F32 USB class's
@@ -1195,10 +1357,10 @@ static void applyProcShelf() {
 // already knows from the production project, so the existing UI populates
 // without any client-side changes.
 
-static void broadcastSnapshot(OSCBundle &reply) {
+FLASHMEM static void broadcastSnapshot(OSCBundle &reply) {
     // Per-channel state — ch1/2 (USB), ch3/4 (Line, audio path TBD),
-    // ch5/6 (PDM mic), ch7..10 (XLR 1..4 via TLV320ADC6140).
-    for (int ch = 1; ch <= 10; ++ch) {
+    // ch5/6 (PDM mic), ch7..10 (XLR 1..4 via TLV320ADC6140), ch11/12 (Optical).
+    for (int ch = 1; ch <= 12; ++ch) {
         {
             char buf[32];
             snprintf(buf, sizeof(buf), "/ch/%02d/mix/fader", ch);
@@ -1224,6 +1386,7 @@ static void broadcastSnapshot(OSCBundle &reply) {
     { OSCMessage m("/main/st/mix/faderL"); m.add(g_mainFaderL); reply.add(m); }
     { OSCMessage m("/main/st/mix/faderR"); m.add(g_mainFaderR); reply.add(m); }
     { OSCMessage m("/main/st/mix/on");     m.add((int)(g_mainOn ? 1 : 0)); reply.add(m); }
+    { OSCMessage m("/main/st/mix/mono");   m.add((int)(g_mainMono ? 1 : 0)); reply.add(m); }
 
     // Host volume — playback (FU 0x31, /main/st/hostvol) and capture
     // (FU 0x30, /-cap/hostvol housekeeping branch).
@@ -1447,7 +1610,7 @@ static void broadcastSnapshot(OSCBundle &reply) {
 // If the 6140 is not present (unprobed I2C address NACKs), we silently
 // skip — the rest of the firmware (USB audio, TAC5212, mixer) keeps
 // working on the audio-shield-only board variant.
-static void setupAdc6140() {
+FLASHMEM static void setupAdc6140() {
     using namespace tlv320adc6140;
 
     Wire.beginTransmission(ADC6140_I2C_ADDRESS);
@@ -1531,7 +1694,7 @@ static void hardResetCodecPower() {
 // Boot gate: DAC volume is left at mute (0) at the end of this function.
 // setup() releases the gate by calling g_codecPanel.unmuteOutput() after
 // the audio graph has had time to settle.
-static void setupCodec() {
+FLASHMEM static void setupCodec() {
     Serial.println("Initializing TAC5212 (typed lib path)...");
 
     // begin() probes I2C, runs SW_RESET, and writes SLEEP_CFG = wake. If
@@ -1696,7 +1859,102 @@ static int parseChannelN(const char *address, const char *suffix) {
     return n;
 }
 
-static void onOscMessage(OSCMessage &msg, void *userData) {
+// Plain-text CLI over the USB serial stream. The SlipOscTransport routes any
+// line NOT starting with the SLIP frame byte (0xC0) here, so you can just type
+// a command + Enter in any serial monitor alongside the OSC dev surface.
+//
+// Commands:
+//   status / s        — dump TAC5212 status (PLL lock, faults, OUT cfg, I2C errs)
+//   tone [on|off|Hz [amp]] — sine straight to the DAC output, downstream of the
+//                            whole mixer. Bare 'tone' toggles; 'tone 1000' sets
+//                            1 kHz and turns it on; 'tone 440 0.5' sets level too.
+//   help / ?          — list commands
+FLASHMEM static void onCliLine(char *line, int length, void *userData) {
+    (void)userData;
+    (void)length;
+
+    // Trim leading spaces and any trailing CR/LF/space left by the terminal.
+    while (*line == ' ' || *line == '\t') line++;
+    for (char *e = line + strlen(line); e > line &&
+         (e[-1] == '\r' || e[-1] == '\n' || e[-1] == ' '); --e) e[-1] = '\0';
+
+    if (line[0] == '\0') return;  // bare Enter — ignore
+
+    if (strcmp(line, "status") == 0 || strcmp(line, "s") == 0) {
+        g_codec.dumpStatus(Serial);
+    } else if (strncmp(line, "tone", 4) == 0 &&
+               (line[4] == '\0' || line[4] == ' ')) {
+        const char *arg = line + 4;
+        while (*arg == ' ') arg++;
+        if (*arg == '\0') {
+            g_toneOn = !g_toneOn;                 // bare 'tone' toggles
+        } else if (strcmp(arg, "on") == 0) {
+            g_toneOn = true;
+        } else if (strcmp(arg, "off") == 0) {
+            g_toneOn = false;
+        } else {
+            // Parse "<freq> [amp]" with strtod (far lighter on the Teensy than
+            // sscanf, which would pull heavy float-scanf code into ITCM/RAM1).
+            char *endp = nullptr;
+            float f = strtod(arg, &endp);
+            if (endp != arg && f > 0.0f) { g_toneFreq = f; g_toneOn = true; }
+            while (*endp == ' ') endp++;
+            if (*endp) {
+                float a = strtod(endp, nullptr);
+                if (a >= 0.0f && a <= 1.0f) g_toneAmp = a;
+            }
+        }
+        applyTestTone();
+        // Avoid printf %f here for the same RAM1 reason — use Print's float fmt.
+        Serial.print("tone ");      Serial.print(g_toneOn ? "ON" : "off");
+        Serial.print("  freq=");    Serial.print(g_toneFreq, 1);
+        Serial.print(" Hz  amp=");  Serial.println(g_toneAmp, 3);
+    } else if (strncmp(line, "fmt", 3) == 0 &&
+               (line[3] == '\0' || line[3] == ' ')) {
+        const char *a = line + 3;
+        while (*a == ' ') a++;
+        if      (strncmp(a, "bclk", 4)  == 0) g_fmtBclkInv  = (strstr(a, "inv") != nullptr);
+        else if (strncmp(a, "fsync", 5) == 0) g_fmtFsyncInv = (strstr(a, "inv") != nullptr);
+        else if (strncmp(a, "off", 3)   == 0) g_fmtSlotOff  = atoi(a + 3);
+        else if (strcmp(a, "i2s") == 0)       g_fmtI2s      = true;
+        else if (strcmp(a, "tdm") == 0)       g_fmtI2s      = false;
+        // bare 'fmt' just re-applies + prints the current state
+        applyCodecFormat();
+        Serial.print("fmt: ");      Serial.print(g_fmtI2s ? "I2S" : "TDM");
+        Serial.print("  bclk=");    Serial.print(g_fmtBclkInv  ? "inv" : "norm");
+        Serial.print("  fsync=");   Serial.print(g_fmtFsyncInv ? "inv" : "norm");
+        Serial.print("  slotoff="); Serial.println(g_fmtSlotOff);
+    } else if (strcmp(line, "spdif") == 0) {
+#if TDSP_HAS_SPDIF
+        Serial.print("spdif OUT (pin 14): mirrors main mix");
+  #if TDSP_HAS_SPDIF_IN
+        Serial.print("  |  IN (pin 15) lock: ");
+        Serial.print(AsyncAudioInputSPDIF3_F32::isLocked() ? "LOCKED" : "no signal");
+        Serial.print("  inFreq=");      Serial.print(spdifIn.getInputFrequency(), 1);
+        Serial.print(" Hz  buffered=");  Serial.print(spdifIn.getBufferedTime() * 1e3, 2);
+        Serial.print(" ms");
+  #else
+        Serial.print("  |  IN: not built (set -D TDSP_HAS_SPDIF_IN=1)");
+  #endif
+        Serial.println();
+#else
+        Serial.println("spdif: not built on this board (teensy41 only)");
+#endif
+    } else if (strcmp(line, "help") == 0 || strcmp(line, "?") == 0) {
+        Serial.println("CLI commands:");
+        Serial.println("  status | s                TAC5212 status dump");
+        Serial.println("  tone [on|off|Hz [amp]]    test sine to DAC out (bare = toggle)");
+        Serial.println("  fmt [bclk n/i|fsync n/i|off N|tdm|i2s]  sweep serial format");
+        Serial.println("  spdif                     optical S/PDIF in lock status");
+        Serial.println("  help | ?                  this list");
+    } else {
+        Serial.print("unknown CLI command: '");
+        Serial.print(line);
+        Serial.println("' (try 'help')");
+    }
+}
+
+FLASHMEM static void onOscMessage(OSCMessage &msg, void *userData) {
     (void)userData;
 
     char address[64];
@@ -1739,7 +1997,7 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
     // Channel range covered by g_chFader / g_chOn arrays:
     //   1..6  — USB L/R + Line L/R + PDM Mic L/R (TAC5212)
     //   7..10 — XLR 1..4 (TLV320ADC6140 mono mic preamps)
-    constexpr int kMaxChannel = 10;
+    constexpr int kMaxChannel = 12;   // ch11/12 = Optical L/R (S/PDIF in)
 
     // ---- /config/chlink/N-M i ---- (X32 stereo-link convention)
     //
@@ -1899,6 +2157,18 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
             applyMain();
         }
         OSCMessage echo("/main/st/mix/on"); echo.add((int)(g_mainOn ? 1 : 0)); reply.add(echo);
+        g_transport.sendBundle(reply);
+        return;
+    }
+
+    // ---- /main/st/mix/mono i ----  (stereo/mono fold-down)
+    if (strcmp(address, "/main/st/mix/mono") == 0) {
+        OSCBundle reply;
+        if (msg.size() > 0 && msg.isInt(0)) {
+            g_mainMono = msg.getInt(0) != 0;
+            applyMainMono();
+        }
+        OSCMessage echo("/main/st/mix/mono"); echo.add((int)(g_mainMono ? 1 : 0)); reply.add(echo);
         g_transport.sendBundle(reply);
         return;
     }
@@ -2899,7 +3169,7 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
         // "/ch/01" => "ch01 fader-value on-flag\n"  (matches X32 packed form)
         if (strncmp(path, "ch/", 3) == 0 && strlen(path) >= 5) {
             int ch = (path[3] - '0') * 10 + (path[4] - '0');
-            if (ch >= 1 && ch <= 10) {
+            if (ch >= 1 && ch <= 12) {
                 snprintf(line, sizeof(line),
                          "/ch/%02d %.4f %d\n",
                          ch, g_chFader[ch], g_chOn[ch] ? 1 : 0);
@@ -2943,7 +3213,7 @@ static void onOscMessage(OSCMessage &msg, void *userData) {
 // setup / loop
 // ============================================================================
 
-void setup() {
+FLASHMEM void setup() {
     // SHDNZ pulse — exactly once, before Wire.begin() so I2C transactions
     // don't race the analog domain coming up.
     hardResetCodecPower();
@@ -2961,6 +3231,13 @@ void setup() {
     Serial.println("================================");
 
     Wire.begin();
+
+    // If this board routes the codec behind a TCA9544A I2C mux, find which
+    // channel it's on and select it now — before any TAC5212/ADC6140
+    // transaction. The 4 TDM headers each map to a different mux channel, so
+    // auto-detecting makes the firmware work in any header without a rebuild.
+    // No-op on direct-wired boards. (See tdsp_hw_config.h / project_tac5212_i2c_mux.)
+    tdspMuxAutoSelectCodec(TAC5212_I2C_ADDRESS);
 
     // Bring up the TAC5212 — typed-driver path, no writeRegister fallback.
     setupCodec();
@@ -2988,6 +3265,7 @@ void setup() {
     // envelopes, mixer chain — ~50 audio_block_t held simultaneously
     // at peak polyphony). 320 leaves headroom for the additional
     // sampler load on top of Dexed.
+    //
     AudioMemory(320);
 
     // --- SD card init (sampler slot needs SD before scanBank) ----------
@@ -2996,6 +3274,7 @@ void setup() {
     // slot (1-bit SPI) is too slow for polyphonic streaming. If no SD
     // card is inserted the sampler stays silent — the rest of the
     // firmware (USB audio, Dexed, mixer) continues normally.
+#if TDSP_HAS_SDCARD
     if (!SD.begin(BUILTIN_SDCARD)) {
         Serial.println("[sampler] SD card init failed - sampler slot will stay silent");
     } else {
@@ -3006,6 +3285,11 @@ void setup() {
         // directory. scanBank() is silent if the directory doesn't exist.
         g_multisampleSlot.scanBank("/samples/piano");
     }
+#else
+    // No BUILTIN_SDCARD on this board (e.g. Teensy 4.0). Sampler slot stays
+    // silent; USB audio, Dexed and the mixer graph are unaffected.
+    Serial.println("[sampler] no BUILTIN_SDCARD on this board - sampler slot disabled");
+#endif
 
     // MPE slot 3 — initialise oscillators / filters / envelopes to a
     // defined silent state. Doesn't depend on SD; safe to call
@@ -3015,9 +3299,11 @@ void setup() {
     // Push initial mixer state into the audio graph. ch3/4 reserve
     // their slots (no audio path yet); applyChannelFader is a no-op
     // for those today. ch7..10 mirror per-channel gain to both adcMixL
-    // and adcMixR (dual-mono XLR sub-bus).
-    for (int ch = 1; ch <= 10; ++ch) applyChannelFader(ch);
+    // and adcMixR (dual-mono XLR sub-bus). ch11/12 drive the optInMix
+    // optical-in gains (no-op when S/PDIF input isn't built).
+    for (int ch = 1; ch <= 12; ++ch) applyChannelFader(ch);
     applyMain();
+    applyMainMono();
     applyHostvol();
     applySynthBusGain();
     applyProcShelf();   // disabled at boot -> passthrough on the biquad
@@ -3025,6 +3311,31 @@ void setup() {
     // No host volume control on the F32 USB classes (they don't expose
     // Feature Unit volume); leave the TDM output at unity gain.
     tdmOut.setGain(1.0f);
+
+    // Output summer + test-tone generator. Both g_outMix slots pass at unity
+    // (program audio on 0, test tone on 1); the tone stays silent until the
+    // 'tone' CLI command raises its amplitude. setSampleRate_Hz before
+    // frequency() so the pitch is correct at our 48 kHz update rate.
+    g_outMixL.gain(0, 1.0f); g_outMixL.gain(1, 1.0f);
+    g_outMixR.gain(0, 1.0f); g_outMixR.gain(1, 1.0f);
+    g_testTone.setSampleRate_Hz(AUDIO_SAMPLE_RATE_EXACT);
+    applyTestTone();   // off (amplitude 0) but enabled and ready
+
+#if TDSP_HAS_SPDIF
+    // Optical S/PDIF OUT mirrors the main mix (pin 14).
+    spdifOut.begin();
+    Serial.println("[spdif] optical OUT (pin 14) enabled");
+#endif
+#if TDSP_HAS_SPDIF_IN
+    // Optical IN sums with USB into mix slot 0. The optInMix INPUT gains are
+    // driven by the channel faders (USB ch1/2 on input 0, Optical ch11/12 on
+    // input 1 — see applyChannelFader, already run above). Here we just pin the
+    // main-mix slot-0 inputs to unity so the summed sub-bus passes through.
+    spdifIn.begin();
+    mixL.gain(0, 1.0f);
+    mixR.gain(0, 1.0f);
+    Serial.println("[spdif] optical IN (pin 15) enabled");
+#endif
 
     // --- Dev surface wiring -----------------------------------------------
     //
@@ -3042,6 +3353,7 @@ void setup() {
 
     g_transport.begin(115200);
     g_transport.setOscMessageHandler(&onOscMessage, nullptr);
+    g_transport.setCliLineHandler(&onCliLine, nullptr);  // type 'status'+Enter for on-demand codec status
 
     // --- USB MIDI host (external keyboard) -------------------------------
     //
@@ -3139,6 +3451,14 @@ void setup() {
     pollHostVolume();
     pollCaptureHostVolume();
     g_codecPanel.unmuteOutput();
+
+    // Clock sanity check. The audio graph is now running, so SAI1 is actively
+    // clocking the TAC5212 over the TDM4 header. Dump codec status — the key
+    // line is "PLL locked". On the header/daughtercard boards (codec behind
+    // clock buffers) a silent DAC with everything else correct almost always
+    // means PLL NOT locked: the codec isn't receiving valid BCLK/FSYNC/MCLK.
+    delay(50);
+    g_codec.dumpStatus(Serial);
 
     Serial.println("\nReady!");
     Serial.println("  USB host audio: 24-bit / 48 kHz, F32 in graph");

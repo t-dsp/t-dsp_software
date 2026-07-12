@@ -72,8 +72,10 @@ volatile uint32_t AsyncAudioInputSPDIF3_F32::microsLast;
 
 DMAMEM __attribute__((aligned(32)))
 static int32_t spdif_rx_buffer[SPDIF_RX_BUFFER_LENGTH];
-static float bufferR[bufferLength];
-static float bufferL[bufferLength];
+// T-DSP: moved to DMAMEM (RAM2) to keep RAM1 free for the synth firmware.
+// CPU-filled from spdif_rx_buffer (no DMA on these), so DMAMEM is safe.
+DMAMEM static float bufferR[bufferLength];
+DMAMEM static float bufferL[bufferLength];
 
 volatile int32_t AsyncAudioInputSPDIF3_F32::buffer_offset = 0;	// read by resample/ written in spdif input isr -> copied at the beginning of 'resmaple' protected by __disable_irq() in resample
 int32_t AsyncAudioInputSPDIF3_F32::resample_offset = 0; // read/written by resample/ read in spdif input isr -> no protection needed?

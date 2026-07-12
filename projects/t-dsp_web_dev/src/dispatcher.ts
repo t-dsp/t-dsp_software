@@ -210,6 +210,13 @@ export class Dispatcher {
     this.sendMsg('/main/st/loop', 'i', [enable ? 1 : 0]);
   }
 
+  // Stereo/mono fold-down. Firmware crossfeeds 0.5*L + 0.5*R into both
+  // outputs when on; off restores discrete L/R passthrough.
+  setMainMono(mono: boolean): void {
+    this.state.main.mono.set(mono);
+    this.sendMsg('/main/st/mix/mono', 'i', [mono ? 1 : 0]);
+  }
+
   // /sub addSub i i s — interval ms, lifetime ms, address pattern
   // (per 02-osc-protocol.md "Subscriptions follow the X32 /xremote idiom").
   // The exact wire format will be confirmed when M8 SubscriptionMgr lands;
@@ -1264,6 +1271,11 @@ export class Dispatcher {
 
     if (a === '/main/st/mix/on' && msg.types === 'i') {
       this.state.main.on.set((msg.args[0] as number) !== 0);
+      return;
+    }
+
+    if (a === '/main/st/mix/mono' && msg.types === 'i') {
+      this.state.main.mono.set((msg.args[0] as number) !== 0);
       return;
     }
 

@@ -259,6 +259,7 @@ select, input[type="text"] {
 .row-solo   { height: 24px;  }
 .row-link   { height: 24px;  }
 .row-rec    { height: 24px;  }
+.row-mono   { height: 24px;  }
 
 /* Individual cells have a fixed width so columns align across rows
  * and across wrappers. A 26px cell comfortably holds a meter (10px),
@@ -412,7 +413,7 @@ select, input[type="text"] {
   line-height: 14px;
 }
 
-.mute, .solo, .link-btn, .enable-btn, .rec-btn, .loop-btn {
+.mute, .solo, .link-btn, .enable-btn, .rec-btn, .loop-btn, .mono-btn {
   font-size: 11px;
   padding: 0;
   height: 24px;
@@ -466,6 +467,19 @@ select, input[type="text"] {
 .loop-btn.active {
   background: #a05a1e;
   border-color: #c27a3a;
+  color: #fff;
+}
+
+/* Main MONO/STEREO fold-down. Teal when active (mono) so it doesn't
+ * collide with LINK's blue or LOOP's amber. Label text flips to show
+ * the current mode (the inactive state reads "STEREO"). */
+.mono-btn {
+  color: #aaa;
+}
+
+.mono-btn.active {
+  background: #2d6a6a;
+  border-color: #3d8a8a;
   color: #fff;
 }
 

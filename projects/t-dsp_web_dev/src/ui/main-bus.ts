@@ -95,6 +95,21 @@ export function mainBus(bus: BusState, dispatcher: Dispatcher): HTMLElement {
   loopBtn.addEventListener('click', () => dispatcher.setMainLoop(!bus.loopEnable.get()));
   rowRec.append(loopBtn);
 
-  root.append(rowName, rowMeter, rowGain, rowFader, rowFv, rowMute, rowSolo, rowLink, rowRec);
+  // Row 9: MONO/STEREO toggle — folds L+R to mono (each at 0.5) at the
+  // firmware's monoMixL/R crossfeed so neither channel is dropped.
+  // Label flips so the button shows the *current* mode at a glance.
+  const rowMono = makeRow('row-mono');
+  const monoBtn = document.createElement('button');
+  monoBtn.className = 'mono-btn wide cell';
+  monoBtn.title =
+    'Click to switch between stereo passthrough and mono fold-down (L+R summed at 0.5 into both outputs).';
+  bus.mono.subscribe((on) => {
+    monoBtn.classList.toggle('active', on);
+    monoBtn.textContent = on ? 'MONO' : 'STEREO';
+  });
+  monoBtn.addEventListener('click', () => dispatcher.setMainMono(!bus.mono.get()));
+  rowMono.append(monoBtn);
+
+  root.append(rowName, rowMeter, rowGain, rowFader, rowFv, rowMute, rowSolo, rowLink, rowRec, rowMono);
   return root;
 }

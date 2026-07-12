@@ -1,0 +1,15 @@
+{
+  "name": "TDspYmfm",
+  "version": "0.1.0",
+  "description": "Yamaha FM chip emulation (Aaron Giles' ymfm) exposed as a Teensy Audio Library source. v1 wraps the OPM (YM2151, 8ch x 4-op) as AudioSynthYmfmOPM: a MIDI-playable, patch-driven stereo synth. Vendors only the pure-FM core (no ADPCM/PCM/OPL/OPN), so no external ROM interface is needed. ymfm is BSD-3-Clause, so a ymfm-only build carries no GPL obligation.",
+  "keywords": ["ymfm", "opm", "ym2151", "fm", "synth", "yamaha", "teensy", "t-dsp"],
+  "frameworks": "arduino",
+  "platforms": "teensy",
+  "dependencies": {
+    "Audio": "*"
+  },
+  "license": "BSD-3-Clause",
+  "build": {
+    "flags": ["-I src", "-I src/ymfm"]
+  }
+}
