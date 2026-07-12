@@ -48,6 +48,8 @@
 #include <MidiFilePlayer.h>
 #include <MidiSmfFile.h>          // runtime SD .mid parser -> MidiFileEvent[]
 
+extern "C" uint8_t external_psram_size;   // MB of soldered PSRAM (Teensy core startup)
+
 constexpr int     TAC5212_EN_PIN      = 35;     // shared SHDNZ, active-low
 constexpr uint8_t TAC5212_I2C_ADDRESS = 0x51;
 
@@ -390,6 +392,7 @@ void setup() {
     Serial.println();
     if (CrashReport) { Serial.println("!!! CRASH REPORT (previous run) !!!"); Serial.print(CrashReport); }
     Serial.println("=== spike_esp32_bt_spdif_mix_kit (TDspProgrammingKit) ===");
+    Serial.printf("[psram] external PSRAM: %u MB\n", external_psram_size);
     Serial.println("MIX: (A) ESP32 A2DP  +  (B) S/PDIF optical loopback tone  -> TAC5212.");
     Serial.println("Connect a TOSLINK cable pin14(OUT)->pin15(IN). Pair 'T-DSP' and play.");
 
@@ -515,6 +518,7 @@ void loop() {
             else if (c == 'S') { if (g_numSongs) g_songSel = (g_songSel + 1) % g_numSongs;  // pick song
                                  Serial.printf("[song] selected: %s\n", g_songs[g_songSel].name); }
             else if (c == 'V') { synthSetInstrument((synthInstrument() + 1) % synthNumInstruments()); }
+            else if (c == 'M') { Serial.printf("[mem] external PSRAM: %u MB\n", external_psram_size); }
         }
     }
 
