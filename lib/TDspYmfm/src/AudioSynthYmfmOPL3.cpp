@@ -191,6 +191,12 @@ void AudioSynthYmfmOPL3::noteOn(uint8_t channel, uint8_t note, uint8_t velocity)
     m_keyOn[c] = false;
     loadPatch(c, p, carrierTL(p, velocity));
     applyPitch(c);                       // 0xA0/0xB0 with key still off
+    // Clock the chip once so it actually samples KON=0 before we raise KON=1.
+    // A note-off immediately followed by this note-on on the same voice (rapid
+    // drums, back-to-back player events) otherwise collapses with no chip clock
+    // between: the KON 0->1 edge is missed and the voice never re-attacks (it
+    // just keeps decaying to silence). One forced sample restores the edge.
+    { ymfm::ymf262::output_data tmp; m_chip.generate(&tmp, 1); }
     m_keyOn[c] = true;                   // now key on
     uint16_t bank = chanBank(c); int lc = chanLocal(c);
     uint8_t b0 = (uint8_t)(m_b0[c] | 0x20);
