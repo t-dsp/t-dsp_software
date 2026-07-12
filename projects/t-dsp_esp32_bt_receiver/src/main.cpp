@@ -80,6 +80,7 @@ enum : uint8_t {
   CMD_STOP_SONG    = 0x21,  // stop the Dexed demo
   CMD_SET_DX_VOICE = 0x22,  // 2nd byte = Dexed instrument index; relayed to the Teensy
   CMD_REFRESH_CAT  = 0x23,  // re-scan SD + refresh song/instrument catalog (@GETCAT to Teensy)
+  CMD_SET_HPF      = 0x24,  // 2nd byte = TAC5212 DAC highpass mode 0..3; relayed to the Teensy
 };
 
 BluetoothA2DPSink a2dp_sink;
@@ -90,6 +91,7 @@ static BLECharacteristic *g_statChar = nullptr;
 static volatile bool      g_bleClientConnected = false;
 static bool               g_discoverable = false;  // we track this; the A2DP lib has no getter
 static uint8_t            g_volume = 50;            // master volume 0..100 (%), last set from the app
+static uint8_t            g_hpf    = 0;             // TAC5212 DAC highpass mode 0..3, last set from the app
 
 // Relay the master volume to the Teensy over UART0 as a framed line "@VOL=<n>".
 // The Teensy owns the TAC5212 codec; it parses this line and calls setDvol() on
@@ -104,6 +106,10 @@ static void relayVolume() {
 static void relaySong(uint8_t idx)    { Serial.printf("@SONG=%u\n", idx); }
 static void relaySongStop()           { Serial.printf("@SONG=stop\n"); }
 static void relayDxVoice(uint8_t idx) { Serial.printf("@DXVOICE=%u\n", idx); }
+
+// Relay the TAC5212 DAC highpass mode (0=off, 1=1Hz, 2=12Hz, 3=96Hz) to the
+// Teensy, which owns the codec and calls g_codec.setDacHpf().
+static void relayHpf(uint8_t mode)    { Serial.printf("@HPF=%u\n", mode); }
 
 // ---- Paired-source list (multi-device switch) -----------------------------
 static BLECharacteristic *g_srcChar = nullptr;
@@ -202,8 +208,9 @@ static void buildStatus(char *buf, size_t n) {
   const char *peer = connected ? a2dp_sink.get_peer_name() : "";
   if (!peer) peer = "";
   // conn: A2DP source connected?  disc: discoverable (pairing)?  vol: master 0..100
-  snprintf(buf, n, "{\"conn\":%d,\"disc\":%d,\"vol\":%u,\"peer\":\"%s\"}",
-           connected ? 1 : 0, g_discoverable ? 1 : 0, g_volume, peer);
+  // hpf: TAC5212 DAC highpass mode 0..3 (0=off) — lets the app reflect device state.
+  snprintf(buf, n, "{\"conn\":%d,\"disc\":%d,\"vol\":%u,\"hpf\":%u,\"peer\":\"%s\"}",
+           connected ? 1 : 0, g_discoverable ? 1 : 0, g_volume, g_hpf, peer);
 }
 
 // Refresh the status characteristic value and notify any subscribed client.
@@ -355,6 +362,15 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
       case CMD_REFRESH_CAT:
         Serial.println("[ble] cmd: REFRESH CATALOG");
         requestCatalog();   // -> Teensy re-scans SD + re-sends @SONGS/@INSTR
+        break;
+      case CMD_SET_HPF:
+        if (v.size() >= 2) {
+          uint8_t mode = (uint8_t)v[1];
+          if (mode > 3) mode = 0;
+          g_hpf = mode;     // remember for the status readback (pushStatus below)
+          Serial.printf("[ble] cmd: SET HPF %u\n", mode);
+          relayHpf(mode);   // -> Teensy: @HPF=<mode>
+        }
         break;
       default:
         Serial.printf("[ble] cmd: unknown opcode 0x%02X\n", op);
