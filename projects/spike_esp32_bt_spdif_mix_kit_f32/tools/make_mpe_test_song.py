@@ -28,8 +28,11 @@ def ramp(t0, dur, fn):       # call fn(tick) ~every 15 ms over [t0, t0+dur]
     for k in range(n + 1): fn(t0 + dur * k / n)
 
 CH = [2, 3, 4, 5]            # MPE member channels
-for ch in CH:                # bend range 12 semis + a sustained patch (strings) per channel
-    cc(0, ch, 101, 0); cc(0, ch, 100, 0); cc(0, ch, 6, 12); cc(0, ch, 38, 0); prog(0, ch, 48)
+# Only set the per-channel bend range (12 semis). Deliberately NO program change, so the
+# song plays whatever instrument the picker/'V' has selected -> audition MPE with any sound.
+# (Pressure swells are most expressive on SUSTAINED patches: strings, pads, organ, brass.)
+for ch in CH:
+    cc(0, ch, 101, 0); cc(0, ch, 100, 0); cc(0, ch, 6, 12); cc(0, ch, 38, 0)
 
 t = TPS // 2
 # Part 1 — chord, then bend the MIDDLE note independently (C E G, one note/channel)

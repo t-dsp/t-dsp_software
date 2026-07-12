@@ -646,7 +646,8 @@ void loop() {
             else if (c == 'W') { if (g_player.isPlaying()) songStop(); else songStart(g_songSel); }  // play/stop
             else if (c == 'S') { if (g_numSongs) g_songSel = (g_songSel + 1) % g_numSongs;  // pick song
                                  Serial.printf("[song] selected: %s\n", g_songs[g_songSel].name); }
-            else if (c == 'V') { synthSetInstrument((synthInstrument() + 1) % synthNumInstruments()); }
+            else if (c == 'V') { synthSetInstrument((synthInstrument() + 1) % synthNumInstruments());
+                                 if (g_mpeMode) synthSetMpeMode(true); }   // re-sync ch10 (MPE member)
             else if (c == 'M') { Serial.printf("[mem] external PSRAM: %u MB\n", external_psram_size); }
             else if (c == 'T') { runInstrumentSelfTest(); }   // exercise all 128 GM + drums, log peaks
             else if (c == 'B') { runPitchBendTest(); }         // audible pitch-bend sweep on ch1
@@ -666,7 +667,8 @@ void loop() {
                 // Control lines from the ESP32 (relayed from the BLE app) are acted
                 // on here; everything else is just mirrored to USB with an [esp] tag.
                 if (strncmp(line, "@VOL=", 5) == 0) setMasterVolumePct(atoi(line + 5));
-                else if (strncmp(line, "@DXVOICE=", 9) == 0) synthSetInstrument(atoi(line + 9));
+                else if (strncmp(line, "@DXVOICE=", 9) == 0) { synthSetInstrument(atoi(line + 9));
+                                 if (g_mpeMode) synthSetMpeMode(true); }   // re-sync ch10 (MPE member)
                 else if (strncmp(line, "@SONG=", 6) == 0) {
                     if (strcmp(line + 6, "stop") == 0) songStop();
                     else songStart(atoi(line + 6));   // @SONG=<song index>
