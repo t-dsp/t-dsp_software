@@ -112,7 +112,9 @@ static bool g_sdReady = false;
 // Declares the engine, wires it into mix slot 3, exposes g_synthSink + the
 // synth* interface. Included HERE so outL/outR already exist for its
 // AudioConnection_F32s (same translation unit -> constructed after the mixers).
-#if defined(TDSP_SYNTH_YMFM)
+#if defined(TDSP_SYNTH_OPL3)
+  #include "SynthBackendOpl3.h"     // OPL3 + DMXOPL GM (needs lib/TDspYmfm OPL3 engine; see spec)
+#elif defined(TDSP_SYNTH_YMFM)
   #include "SynthBackendYmfm.h"
 #else
   #include "SynthBackendDexed.h"
