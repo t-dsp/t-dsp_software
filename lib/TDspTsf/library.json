@@ -1,0 +1,16 @@
+{
+  "name": "TDspTsf",
+  "version": "0.1.0",
+  "description": "TinySoundFont (schellingb/TinySoundFont, MIT) as a Teensy Audio Library source. A COMPLETE runtime SF2 renderer — velocity layers, region layering, all generators, filters, envelopes, GM drums — configured for Teensy 4.1: samples resident in PSRAM (extmem allocators), font streamed off SD (no stdio). Wrapped as AudioSynthTsf, a stereo int16 AudioStream. The full-fidelity alternative to the sf22aswt/AudioSynthWavetable engine; needs a compact font that fits PSRAM.",
+  "keywords": ["tsf", "tinysoundfont", "sf2", "soundfont", "general-midi", "gm", "sampler", "psram", "teensy", "t-dsp"],
+  "frameworks": "arduino",
+  "platforms": "teensy",
+  "dependencies": {
+    "Audio": "*",
+    "SD": "*"
+  },
+  "license": "MIT",
+  "build": {
+    "flags": ["-I src"]
+  }
+}
