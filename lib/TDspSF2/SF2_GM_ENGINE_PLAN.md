@@ -15,8 +15,12 @@ catalog, phone app, BT, and S/PDIF are UNCHANGED — only the engine is new. Bui
 ---
 
 ## Hardware / budget (measured on this board)
-- Teensy 4.1, **8 MB PSRAM** (`external_psram_size == 8`; the mix-kit prints it at boot and
-  via the `M` serial command). Sample data must be **PSRAM/RAM-resident** — see §"Streaming".
+- Teensy 4.1, **currently 8 MB PSRAM**, upgradeable to **16 MB** by soldering a second
+  APMemory **APS6404L-3SQR** (8 MB / 64 Mbit QSPI PSRAM, 8-SOIC) into the second bottom-side
+  pad. The core auto-detects total size — **the firmware must run unchanged on 8 MB OR 16 MB**
+  (see §"Adaptive PSRAM" — read `external_psram_size` at runtime, don't hardcode). The
+  mix-kit prints the size at boot and via the `M` serial command.
+- Sample data must be **PSRAM/RAM-resident** — see §"Streaming".
 - TAC5212 DAC through an **F32 / 48 kHz TDM** mix bus (OpenAudio). The synth feeds **mix
   slot 3** as int16 → `AudioConvert_I16toF32` → `outL/outR` (see `SynthBackendOpl3.h`).
 - RAM1 (DTCM/ITCM) is already tight on this firmware — samples go in PSRAM (`extmem`), voice
@@ -72,11 +76,35 @@ setGain(float);  int activeVoices();  int numMelodic();  const char* melodicName
 - **PSRAM-resident, always** (see below). Put the `.sf2` on the SD as `/sf2/gm.sf2`;
   `sf22aswt` loads it at runtime and spills samples to PSRAM.
 - **GeneralUser GS** (S. Christian Collins) is the de-facto Teensy GM bank (used by PJRC's
-  ISO-Drone build with manicken's decoder). Full ~30 MB does **NOT** fit 8 MB PSRAM →
-  **trim it offline** (mono, 16-bit, fewer velocity/octave layers, trimmed tails — via
-  Awave/OpenMPT/Polyphone) to a few MB, OR **load per-instrument on demand** (sf22aswt
-  supports this) so each patch keeps full fidelity but only the in-use ones sit in PSRAM.
+  ISO-Drone build with manicken's decoder). Full ~30 MB doesn't fit even 16 MB PSRAM →
+  **load per-instrument on demand** into the adaptive PSRAM cache (§"Adaptive PSRAM") so each
+  patch keeps full fidelity but only in-use ones sit in PSRAM. Optionally keep a **trimmed**
+  variant (mono/16-bit, fewer layers, via Awave/OpenMPT/Polyphone) so that at **8 MB** more
+  of the bank can stay resident; at **16 MB** the on-demand cache holds more of the full-
+  fidelity patches. The cache budget scales with `external_psram_size` automatically.
 - Verify licensing of whatever bank ships (GeneralUser GS is very permissive).
+
+## Adaptive PSRAM (8 MB OR 16 MB) — ONE firmware, sized at runtime
+The board ships 8 MB now and may get a second APS6404L-3SQR later (→ 16 MB). The engine must
+adapt at boot, not need a rebuild:
+1. Read `extern "C" uint8_t external_psram_size;` (MB) in `begin()`. Set a resident-sample
+   budget `= external_psram_size * 1024*1024 * ~0.8` (leave headroom for the voice pool,
+   the audio graph, and malloc).
+2. **Design so more PSRAM = better, automatically.** The robust way: the full SF2 lives on
+   the SD; instruments load **on demand** into a PSRAM cache sized to the budget, with **LRU
+   eviction** when the cache is full. Same code path both modes — at 8 MB it caches fewer
+   instruments (occasional reload on program-change), at 16 MB it caches (potentially all)
+   more, with fewer/no reloads. `sf22aswt`'s lazy per-instrument load + PSRAM spill is the
+   substrate for this.
+3. Optionally preload a "resident set" (the most common GM programs + the drum kit) up to the
+   budget, then demand-load the rest. Scale the resident-set count by `external_psram_size`.
+4. Report at boot: PSRAM size, budget, how many instruments are resident. If a requested
+   instrument won't fit even after eviction (huge patch on 8 MB), fall back to a trimmed
+   version or the nearest smaller GM program — never crash.
+
+Net effect: solder the second chip and the SAME firmware just holds more of the bank
+resident (fewer reloads, more headroom for a fuller/higher-fidelity font). No 8-vs-16 build
+split.
 
 ## Streaming: NO. Samples MUST be resident.
 PJRC forum consensus (thread 58480): *"mixing several instruments directly from SD isn't
