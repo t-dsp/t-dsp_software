@@ -84,6 +84,38 @@ export const DX_INSTRUMENTS = [
   'Voice', 'Choir',
 ] as const;
 
+// Standard General MIDI program names (0..127). A GM engine (SF2 / TSF / OPL3)
+// doesn't stream its instrument names — the firmware just flags "GM" on the catalog
+// header (a 3rd \t-field) and the app renders these standard names locally. This
+// avoids streaming ~2 KB of names over the UART/BLE (a BLE characteristic caps at
+// 512 B, so only ~30 names would otherwise fit). See sendCatalog() / readCatalog().
+export const GM_INSTRUMENTS = [
+  'Acoustic Grand Piano', 'Bright Acoustic Piano', 'Electric Grand Piano', 'Honky-tonk Piano',
+  'Electric Piano 1', 'Electric Piano 2', 'Harpsichord', 'Clavinet',
+  'Celesta', 'Glockenspiel', 'Music Box', 'Vibraphone', 'Marimba', 'Xylophone', 'Tubular Bells', 'Dulcimer',
+  'Drawbar Organ', 'Percussive Organ', 'Rock Organ', 'Church Organ', 'Reed Organ',
+  'Accordion', 'Harmonica', 'Tango Accordion',
+  'Acoustic Guitar (nylon)', 'Acoustic Guitar (steel)', 'Electric Guitar (jazz)', 'Electric Guitar (clean)',
+  'Electric Guitar (muted)', 'Overdriven Guitar', 'Distortion Guitar', 'Guitar Harmonics',
+  'Acoustic Bass', 'Electric Bass (finger)', 'Electric Bass (pick)', 'Fretless Bass',
+  'Slap Bass 1', 'Slap Bass 2', 'Synth Bass 1', 'Synth Bass 2',
+  'Violin', 'Viola', 'Cello', 'Contrabass', 'Tremolo Strings', 'Pizzicato Strings', 'Orchestral Harp', 'Timpani',
+  'String Ensemble 1', 'String Ensemble 2', 'Synth Strings 1', 'Synth Strings 2',
+  'Choir Aahs', 'Voice Oohs', 'Synth Voice', 'Orchestra Hit',
+  'Trumpet', 'Trombone', 'Tuba', 'Muted Trumpet', 'French Horn', 'Brass Section', 'Synth Brass 1', 'Synth Brass 2',
+  'Soprano Sax', 'Alto Sax', 'Tenor Sax', 'Baritone Sax', 'Oboe', 'English Horn', 'Bassoon', 'Clarinet',
+  'Piccolo', 'Flute', 'Recorder', 'Pan Flute', 'Blown Bottle', 'Shakuhachi', 'Whistle', 'Ocarina',
+  'Lead 1 (square)', 'Lead 2 (sawtooth)', 'Lead 3 (calliope)', 'Lead 4 (chiff)',
+  'Lead 5 (charang)', 'Lead 6 (voice)', 'Lead 7 (fifths)', 'Lead 8 (bass + lead)',
+  'Pad 1 (new age)', 'Pad 2 (warm)', 'Pad 3 (polysynth)', 'Pad 4 (choir)',
+  'Pad 5 (bowed)', 'Pad 6 (metallic)', 'Pad 7 (halo)', 'Pad 8 (sweep)',
+  'FX 1 (rain)', 'FX 2 (soundtrack)', 'FX 3 (crystal)', 'FX 4 (atmosphere)',
+  'FX 5 (brightness)', 'FX 6 (goblins)', 'FX 7 (echoes)', 'FX 8 (sci-fi)',
+  'Sitar', 'Banjo', 'Shamisen', 'Koto', 'Kalimba', 'Bagpipe', 'Fiddle', 'Shanai',
+  'Tinkle Bell', 'Agogo', 'Steel Drums', 'Woodblock', 'Taiko Drum', 'Melodic Tom', 'Synth Drum', 'Reverse Cymbal',
+  'Guitar Fret Noise', 'Breath Noise', 'Seashore', 'Bird Tweet', 'Telephone Ring', 'Helicopter', 'Applause', 'Gunshot',
+] as const;
+
 // Built-in Dexed songs — index sent via PLAY_SONG. MUST stay in sync (order)
 // with kSongs[] in projects/spike_esp32_bt_spdif_mix_kit/src/main.cpp.
 export const DX_SONGS = [
@@ -298,14 +330,19 @@ export function useTdsp() {
       // in patch names. Old firmware sends no header -> synth stays default.
       const raw = c.value ? base64ToString(c.value) : '';
       const parts = raw.split('|').filter((x) => x.length > 0);
+      // The header may carry a 3rd \t-field "GM": a General-MIDI engine sends NO
+      // instrument names (they'd overflow BLE's 512 B) and we render the standard
+      // GM_INSTRUMENTS locally instead.
+      let isGM = false;
       if (parts.length && parts[0].startsWith('\x1f')) {
-        const header = parts.shift()!.slice(1);
-        const tab = header.indexOf('\t');
-        const name = (tab >= 0 ? header.slice(0, tab) : header).trim();
-        const description = tab >= 0 ? header.slice(tab + 1).trim() : '';
+        const fields = parts.shift()!.slice(1).split('\t');
+        const name = (fields[0] ?? '').trim();
+        const description = (fields[1] ?? '').trim();
+        if ((fields[2] ?? '').trim() === 'GM') isGM = true;
         if (name) setCatSynth({ name, description: description || DEFAULT_SYNTH.description });
       }
-      if (parts.length) setCatInstruments(parts);
+      if (isGM) setCatInstruments(GM_INSTRUMENTS as unknown as string[]);
+      else if (parts.length) setCatInstruments(parts);
     } catch {}
   }, []);
 

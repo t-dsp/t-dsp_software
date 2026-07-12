@@ -94,7 +94,7 @@ export default function App() {
 
       {!connected ? (
         <PrimaryButton
-          label={state === 'scanning' ? 'Scanning…' : state === 'connecting' ? 'Connecting…' : 'Connect to T-DSP'}
+          label={state === 'scanning' ? 'Scanning…' : state === 'connecting' ? 'Connecting…' : 'Connect App'}
           busy={state === 'scanning' || state === 'connecting'}
           disabled={!btReady || state !== 'idle'}
           onPress={scanAndConnect}
@@ -106,6 +106,7 @@ export default function App() {
             label={status?.conn ? 'Disconnect Bluetooth Audio' : 'Connect Bluetooth Audio'}
             onPress={() => sendCommand(status?.conn ? CMD.DISCONNECT : CMD.RECONNECT)}
           />
+          <SecondaryButton label="Disconnect App" onPress={disconnect} />
         </>
       )}
 
@@ -121,10 +122,6 @@ export default function App() {
         onForgetSource={forgetSource}
         onCommand={sendCommand}
         audioConnected={!!status?.conn}
-        onDisconnectApp={() => {
-          setShowSettings(false);
-          disconnect();
-        }}
         songs={songs}
         instruments={instruments}
         synth={synth}
@@ -169,7 +166,6 @@ function SettingsModal({
   onForgetSource,
   onCommand,
   audioConnected,
-  onDisconnectApp,
   songs,
   instruments,
   synth,
@@ -193,7 +189,6 @@ function SettingsModal({
   onForgetSource: (addr: string) => void;
   onCommand: (op: number) => void;
   audioConnected: boolean;
-  onDisconnectApp: () => void;
   songs: string[];
   instruments: string[];
   synth: SynthInfo;
@@ -242,8 +237,6 @@ function SettingsModal({
               <MenuRow label="Bluetooth" detail="Pairing & paired sources" onPress={() => setPane('bluetooth')} />
               <MenuRow label="MIDI" detail={`${synth.name} synth`} onPress={() => setPane('midi')} />
               <MenuRow label="TAC5212" detail="Codec highpass filter" onPress={() => setPane('tac5212')} />
-              <Text style={styles.sectionLabel}>App</Text>
-              <SecondaryButton label="Disconnect App" onPress={onDisconnectApp} />
             </>
           )}
 
@@ -299,6 +292,11 @@ function SettingsModal({
 
               <Text style={styles.sectionLabel}>Instrument</Text>
               <Dropdown label="Instrument" options={instruments} value={dxVoice} onSelect={onSelectVoice} />
+              <Stepper
+                count={instruments.length}
+                value={dxVoice}
+                onStep={(i) => onSelectVoice(i)}
+              />
             </>
           )}
 
@@ -375,6 +373,34 @@ function Dropdown({
             }}
           />
         ))}
+    </View>
+  );
+}
+
+// Prev/next stepper (‹ ›) for quickly walking through options without opening the
+// dropdown. Wraps around at the ends. Disabled when there are fewer than 2 options.
+function Stepper({ count, value, onStep }: { count: number; value: number; onStep: (index: number) => void }) {
+  const disabled = count < 2;
+  const go = (delta: number) => {
+    if (disabled) return;
+    onStep((value + delta + count) % count);
+  };
+  return (
+    <View style={styles.stepperRow}>
+      <Pressable
+        disabled={disabled}
+        onPress={() => go(-1)}
+        style={({ pressed }) => [styles.stepBtn, disabled && styles.btnDisabled, pressed && styles.btnPressed]}
+      >
+        <Text style={styles.stepBtnText}>‹</Text>
+      </Pressable>
+      <Pressable
+        disabled={disabled}
+        onPress={() => go(1)}
+        style={({ pressed }) => [styles.stepBtn, disabled && styles.btnDisabled, pressed && styles.btnPressed]}
+      >
+        <Text style={styles.stepBtnText}>›</Text>
+      </Pressable>
     </View>
   );
 }
@@ -546,6 +572,9 @@ const styles = StyleSheet.create({
   instName: { color: '#e6edf3', fontSize: 16, fontWeight: '600' },
   instNameOn: { color: '#3fb950' },
   instCheck: { color: '#3fb950', fontSize: 18, fontWeight: '700' },
+  stepperRow: { flexDirection: 'row', gap: 10, marginTop: 10 },
+  stepBtn: { flex: 1, backgroundColor: '#21262d', borderRadius: 12, paddingVertical: 12, alignItems: 'center' },
+  stepBtnText: { color: '#e6edf3', fontSize: 22, fontWeight: '700' },
   sectionLabel: { color: '#8b949e', fontSize: 13, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 1, marginTop: 18, marginBottom: 10 },
   dim: { color: '#6e7681', fontSize: 14, lineHeight: 20 },
   pairingHint: { color: '#3fb950', fontSize: 13, fontWeight: '600', marginBottom: 10 },
