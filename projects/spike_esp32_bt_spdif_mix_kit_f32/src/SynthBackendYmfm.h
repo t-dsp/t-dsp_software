@@ -73,6 +73,7 @@ DMAMEM static char g_opmFileBuf[24000];   // scratch to read one .opm file (OCRA
 
 static const char *synthName()        { return "ymfm OPM x4"; }
 static const char *synthDescription() { return "YM2151 (OPM) 4-op FM, 4-part multitimbral: songs play a patch per channel. Add banks in /ymfm/*.opm."; }
+static bool        synthIsGM()         { return false; }  // curated OPM bank list -> names streamed to the app
 static int         synthNumInstruments()        { return g_numInstr; }
 static const char *synthInstrumentName(int i)   { return (i >= 0 && i < g_numInstr) ? g_instr[i].name : ""; }
 static int         synthInstrument()            { return g_synthInstrument; }

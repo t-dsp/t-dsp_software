@@ -114,7 +114,11 @@ static bool g_sdReady = false;
 // Declares the engine, wires it into mix slot 3, exposes g_synthSink + the
 // synth* interface. Included HERE so outL/outR already exist for its
 // AudioConnection_F32s (same translation unit -> constructed after the mixers).
-#if defined(TDSP_SYNTH_OPL3)
+#if defined(TDSP_SYNTH_SF2_TSF)
+  #include "SynthBackendSF2Tsf.h"   // full-fidelity SF2 GM via TinySoundFont (lib/TDspTsf, PSRAM)
+#elif defined(TDSP_SYNTH_SF2)
+  #include "SynthBackendSF2.h"      // SF2 sampled General MIDI (lib/TDspSF2 + sf22aswt, PSRAM)
+#elif defined(TDSP_SYNTH_OPL3)
   #include "SynthBackendOpl3.h"     // OPL3 + DMXOPL GM (needs lib/TDspYmfm OPL3 engine; see spec)
 #elif defined(TDSP_SYNTH_YMFM)
   #include "SynthBackendYmfm.h"
@@ -349,7 +353,15 @@ static void sendCatalog() {
     kit.uart().print(synthName());
     kit.uart().print('\t');
     kit.uart().print(synthDescription());
-    for (int i = 0; i < synthNumInstruments(); ++i) { kit.uart().print('|'); kit.uart().print(synthInstrumentName(i)); }
+    if (synthIsGM()) {
+        // A General-MIDI engine uses the 128 STANDARD program names. Streaming ~2 KB
+        // of names over the UART would overflow the ESP32's line buffer AND a single
+        // BLE characteristic (512 B cap) — so we just flag "GM" (a 3rd \t-field on the
+        // header) and the app renders the standard GM 0..127 names itself.
+        kit.uart().print("\tGM");
+    } else {
+        for (int i = 0; i < synthNumInstruments(); ++i) { kit.uart().print('|'); kit.uart().print(synthInstrumentName(i)); }
+    }
     kit.uart().print('\n');
     Serial.printf("[cat] catalog sent to ESP32 (synth=%s)\n", synthName());
 }
@@ -473,6 +485,67 @@ void setup() {
     kit.bootApp();
 }
 
+// Instrument self-test ('T'): step through all 128 GM programs + the drum kit, play
+// test notes on each, and log the resulting output peak. The "prog N -> on" line is
+// printed and flushed BEFORE rendering, so if the engine hangs or faults on a specific
+// patch the LAST serial line names the culprit. Backend-agnostic (drives g_synthSink).
+static void runInstrumentSelfTest() {
+    if (g_player.isPlaying()) songStop();
+    g_synthSink->onAllNotesOff(0);
+    delay(50);
+    Serial.printf("[selftest] === %s: 128 GM programs (ch1) + drums (ch10) ===\n", synthName());
+    const int notes[3] = {48, 60, 72};
+    int silent = 0;
+    for (int prog = 0; prog < 128; prog++) {
+        Serial.printf("[selftest] prog %3d -> on ", prog); Serial.flush();
+        g_synthSink->onProgramChange(1, (uint8_t)prog);
+        for (int i = 0; i < 3; i++) g_synthSink->onNoteOn(1, notes[i], 110);
+        float pk = 0.0f; uint32_t t0 = millis();
+        while (millis() - t0 < 220) { if (peakOut.available()) { float p = peakOut.read(); if (p > pk) pk = p; } delay(4); }
+        for (int i = 0; i < 3; i++) g_synthSink->onNoteOff(1, notes[i], 0);
+        Serial.printf("peak=%.3f %s\n", pk, pk < 0.008f ? "*** SILENT ***" : "ok");
+        if (pk < 0.008f) silent++;
+        delay(70);
+    }
+    Serial.println("[selftest] --- drums (ch10, notes 35..81) ---");
+    float drumMax = 0.0f; int drumSilent = 0;
+    for (int note = 35; note <= 81; note++) {
+        Serial.printf("[selftest] drum %2d -> on ", note); Serial.flush();
+        g_synthSink->onNoteOn(10, (uint8_t)note, 110);
+        float pk = 0.0f; uint32_t t0 = millis();
+        while (millis() - t0 < 150) { if (peakOut.available()) { float p = peakOut.read(); if (p > pk) pk = p; } delay(4); }
+        g_synthSink->onNoteOff(10, (uint8_t)note, 0);
+        Serial.printf("peak=%.3f %s\n", pk, pk < 0.008f ? "silent" : "ok");
+        if (pk > drumMax) drumMax = pk;
+        if (pk < 0.008f) drumSilent++;
+        delay(40);
+    }
+    g_synthSink->onAllNotesOff(0);
+    Serial.printf("[selftest] DONE: %d/128 melodic SILENT; drums peakMax=%.3f, %d/47 notes silent\n",
+                  silent, drumMax, drumSilent);
+}
+
+// Pitch-bend audible test ('B'): hold a sustained strings note on ch1 and sweep the
+// bend 0 -> +2 -> -2 -> 0 semitones over ~4 s. If bend works you hear the note glide.
+static void runPitchBendTest() {
+    if (g_player.isPlaying()) songStop();
+    Serial.println("[pbtest] ch1 strings, note 60 held; bend sweep 0->+2->-2->0 semis (~4s)");
+    g_synthSink->onProgramChange(1, 48);      // String Ensemble 1 (sustained -> bend clearly audible)
+    g_synthSink->onPitchBend(1, 0.0f);
+    g_synthSink->onNoteOn(1, 60, 110);
+    for (int i = 0; i <= 80; i++) {
+        float phase = i / 80.0f, semis;
+        if      (phase < 0.25f) semis =  (phase / 0.25f) * 2.0f;                 // 0 -> +2
+        else if (phase < 0.75f) semis =  2.0f - ((phase - 0.25f) / 0.5f) * 4.0f; // +2 -> -2
+        else                    semis = -2.0f + ((phase - 0.75f) / 0.25f) * 2.0f;// -2 -> 0
+        g_synthSink->onPitchBend(1, semis);
+        delay(50);
+    }
+    g_synthSink->onPitchBend(1, 0.0f);
+    g_synthSink->onNoteOff(1, 60, 0);
+    Serial.println("[pbtest] done");
+}
+
 void loop() {
     // Flash-mode passthrough owns the loop (also handles @BOOTAPP@); in run mode this
     // ticks the slow LED heartbeat and returns false.
@@ -519,6 +592,8 @@ void loop() {
                                  Serial.printf("[song] selected: %s\n", g_songs[g_songSel].name); }
             else if (c == 'V') { synthSetInstrument((synthInstrument() + 1) % synthNumInstruments()); }
             else if (c == 'M') { Serial.printf("[mem] external PSRAM: %u MB\n", external_psram_size); }
+            else if (c == 'T') { runInstrumentSelfTest(); }   // exercise all 128 GM + drums, log peaks
+            else if (c == 'B') { runPitchBendTest(); }         // audible pitch-bend sweep on ch1
         }
     }
 

@@ -63,6 +63,7 @@ static int g_synthInstrument = 0;
 
 static const char *synthName()        { return "Dexed"; }
 static const char *synthDescription() { return "6-op FM (DX7) synth, played by the MIDI IN port and the songs below."; }
+static bool        synthIsGM()         { return false; }  // curated Dexed patch list -> names streamed to the app
 static int         synthNumInstruments()        { return kNumInstruments; }
 static const char *synthInstrumentName(int i)   { return kInstruments[i].name; }
 static int         synthInstrument()            { return g_synthInstrument; }
