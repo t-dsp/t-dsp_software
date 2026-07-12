@@ -30,6 +30,7 @@ static int g_synthInstrument = 0;   // app-picker "audition" program (0..127)
 static const char *synthName()        { return "OPL3 (DMXOPL)"; }
 static const char *synthDescription() { return "YMF262 OPL3 + DMXOPL General MIDI: multitimbral, a patch per channel, with drums."; }
 static bool        synthIsGM()         { return true; }   // 128 standard GM programs -> app renders names locally
+static void        synthSetMpeMode(bool /*mpe*/) {}       // MPE not wired for this backend (router still bends)
 static int         synthNumInstruments()      { return g_opl3.numMelodic(); }             // 128 GM
 static const char *synthInstrumentName(int i) { return g_opl3.melodicName(i); }
 static int         synthInstrument()          { return g_synthInstrument; }

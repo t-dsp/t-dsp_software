@@ -42,6 +42,7 @@ static int g_synthInstrument = 0;   // app-picker "audition" program (0..127)
 static const char *synthName()        { return "SF2 GM"; }
 static const char *synthDescription() { return "General MIDI from real sampled instruments (SF2), loaded to PSRAM at runtime: a patch per channel, with drums."; }
 static bool        synthIsGM()         { return true; }   // 128 standard GM programs -> app renders names locally
+static void        synthSetMpeMode(bool /*mpe*/) {}       // MPE not wired for this backend yet (router still bends)
 static int         synthNumInstruments()      { return g_sf2.numMelodic(); }        // 128 GM
 static const char *synthInstrumentName(int i) { return g_sf2.melodicName(i); }
 static int         synthInstrument()          { return g_synthInstrument; }

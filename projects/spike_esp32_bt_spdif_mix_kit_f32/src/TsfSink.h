@@ -29,9 +29,10 @@ public:
         tsf *t = *_t; if (!t) return;
         AudioNoInterrupts(); tsf_channel_set_presetnumber(t, ch - 1, prog, ch == 10 ? 1 : 0); AudioInterrupts();
     }
+    // pitchRange is set to 48 semis in synthBegin (covers normal +-2 AND MPE +-48).
     void onPitchBend(uint8_t ch, float semitones) override {
-        tsf *t = *_t; if (!t) return;                 // pitchRange is set to 12 semis in synthBegin
-        int wheel = (int)((semitones + 12.0f) / 24.0f * 16383.0f + 0.5f);
+        tsf *t = *_t; if (!t) return;
+        int wheel = (int)((semitones + 48.0f) / 96.0f * 16383.0f + 0.5f);
         wheel = wheel < 0 ? 0 : wheel > 16383 ? 16383 : wheel;
         AudioNoInterrupts(); tsf_channel_set_pitchwheel(t, ch - 1, wheel); AudioInterrupts();
     }
@@ -42,6 +43,19 @@ public:
     void onSustain(uint8_t ch, bool on) override {
         tsf *t = *_t; if (!t) return;
         AudioNoInterrupts(); tsf_channel_midi_control(t, ch - 1, 64, on ? 127 : 0); AudioInterrupts();
+    }
+    // MPE expression. Pressure (Z-axis) -> per-channel volume, which TSF applies to
+    // LIVE voices, so a held note swells with finger pressure. Timbre (CC74, the
+    // slide/Y-axis) is forwarded but TSF has no per-channel filter-cutoff control, so
+    // it's currently inert (a follow-up would patch TSF's filter). At rest (normal
+    // MIDI, no pressure sent) volume stays 1.0, so this is a no-op outside MPE.
+    void onPressure(uint8_t ch, float v) override {
+        tsf *t = *_t; if (!t) return;
+        AudioNoInterrupts(); tsf_channel_set_volume(t, ch - 1, v); AudioInterrupts();
+    }
+    void onTimbre(uint8_t ch, float v) override {
+        tsf *t = *_t; if (!t) return;
+        AudioNoInterrupts(); tsf_channel_midi_control(t, ch - 1, 74, to7(v)); AudioInterrupts();
     }
     void onAllNotesOff(uint8_t ch) override {
         tsf *t = *_t; if (!t) return;

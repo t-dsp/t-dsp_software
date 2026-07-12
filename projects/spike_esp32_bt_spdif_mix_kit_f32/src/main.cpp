@@ -27,6 +27,8 @@
 #include <TAC5212.h>
 #include <TDspProgrammingKit.h>
 #include <MIDI.h>
+#include <USBHost_t36.h>   // USB host: receive MIDI from a controller (e.g. LinnStrument) via USB
+#include <MidiRouter.h>    // MPE-aware fan-out: bend->semitones, CC74->timbre, pressure->onPressure
 #include <SD.h>
 #include <MTP_Teensy.h>   // expose the SD card to the host over USB (Serial+MTP)
 #include "async_input.h"
@@ -82,6 +84,13 @@ AudioSynthWaveformSine spdifTone;                                // int16 tone -
 // declared by the build-selected backend header, included after the mixers.
 AudioSynthWaveformSine_F32 testTone;         // local DAC self-test source (F32)
 tdsp::MidiFilePlayer   g_player;             // non-blocking, synth-agnostic song player
+
+// Live MIDI: a USB-host controller (LinnStrument etc.) + the DIN MIDI IN both feed
+// one MPE-aware router that normalizes bend/timbre/pressure into the synth sink.
+USBHost                g_usbHost;
+MIDIDevice             g_usbMidi(g_usbHost);
+tdsp::MidiRouter       g_router;
+static bool            g_mpeMode = false;    // false = normal MIDI (bend +-2, ch10 drums), true = MPE
 
 AudioMixer4_F32        outL, outR;           // F32 mix: 0=BT, 1=local tone, 2=S/PDIF-in, 3=synth
 AudioAnalyzePeak_F32   peakBt, peakSpdif, peakOut;
@@ -377,21 +386,27 @@ static void refreshCatalog() {
     sendCatalog();
 }
 
-// --- MIDI IN (Serial1 DIN) -> Dexed via the shared MidiSink -----------------
-// Live MIDI now flows through the same g_synthSink the song player uses, so the
-// two share one control path into the engine (and one day into ymfm).
-static void onNoteOn(byte ch, byte note, byte vel) {
-    if (vel == 0) g_synthSink->onNoteOff(ch, note, 0);
-    else          g_synthSink->onNoteOn(ch, note, vel);
-}
-static void onNoteOff(byte ch, byte note, byte vel) { g_synthSink->onNoteOff(ch, note, vel); }
-static void onPitchBend(byte ch, int bend) {   // bend: -8192..+8191 -> semitones (range 2)
-    g_synthSink->onPitchBend(ch, ((float)bend / 8192.0f) * 2.0f);
-}
-static void onControlChange(byte ch, byte cc, byte val) {
-    if (cc == 1)  g_synthSink->onModWheel(ch, val / 127.0f);
-    if (cc == 64) g_synthSink->onSustain(ch, val >= 64);
-    if (cc == 123 && val == 0) g_synthSink->onAllNotesOff(ch);
+// --- Live MIDI IN (DIN on Serial1 + USB host) -> MPE-aware router -> synth ----
+// Both physical sources feed one MidiRouter, which normalizes pitch bend to
+// semitones (per-channel range: 2 in MIDI mode, 48 in MPE / RPN), CC74 -> timbre,
+// and channel pressure -> pressure. The router then drives the same g_synthSink the
+// song player uses. Callbacks are shared by the DIN (MIDI.h) and USB host (MIDIDevice)
+// sources — their setHandle* signatures match.
+static void midiNoteOn  (byte ch, byte note, byte vel) { g_router.handleNoteOn(ch, note, vel); }
+static void midiNoteOff (byte ch, byte note, byte vel) { g_router.handleNoteOff(ch, note, vel); }
+static void midiCC      (byte ch, byte cc,   byte val) { g_router.handleControlChange(ch, cc, val); }
+static void midiPitch   (byte ch, int bend)            { g_router.handlePitchBend(ch, (int16_t)bend); }
+static void midiPressure(byte ch, byte pressure)       { g_router.handleChannelPressure(ch, pressure); }
+
+// Switch the device between normal MIDI and MPE (per-note expression). Sets the
+// router's per-channel bend range (2 vs the LinnStrument's 48-semi default) and lets
+// the backend reconfigure (TSF frees ch10 from drums so it's an MPE member channel).
+static void applyMidiMode(bool mpe) {
+    g_mpeMode = mpe;
+    float range = mpe ? tdsp::MidiRouter::kDefaultPitchBendRange : 2.0f;   // 48 (MPE) vs 2
+    for (uint8_t ch = 1; ch <= 16; ch++) g_router.setPitchBendRange(ch, range);
+    synthSetMpeMode(mpe);   // backend hook (no-op except TSF)
+    Serial.printf("[mode] %s\n", mpe ? "MPE (per-note bend/pressure)" : "normal MIDI");
 }
 
 void setup() {
@@ -459,19 +474,29 @@ void setup() {
     spdifTone.frequency(1000.0f); spdifTone.amplitude(0.25f);
     if (g_codecOk) applyVol();
 
-    // Physical MIDI IN on Serial1 (pin 0) -> Dexed, omni. Soft-thru off.
+    // Physical MIDI IN on Serial1 (pin 0), omni, soft-thru off -> the router.
     MIDI.begin(MIDI_CHANNEL_OMNI);
     MIDI.turnThruOff();
-    MIDI.setHandleNoteOn(onNoteOn);
-    MIDI.setHandleNoteOff(onNoteOff);
-    MIDI.setHandlePitchBend(onPitchBend);
-    MIDI.setHandleControlChange(onControlChange);
+    MIDI.setHandleNoteOn(midiNoteOn);
+    MIDI.setHandleNoteOff(midiNoteOff);
+    MIDI.setHandlePitchBend(midiPitch);
+    MIDI.setHandleControlChange(midiCC);
+    // USB host: a controller (LinnStrument) plugged into the Teensy 4.1 host port.
+    g_usbHost.begin();
+    g_usbMidi.setHandleNoteOn(midiNoteOn);
+    g_usbMidi.setHandleNoteOff(midiNoteOff);
+    g_usbMidi.setHandleControlChange(midiCC);
+    g_usbMidi.setHandlePitchChange(midiPitch);
+    g_usbMidi.setHandleAfterTouchChannel(midiPressure);   // channel pressure = MPE Z-axis
+    g_router.addSink(g_synthSink);                        // live MIDI -> current synth
+
     // Route the song player into the build-selected synth via its shared sink.
     // Omni so every song channel (and live MIDI on any channel) reaches the one
     // patch; the player's default mask still skips channel 10 (drums), matching
     // a single melodic engine. synthBegin() sets gain + loads the default patch.
     g_player.setSink(g_synthSink);
     synthBegin();
+    applyMidiMode(false);   // start in normal MIDI (after synthBegin, so the engine exists)
 
     Serial.println("running -- cmds: t=DACtone a=BT+SPDIF mix  s=SPDIF-only  m=BT-only");
     Serial.println("                 x=toggle SPDIF tone  +/-=vol  d=dump  i=re-init codec");
@@ -546,6 +571,35 @@ static void runPitchBendTest() {
     Serial.println("[pbtest] done");
 }
 
+// MPE self-test ('A'): drive the router as if a LinnStrument sent one MPE note on a
+// member channel — RPN bend range 48, a note, then a pressure swell + pitch-bend sweep.
+// Verifies the router -> sink -> TSF expression path: outPeak should FOLLOW the pressure
+// (swell up then down), proving per-note pressure->volume works, plus the bend glides.
+static void runMpeTest() {
+    if (g_player.isPlaying()) songStop();
+    applyMidiMode(true);                      // MPE mode (ch10 melodic, router bend 48)
+    const uint8_t ch = 2;                     // an MPE member channel
+    Serial.println("[mpetest] ch2 note 60: pressure swell + bend sweep (~5s). Watch outPeak follow pressure.");
+    g_router.handleControlChange(ch, 101, 0); // RPN 0,0 = pitch-bend range...
+    g_router.handleControlChange(ch, 100, 0);
+    g_router.handleControlChange(ch, 6, 48);  // ...= 48 semitones
+    g_router.handleChannelPressure(ch, 100);
+    g_router.handleNoteOn(ch, 60, 100);
+    for (int i = 0; i <= 50; i++) {
+        float ph = i / 50.0f;
+        uint8_t pr = (uint8_t)(127.0f * (0.5f - 0.5f * cosf(ph * 2.0f * PI)));   // 0 -> 127 -> 0
+        int16_t bend = (int16_t)(8191.0f * sinf(ph * 2.0f * PI));               // 0 -> +bend -> -bend -> 0
+        g_router.handleChannelPressure(ch, pr);
+        g_router.handlePitchBend(ch, bend);
+        float pk = 0; uint32_t t0 = millis();
+        while (millis() - t0 < 90) { if (peakOut.available()) { float p = peakOut.read(); if (p > pk) pk = p; } delay(4); }
+        if (i % 6 == 0) Serial.printf("[mpetest] pressure=%3u  outPeak=%.3f\n", pr, pk);
+    }
+    g_router.handleNoteOff(ch, 60, 0);
+    applyMidiMode(false);
+    Serial.println("[mpetest] done (back to normal MIDI)");
+}
+
 void loop() {
     // Flash-mode passthrough owns the loop (also handles @BOOTAPP@); in run mode this
     // ticks the slow LED heartbeat and returns false.
@@ -555,8 +609,10 @@ void loop() {
     MTP.loop();   // service USB file transfers to/from the SD (host drag-and-drop)
 #endif
 
-    // Dexed source: drain physical MIDI IN and advance the (non-blocking) song.
+    // Live MIDI: drain DIN + USB-host controllers, then advance the (non-blocking) song.
     while (MIDI.read()) { /* handlers fire per message */ }
+    g_usbHost.Task();
+    while (g_usbMidi.read()) { /* USB-host MIDI handlers fire per message */ }
     g_player.tick();
 
     if (Serial.available()) {
@@ -594,6 +650,8 @@ void loop() {
             else if (c == 'M') { Serial.printf("[mem] external PSRAM: %u MB\n", external_psram_size); }
             else if (c == 'T') { runInstrumentSelfTest(); }   // exercise all 128 GM + drums, log peaks
             else if (c == 'B') { runPitchBendTest(); }         // audible pitch-bend sweep on ch1
+            else if (c == 'E') { applyMidiMode(!g_mpeMode); }  // toggle MIDI <-> MPE mode locally
+            else if (c == 'A') { runMpeTest(); }               // simulate an MPE note (bend + pressure)
         }
     }
 
@@ -615,6 +673,7 @@ void loop() {
                 }
                 else if (strcmp(line, "@GETCAT") == 0) refreshCatalog();  // re-scan SD + send catalog
                 else if (strncmp(line, "@HPF=", 5) == 0) setDacHpfMode(atoi(line + 5));
+                else if (strncmp(line, "@MIDIMODE=", 10) == 0) applyMidiMode(atoi(line + 10) != 0);
                 else Serial.printf("[esp] %s\n", line);
             }
             n = 0;

@@ -53,6 +53,17 @@ static void synthSetInstrument(int idx) {
     Serial.printf("[synth] all channels -> GM %d = %s\n", idx, synthInstrumentName(idx));
 }
 
+// MPE mode hook (called by main.cpp applyMidiMode). MPE puts one note per member
+// channel 2..16, so channel 10 must be melodic, not the GM drum kit; normal MIDI
+// keeps ch10 as drums. Per-note bend range is handled by the router (48 semis).
+static void synthSetMpeMode(bool mpe) {
+    if (!g_tsf) return;
+    AudioNoInterrupts();
+    tsf_channel_set_presetnumber(g_tsf, 9, mpe ? g_synthInstrument : 0, mpe ? 0 : 1);
+    AudioInterrupts();
+    Serial.printf("[synth] MPE %s: channel 10 -> %s\n", mpe ? "ON" : "off", mpe ? "melodic" : "drums");
+}
+
 static void synthBegin() {
     if (!g_sdReady) {
         Serial.println("[synth] TSF: no SD card -> engine idle (need /sf2/gm_tsf.sf2)");
@@ -69,7 +80,7 @@ static void synthBegin() {
     // Pre-create all 16 channels; channel 9 (MIDI 10) is drums (bank 128).
     for (int ch = 0; ch < 16; ch++) {
         tsf_channel_set_presetnumber(g_tsf, ch, 0, ch == 9 ? 1 : 0);
-        tsf_channel_set_pitchrange(g_tsf, ch, 12.0f); // TsfSink maps bend semis over +-12
+        tsf_channel_set_pitchrange(g_tsf, ch, 48.0f); // TsfSink maps bend over +-48 (covers MPE)
     }
     g_tsfSynth.begin(g_tsf);
     g_tsfSynth.setGain(1.0f);
