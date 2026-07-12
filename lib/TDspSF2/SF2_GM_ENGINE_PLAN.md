@@ -1,134 +1,142 @@
 # SF2 General-MIDI sample engine — build plan (fresh-agent handoff)
 
 **Goal:** full 128-instrument General MIDI with **real sampled instruments** ("quality
-keyboard," not FM/retro), as a new synth backend for the mix-kit. This replaces the
-*character* of Dexed/OPL3/OPM (all synthesis) with actual recordings of instruments —
-the only way to sound like a real piano/strings/etc.
+keyboard," not FM), as a new synth backend for the mix-kit. It slots behind the SAME
+`tdsp::MidiSink` + `SynthBackend*` seam as Dexed/OPL3/OPM, so the MIDI player, SD song
+catalog, phone app, BT, and S/PDIF are UNCHANGED — only the engine is new. Build flag
+`-D TDSP_SYNTH_SF2` → env `teensy41_sf2`.
 
-It slots behind the SAME seam as the existing engines: a `tdsp::MidiSink` +
-`SynthBackend*` in `projects/spike_esp32_bt_spdif_mix_kit_f32`, so the MIDI player,
-the SD song catalog, the phone app, BT, and S/PDIF are all UNCHANGED — only the
-engine is new. Build flag `-D TDSP_SYNTH_SF2` → env `teensy41_sf2`.
-
-This is the **biggest** engine of the set (real sample playback with per-voice
-pitch/loop/envelope/filter + SF2 parsing + PSRAM/SD sample management). Budget for it.
+> **This plan is grounded in the Teensy state-of-the-art (PJRC forum, Teensy Audio
+> Library, and community GitHub repos), not first principles. The headline finding:
+> DO NOT write your own SF2 parser or wavetable voice engine — proven, MIT-licensed,
+> PSRAM-aware Teensy code already exists. Reuse it.** (Research done 2026-07-12; sources
+> at the bottom.)
 
 ---
 
 ## Hardware / budget (measured on this board)
-- Teensy 4.1, **8 MB PSRAM** (`external_psram_size == 8`; the mix-kit prints it at boot
-  and via the `M` serial command). Sample data lives in PSRAM via the `EXTMEM` keyword.
-- TAC5212 DAC through an **F32 / 48 kHz TDM** mix bus (OpenAudio). The synth feeds
-  **mix slot 3** as int16 → `AudioConvert_I16toF32` → `outL/outR` (see SynthBackendOpl3.h).
-- RAM1 (DTCM/ITCM) is already tight on this firmware — keep new DTCM use small; put big
-  buffers in `EXTMEM` (PSRAM) or `DMAMEM` (OCRAM).
+- Teensy 4.1, **8 MB PSRAM** (`external_psram_size == 8`; the mix-kit prints it at boot and
+  via the `M` serial command). Sample data must be **PSRAM/RAM-resident** — see §"Streaming".
+- TAC5212 DAC through an **F32 / 48 kHz TDM** mix bus (OpenAudio). The synth feeds **mix
+  slot 3** as int16 → `AudioConvert_I16toF32` → `outL/outR` (see `SynthBackendOpl3.h`).
+- RAM1 (DTCM/ITCM) is already tight on this firmware — samples go in PSRAM (`extmem`), voice
+  state small.
 
-## Two-stage plan (do Stage 1 first)
-- **Stage 1 — PSRAM-resident small GM SF2.** A compact full-GM SoundFont (~4–7 MB) whose
-  entire 16-bit sample pool loads into `EXTMEM` at boot from the SD card. No streaming.
-  Proves the SF2 parser + the sampled-voice engine. Fits 8 MB with headroom.
-- **Stage 2 — SD-streaming (later).** Same voice engine, but sample data streams from the
-  SD on demand (for a bigger/better SF2 like GeneralUser GS ~30 MB, which does NOT fit in
-  8 MB PSRAM), using PSRAM as a sample cache. Only do this after Stage 1 sounds good.
+## THE core decision: reuse the proven stack, don't rebuild
+The community has already solved runtime SF2 → polyphonic sample playback on Teensy 4.1 with
+PSRAM. Use it. Recommended (Path A):
 
-## The engine — `lib/TDspSF2`
-### 1. SF2 parser (`SF2File.{h,cpp}`) — pure, no audio
-SF2 is a RIFF file ("sfbk") with LIST chunks:
-- **sdta/smpl** — the raw 16-bit PCM sample pool (mono samples concatenated).
-- **pdta** — the "hydra": `phdr` (presets) → `pbag`/`pgen`/`pmod` (preset zones) → `inst`
-  (instruments) → `ibag`/`igen`/`imod` (instrument zones) → `shdr` (sample headers:
-  start/end/loopstart/loopend, sampleRate, originalPitch, pitchCorrection).
-Parse into: **preset(bank, program) → zones → instrument → zones → {sample header +
-generator set}**. GM melodic = **bank 0, programs 0–127**; GM drums = **bank 128**.
-Generators to honor (minimum): `sampleID`, `keyRange`, `velRange`, `overridingRootKey`,
-`coarseTune`/`fineTune`, `sampleModes` (loop on/off), `startloopAddrsOffset` +variants,
-volume ADSR (`attackVolEnv`/`decay`/`sustain`/`release`, timecents), `initialAttenuation`,
-`pan`, `initialFilterFc`/`Q` (optional at first). Store a flat lookup: for a given
-(program, key, velocity) → the matching zone's sample + params.
+| Component | Repo / source | Role | License |
+|---|---|---|---|
+| **AudioSynthWavetable** | Teensy Audio Library (from https://github.com/TeensyAudio/Wavetable-Synthesis) | The **voice engine**: DDS wavetable playback + attack/loop/release envelope + linear interp, 16-bit. **One object = one voice** (no internal allocator). | PJRC/MIT |
+| **manicken/sf22aswt** | https://github.com/manicken/sf22aswt | **Runtime SF2 loader** into AudioSynthWavetable. `Load_instrument_from_file` reads an SF2 off SD; **auto-spills sample data to `extmem`/PSRAM** (tunable `Samples_Max_Internal_RAM_Cap`). Multi-instrument + lazy-load. This is the "GitHub addition to the outdated library." | **MIT**, active (v0.1.5, 2024); self-described WIP |
+| **manicken/SoundFontDecoder** | https://github.com/manicken/SoundFontDecoder | Fixed **offline** SF2→C++ decoder (the original TeensyAudio one has a documented zone/sample duplication → file-size-explosion bug). Use for any offline prep. | active |
+| **manicken/sf22aswtTester** | https://github.com/manicken/sf22aswtTester | Serial-command control + SF2/instrument upload — a working integration to copy patterns from. | — |
 
-### 2. Sampled-voice engine (`AudioSynthSF2.{h,cpp}`)
-A Teensy `AudioStream`, **stereo int16** (out 0=L, 1=R), summing N voices at
-`AUDIO_SAMPLE_RATE`. Unlike the ymfm engines there is **no chip resampler** — each VOICE
-resamples its own sample:
-- **Pitch:** `step = (sample.rate / AUDIO_SAMPLE_RATE_EXACT) * 2^((note - rootKey + tune + bend)/12)`.
-  Walk a fractional read pointer through the PSRAM sample with linear interpolation.
-- **Loop:** if `sampleModes` has loop, wrap the pointer between loopStart/loopEnd; else
-  play once to `end` then release.
-- **Volume envelope:** SF2 ADSR (convert timecents → per-sample rates). Apply attenuation
-  (`initialAttenuation` + velocity→attenuation + envelope).
-- **Pan:** SF2 `pan` → L/R gains.
-- **(Optional, later) low-pass filter** from `initialFilterFc`/`Q`.
-- **Polyphony:** ~24–32 voices, oldest/quietest-note stealing. Per MIDI channel: current
-  program (`programChange`), pitch bend. **Channel 10 = drums** → SF2 bank 128, the drum
-  note selects the sample.
-- Rapid retrigger is a non-issue here (a new note just resets the voice's read pointer +
-  envelope) — unlike the OPL3 KON-edge bug (see [[project_opl3_dmxopl]]).
+Path A gives you: SF2 parsing, per-voice sample rendering, envelopes, interpolation, and
+PSRAM residency **for free**. What YOU still write is the thin GM layer on top (below).
 
-### 3. Public API — mirror `SynthBackendOpl3.h`/`Opl3Sink.h` EXACTLY
-`AudioSynthSF2` must expose what the mix-kit backend calls:
+**Alternative (Path B, less proven):** port **TinySoundFont** (`schellingb/tsf.h`, single
+header, MIT, overridable `fopen`/`malloc` → point at PSRAM). It's a COMPLETE GM renderer
+(parse + allocate + render + drums internally) — thinner GM glue, cleaner SF2 semantics —
+but there is **no existing Teensy port** (only an ESP8266Audio port), it loads the whole
+font's samples into one PSRAM buffer (trimmed font only), renders its own voice pool
+(bypasses the Teensy audio graph — feed its block into an F32 sink), and its CPU at high
+polyphony on Teensy 4.1 is unbenchmarked. Consider only if Path A's per-instrument model
+proves too limiting.
+
+## What you actually build (the GM layer + integration)
+Regardless of path, the mix-kit needs a backend matching the exact API the other backends
+use (mirror `SynthBackendOpl3.h`/`Opl3Sink.h`):
 ```
-begin();                                   // parse SF2 + load samples into PSRAM
-noteOn(uint8_t ch1_16, note, vel); noteOff(ch, note); programChange(ch, prog);
-pitchBend(ch, float semitones); controlChange(ch, cc, val); allNotesOff();
-setGain(float); int activeVoices() const;
-int numMelodic() const;                    // 128
-const char* melodicName(int) const;        // GM name or SF2 preset name
+begin();  noteOn(ch1_16,note,vel);  noteOff(ch,note);  programChange(ch,prog);
+pitchBend(ch,semitones);  controlChange(ch,cc,val);  allNotesOff();
+setGain(float);  int activeVoices();  int numMelodic();  const char* melodicName(int);
 ```
-Stereo `AudioStream(0,nullptr)` with 2 outputs. Load the SoundFont in `begin()`.
+- **Voice allocation / polyphony (Path A):** AudioSynthWavetable has NO allocator — you
+  instantiate a **pool of N voices** (target **24–32**; 48 is proven at 1–10% CPU on a 4.0)
+  and write the allocator: note-on → pick free/oldest voice, set its instrument (the current
+  program for that MIDI channel; drums = channel 10), trigger; note-off → release. You may
+  reuse **`newdigate/teensy-polyphony`** (https://github.com/newdigate/teensy-polyphony, MIT,
+  a generic voice-allocation layer over the Teensy Audio Library) instead of writing it.
+- **GM routing:** per MIDI channel keep current program (`programChange`) + pitch bend;
+  channel 10 = drums (SF2 bank 128; the drum note selects the sample). Load the needed SF2
+  instruments via `sf22aswt` (per-instrument or a resident set).
+- **F32 / 48 kHz bridge:** AudioSynthWavetable outputs **int16** at the Teensy audio-block
+  model. In THIS firmware `AUDIO_SAMPLE_RATE_EXACT=48000`, so the wavetable engine runs at
+  48 kHz too — feed the summed int16 voices → `AudioConvert_I16toF32` → mix slot 3, exactly
+  like the OPL3/OPM backends. (Verify the wavetable/SF2 sample-rate handling honors 48 kHz;
+  flag if it assumes 44.1.)
+
+## The SoundFont
+- **PSRAM-resident, always** (see below). Put the `.sf2` on the SD as `/sf2/gm.sf2`;
+  `sf22aswt` loads it at runtime and spills samples to PSRAM.
+- **GeneralUser GS** (S. Christian Collins) is the de-facto Teensy GM bank (used by PJRC's
+  ISO-Drone build with manicken's decoder). Full ~30 MB does **NOT** fit 8 MB PSRAM →
+  **trim it offline** (mono, 16-bit, fewer velocity/octave layers, trimmed tails — via
+  Awave/OpenMPT/Polyphone) to a few MB, OR **load per-instrument on demand** (sf22aswt
+  supports this) so each patch keeps full fidelity but only the in-use ones sit in PSRAM.
+- Verify licensing of whatever bank ships (GeneralUser GS is very permissive).
+
+## Streaming: NO. Samples MUST be resident.
+PJRC forum consensus (thread 58480): *"mixing several instruments directly from SD isn't
+feasible because you access data too randomly for synthesis."* SD streaming works for ~1–2
+voices, not polyphonic GM. So: **PSRAM-resident samples**, loaded from SD at boot /
+instrument-change (use SDIO 4-bit, ~4× faster than SPI, for the load). Do not design an
+SD-per-voice streaming engine.
 
 ## Mix-kit side (write — mirrors the OPL3 backend)
 - `src/SF2Sink.h` — channel-addressed `tdsp::MidiSink` → `g_sf2` methods (copy `Opl3Sink.h`).
-- `src/SynthBackendSF2.h` — `AudioSynthSF2 g_sf2;` wired **stereo int16 → F32 → mix slot 3**;
-  the `synth*` interface (name `"SF2 GM"`, description, catalog from `numMelodic`/
-  `melodicName`, `synthSetInstrument` = audition a program on all channels); `setGain`;
-  drums on: `g_player.setChannelMask(tdsp::MidiFilePlayer::kMaskAll)`. In `synthBegin`,
-  parse the SF2 from `/sf2/gm.sf2` on the SD and load its samples into PSRAM (show progress;
-  it takes a few seconds).
+- `src/SynthBackendSF2.h` — the voice pool + allocator wired **int16 → F32 → mix slot 3**;
+  the `synth*` interface (name `"SF2 GM"`, catalog from `numMelodic`/`melodicName`); `setGain`;
+  drums on (`g_player.setChannelMask(kMaskAll)`); load `/sf2/gm.sf2` in `synthBegin` (show
+  load progress — MB into PSRAM takes seconds).
 - `src/main.cpp` — add `#elif defined(TDSP_SYNTH_SF2) #include "SynthBackendSF2.h"` to the
-  backend `#if` block (currently OPL3/YMFM/Dexed).
-- `platformio.ini` — add `[env:teensy41_sf2]` (extends common) with
-  `-D TDSP_SYNTH_SF2=1`, `lib_deps =` (empty — stay GPL-free), and
-  `build_src_filter = +<*> -<DexedVoiceBank.cpp>`. No special PSRAM flag — `EXTMEM` works
-  on teensy41.
-
-## The SoundFont itself
-- **Stage 1:** obtain a COMPACT full-GM `.sf2` (~4–7 MB, permissive license) and put it on
-  the SD as `/sf2/gm.sf2`. Do NOT bake multi-MB into flash (8 MB flash, impractical) —
-  parse from SD at boot and load the sample pool into `EXTMEM`. Good small options exist
-  (various "GM" / "GMGSx" banks); verify licensing. If none small enough sounds good,
-  down-sample/trim a bigger one offline.
-- **Stage 2:** GeneralUser GS (~30 MB, very permissive) on SD, streaming.
+  backend `#if` block.
+- `platformio.ini` — `[env:teensy41_sf2]` (extends common), `-D TDSP_SYNTH_SF2=1`,
+  `lib_deps =` (stay GPL-free; sf22aswt/Wavetable are MIT), `build_src_filter = +<*>
+  -<DexedVoiceBank.cpp>`. Vendor `sf22aswt` + `AudioSynthWavetable` (if not already in the
+  Audio lib) under `lib/` like `lib/TDspYmfm`. `extmem` needs no special flag on teensy41.
 
 ## Build & test
-- `pio run -e teensy41_sf2` → green; keep `teensy41`, `teensy41_ymfm`, `teensy41_opl3` green.
-- Report FLASH + **PSRAM** usage (how much of 8 MB the sample pool takes).
-- On device, play the diagnostic MIDIs already on the SD `/songs` (generated in
-  `C:\tmp\opl3_tests`, copied to the card): `02_chromatic` (tuning), `03_velocity`,
-  `04_gm_sweep` (now each GM program is a REAL instrument — the payoff test), `05_polyphony`,
-  `01_drums`, and Daft Punk. Judge by ear with the user.
+- `pio run -e teensy41_sf2` → green; keep `teensy41`/`_ymfm`/`_opl3` green.
+- Report FLASH + **PSRAM** usage and the achieved **voice count vs CPU** on Teensy 4.1
+  (the 48-voice/1–10% number is from a 4.0 — confirm on 4.1).
+- On device, play the diagnostic MIDIs already on the SD `/songs` (in `C:\tmp\opl3_tests`,
+  copied to the card): `04_gm_sweep` is the payoff (each GM program is now a REAL instrument),
+  plus `02_chromatic`, `03_velocity`, `05_polyphony`, `01_drums`, and Daft Punk.
 - **Do NOT flash the shared board without checking with the user first.**
 
-## Reference files (read these)
+## Reference files in-repo (read these)
 - Backend to mirror: `projects/spike_esp32_bt_spdif_mix_kit_f32/src/SynthBackendOpl3.h`,
-  `Opl3Sink.h`, the `main.cpp` backend `#if` branch, and the `[env:teensy41_opl3]`/`_ymfm`
-  envs in `platformio.ini`.
-- Engine style (AudioStream + voice allocator + stereo int16): `lib/TDspYmfm/src/
-  AudioSynthYmfmOPL3.{h,cpp}` and `AudioSynthYmfmOPM.cpp`.
-- Player + interface: `lib/TDspMidiPlayer` (`MidiFilePlayer`, `MidiFileEvent`) and
-  `lib/TDspMidi/src/MidiSink.h`.
-- **Existing sampler code to reuse if present:** the multisample sampler slot — check
-  `projects/t-dsp_f32_audio_shield/src/synth/` and the `/samples/<bank>/<note>.wav` layout;
-  there may be a sample-playback voice you can adapt instead of writing from scratch.
-- Teensy PSRAM: `EXTMEM` keyword allocates in the 8 MB PSRAM; `extern "C" uint8_t
-  external_psram_size;` = MB.
+  `Opl3Sink.h`, the `main.cpp` backend `#if` branch, the `[env:teensy41_opl3]` env.
+- Engine style (AudioStream + allocator + int16 stereo + F32 bridge): `lib/TDspYmfm/src/
+  AudioSynthYmfmOPL3.{h,cpp}`.
+- Player + interface: `lib/TDspMidiPlayer`, `lib/TDspMidi/src/MidiSink.h`.
+- Existing sampler infra to possibly reuse: `projects/t-dsp_f32_audio_shield/src/synth/`
+  (multisample slot) + the `/samples/<bank>/<note>.wav` layout.
+- Teensy PSRAM: `extmem`/`EXTMEM` keyword → 8 MB PSRAM; `extern "C" uint8_t external_psram_size;`.
 
-## Gotchas
-- Every SF2 sample has its OWN sample-rate + root key + loop points — a note plays a sample
-  pitch-shifted from its root key; you must resample per voice.
-- GM drums = SF2 **bank 128**; melodic = bank 0. Channel 10 is drums.
-- 8 MB PSRAM: GeneralUser GS (30 MB) does NOT fit — Stage 1 needs a small SF2, Stage 2
-  streams.
-- Loading MB of samples from SD → PSRAM at boot takes seconds; print progress.
-- Watch RAM1 — it's already tight on this firmware; keep voice state small, samples in PSRAM.
+## Gotchas (from the research)
+1. **Reuse, don't rebuild** — the official TeensyAudio SF2 decoder has a real
+   zone/sample-indexing bug (file-size explosion); manicken's fixes it and `sf22aswt` does
+   the runtime+PSRAM loading. Rebuilding an SF2 parser reproduces solved, subtle problems.
+2. **No SD streaming for polyphony** — PSRAM-resident only.
+3. **Trim the font** — full GeneralUser GS (30 MB) won't fit 8 MB; SF2→resident also expands
+   the data. Trim offline or load per-instrument.
+4. **F32/48 kHz bridge** — proven engines are int16 classic-block; bridge into the F32 bus
+   (already the pattern here). Verify 48 kHz handling.
+5. **`sf22aswt` is WIP** — validate stability under 128-instrument switching; have a fallback
+   (per-instrument reload) if a full resident GM set is unstable.
+6. Rapid retrigger is fine for sample voices (reset read pointer + envelope) — no OPL3
+   KON-edge issue (see [[project_opl3_dmxopl]]).
+
+## Sources (state-of-the-art, 2026-07-12)
+- manicken/sf22aswt, manicken/SoundFontDecoder, manicken/sf22aswtTester, manicken/teensy4.0polysynth (github.com/manicken/*)
+- TeensyAudio/Wavetable-Synthesis + soundFontDecoder guide (teensyaudio.github.io/Wavetable-Synthesis)
+- newdigate/teensy-polyphony, newdigate/teensy-sample-flashloader; jerry20091103/Teensy_Grovebox; Soundpauli/NI404; wrightflyer/SF2_SoundFonts
+- schellingb/TinySoundFont (tsf.h); earlephilhower/ESP8266Audio (TSF port precedent)
+- PJRC forum: "Wavetable synthesis of large soundfonts" (thread 58480 — streaming infeasible, shrink offline); "SoundFont Decoder & File Size" (thread 70218 — decoder bug + PSRAM); PJRC blog ISO-Drone (2026/02 — GeneralUser GS + manicken decoder on 4.1)
+- Circuit Cellar "Build a SoundFont MIDI Synthesizer" Part 2 (48 voices @ 1–10% CPU on Teensy 4.0)
 
 Related memory: [[project_opl3_dmxopl]], [[project_midi_player_synth_agnostic]].
