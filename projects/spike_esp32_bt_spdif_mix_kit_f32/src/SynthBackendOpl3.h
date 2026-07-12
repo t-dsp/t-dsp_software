@@ -51,6 +51,8 @@ static void synthSetInstrument(int idx) {
 
 static void synthBegin() {
     g_opl3.begin();                    // reset chip + resampler, load baked DMXOPL bank
+    g_opl3.setGain(3.2f);              // DMXOPL runs quiet; lift ~1.6x over the 2.0 default
+                                       // (dense material still peaks well under clip)
     // OPL3 handles GM drums on channel 10 itself, so let the player pass every
     // channel through (the Dexed/OPM backends leave the default kMaskNoDrums).
     g_player.setChannelMask(tdsp::MidiFilePlayer::kMaskAll);
