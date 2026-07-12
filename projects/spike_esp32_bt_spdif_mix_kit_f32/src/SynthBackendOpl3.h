@@ -44,33 +44,13 @@ static void synthSetInstrument(int idx) {
     Serial.printf("[synth] all channels -> GM %d = %s\n", idx, g_opl3.melodicName(idx));
 }
 
-#if TDSP_HAS_SDCARD
-DMAMEM static uint8_t g_woplBuf[80000];   // scratch to read one .wopl bank (OCRAM; DMXOPL ~63KB)
-// Optional: override the baked DMXOPL bank with the first /opl/*.wopl on the card.
-static void synthScanOplBank() {
-    File d = SD.open("/opl");
-    if (!d || !d.isDirectory()) { if (d) d.close(); return; }
-    for (File f = d.openNextFile(); f; f = d.openNextFile()) {
-        const char *nm = f.name();
-        size_t L = nm ? strlen(nm) : 0;
-        if (!f.isDirectory() && L > 5 && strcasecmp(nm + L - 5, ".wopl") == 0) {
-            size_t n = f.read(g_woplBuf, sizeof(g_woplBuf));
-            int got = g_opl3.loadBankWopl(g_woplBuf, n);
-            Serial.printf("[opl3] SD bank %s: %d instruments\n", nm, got);
-            f.close();
-            break;   // first /opl/*.wopl wins
-        }
-        f.close();
-    }
-    d.close();
-}
-#endif
+// NOTE: the SD /opl/*.wopl bank override is deferred until AudioSynthYmfmOPL3::
+// loadBankWopl() is implemented (it's currently a stub). A large DMAMEM read
+// buffer here would starve the SD MIDI parser's malloc heap and break song
+// loading — the baked DMXOPL bank is used until WOPL loading lands.
 
 static void synthBegin() {
     g_opl3.begin();                    // reset chip + resampler, load baked DMXOPL bank
-#if TDSP_HAS_SDCARD
-    if (g_sdReady) { if (!SD.exists("/opl")) SD.mkdir("/opl"); synthScanOplBank(); }
-#endif
     // OPL3 handles GM drums on channel 10 itself, so let the player pass every
     // channel through (the Dexed/OPM backends leave the default kMaskNoDrums).
     g_player.setChannelMask(tdsp::MidiFilePlayer::kMaskAll);
