@@ -9,7 +9,7 @@
 # bend via kPitchBend and pressure via kChannelPressure -> the synth sink onPressure).
 #
 #   python3 make_mpe_test_song.py [out.mid]
-import struct, sys
+import struct, sys, math
 
 OUT = sys.argv[1] if len(sys.argv) > 1 else "mpetest.mid"
 DIV, TPS = 480, 960          # ticks/quarter, ticks/sec at 120 bpm
@@ -35,25 +35,40 @@ for ch in CH:
     cc(0, ch, 101, 0); cc(0, ch, 100, 0); cc(0, ch, 6, 12); cc(0, ch, 38, 0)
 
 t = TPS // 2
-# Part 1 — chord, then bend the MIDDLE note independently (C E G, one note/channel)
-non(t, 2, 60, 95); non(t, 3, 64, 95); non(t, 4, 67, 95); t += TPS
-ramp(t, TPS, lambda tt, t=t: bend_semis(tt, 3,  2 * ((tt - t) / TPS)));      t += TPS   # E -> +2
-t += TPS // 2
-ramp(t, TPS, lambda tt, t=t: bend_semis(tt, 3,  2 * (1 - (tt - t) / TPS)));  t += TPS   # back
-noff(t, 2, 60); noff(t, 3, 64); noff(t, 4, 67); t += TPS // 2
+# Part 1 — chords, then bend the MIDDLE note independently (one note per channel)
+for root in ([60, 64, 67], [57, 60, 64]):     # C major, then A minor
+    non(t, 2, root[0], 95); non(t, 3, root[1], 95); non(t, 4, root[2], 95); t += TPS
+    ramp(t, TPS, lambda tt, t=t: bend_semis(tt, 3,  2 * ((tt - t) / TPS)));      t += TPS   # middle -> +2
+    t += TPS // 2
+    ramp(t, TPS, lambda tt, t=t: bend_semis(tt, 3,  2 * (1 - (tt - t) / TPS)));  t += TPS   # back
+    noff(t, 2, root[0]); noff(t, 3, root[1]); noff(t, 4, root[2]); t += TPS // 2
 # Part 2 — pressure swells (volume follows pressure)
-for ch, note in [(2, 62), (3, 65)]:
+for ch, note in [(2, 60), (3, 64), (4, 67), (5, 72)]:
     press(t, ch, 15); non(t, ch, note, 80)
-    ramp(t, int(TPS * 1.4), lambda tt, ch=ch, t=t: press(tt, ch, 15 + 112 * ((tt - t) / (TPS * 1.4)))); t += int(TPS * 1.4)
-    ramp(t, int(TPS * 1.4), lambda tt, ch=ch, t=t: press(tt, ch, 127 - 112 * ((tt - t) / (TPS * 1.4)))); t += int(TPS * 1.4)
-    noff(t, ch, note); t += TPS // 3
+    ramp(t, int(TPS * 1.2), lambda tt, ch=ch, t=t: press(tt, ch, 15 + 112 * ((tt - t) / (TPS * 1.2)))); t += int(TPS * 1.2)
+    ramp(t, int(TPS * 1.2), lambda tt, ch=ch, t=t: press(tt, ch, 127 - 112 * ((tt - t) / (TPS * 1.2)))); t += int(TPS * 1.2)
+    noff(t, ch, note); t += TPS // 4
 # Part 3 — expressive phrase: each note scoops into pitch with a pressure swell
-for i, note in enumerate([60, 62, 64, 67, 72]):
-    ch = CH[i % len(CH)]; dur = int(TPS * 0.55)
+for i, note in enumerate([60, 62, 64, 65, 67, 69, 71, 72]):
+    ch = CH[i % len(CH)]; dur = int(TPS * 0.5)
     press(t, ch, 20); bend_semis(t, ch, -1); non(t, ch, note, 90)
     ramp(t, dur, lambda tt, ch=ch, t=t, dur=dur: bend_semis(tt, ch, -1 + (tt - t) / dur))
-    ramp(t, dur, lambda tt, ch=ch, t=t, dur=dur: press(tt, ch, 20 + 90 * ((tt - t) / dur)))
-    t += dur; noff(t, ch, note); t += int(TPS * 0.12)
+    ramp(t, dur, lambda tt, ch=ch, t=t, dur=dur: press(tt, ch, 20 + 95 * ((tt - t) / dur)))
+    t += dur; noff(t, ch, note); t += int(TPS * 0.1)
+t += TPS // 2
+# Part 4 — contrary motion: two held notes bend apart, then back together
+non(t, 2, 60, 90); non(t, 3, 60, 90)          # unison, then split
+ramp(t, int(TPS * 1.5), lambda tt, t=t: (bend_semis(tt, 2,  3 * (tt - t) / (TPS * 1.5)),
+                                         bend_semis(tt, 3, -3 * (tt - t) / (TPS * 1.5)))); t += int(TPS * 1.5)
+ramp(t, int(TPS * 1.5), lambda tt, t=t: (bend_semis(tt, 2,  3 * (1 - (tt - t) / (TPS * 1.5))),
+                                         bend_semis(tt, 3, -3 * (1 - (tt - t) / (TPS * 1.5))))); t += int(TPS * 1.5)
+noff(t, 2, 60); noff(t, 3, 60); t += TPS // 2
+# Part 5 — a sustained note with pressure vibrato + a bend wiggle
+non(t, 4, 67, 85); press(t, 4, 40)
+dur = int(TPS * 3)
+ramp(t, dur, lambda tt, t=t: (press(tt, 4, 70 + 45 * math.sin((tt - t) / TPS * 2 * math.pi * 5)),
+                              bend_semis(tt, 4, 0.4 * math.sin((tt - t) / TPS * 2 * math.pi * 5))))
+t += dur; noff(t, 4, 67)
 tEnd = t + TPS
 
 evs.sort(key=lambda x: x[0])

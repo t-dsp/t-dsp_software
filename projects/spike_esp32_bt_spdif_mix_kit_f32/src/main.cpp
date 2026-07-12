@@ -405,6 +405,9 @@ static void applyMidiMode(bool mpe) {
     g_mpeMode = mpe;
     float range = mpe ? tdsp::MidiRouter::kDefaultPitchBendRange : 2.0f;   // 48 (MPE) vs 2
     for (uint8_t ch = 1; ch <= 16; ch++) g_router.setPitchBendRange(ch, range);
+    // MPE is single-timbre: a song's per-channel program changes shouldn't apply, so the
+    // whole performance (and the MPE test song) uses the SELECTED instrument, not the file's.
+    g_player.setProgramChangeEnabled(!mpe);
     synthSetMpeMode(mpe);   // backend hook (no-op except TSF)
     Serial.printf("[mode] %s\n", mpe ? "MPE (per-note bend/pressure)" : "normal MIDI");
 }

@@ -53,15 +53,21 @@ static void synthSetInstrument(int idx) {
     Serial.printf("[synth] all channels -> GM %d = %s\n", idx, synthInstrumentName(idx));
 }
 
-// MPE mode hook (called by main.cpp applyMidiMode). MPE puts one note per member
-// channel 2..16, so channel 10 must be melodic, not the GM drum kit; normal MIDI
-// keeps ch10 as drums. Per-note bend range is handled by the router (48 semis).
+// MPE mode hook (called by main.cpp applyMidiMode). MPE is single-timbre: every member
+// channel (1..16, including 10) plays the ONE currently-selected instrument, so we point
+// them all at g_synthInstrument. Normal MIDI restores GM drums on channel 10 and leaves
+// the other channels' programs alone. Per-note bend range is handled by the router.
 static void synthSetMpeMode(bool mpe) {
     if (!g_tsf) return;
     AudioNoInterrupts();
-    tsf_channel_set_presetnumber(g_tsf, 9, mpe ? g_synthInstrument : 0, mpe ? 0 : 1);
+    if (mpe) {
+        for (int ch = 0; ch < 16; ch++) tsf_channel_set_presetnumber(g_tsf, ch, g_synthInstrument, 0);
+    } else {
+        tsf_channel_set_presetnumber(g_tsf, 9, 0, 1);   // GM drums back on ch10
+    }
     AudioInterrupts();
-    Serial.printf("[synth] MPE %s: channel 10 -> %s\n", mpe ? "ON" : "off", mpe ? "melodic" : "drums");
+    Serial.printf("[synth] MPE %s\n", mpe ? "ON: all channels play the selected instrument"
+                                         : "off: channel 10 = GM drums");
 }
 
 static void synthBegin() {
