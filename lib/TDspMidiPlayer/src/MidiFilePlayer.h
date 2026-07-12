@@ -43,9 +43,14 @@ public:
     // fixed-timbre backend that should ignore the file's instrument choices.
     void setProgramChangeEnabled(bool en) { pcEnabled_ = en; }
 
-    // Pitch-bend range in semitones used to convert the file's 14-bit bend into
-    // the MidiSink's float-semitone convention (default 2).
-    void setPitchBendRange(float semis) { pbRange_ = semis; }
+    // Default pitch-bend range in semitones, used to convert the file's 14-bit bend
+    // into the MidiSink's float-semitone convention (default 2). A song can override
+    // it PER CHANNEL via RPN 0,0 (CC 101=0, 100=0, 6=semitones) — many do (e.g. ±12);
+    // ignoring that renders bends at a fraction of their intended depth.
+    void setPitchBendRange(float semis) {
+        pbDefault_ = semis;
+        for (int c = 0; c < 16; c++) pbRange_[c] = semis;
+    }
 
     // Start playing ev[0..count). `ev` must outlive playback (not copied).
     void play(const MidiFileEvent *ev, uint32_t count) {
@@ -53,6 +58,9 @@ public:
         if (!ev || count == 0) return;
         ev_ = ev; count_ = count; idx_ = 0;
         wait_ = ev_[0].deltaMs; clock_ = 0;
+        for (int c = 0; c < 16; c++) {          // reset per-channel bend range + RPN state
+            pbRange_[c] = pbDefault_; rpnMsb_[c] = rpnLsb_[c] = 0x7F;
+        }
         playing_ = true;
     }
 
@@ -98,7 +106,7 @@ private:
             case kControlChange: dispatchCC(ch, e.data1, e.data2); break;
             case kPitchBend: {
                 const int value = ((int)e.data2 << 7) | (int)e.data1;   // 0..16383, center 8192
-                sink_->onPitchBend(ch, ((float)(value - 8192) / 8192.0f) * pbRange_);
+                sink_->onPitchBend(ch, ((float)(value - 8192) / 8192.0f) * pbRange_[e.channel]);
                 break;
             }
             default: break;
@@ -109,10 +117,16 @@ private:
     // (expression, pan, ...) is dropped for now — the sink has no generic CC
     // path, and these cover the musically important cases.
     void dispatchCC(uint8_t ch, uint8_t cc, uint8_t val) {
+        const uint8_t ci = (uint8_t)(ch - 1);   // 0-based channel for RPN/range state
         switch (cc) {
             case 1:   sink_->onModWheel(ch, val / 127.0f); break;   // mod wheel
             case 74:  sink_->onTimbre  (ch, val / 127.0f); break;   // MPE timbre
             case 64:  sink_->onSustain (ch, val >= 64);    break;   // sustain pedal
+            // RPN: select register (101=MSB, 100=LSB); data entry 6 sets its value.
+            // RPN 0,0 = pitch-bend range in semitones (a song can raise it above ±2).
+            case 101: rpnMsb_[ci] = val; break;
+            case 100: rpnLsb_[ci] = val; break;
+            case 6:   if (rpnMsb_[ci] == 0 && rpnLsb_[ci] == 0) pbRange_[ci] = (float)val; break;
             case 120: // all sound off
             case 123: sink_->onAllNotesOff(ch); break;              // all notes off
             default:  break;
@@ -127,7 +141,10 @@ private:
     elapsedMillis        clock_;
     bool                 playing_   = false;
     bool                 pcEnabled_ = true;
-    float                pbRange_   = 2.0f;
+    float                pbDefault_ = 2.0f;              // fallback bend range (no RPN in file)
+    float                pbRange_[16] = {2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2};  // per-channel, RPN-settable
+    uint8_t              rpnMsb_[16] = {0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F};
+    uint8_t              rpnLsb_[16] = {0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F};
     uint16_t             chMask_    = kMaskNoDrums;
 };
 
