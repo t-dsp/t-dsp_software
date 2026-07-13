@@ -40,6 +40,8 @@ export const CMD = {
   SET_MIDI_MODE: 0x25, // + 1 byte: 0 = normal MIDI, 1 = MPE (per-note expression)
   SET_LOOP: 0x26, // + 1 byte: 0/1 — loop the current song when it ends
   SET_PRESSURE: 0x27, // + 1 byte: MPE pressure routing bitmask (1=vol 2=bright 4=vib 8=trem)
+  SET_MODWHEEL: 0x28, // + 1 byte: mod-wheel routing bitmask (2=bright 4=vib 8=trem)
+  SET_LFOMODE: 0x29, // + 1 byte: 0 respect patch LFO / 1 force LFO on any patch
 } as const;
 
 // TAC5212 DAC highpass filter modes — byte sent via SET_HPF. Maps to the
@@ -610,6 +612,16 @@ export function useTdsp() {
     (mask: number) => writeByteCmd(CMD.SET_PRESSURE, mask & 0xff),
     [writeByteCmd]
   );
+  // Mod-wheel routing bitmask: 2=brightness 4=vibrato 8=tremolo (volume bit ignored).
+  const setModWheel = useCallback(
+    (mask: number) => writeByteCmd(CMD.SET_MODWHEEL, mask & 0xff),
+    [writeByteCmd]
+  );
+  // LFO mode for vibrato/tremolo: false = respect the patch's own LFO, true = force one.
+  const setLfoMode = useCallback(
+    (force: boolean) => writeByteCmd(CMD.SET_LFOMODE, force ? 1 : 0),
+    [writeByteCmd]
+  );
   // Ask the device to re-scan its SD card and re-send the catalog. The device
   // NOTIFYs the songs/instruments chars, which re-reads via the subscription; we
   // also re-read after a short delay in case the notify is missed.
@@ -703,6 +715,8 @@ export function useTdsp() {
     setMidiMode,
     setLoop,
     setPressure,
+    setModWheel,
+    setLfoMode,
     refreshCatalog,
   };
 }

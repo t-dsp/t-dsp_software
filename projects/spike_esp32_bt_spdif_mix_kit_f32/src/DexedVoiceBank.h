@@ -45,5 +45,10 @@ bool copyVoiceName(int bank, int voice, char *out, int outLen);
 // call `engine.panic()` first.
 bool loadVoice(AudioSynthDexed &engine, int bank, int voice);
 
+// Reads the packed voice's LFO config to report whether it natively does vibrato /
+// tremolo. Returns a bitmask: bit0 (1) = vibrato-capable (LFO modulates pitch),
+// bit1 (2) = tremolo-capable (LFO modulates amplitude). Used for the [V]/[T] UI tags.
+uint8_t voiceLfoTags(int bank, int voice);
+
 } // namespace dexed
 } // namespace tdsp

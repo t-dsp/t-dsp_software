@@ -43,6 +43,8 @@ export default function App() {
     setMidiMode,
     setLoop,
     setPressure,
+    setModWheel,
+    setLfoMode,
     refreshCatalog,
   } = useTdsp();
   const [showSettings, setShowSettings] = useState(false);
@@ -57,8 +59,10 @@ export default function App() {
   const [mpe, setMpe] = useState(false);
   // Loop the current song (local UI state; sent to the device on change).
   const [loop, setLoopState] = useState(false);
-  // MPE pressure routing bitmask (1=volume 2=brightness 4=vibrato 8=tremolo). Default = vol+bright.
-  const [pressMask, setPressMask] = useState(3);
+  // Expression routing bitmasks (1=volume 2=brightness 4=vibrato 8=tremolo).
+  const [pressMask, setPressMask] = useState(3);   // pressure: default vol+bright
+  const [modMask, setModMask] = useState(4);       // mod wheel: default vibrato (no volume bit)
+  const [lfoForce, setLfoForce] = useState(true);  // force LFO so vib/trem work on any patch
   const connected = state === 'connected';
 
   // Initialize the HPF controls from the device's reported state once per
@@ -93,6 +97,15 @@ export default function App() {
     const next = pressMask ^ bit;
     setPressMask(next);
     setPressure(next);
+  };
+  const onToggleModBit = (bit: number) => {
+    const next = modMask ^ bit;
+    setModMask(next);
+    setModWheel(next);
+  };
+  const onSetLfoForce = (force: boolean) => {
+    setLfoForce(force);
+    setLfoMode(force);
   };
 
   const openSettings = () => {
@@ -157,6 +170,10 @@ export default function App() {
         onToggleLoop={onToggleLoop}
         pressMask={pressMask}
         onTogglePressBit={onTogglePressBit}
+        modMask={modMask}
+        onToggleModBit={onToggleModBit}
+        lfoForce={lfoForce}
+        onSetLfoForce={onSetLfoForce}
         dxVoice={dxVoice}
         onSelectVoice={(i) => {
           setDxVoiceState(i);
@@ -207,6 +224,10 @@ function SettingsModal({
   onToggleLoop,
   pressMask,
   onTogglePressBit,
+  modMask,
+  onToggleModBit,
+  lfoForce,
+  onSetLfoForce,
   dxVoice,
   onSelectVoice,
   song,
@@ -236,6 +257,10 @@ function SettingsModal({
   onToggleLoop: () => void;
   pressMask: number;
   onTogglePressBit: (bit: number) => void;
+  modMask: number;
+  onToggleModBit: (bit: number) => void;
+  lfoForce: boolean;
+  onSetLfoForce: (force: boolean) => void;
   dxVoice: number;
   onSelectVoice: (index: number) => void;
   song: number;
@@ -338,16 +363,28 @@ function SettingsModal({
                 onPress={onToggleMpe}
               />
 
-              <Text style={styles.sectionLabel}>Pressure (MPE Z) controls</Text>
+              <Text style={styles.sectionLabel}>Expression — controller → sound</Text>
+
+              <Text style={styles.dim}>Mod Wheel (every keyboard)</Text>
+              <SecondaryButton label={`${modMask & 4 ? '☑' : '☐'}  Mod Wheel → Vibrato`} onPress={() => onToggleModBit(4)} />
+              <SecondaryButton label={`${modMask & 8 ? '☑' : '☐'}  Mod Wheel → Tremolo`} onPress={() => onToggleModBit(8)} />
+              <SecondaryButton label={`${modMask & 2 ? '☑' : '☐'}  Mod Wheel → Brightness`} onPress={() => onToggleModBit(2)} />
+
+              <View style={{ height: 10 }} />
+              <Text style={styles.dim}>Pressure (aftertouch / MPE Z)</Text>
+              <SecondaryButton label={`${pressMask & 1 ? '☑' : '☐'}  Pressure → Volume`} onPress={() => onTogglePressBit(1)} />
+              <SecondaryButton label={`${pressMask & 2 ? '☑' : '☐'}  Pressure → Brightness`} onPress={() => onTogglePressBit(2)} />
+              <SecondaryButton label={`${pressMask & 4 ? '☑' : '☐'}  Pressure → Vibrato`} onPress={() => onTogglePressBit(4)} />
+              <SecondaryButton label={`${pressMask & 8 ? '☑' : '☐'}  Pressure → Tremolo`} onPress={() => onTogglePressBit(8)} />
+
+              <View style={{ height: 10 }} />
               <Text style={styles.dim}>
-                What channel pressure modulates. Volume &amp; Brightness work on any patch;
-                Vibrato &amp; Tremolo add an LFO.
+                LFO for Vibrato/Tremolo. Force = works on any patch; Respect = only instruments tagged [V]/[T].
               </Text>
-              <View style={{ height: 8 }} />
-              <SecondaryButton label={`${pressMask & 1 ? '☑' : '☐'}  Volume`} onPress={() => onTogglePressBit(1)} />
-              <SecondaryButton label={`${pressMask & 2 ? '☑' : '☐'}  Brightness`} onPress={() => onTogglePressBit(2)} />
-              <SecondaryButton label={`${pressMask & 4 ? '☑' : '☐'}  Vibrato`} onPress={() => onTogglePressBit(4)} />
-              <SecondaryButton label={`${pressMask & 8 ? '☑' : '☐'}  Tremolo`} onPress={() => onTogglePressBit(8)} />
+              <SecondaryButton
+                label={lfoForce ? 'LFO: Force on any patch' : 'LFO: Respect patch [V]/[T]'}
+                onPress={() => onSetLfoForce(!lfoForce)}
+              />
 
               <Text style={styles.sectionLabel}>Song</Text>
               <Dropdown label="Song" options={songs} value={song} onSelect={onSelectSong} />

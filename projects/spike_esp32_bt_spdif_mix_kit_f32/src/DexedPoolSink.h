@@ -61,46 +61,54 @@ public:
         const int16_t counts = clampCounts((int)(semitones / (float)kBendRange * 8192.0f));
         forEachTarget(ch, [&](AudioSynthDexed *e) { e->setPitchbendRange((uint8_t)kBendRange); e->setPitchbend(counts); });
     }
-    // ---- Pressure (MPE Z-axis) routing -------------------------------------
-    // What channel pressure modulates is configurable (a bitmask, any combination):
+    // ---- Expression routing (Mod Wheel + Pressure) -------------------------
+    // Two performance SOURCES — the mod wheel (CC1, on every keyboard) and channel
+    // pressure (mono aftertouch on a normal keyboard / per-note MPE-Z) — each route to any
+    // combination of DESTINATIONS. Mod wheel drives the Dexed controller targets; pressure
+    // drives them plus a per-note VOLUME swell. VOL applies to pressure only (mod wheel is
+    // for the LFO/EG effects). kLfoForce vs respect: see applyExprConfig.
     enum {
-        PRESS_VOL    = 1,   // per-note output gain  — strong VOLUME swell, ANY patch
-        PRESS_BRIGHT = 2,   // Dexed aftertouch -> EG bias — brightness/timbre, ANY patch
-        PRESS_VIB    = 4,   // Dexed aftertouch -> PITCH (LFO vibrato) — needs the LFO
-        PRESS_TREM   = 8,   // Dexed aftertouch -> AMP   (LFO tremolo) — needs the LFO
+        DEST_VOL    = 1,   // per-note output gain — VOLUME swell (pressure only), ANY patch
+        DEST_BRIGHT = 2,   // Dexed controller -> EG bias — brightness/timbre, ANY patch
+        DEST_VIB    = 4,   // Dexed controller -> PITCH (LFO vibrato)
+        DEST_TREM   = 8,   // Dexed controller -> AMP   (LFO tremolo)
     };
     static constexpr float kEngineGain = 0.8f;   // must match synthBegin()'s setGain
     static constexpr float kPressFloor = 0.22f;  // VOL: 0 pressure -> 22% gain; full -> 100%
 
-    void     setPressureMask(uint8_t m) { _pressMask = m; applyPressureConfig(); }
+    void     setPressureMask(uint8_t m) { _pressMask = m; applyExprConfig(); }
+    void     setModMask(uint8_t m)      { _modMask = (uint8_t)(m & ~DEST_VOL); applyExprConfig(); }
+    void     setLfoForce(bool on)       { _lfoForce = on; applyExprConfig(); }
     uint8_t  pressureMask() const       { return _pressMask; }
+    uint8_t  modMask() const            { return _modMask; }
+    bool     lfoForce() const           { return _lfoForce; }
 
-    // (Re)program each engine's Dexed aftertouch target from the mask. VIB/TREM force the
-    // LFO to run (setLFOSpeed) so they respond even on patches whose LFO speed is 0. Call
-    // after every voice load (loadVoice can reset controller/LFO state).
-    void applyPressureConfig() {
-        const uint8_t dexed = (uint8_t)(((_pressMask & PRESS_VIB)  ? 1 : 0)    // Dexed PITCH
-                                      | ((_pressMask & PRESS_TREM) ? 2 : 0)    // Dexed AMP
-                                      | ((_pressMask & PRESS_BRIGHT)? 4 : 0)); // Dexed EG
-        const bool needLfo = _pressMask & (PRESS_VIB | PRESS_TREM);
+    static uint8_t dexedTarget(uint8_t mask) {   // dest bits -> Dexed target bitmask (1=pitch 2=amp 4=eg)
+        return (uint8_t)(((mask & DEST_VIB) ? 1 : 0) | ((mask & DEST_TREM) ? 2 : 0) | ((mask & DEST_BRIGHT) ? 4 : 0));
+    }
+
+    // (Re)program each engine's mod-wheel + aftertouch targets from the masks. In FORCE
+    // mode, if either source routes to vibrato/tremolo we also force the LFO (speed +
+    // pitch sensitivity) so it works on ANY patch; in RESPECT mode we leave the patch's
+    // own LFO alone (only natively-LFO patches — the [V]/[T]-tagged ones — respond). Call
+    // after every voice load (loadVoice resets controller/LFO state).
+    void applyExprConfig() {
+        const uint8_t both = _modMask | _pressMask;
         for (uint8_t i = 0; i < _n; ++i) {
-            _eng[i]->setAftertouchRange(99);
-            _eng[i]->setAftertouchTarget(dexed);
-            if (needLfo) {
-                _eng[i]->setLFOSpeed(30);          // ~a few Hz so vib/trem oscillate
-                _eng[i]->setLFOWaveform(0);        // triangle/sine — smooth
-                // Vibrato depth = pitch_mod (pressure) * LFO pitch-mod SENSITIVITY. Force
-                // it to max so pressure->vibrato works regardless of the patch's own value;
-                // tremolo (amp) is driven directly by pressure*lfo_val and needs no sens.
-                if (_pressMask & PRESS_VIB) _eng[i]->setLFOPitchModulationSensitivity(7);
+            _eng[i]->setAftertouchRange(99); _eng[i]->setAftertouchTarget(dexedTarget(_pressMask));
+            _eng[i]->setModWheelRange(99);   _eng[i]->setModWheelTarget(dexedTarget(_modMask));
+            if (_lfoForce && (both & (DEST_VIB | DEST_TREM))) {
+                _eng[i]->setLFOSpeed(30);
+                _eng[i]->setLFOWaveform(0);
+                if (both & DEST_VIB) _eng[i]->setLFOPitchModulationSensitivity(7);
             }
         }
     }
 
     void onPressure(uint8_t ch, float value) override {
         const uint8_t v = toMidi7(value);
-        // VOL on -> swell gain from kPressFloor..1; VOL off -> hold gain at base.
-        const float g = (_pressMask & PRESS_VOL)
+        // VOL routed -> swell gain from kPressFloor..1; else hold at base.
+        const float g = (_pressMask & DEST_VOL)
                           ? kEngineGain * (kPressFloor + (1.0f - kPressFloor) * value)
                           : kEngineGain;
         forEachTarget(ch, [&](AudioSynthDexed *e) { e->setAftertouch(v); e->setGain(g); });
@@ -131,7 +139,9 @@ private:
     int8_t   _chEng[17];    // MPE: member channel (1..16) -> engine, -1 = unmapped
     uint8_t  _rr = 0;       // normal-mode round-robin cursor
     uint32_t _seq = 0;      // monotonic age stamp for oldest-note stealing
-    uint8_t  _pressMask = PRESS_VOL | PRESS_BRIGHT;   // what pressure modulates (default)
+    uint8_t  _pressMask = DEST_VOL | DEST_BRIGHT;   // pressure routing (default: volume + brightness)
+    uint8_t  _modMask   = DEST_VIB;                 // mod-wheel routing (default: vibrato)
+    bool     _lfoForce  = true;                     // force LFO so vib/trem work on any patch
 
     uint8_t maxVoices() const {
         uint16_t m = (uint16_t)_n * _vpe;

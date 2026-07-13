@@ -232,12 +232,16 @@ static int         synthNumInstruments()     { return kNumInstruments; }
 static int         synthInstrument()         { return g_synthInstrument; }
 
 static const char *synthInstrumentName(int i) {
-    static char buf[32];
+    static char buf[40];
     int bank  = i / tdsp::dexed::kVoicesPerBank;
     int voice = i % tdsp::dexed::kVoicesPerBank;
     char vname[tdsp::dexed::kVoiceNameBufBytes];
     if (!tdsp::dexed::copyVoiceName(bank, voice, vname, sizeof(vname))) vname[0] = 0;
-    snprintf(buf, sizeof(buf), "%s: %s", tdsp::dexed::bankName(bank), vname);
+    // [V]/[T] tag = patch's LFO natively does vibrato/tremolo (matters most in RESPECT LFO
+    // mode, where only these patches wobble; informational in FORCE mode).
+    uint8_t tags = tdsp::dexed::voiceLfoTags(bank, voice);
+    const char *tag = (tags == 3) ? " [V][T]" : (tags & 1) ? " [V]" : (tags & 2) ? " [T]" : "";
+    snprintf(buf, sizeof(buf), "%s: %s%s", tdsp::dexed::bankName(bank), vname, tag);
     return buf;
 }
 
@@ -252,10 +256,10 @@ static void synthSetInstrument(int idx) {
         g_pool[i]->panic();
         tdsp::dexed::loadVoice(*g_pool[i], bank, voice);
     }
-    // Re-apply the pressure routing (aftertouch target / LFO) after loading — loadVoice
-    // can reset controller + LFO state. What pressure modulates is configurable via the
-    // sink's mask (@PRESSURE=); default = VOLUME + BRIGHTNESS.
-    g_poolSink.applyPressureConfig();
+    // Re-apply the expression routing (mod-wheel + aftertouch targets / LFO) after loading
+    // — loadVoice resets controller + LFO state. Configured via @MODWHEEL / @PRESSURE /
+    // @LFOMODE; defaults: mod wheel -> vibrato, pressure -> volume + brightness, force LFO.
+    g_poolSink.applyExprConfig();
     g_synthInstrument = idx;
     // ReplayGain-style per-voice loudness trim (baked table in DexedVoiceGains.h). One
     // bus gain for the whole pool is correct: the pool is single-timbre (one voice at a

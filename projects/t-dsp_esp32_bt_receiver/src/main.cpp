@@ -86,6 +86,8 @@ enum : uint8_t {
   CMD_SET_MIDI_MODE= 0x25,  // 2nd byte = 0 normal MIDI / 1 MPE; relayed to the Teensy
   CMD_SET_LOOP     = 0x26,  // 2nd byte = 0/1 loop the current song; relayed to the Teensy
   CMD_SET_PRESSURE = 0x27,  // 2nd byte = MPE pressure routing bitmask (1=vol 2=bright 4=vib 8=trem)
+  CMD_SET_MODWHEEL = 0x28,  // 2nd byte = mod-wheel routing bitmask (2=bright 4=vib 8=trem)
+  CMD_SET_LFOMODE  = 0x29,  // 2nd byte = 0 respect patch LFO / 1 force LFO on any patch
 };
 
 BluetoothA2DPSink a2dp_sink;
@@ -119,6 +121,8 @@ static void relayHpf(uint8_t mode)    { Serial.printf("@HPF=%u\n", mode); }
 static void relayMidiMode(uint8_t m)  { Serial.printf("@MIDIMODE=%u\n", m); }
 static void relayLoop(uint8_t on)     { Serial.printf("@LOOP=%u\n", on ? 1 : 0); }
 static void relayPressure(uint8_t m)  { Serial.printf("@PRESSURE=%u\n", m); }
+static void relayModWheel(uint8_t m)  { Serial.printf("@MODWHEEL=%u\n", m); }
+static void relayLfoMode(uint8_t f)   { Serial.printf("@LFOMODE=%u\n", f ? 1 : 0); }
 
 // ---- Paired-source list (multi-device switch) -----------------------------
 static BLECharacteristic *g_srcChar = nullptr;
@@ -414,6 +418,18 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
         if (v.size() >= 2) {
           Serial.printf("[ble] cmd: SET PRESSURE mask=%u\n", v[1]);
           relayPressure(v[1]);   // -> Teensy: @PRESSURE=<mask>
+        }
+        break;
+      case CMD_SET_MODWHEEL:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET MODWHEEL mask=%u\n", v[1]);
+          relayModWheel(v[1]);   // -> Teensy: @MODWHEEL=<mask>
+        }
+        break;
+      case CMD_SET_LFOMODE:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET LFOMODE %s\n", v[1] ? "force" : "respect");
+          relayLfoMode(v[1]);    // -> Teensy: @LFOMODE=<0|1>
         }
         break;
       default:
