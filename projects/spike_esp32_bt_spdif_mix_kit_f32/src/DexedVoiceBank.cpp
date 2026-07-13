@@ -15,7 +15,8 @@ namespace {
 constexpr int kDecodedVoiceBytes = 156;
 
 constexpr int kVmemBytes        = 128;
-constexpr int kVmemNameOffset   = 117;
+constexpr int kVmemNameOffset   = 118;   // name is bytes 118..127; byte 117 is transpose
+                                          // (reading 117 prepended a garbage transpose char)
 
 // Order must match the bank layout in dexed_banks_data.h. Names chosen
 // to be short enough to fit in a dropdown without wrapping.
