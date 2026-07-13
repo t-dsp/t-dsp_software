@@ -66,6 +66,11 @@ MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
 // TDM output drives the SAI1 clock on its own (proven by spike_f32_usb_loopback).
 AudioSettings_F32      g_audioSettings(AUDIO_SAMPLE_RATE_EXACT, AUDIO_BLOCK_SAMPLES);
 AudioOutputTDM_F32     tdmOut;               // SAI1 TDM (32-bit slots) -> TAC5212 DAC
+// Diagnostic ADC capture of the analog loopback (HP OUT1/OUT2 -> IN1/IN2). The codec
+// re-digitizes its own DAC output and sends it back on DOUT / SAI1 RX (pin 8); slots
+// 0/1 = ADC ch1/ch2 (see setupCodec). tdmOut is still constructed FIRST so it keeps
+// update_responsibility (see project_f32_update_order); tdmIn just adds its own RX DMA.
+AudioInputTDM_F32      tdmIn;                // SAI1 TDM RX: codec ADC (loopback) -> Teensy
 
 // (A) Bluetooth: the async I2S resampler is int16-only (lib/TDspAsyncI2S has no
 // F32 variant), so we bridge its two output channels to F32 immediately with two
@@ -135,6 +140,88 @@ static bool g_sdReady = false;
   #include "SynthBackendDexedPool.h" // MPE-capable Dexed: pool of engines, one per note
 #else
   #include "SynthBackendDexed.h"
+#endif
+
+#ifdef TDSP_SYNTH_DEXED_POOL
+// Analog-loopback capture probe: taps tdmIn slot 0 = ADC ch1 = the re-digitized OUT1.
+// A dedicated capture-only class (not ClipProbe_F32) so its 32 KB buffer can live in
+// DMAMEM (RAM2) instead of RAM1 — a second full ClipProbe overflows RAM1.
+DMAMEM static float g_adcCapBuf[8192];
+DMAMEM static float g_adcSnap[256];
+class AdcCaptureProbe_F32 : public AudioStream_F32 {
+public:
+    static const int kCapN = 8192;
+    static const int kPre = 128, kPost = 128, kSnapN = kPre + kPost;
+    AdcCaptureProbe_F32(void) : AudioStream_F32(1, inputQueueArray) {}
+    void update(void) override {
+        audio_block_f32_t *b = receiveReadOnly_f32(0);
+        if (!b) return;
+        for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+            float s = b->data[i];
+            if (m_arm && m_idx < kCapN) { g_adcCapBuf[m_idx++] = s; if (m_idx >= kCapN) m_arm = false; }
+            // Continuous discontinuity watch on the ANALOG loopback: an intermittent
+            // codec/DAC pop shows as a step here that has no match in the digital sum.
+            if (m_haveHist) {
+                float dj = s - m_prev; if (dj < 0) dj = -dj;
+                if (dj > m_maxJump) m_maxJump = dj;
+                if (dj > m_worstJump && m_snapFill == 0) {
+                    m_worstJump = dj;
+                    for (int k = 0; k < kPre; k++) g_adcSnap[k] = m_ring[(m_ringHead + k) % kPre];
+                    m_snapFill = kPre;
+                }
+            }
+            if (m_snapFill > 0 && m_snapFill < kSnapN) {
+                g_adcSnap[m_snapFill++] = s;
+                if (m_snapFill >= kSnapN) { m_snapValid = true; m_snapFill = 0; }
+            }
+            m_ring[m_ringHead] = s; m_ringHead = (m_ringHead + 1) % kPre;
+            m_prev = s; m_haveHist = true;
+        }
+        AudioStream_F32::release(b);
+    }
+    void         armCapture(void)  { __disable_irq(); m_idx = 0; m_arm = true; __enable_irq(); }
+    bool         captureDone(void) const { return !m_arm; }
+    int          captureCount(void) const { return m_idx; }
+    const float *capture(void)     const { return g_adcCapBuf; }
+    float        maxJump(void)   const { return m_maxJump; }
+    void         resetPeriod(void)     { m_maxJump = 0.0f; }
+    void         resetWorst(void)      { __disable_irq(); m_worstJump = 0.0f; m_snapValid = false; m_snapFill = 0; __enable_irq(); }
+    float        worstJump(void) const { return m_worstJump; }
+    bool         snapValid(void) const { return m_snapValid; }
+    const float *snap(void)      const { return g_adcSnap; }
+private:
+    audio_block_f32_t *inputQueueArray[1];
+    volatile bool m_arm = false;
+    volatile int  m_idx = 0;
+    float         m_ring[kPre];
+    volatile int  m_ringHead = 0, m_snapFill = 0;
+    volatile bool m_snapValid = false, m_haveHist = false;
+    volatile float m_maxJump = 0.0f, m_worstJump = 0.0f, m_prev = 0.0f;
+};
+AdcCaptureProbe_F32 adcProbe;
+AudioConnection_F32 cAdcCap(tdmIn, 0, adcProbe, 0);
+
+// Slot scanner: tracks peak on ALL 8 TDM input slots so we can find which slot (if
+// any) carries the ADC loopback — diagnostic for when slot 0 comes back silent.
+class TdmScan_F32 : public AudioStream_F32 {
+public:
+    TdmScan_F32(void) : AudioStream_F32(8, inputQueueArray) {}
+    void update(void) override {
+        for (int ch = 0; ch < 8; ch++) {
+            audio_block_f32_t *b = receiveReadOnly_f32(ch);
+            if (!b) continue;
+            for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) { float m = fabsf(b->data[i]); if (m > pk[ch]) pk[ch] = m; }
+            AudioStream_F32::release(b);
+        }
+    }
+    void reset(void) { for (int i = 0; i < 8; i++) pk[i] = 0.0f; }
+    volatile float pk[8] = {0};
+private:
+    audio_block_f32_t *inputQueueArray[8];
+};
+TdmScan_F32 tdmScan;
+AudioConnection_F32 csc0(tdmIn,0,tdmScan,0), csc1(tdmIn,1,tdmScan,1), csc2(tdmIn,2,tdmScan,2), csc3(tdmIn,3,tdmScan,3),
+                    csc4(tdmIn,4,tdmScan,4), csc5(tdmIn,5,tdmScan,5), csc6(tdmIn,6,tdmScan,6), csc7(tdmIn,7,tdmScan,7);
 #endif
 
 tac5212::TAC5212 g_codec(Wire);
@@ -216,7 +303,13 @@ FLASHMEM static void setupCodec() {
     sf.format  = tac5212::TAC5212::Format::Tdm;
     sf.wordLen = tac5212::TAC5212::WordLen::Bits32;   // 32-bit slots for AudioOutputTDM_F32 (was Bits16)
     g_codec.setSerialFormat(sf);
+#ifdef TDSP_DIGITAL_AUDIO_BOARD
+    // The t-dsp_digital_audio_board mis-wires DOUT (a buffer contends on the TDM data
+    // line), so its codec DOUT must be forced off. The t-dsp_tac5212_audio_adaptor_shield
+    // is wired correctly and leaves setSerialFormat's DOUT routing intact (needed for the
+    // ADC loopback capture). Board switch: define TDSP_DIGITAL_AUDIO_BOARD for the former.
     g_codec.writeRegister(0, /*INTF_CFG1*/ 0x10, 0x00);   // board bodge: disable codec DOUT
+#endif
     g_codec.setRxSlotOffset(1);
     g_codec.setRxChannelSlot(1, 0);
     g_codec.setRxChannelSlot(2, 1);
@@ -224,7 +317,23 @@ FLASHMEM static void setupCodec() {
     g_codec.out(2).setMode(tac5212::OutMode::HpDriver);
     g_codec.out(1).setDvol(-128.0f);
     g_codec.out(2).setDvol(-128.0f);
-    g_codec.setChannelEnable(/*inMask=*/0x0, /*outMask=*/0xC);
+    // --- ADC capture of the analog loopback (OUT1/OUT2 -> IN1/IN2) ---------------
+    // IN1/IN2 as single-ended line inputs (INxP), DC-low coupling for headroom; the
+    // codec re-digitizes its DAC output and transmits ADC ch1/ch2 on TDM TX slots 0/1
+    // (DOUT / SAI1 RX pin 8), where AudioInputTDM_F32 tdmIn reads them.
+    g_codec.adc(1).setMode(tac5212::AdcMode::SingleEndedInp);
+    g_codec.adc(2).setMode(tac5212::AdcMode::SingleEndedInp);
+    g_codec.adc(1).setCoupling(tac5212::AdcCoupling::DcLow);
+    g_codec.adc(2).setCoupling(tac5212::AdcCoupling::DcLow);
+    g_codec.adc(1).setFullscale(tac5212::AdcFullscale::V2rms);
+    g_codec.adc(2).setFullscale(tac5212::AdcFullscale::V2rms);
+    g_codec.adc(1).setDvol(0.0f);
+    g_codec.adc(2).setDvol(0.0f);
+    g_codec.setTxChannelSlot(1, 0);   // ADC ch1 -> TDM slot 0 (loopback of OUT1)
+    g_codec.setTxChannelSlot(2, 1);   // ADC ch2 -> TDM slot 1 (loopback of OUT2)
+    g_codec.setTxSlotOffset(1);       // mirror the RX slot offset
+    g_codec.setChannelEnable(/*inMask=*/0xC, /*outMask=*/0xC);   // IN1/IN2 + OUT1/OUT2 (CH1/CH2 = top bits of each nibble)
+    g_codec.powerAdc(true);
     g_codec.powerDac(true);
     delay(100);
     g_codec.setDspAvddSelect(true);
@@ -419,8 +528,15 @@ static void applyMidiMode(bool mpe) {
 // the USB CDC port (a Web Serial browser page, no ESP32 required). `reply` is the
 // stream a query answers on (only @GETCAT replies) so each channel gets its own
 // catalog. Returns true if the line was a recognized command.
+#ifdef TDSP_SYNTH_DEXED_POOL
+static void runGainSweep(int startIdx = 0);   // ReplayGain sweep; resumable from a voice index
+#endif
+
 static bool handleControlLine(const char* line, Print& reply) {
     if      (strncmp(line, "@VOL=", 5) == 0)      setMasterVolumePct(atoi(line + 5));
+#ifdef TDSP_SYNTH_DEXED_POOL
+    else if (strncmp(line, "@GAIN=", 6) == 0)     runGainSweep(atoi(line + 6));   // resume sweep from index
+#endif
     else if (strncmp(line, "@DXVOICE=", 9) == 0) { synthSetInstrument(atoi(line + 9));
                                  if (g_mpeMode) synthSetMpeMode(true); }   // re-sync ch10 (MPE member)
     else if (strncmp(line, "@SONG=", 6) == 0) {
@@ -697,6 +813,222 @@ static void runPizzCapture(int inst, int, int vel) {
     g_synthSink->onAllNotesOff(0);
     Serial.println("[cap] ALLDONE");
 }
+
+static void dumpFloatsTagged(const char *tag, const float *c, int n) {
+    Serial.printf("[lb] %s begin %d\n", tag, n);
+    char lb[220];
+    for (int i = 0; i < n; ) {
+        int p = 0;
+        for (int k = 0; k < 16 && i < n; k++, i++)
+            p += snprintf(lb + p, sizeof(lb) - p, "%.6g ", (double)c[i]);
+        Serial.println(lb);
+    }
+    Serial.printf("[lb] %s end\n", tag);
+}
+
+// Loopback capture ('L'): fire one note and record BOTH the digital synth sum (dxpClip)
+// and the re-digitized analog output (adcProbe, via the OUT->IN loopback) for the same
+// event. Comparing them (after latency alignment) shows whether the codec/analog stage
+// adds a per-note transient the clean digital signal doesn't have.
+static void runLoopbackCapture(int inst, int note, int vel) {
+    if (g_player.isPlaying()) songStop();
+    g_synthSink->onAllNotesOff(0);
+    synthSetInstrument(inst);
+    if (g_dvol < -30.0f) { g_dvol = -12.0f; if (g_codecOk) applyVol(); }   // ensure the DAC drives the loopback
+    delay(80);
+    Serial.printf("[lb] inst %d = %s note=%d vel=%d rate=%.0f N=%d dvol=%.0f\n",
+                  inst, synthInstrumentName(inst), note, vel,
+                  (double)AUDIO_SAMPLE_RATE_EXACT, ClipProbe_F32::kCapN, (double)g_dvol);
+    dxpClip.armCapture();
+    adcProbe.armCapture();
+    g_synthSink->onNoteOn(1, note, vel);
+    uint32_t t0 = millis();
+    while ((!dxpClip.captureDone() || !adcProbe.captureDone()) && millis() - t0 < 2500) delay(2);
+    g_synthSink->onNoteOff(1, note, 0);
+    dumpFloatsTagged("DIG", dxpClip.capture(),  dxpClip.captureCount());
+    dumpFloatsTagged("ADC", adcProbe.capture(), adcProbe.captureCount());
+    Serial.println("[lb] ALLDONE");
+    g_synthSink->onAllNotesOff(0);
+}
+
+// Slot scan ('Y'): play a loud note and report the peak on EACH of the 8 TDM input
+// slots, so we can see which slot (if any) carries the ADC loopback signal.
+static void runSlotScan(void) {
+    if (g_player.isPlaying()) songStop();
+    g_synthSink->onAllNotesOff(0);
+    synthSetInstrument(13);
+    if (g_dvol < -20.0f) { g_dvol = -6.0f; if (g_codecOk) applyVol(); }
+    tdmScan.reset();
+    Serial.printf("[scan] note 60 vel 120, dvol=%.0f, watching 8 TDM-in slots...\n", (double)g_dvol);
+    g_synthSink->onNoteOn(1, 60, 120);
+    uint32_t t0 = millis();
+    while (millis() - t0 < 900) delay(5);
+    g_synthSink->onNoteOff(1, 60, 0);
+    for (int ch = 0; ch < 8; ch++)
+        Serial.printf("[scan] slot %d peak = %.6f\n", ch, (double)tdmScan.pk[ch]);
+    g_synthSink->onAllNotesOff(0);
+    Serial.println("[scan] done");
+}
+
+// Dump the frozen window around the worst discontinuity seen since the last reset.
+// A clean waveform gives a smooth window; a voice-steal click gives a visible step.
+static void dumpWorstJump(void) {
+    Serial.printf("[jump] worst=%.6f valid=%d (window %d samples, step at idx %d)\n",
+                  (double)dxpClip.worstJump(), dxpClip.snapValid() ? 1 : 0,
+                  ClipProbe_F32::kSnapN, ClipProbe_F32::kPre);
+    if (!dxpClip.snapValid()) { Serial.println("[jump] (no discontinuity captured)"); return; }
+    const float *c = dxpClip.snap();
+    Serial.printf("[jump] begin %d\n", ClipProbe_F32::kSnapN);
+    char lb[220];
+    for (int i = 0; i < ClipProbe_F32::kSnapN; ) {
+        int p = 0;
+        for (int k = 0; k < 16 && i < ClipProbe_F32::kSnapN; k++, i++)
+            p += snprintf(lb + p, sizeof(lb) - p, "%.6g ", (double)c[i]);
+        Serial.println(lb);
+    }
+    Serial.println("[jump] end");
+}
+
+// Same as dumpWorstJump but for the ANALOG loopback (adcProbe). Tag [ajump] so the PC
+// can split it. Compare its worst step against the digital [jump] at the same session:
+// analog >> digital == a codec/DAC pop that isn't in the synthesis.
+static void dumpAdcWorstJump(void) {
+    Serial.printf("[ajump] worst=%.6f valid=%d (window %d samples, step at idx %d)\n",
+                  (double)adcProbe.worstJump(), adcProbe.snapValid() ? 1 : 0,
+                  AdcCaptureProbe_F32::kSnapN, AdcCaptureProbe_F32::kPre);
+    if (!adcProbe.snapValid()) { Serial.println("[ajump] (no discontinuity captured)"); return; }
+    const float *c = adcProbe.snap();
+    Serial.printf("[ajump] begin %d\n", AdcCaptureProbe_F32::kSnapN);
+    char lb[220];
+    for (int i = 0; i < AdcCaptureProbe_F32::kSnapN; ) {
+        int p = 0;
+        for (int k = 0; k < 16 && i < AdcCaptureProbe_F32::kSnapN; k++, i++)
+            p += snprintf(lb + p, sizeof(lb) - p, "%.6g ", (double)c[i]);
+        Serial.println(lb);
+    }
+    Serial.println("[ajump] end");
+}
+
+// --- ReplayGain sweep ('N') --------------------------------------------------
+// Measures the loudness of every one of the 320 DX7 voices and prints a
+// paste-ready kDexedVoiceTrim[] table for DexedVoiceGains.h (see that header for
+// the bake workflow). For each voice it plays a fixed reference note and records
+// the MAX short-term K-weighted loudness (the loudest ~100 ms window, dxpClip is
+// K-weighted per BS.1770) — this matches PERCEIVED loudness, so bright and
+// percussive patches no longer read quiet and then blast. Trims are centered on
+// the median voice loudness; a loose peak cap keeps boosts sane and the downstream
+// bus limiter (dxpLimit) catches whatever peaks through.
+static int cmpFloatAsc(const void *a, const void *b) {
+    float fa = *(const float *)a, fb = *(const float *)b;
+    return (fa > fb) - (fa < fb);
+}
+// Cooperative wait for the (otherwise blocking) sweep: keeps the USB stack serviced
+// so Windows' MTP driver watchdog doesn't re-enumerate the device mid-sweep and drop
+// the COM port (which is what killed the first capture attempts ~140s in). Audio runs
+// from the ISR independently, so the note keeps sounding for the full duration.
+static void sweepWait(uint32_t ms) {
+    uint32_t t0 = millis();
+    while (millis() - t0 < ms) {
+#if TDSP_HAS_SDCARD
+        MTP.loop();          // service the MTP endpoint so the host doesn't time it out
+#endif
+        g_usbHost.Task();
+        yield();
+    }
+}
+static void runGainSweep(int startIdx) {
+    static const int   kNote     = 60;     // C4 reference note
+    static const int   kVel      = 100;
+    static const int   kWinMs    = 100;    // short-term loudness window (~ear integration time)
+    static const int   kWindows  = 14;     // 14 * 100ms = 1.4s hold: covers slow-attack pads
+    static const int   kTailMs   = 350;    // let the note decay before the next voice
+    static const float kPeakCeil = 1.40f;  // loose raw-peak cap; the bus limiter cleans the rest
+    static const float kMinTrim  = 0.10f, kMaxTrim = 6.0f;
+    const int N = synthNumInstruments();   // 320
+
+    static DMAMEM float loud[320], peak[320];  // RAM2: keep 2.5 KB out of the tight RAM1/stack
+    if (N > 320) { Serial.println("[gain] N>320, aborting"); return; }
+
+    if (startIdx < 0) startIdx = 0;
+    if (g_player.isPlaying()) songStop();
+    const bool wasMpe   = g_mpeMode;
+    const int  savedInst = synthInstrument();
+    applyMidiMode(false);                  // deterministic: single note, normal alloc
+    g_synthSink->onAllNotesOff(0);
+
+    Serial.printf("[gain] sweep begin: voices %d..%d, note=%d vel=%d, K-weighted max-short-term (%dx%dms) (LOUD, ~%d min)\n",
+                  startIdx, N - 1, kNote, kVel, kWindows, kWinMs,
+                  ((N - startIdx) * (kWindows * kWinMs + kTailMs + 120)) / 60000 + 1);
+
+    // Pass 1 — for each voice, max short-term K-weighted loudness + raw peak. EVERY voice is
+    // printed (host stitches the per-voice "V=.. loud=.. peak=.." lines into the table), so a
+    // freeze mid-sweep only loses the current voice — resume with "@GAIN=<next index>".
+    for (int i = startIdx; i < N; ++i) {
+        g_synthSink->onAllNotesOff(0);
+        synthSetInstrument(i);             // NOTE: this sets dxpTrim to the baked value...
+        dxpTrim.setGain(1.0f);             // ...so force UNITY — we must measure RAW loudness.
+        sweepWait(60);
+        dxpClip.reset();                   // clears RMS, peak, and K-weight filter state
+        g_synthSink->onNoteOn(1, kNote, kVel);
+        float maxST = 0.0f;
+        for (int w = 0; w < kWindows; ++w) {
+            dxpClip.resetRms();            // new 100ms window; keep filter state (no restart) + peak
+            sweepWait(kWinMs);
+            float st = dxpClip.rms();
+            if (st > maxST) maxST = st;
+        }
+        g_synthSink->onNoteOff(1, kNote, 0);
+        sweepWait(kTailMs);
+        loud[i] = maxST;                   // perceptual loudness of this voice
+        peak[i] = dxpClip.peak();          // raw peak accumulated across the whole note
+        Serial.printf("[gain] V=%d/%d loud=%.5f peak=%.5f  %s\n",
+                      i, N, (double)loud[i], (double)peak[i], synthInstrumentName(i));
+    }
+    g_synthSink->onAllNotesOff(0);
+
+    // Restore prior state now — the paste-block below is a convenience only when a FULL run
+    // (startIdx==0) completes; otherwise the host computes the table from the V= lines.
+    if (startIdx > 0) {
+        synthSetInstrument(savedInst);
+        applyMidiMode(wasMpe);
+        Serial.printf("[gain] partial sweep done (%d..%d) — host stitches V= lines\n", startIdx, N - 1);
+        return;
+    }
+
+    // Target = median perceptual loudness (over voices that actually sounded), so trims
+    // center near 1.0 and roughly half the voices go up, half down.
+    static DMAMEM float sorted[320]; int m = 0;
+    for (int i = 0; i < N; ++i) if (loud[i] > 1e-5f) sorted[m++] = loud[i];
+    qsort(sorted, m, sizeof(float), cmpFloatAsc);
+    const float target = m ? sorted[m / 2] : 0.1f;
+    Serial.printf("[gain] target(median) loud=%.4f over %d sounding voices; peakCeil=%.2f\n",
+                  (double)target, m, (double)kPeakCeil);
+
+    // Pass 2 — compute + print the paste-ready table.
+    Serial.println("[gain] ---- paste the block below over kDexedVoiceTrim[] in DexedVoiceGains.h ----");
+    Serial.println("static const float kDexedVoiceTrim[320] = {");
+    char lb[200];
+    for (int i = 0; i < N; ++i) {
+        float byLoud = loud[i] > 1e-5f ? target    / loud[i] : 1.0f;
+        float byPeak = peak[i] > 1e-5f ? kPeakCeil / peak[i] : kMaxTrim;
+        float trim = byLoud < byPeak ? byLoud : byPeak;   // min: loudness-match but cap extreme boosts
+        if (trim < kMinTrim) trim = kMinTrim;
+        if (trim > kMaxTrim) trim = kMaxTrim;
+        if (i % 32 == 0) Serial.printf("    // bank %d\n", i / 32);
+        int col = i % 16;
+        if (col == 0) { lb[0] = 0; strcat(lb, "    "); }
+        char cell[16]; snprintf(cell, sizeof(cell), "%.3ff,", (double)trim);
+        strcat(lb, cell);
+        if (col == 15 || i == N - 1) Serial.println(lb);
+    }
+    Serial.println("};");
+    Serial.println("[gain] ---- end paste block ----");
+
+    // Restore prior state.
+    synthSetInstrument(savedInst);         // reapplies the baked trim for this voice
+    applyMidiMode(wasMpe);
+    Serial.println("[gain] sweep done");
+}
 #endif
 
 void loop() {
@@ -773,6 +1105,12 @@ void loop() {
 #ifdef TDSP_SYNTH_DEXED_POOL
             else if (c == 'K') { runPizzClipTest(273); }       // pizz clip probe: is the attack snap clipping?
             else if (c == 'J') { runPizzCapture(273, 60, 110); } // capture onset waveform -> serial (aliasing/zero-cross)
+            else if (c == 'R') { dxpClip.resetWorst(); adcProbe.resetWorst(); Serial.println("[jump] worst-discontinuity detectors reset (digital + analog)"); }
+            else if (c == 'G') { dumpWorstJump(); }             // dump worst DIGITAL step captured during playback
+            else if (c == 'H') { dumpAdcWorstJump(); }          // dump worst ANALOG (loopback) step during playback
+            else if (c == 'L') { runLoopbackCapture(13, 60, 110); }  // capture digital + analog loopback (13 JUPITER exemplifies the snap)
+            else if (c == 'Y') { runSlotScan(); }                    // scan all 8 TDM-in slots for the ADC loopback signal
+            else if (c == 'N') { runGainSweep(); }              // ReplayGain: sweep all 320 voices, print trim table
 #endif
         }
     }
@@ -814,9 +1152,15 @@ void loop() {
 #ifdef TDSP_SYNTH_DEXED_POOL
         // Synth-sum clip watch (pre-0.62 mix): shows per-engine int16 railing that the
         // final outPeak hides. During real song playback, railed>0 == audible clipping.
-        Serial.printf("  [synth] sumPeak=%.4f railed=%lu/%lu\n",
-                      (double)dxpClip.peak(), (unsigned long)dxpClip.clipped(), (unsigned long)dxpClip.total());
-        dxpClip.reset();
+        Serial.printf("  [synth] sumPeak=%.4f railed=%lu/%lu  maxJump=%.4f worstJump=%.4f\n",
+                      (double)dxpClip.peak(), (unsigned long)dxpClip.clipped(), (unsigned long)dxpClip.total(),
+                      (double)dxpClip.maxJump(), (double)dxpClip.worstJump());
+        // Analog-loopback discontinuity watch: adcMaxJump >> synth maxJump == a pop the
+        // codec/DAC added that isn't in the digital sum. Baseline ~0.03 (bright-edge slew).
+        Serial.printf("  [adc]   maxJump=%.4f worstJump=%.4f\n",
+                      (double)adcProbe.maxJump(), (double)adcProbe.worstJump());
+        dxpClip.reset(); dxpClip.resetPeriod();
+        adcProbe.resetPeriod();
 #endif
     }
 }
