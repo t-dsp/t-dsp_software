@@ -43,6 +43,7 @@
 #include "billie_jean_mid.h"
 #include "bohemian_mid.h"
 #include "song_event.h"           // baked built-in songs are SongEv[] arrays
+#include "test_songs.h"           // built-in MIDI/MPE test sequences (MidiFileEvent[])
 // Synth-agnostic MIDI playback (lib/TDspMidiPlayer): the non-blocking player
 // fans events into a tdsp::MidiSink. The concrete synth engine (Dexed / ymfm
 // OPM) is a build-time choice pulled in below via SynthBackend*.h; nothing in
@@ -365,7 +366,10 @@ static const int kNumBuiltin = sizeof(kBuiltinSongs) / sizeof(kBuiltinSongs[0]);
 // Unified runtime song list: built-ins first, then /songs/*.mid off the SD card.
 // SD songs are parsed on play into g_buf. Adding a song = drop a .mid on the
 // card; it appears in the catalog (and the app) with no firmware rebuild.
-struct SongRef { char name[48]; const SongEv *ev; uint32_t count; char path[96]; bool sd; };
+// A song source is one of: baked SongEv[] (ev), a baked rich MidiFileEvent[] test
+// sequence (mev, plays directly + flips MPE mode via `mpe`), or an SD .mid file (sd/path).
+struct SongRef { char name[48]; const SongEv *ev; uint32_t count; char path[96]; bool sd;
+                 const tdsp::MidiFileEvent *mev; uint32_t mcount; bool mpe; };
 static SongRef g_songs[48];
 static int     g_numSongs = 0;
 // g_sdReady is declared earlier (before the synth backend include).
@@ -400,7 +404,7 @@ static void scanSongDir(const char *dir) {
                 if (strcmp(dir, "/") == 0) snprintf(r.path, sizeof(r.path), "/%s", nm);
                 else                       snprintf(r.path, sizeof(r.path), "%s/%s", dir, nm);
                 strncpy(r.name, disp, sizeof(r.name) - 1); r.name[sizeof(r.name) - 1] = 0;
-                r.ev = nullptr; r.count = 0; r.sd = true;
+                r.ev = nullptr; r.count = 0; r.sd = true; r.mev = nullptr; r.mcount = 0; r.mpe = false;
             }
         }
         f.close();
@@ -408,32 +412,58 @@ static void scanSongDir(const char *dir) {
     d.close();
 }
 static void buildSongList() {
+    const int cap = (int)(sizeof(g_songs)/sizeof(g_songs[0]));
     g_numSongs = 0;
-    for (int i = 0; i < kNumBuiltin && g_numSongs < (int)(sizeof(g_songs)/sizeof(g_songs[0])); ++i) {
+    // Built-in MIDI/MPE test sequences FIRST, so they head the picker as "01 .. 08".
+    for (int i = 0; i < testsong::kNumTestSongs && g_numSongs < cap; ++i) {
+        SongRef &r = g_songs[g_numSongs++];
+        strncpy(r.name, testsong::kTestSongs[i].name, sizeof(r.name) - 1); r.name[sizeof(r.name) - 1] = 0;
+        r.ev = nullptr; r.count = 0; r.sd = false; r.path[0] = 0;
+        r.mev = testsong::kTestSongs[i].ev; r.mcount = testsong::kTestSongs[i].count; r.mpe = testsong::kTestSongs[i].mpe;
+    }
+    for (int i = 0; i < kNumBuiltin && g_numSongs < cap; ++i) {
         SongRef &r = g_songs[g_numSongs++];
         strncpy(r.name, kBuiltinSongs[i].name, sizeof(r.name) - 1); r.name[sizeof(r.name) - 1] = 0;
         r.ev = kBuiltinSongs[i].ev; r.count = kBuiltinSongs[i].count; r.sd = false; r.path[0] = 0;
+        r.mev = nullptr; r.mcount = 0; r.mpe = false;
     }
     if (!g_sdReady) return;
     if (!SD.exists("/songs")) SD.mkdir("/songs");   // create it so there's a home to drop songs into
     scanSongDir("/songs");
     scanSongDir("/");                               // also accept .mid files dropped at the card root
-    Serial.printf("[sd] songs: %d total (%d built-in + %d SD)\n",
-                  g_numSongs, kNumBuiltin, g_numSongs - kNumBuiltin);
+    Serial.printf("[sd] songs: %d total (%d test + %d built-in + %d SD)\n",
+                  g_numSongs, testsong::kNumTestSongs, kNumBuiltin,
+                  g_numSongs - testsong::kNumTestSongs - kNumBuiltin);
 }
 
-static int g_songSel = 0;   // selected / currently-playing song index
+static int  g_songSel = 0;          // selected / currently-playing song index
+static bool g_loop = false;         // when set, a song restarts itself when it ends
+static bool g_songWasPlaying = false;  // edge-detect natural song end (for loop) in loop()
 
 // Load the selected song into g_buf and hand it to the player. Baked built-ins
 // expand from their legacy SongEv[] (channel 0); SD songs parse straight to
 // MidiFileEvent[] (full channel/program/velocity). The player is non-blocking
 // (g_player.tick() in loop) and drives the synth via g_synthSink.
+static void applyMidiMode(bool mpe);   // defined below; test songs flip mode on start
+
 static void songStart(int idx) {
     if (g_numSongs == 0) return;
     if (idx < 0) idx = 0;
     if (idx >= g_numSongs) idx = g_numSongs - 1;
     g_songSel = idx;
     SongRef &r = g_songs[idx];
+    // Baked rich-event test sequence: set the device mode (MPE tests need per-note
+    // expression) then hand the events straight to the player — no expansion needed.
+    if (r.mev) {
+        applyMidiMode(r.mpe);
+        Serial.printf("[song] %s -> %s (%s, %lu events, start)\n", r.name, synthName(),
+                      r.mpe ? "MPE" : "MIDI", (unsigned long)r.mcount);
+        g_player.play(r.mev, r.mcount);
+        return;
+    }
+    // A non-test song is normal MIDI; if a prior MPE test left the device in MPE mode,
+    // return to normal so multi-timbral songs play with their own programs.
+    if (g_mpeMode) applyMidiMode(false);
     uint32_t n = 0;
     if (r.sd) {
         int got = tdsp::smf::loadSmfFile(r.path, g_buf, MAX_EVENTS);   // parse from SD (main loop)
@@ -448,9 +478,21 @@ static void songStart(int idx) {
     g_player.play(g_buf, n);
 }
 static void songStop() {
+    g_songWasPlaying = false;   // a manual stop must NOT trigger the loop-restart
     if (!g_player.isPlaying()) return;
     g_player.stop();
     Serial.println("[song] stopped");
+}
+
+// Called every loop(): if a looping song just ended on its own, restart it. Manual
+// stops clear g_songWasPlaying above, so they don't re-trigger.
+static void songLoopTick() {
+    bool now = g_player.isPlaying();
+    if (g_songWasPlaying && !now && g_loop) {
+        songStart(g_songSel);       // re-arm the same song (also re-applies its MIDI/MPE mode)
+        now = g_player.isPlaying();
+    }
+    g_songWasPlaying = now;
 }
 
 // Stream the device catalog (song + instrument names, '|'-delimited) to the ESP32
@@ -545,6 +587,8 @@ static bool handleControlLine(const char* line, Print& reply) {
     }
     else if (strcmp(line, "@GETCAT") == 0)        refreshCatalog(reply);   // re-scan SD + send catalog
     else if (strncmp(line, "@HPF=", 5) == 0)      setDacHpfMode(atoi(line + 5));
+    else if (strncmp(line, "@LOOP=", 6) == 0)   { g_loop = (atoi(line + 6) != 0);
+                                 Serial.printf("[song] loop %s\n", g_loop ? "ON" : "off"); }
     else if (strncmp(line, "@MIDIMODE=", 10) == 0) applyMidiMode(atoi(line + 10) != 0);
     else return false;
     return true;
@@ -1045,6 +1089,7 @@ void loop() {
     g_usbHost.Task();
     while (g_usbMidi.read()) { /* USB-host MIDI handlers fire per message */ }
     g_player.tick();
+    songLoopTick();   // auto-restart the song if loop mode is on and it just ended
 
     // USB CDC input serves two roles: '@'-prefixed control LINES (the same protocol
     // the ESP32 relays from BLE — lets a Web Serial browser page drive the device with
@@ -1101,6 +1146,7 @@ void loop() {
             else if (c == 'T') { runInstrumentSelfTest(); }   // exercise all 128 GM + drums, log peaks
             else if (c == 'B') { runPitchBendTest(); }         // audible pitch-bend sweep on ch1
             else if (c == 'E') { applyMidiMode(!g_mpeMode); }  // toggle MIDI <-> MPE mode locally
+            else if (c == 'O') { g_loop = !g_loop; Serial.printf("[song] loop %s\n", g_loop ? "ON" : "off"); }  // lOop toggle
             else if (c == 'A') { runMpeTest(); }               // simulate an MPE note (bend + pressure)
 #ifdef TDSP_SYNTH_DEXED_POOL
             else if (c == 'K') { runPizzClipTest(273); }       // pizz clip probe: is the attack snap clipping?

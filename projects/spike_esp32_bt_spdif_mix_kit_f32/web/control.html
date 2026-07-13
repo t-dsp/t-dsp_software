@@ -19,9 +19,10 @@
   .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
              color: #8b93a1; margin: 0 0 10px; }
   label { display: block; font-size: 13px; margin-bottom: 6px; color: #b8bec9; }
-  select, input[type=range], button { font: inherit; }
-  select { width: 100%; padding: 8px; background: #14161a; color: #e6e8ec;
+  select, input[type=range], input[type=text], button { font: inherit; }
+  select, input[type=text] { width: 100%; padding: 8px; background: #14161a; color: #e6e8ec;
            border: 1px solid #333844; border-radius: 6px; }
+  input[type=text]::placeholder { color: #6b7280; }
   input[type=range] { width: 100%; }
   .row { display: flex; gap: 10px; align-items: center; }
   .row > * { flex: 1; }
@@ -72,11 +73,15 @@
       <button id="play" disabled>Play</button>
       <button id="stop" class="ghost" disabled>Stop</button>
       <button id="refresh" class="ghost" disabled>Refresh SD</button>
+      <label style="display:flex; align-items:center; gap:6px; margin:0 0 0 auto; font-size:13px; color:#b8bec9">
+        <input type="checkbox" id="loop" disabled> Loop
+      </label>
     </div>
   </div>
 
   <div class="card">
     <h2>Instrument</h2>
+    <input type="text" id="instr-search" placeholder="Search instruments…" disabled autocomplete="off" style="margin-bottom:8px">
     <select id="instr" disabled></select>
     <div class="row" style="margin-top:10px">
       <button id="instr-prev" class="ghost" disabled>◀ Prev</button>
@@ -156,7 +161,7 @@ async function disconnect() {
 function setConnected(on) {
   $('dot').classList.toggle('on', on);
   $('connect').textContent = on ? 'Disconnect' : 'Connect';
-  ['vol','song','play','stop','refresh','instr','instr-prev','instr-next','hpf'].forEach(id => $(id).disabled = !on);
+  ['vol','song','play','stop','refresh','instr','instr-search','instr-prev','instr-next','hpf','loop'].forEach(id => $(id).disabled = !on);
   document.querySelectorAll('#mode button').forEach(b => b.disabled = !on);
   if (!on) $('synth').textContent = '';
 }
@@ -195,6 +200,10 @@ function fillSongs(payload) {
   sel.innerHTML = names.map((n, i) => `<option value="${i}">${escapeHtml(n)}</option>`).join('');
 }
 
+// Full instrument list, kept so the search box can filter without re-fetching.
+// Each entry: { i: global index, bank: '' | 'Bank A', label: 'voice name' }.
+let instrItems = [];
+
 function fillInstr(payload) {
   // payload = <0x1F>name<TAB>desc[<TAB>GM]  |inst0|inst1|...
   if (payload.charCodeAt(0) === 0x1F) payload = payload.slice(1);
@@ -203,24 +212,47 @@ function fillInstr(payload) {
   const [name, desc, gmFlag] = header;
   $('synth').textContent = name + (desc ? ' — ' + desc : '');
   const names = gmFlag === 'GM' ? GM_NAMES : parts;
-  const sel = $('instr');
   // Group by bank when names arrive as "<bank>: <voice>" (Dexed's full 320-voice
-  // set); otherwise render a flat list. The <option> value is always the global
+  // set); otherwise a flat list. The <option> value is always the global
   // instrument index the device expects in @DXVOICE=.
-  const groups = new Map();
-  names.forEach((n, i) => {
+  instrItems = names.map((n, i) => {
     const sep = n.indexOf(': ');
-    const bank = sep > 0 ? n.slice(0, sep) : '';
-    const label = sep > 0 ? n.slice(sep + 2) : n;
-    if (!groups.has(bank)) groups.set(bank, []);
-    groups.get(bank).push({ i, label });
+    return {
+      i,
+      bank: sep > 0 ? n.slice(0, sep) : '',
+      label: sep > 0 ? n.slice(sep + 2) : n,
+    };
   });
+  $('instr-search').value = '';
+  renderInstr('');
+}
+
+// Rebuild the <select> from instrItems, keeping only entries that match the
+// (case-insensitive) filter against the voice label, bank, or index. Preserves
+// the current selection when it survives the filter.
+function renderInstr(filter) {
+  const sel = $('instr');
+  const prev = sel.value;
+  const q = filter.trim().toLowerCase();
+  const match = o => !q ||
+    o.label.toLowerCase().includes(q) ||
+    o.bank.toLowerCase().includes(q) ||
+    String(o.i) === q;
+  const groups = new Map();
+  for (const o of instrItems) {
+    if (!match(o)) continue;
+    if (!groups.has(o.bank)) groups.set(o.bank, []);
+    groups.get(o.bank).push(o);
+  }
   let html = '';
   for (const [bank, items] of groups) {
     const opts = items.map(o => `<option value="${o.i}">${o.i}: ${escapeHtml(o.label)}</option>`).join('');
     html += bank ? `<optgroup label="${escapeHtml(bank)}">${opts}</optgroup>` : opts;
   }
   sel.innerHTML = html;
+  // Keep the prior selection visible if it still matches; otherwise fall back to
+  // the first result (without sending — the device voice is unchanged).
+  if (html && [...sel.options].some(o => o.value === prev)) sel.value = prev;
 }
 
 function escapeHtml(s) { return s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
@@ -230,8 +262,10 @@ $('vol').oninput = e => { $('vol-val').textContent = e.target.value + '%'; };
 $('vol').onchange = e => send('@VOL=' + e.target.value);
 $('play').onclick = () => send('@SONG=' + $('song').value);
 $('stop').onclick = () => send('@SONG=stop');
+$('loop').onchange = e => send('@LOOP=' + (e.target.checked ? 1 : 0));
 $('refresh').onclick = () => send('@GETCAT');
 $('instr').onchange = e => send('@DXVOICE=' + e.target.value);
+$('instr-search').oninput = e => renderInstr(e.target.value);
 // Prev/Next step through the flat option list (across bank <optgroup>s) and send
 // the newly-selected global index.
 function stepInstr(delta) {

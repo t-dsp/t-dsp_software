@@ -50,12 +50,15 @@ public:
             if (_v[i].on && _v[i].ch == ch && _v[i].note == note) { release(&_v[i]); return; }
     }
 
+    // Bend sensitivity. The router / player already applied the per-channel range and
+    // hands us the final semitone value, so we set Dexed's own sensitivity to a FIXED
+    // kBendRange and map the semitones into +/-8192 counts. kBendRange must be >= the
+    // widest bend we want to reproduce — a full MPE octave is 12 semitones. (Was 1,
+    // which clamped every per-note bend to +/-1 semitone.)
+    static constexpr int kBendRange = 12;
     void onPitchBend(uint8_t ch, float semitones) override {
-        // Match DexedSink: override sensitivity to 1 semi and send the pre-scaled
-        // semitone value remapped into +/-8191 counts (the router already applied
-        // the per-channel range, so Dexed's own sensitivity must be neutralized).
-        const int16_t counts = clampCounts((int)(semitones * 8192.0f));
-        forEachTarget(ch, [&](AudioSynthDexed *e) { e->setPitchbendRange(1); e->setPitchbend(counts); });
+        const int16_t counts = clampCounts((int)(semitones / (float)kBendRange * 8192.0f));
+        forEachTarget(ch, [&](AudioSynthDexed *e) { e->setPitchbendRange((uint8_t)kBendRange); e->setPitchbend(counts); });
     }
     void onPressure(uint8_t ch, float value) override {
         const uint8_t v = toMidi7(value);

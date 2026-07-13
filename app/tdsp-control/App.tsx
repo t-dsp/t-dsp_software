@@ -41,6 +41,7 @@ export default function App() {
     setDxVoice,
     setHpf,
     setMidiMode,
+    setLoop,
     refreshCatalog,
   } = useTdsp();
   const [showSettings, setShowSettings] = useState(false);
@@ -53,6 +54,8 @@ export default function App() {
   const [hpfCutIdx, setHpfCutIdx] = useState(1); // 12 Hz
   // MIDI vs MPE mode — mirrors status.mpe once per connection, then local toggle wins.
   const [mpe, setMpe] = useState(false);
+  // Loop the current song (local UI state; sent to the device on change).
+  const [loop, setLoopState] = useState(false);
   const connected = state === 'connected';
 
   // Initialize the HPF controls from the device's reported state once per
@@ -77,6 +80,11 @@ export default function App() {
     const next = !mpe;
     setMpe(next);
     setMidiMode(next);
+  };
+  const onToggleLoop = () => {
+    const next = !loop;
+    setLoopState(next);
+    setLoop(next);
   };
 
   const openSettings = () => {
@@ -137,6 +145,8 @@ export default function App() {
         synth={synth}
         onPlaySong={playSong}
         onStopSong={stopSong}
+        loop={loop}
+        onToggleLoop={onToggleLoop}
         dxVoice={dxVoice}
         onSelectVoice={(i) => {
           setDxVoiceState(i);
@@ -183,6 +193,8 @@ function SettingsModal({
   synth,
   onPlaySong,
   onStopSong,
+  loop,
+  onToggleLoop,
   dxVoice,
   onSelectVoice,
   song,
@@ -208,6 +220,8 @@ function SettingsModal({
   synth: SynthInfo;
   onPlaySong: (index: number) => void;
   onStopSong: () => void;
+  loop: boolean;
+  onToggleLoop: () => void;
   dxVoice: number;
   onSelectVoice: (index: number) => void;
   song: number;
@@ -315,6 +329,7 @@ function SettingsModal({
               <View style={{ height: 8 }} />
               <PrimaryButton label={`▶  Play ${songs[song] ?? 'Song'}`} onPress={() => onPlaySong(song)} />
               <SecondaryButton label="Stop" onPress={onStopSong} />
+              <SecondaryButton label={loop ? '☑  Loop: On' : '☐  Loop: Off'} onPress={onToggleLoop} />
               <SecondaryButton label="↻  Refresh Songs (after adding via USB)" onPress={onRefreshCatalog} />
 
               <Text style={styles.sectionLabel}>Instrument</Text>

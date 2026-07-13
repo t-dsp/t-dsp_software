@@ -84,6 +84,7 @@ enum : uint8_t {
   CMD_REFRESH_CAT  = 0x23,  // re-scan SD + refresh song/instrument catalog (@GETCAT to Teensy)
   CMD_SET_HPF      = 0x24,  // 2nd byte = TAC5212 DAC highpass mode 0..3; relayed to the Teensy
   CMD_SET_MIDI_MODE= 0x25,  // 2nd byte = 0 normal MIDI / 1 MPE; relayed to the Teensy
+  CMD_SET_LOOP     = 0x26,  // 2nd byte = 0/1 loop the current song; relayed to the Teensy
 };
 
 BluetoothA2DPSink a2dp_sink;
@@ -115,6 +116,7 @@ static void relayDxVoice(uint8_t idx) { Serial.printf("@DXVOICE=%u\n", idx); }
 // Teensy, which owns the codec and calls g_codec.setDacHpf().
 static void relayHpf(uint8_t mode)    { Serial.printf("@HPF=%u\n", mode); }
 static void relayMidiMode(uint8_t m)  { Serial.printf("@MIDIMODE=%u\n", m); }
+static void relayLoop(uint8_t on)     { Serial.printf("@LOOP=%u\n", on ? 1 : 0); }
 
 // ---- Paired-source list (multi-device switch) -----------------------------
 static BLECharacteristic *g_srcChar = nullptr;
@@ -398,6 +400,12 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
           g_midiMode = v[1] ? 1 : 0;
           Serial.printf("[ble] cmd: SET MIDI MODE %s\n", g_midiMode ? "MPE" : "MIDI");
           relayMidiMode(g_midiMode);   // -> Teensy: @MIDIMODE=<0|1>
+        }
+        break;
+      case CMD_SET_LOOP:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET LOOP %s\n", v[1] ? "ON" : "off");
+          relayLoop(v[1]);   // -> Teensy: @LOOP=<0|1>
         }
         break;
       default:
