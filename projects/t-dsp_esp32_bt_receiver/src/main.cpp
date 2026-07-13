@@ -61,8 +61,10 @@ static constexpr char BT_DEVICE_NAME[] = "T-DSP";
 #define TDSP_SRC_UUID  "7a9c0004-4a6e-4b7d-8f1a-2d3c4e5f6a70"
 // Device catalog (READ+NOTIFY): '|'-delimited name lists the Teensy streams over
 // UART (@SONGS=/@INSTR=) so the app renders its Dexed pickers dynamically — no
-// app rebuild when songs/instruments change. Each value fits one BLE char (<512B;
-// ~50 names max). NOTIFY signals "changed" -> the app RE-READS the full value.
+// app rebuild when songs/instruments change. A list longer than one BLE value
+// (512 B) is streamed as a burst of framed NOTIFY chunks ("<seq>\x1e<count>\x1e
+// <payload>") that the app reassembles — see setCatalog(). A single-chunk list is
+// just count=1. The app forces a fresh burst (CMD_REFRESH_CAT) after subscribing.
 #define TDSP_SONGS_UUID "7a9c0005-4a6e-4b7d-8f1a-2d3c4e5f6a70"
 #define TDSP_INSTR_UUID "7a9c0006-4a6e-4b7d-8f1a-2d3c4e5f6a70"
 
@@ -122,10 +124,26 @@ static BLECharacteristic *g_songsChar = nullptr;
 static BLECharacteristic *g_instrChar = nullptr;
 
 // Store a '|'-delimited name list into a catalog characteristic and notify.
+// A BLE characteristic value caps at 512 B, so a long list (e.g. Dexed's full
+// 320-voice set, ~7 KB) can't be served in one value. We stream it as a burst of
+// framed notifications, each "<seq>\x1e<count>\x1e<payload>" (0x1e = record sep,
+// never appears in names). The app reassembles the chunks in order. Notifications
+// are unacknowledged, so we pace them so the BLE stack doesn't drop chunks.
+static const size_t kCatChunk = 400;   // payload bytes/chunk; safe under a 512 MTU
+
 static void setCatalog(BLECharacteristic *ch, const char *list) {
   if (!ch) return;
-  ch->setValue((uint8_t *)list, strlen(list));
-  if (g_bleClientConnected) ch->notify();
+  size_t len   = strlen(list);
+  size_t count = len ? (len + kCatChunk - 1) / kCatChunk : 1;   // >=1 (empty = one empty chunk)
+  for (size_t seq = 0; seq < count; ++seq) {
+    size_t off = seq * kCatChunk;
+    size_t n   = (len - off < kCatChunk) ? (len - off) : kCatChunk;
+    char   frame[24 + kCatChunk];
+    int    h = snprintf(frame, sizeof(frame), "%u\x1e%u\x1e", (unsigned)seq, (unsigned)count);
+    memcpy(frame + h, list + off, n);
+    ch->setValue((uint8_t *)frame, h + n);
+    if (g_bleClientConnected) { ch->notify(); delay(25); }   // pace so chunks aren't dropped
+  }
 }
 
 // A complete '@'-framed line arrived from the Teensy over UART. The Teensy sends
@@ -528,7 +546,9 @@ void loop() {
   // Two framings share this UART: bare single-char commands (p/f/x/s from the
   // Teensy's P/F relay + pairing) and '@'-framed lines (e.g. @SONGS=/@INSTR=
   // catalog). A '@' starts line mode until '\n'; other bytes are single commands.
-  static char line[600];
+  // Big enough for the whole catalog line: Dexed's full 320-voice @INSTR list is
+  // ~7 KB. The value is then chunked out over BLE by setCatalog().
+  static char line[8192];
   static size_t ln = 0;
   static bool inLine = false;
   while (Serial.available()) {

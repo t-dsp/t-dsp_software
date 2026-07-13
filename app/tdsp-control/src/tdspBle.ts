@@ -308,46 +308,94 @@ export function useTdsp() {
     } catch {}
   }, []);
 
-  // Read the device catalog (song + instrument name lists). Each is a single
-  // '|'-delimited value; empty is left untouched so the UI keeps its fallback.
+  // ---- Catalog reassembly (chunked over BLE) --------------------------------
+  // A catalog list longer than one BLE value (~512 B) — e.g. Dexed's full 320-
+  // voice set — arrives as a burst of framed notifications, each
+  // "<seq>\x1e<count>\x1e<payload>" (0x1e = record separator). We reassemble the
+  // chunks in order and apply the joined list once all have arrived. A value with
+  // no framing (old firmware, or a list that fit in one value) is applied as-is.
+  const RS = '\x1e';
+  type CatAsm = { count: number; parts: (string | undefined)[]; got: number };
+  const songsAsmRef = useRef<CatAsm | null>(null);
+  const instrAsmRef = useRef<CatAsm | null>(null);
+
+  const applySongsStr = useCallback((full: string) => {
+    const list = full.split('|').filter((x) => x.length > 0);
+    if (list.length) setCatSongs(list);
+  }, []);
+
+  const applyInstrStr = useCallback((full: string) => {
+    // The instrument list may carry an optional synth header as its FIRST
+    // '|'-field, so the MIDI page labels itself from the engine the firmware was
+    // built with:  "\x1F<name>\t<description>|inst0|inst1|..."  The header is
+    // marked by a leading 0x1F (unit separator); a 3rd \t-field "GM" means a
+    // General-MIDI engine sends NO names and we render GM_INSTRUMENTS locally.
+    const parts = full.split('|').filter((x) => x.length > 0);
+    let isGM = false;
+    if (parts.length && parts[0].startsWith('\x1f')) {
+      const fields = parts.shift()!.slice(1).split('\t');
+      const name = (fields[0] ?? '').trim();
+      const description = (fields[1] ?? '').trim();
+      if ((fields[2] ?? '').trim() === 'GM') isGM = true;
+      if (name) setCatSynth({ name, description: description || DEFAULT_SYNTH.description });
+    }
+    if (isGM) setCatInstruments(GM_INSTRUMENTS as unknown as string[]);
+    else if (parts.length) setCatInstruments(parts);
+  }, []);
+
+  // Feed one raw characteristic value (base64) into a reassembler; apply the
+  // joined list once every chunk of the burst has been collected.
+  const feedCatalog = useCallback(
+    (
+      ref: { current: CatAsm | null },
+      value: string | null | undefined,
+      apply: (full: string) => void
+    ) => {
+      const s = value ? base64ToString(value) : '';
+      if (!s) return;
+      const i1 = s.indexOf(RS);
+      const i2 = i1 >= 0 ? s.indexOf(RS, i1 + 1) : -1;
+      if (i1 < 0 || i2 < 0) {
+        // Unframed value (old firmware / single value) — treat as the whole list.
+        ref.current = null;
+        apply(s);
+        return;
+      }
+      const seq = parseInt(s.slice(0, i1), 10);
+      const count = parseInt(s.slice(i1 + 1, i2), 10);
+      const payload = s.slice(i2 + 1);
+      if (!Number.isFinite(seq) || !Number.isFinite(count) || count < 1 || seq < 0 || seq >= count) return;
+      let asm = ref.current;
+      if (!asm || asm.count !== count) {
+        asm = { count, parts: new Array(count).fill(undefined), got: 0 };
+        ref.current = asm;
+      }
+      if (asm.parts[seq] === undefined) asm.got++;
+      asm.parts[seq] = payload;
+      if (asm.got >= count) {
+        const full = asm.parts.join('');
+        ref.current = null;
+        apply(full);
+      }
+    },
+    []
+  );
+
+  // Read each catalog characteristic once and feed it into the reassembler. For a
+  // single-chunk (or legacy) value this completes immediately; for a multi-chunk
+  // burst the notify subscription + a forced refresh deliver the rest.
   const readCatalog = useCallback(async () => {
     const device = deviceRef.current;
     if (!device) return;
-    const parseList = (v: string | null | undefined): string[] => {
-      const s = v ? base64ToString(v) : '';
-      return s ? s.split('|').filter((x) => x.length > 0) : [];
-    };
     try {
       const c = await device.readCharacteristicForService(TDSP_SVC_UUID, TDSP_SONGS_UUID);
-      const list = parseList(c.value);
-      if (list.length) setCatSongs(list);
+      feedCatalog(songsAsmRef, c.value, applySongsStr);
     } catch {}
     try {
       const c = await device.readCharacteristicForService(TDSP_SVC_UUID, TDSP_INSTR_UUID);
-      // The instrument value may carry an optional synth header as its FIRST
-      // '|'-field, so the MIDI page labels itself from the engine the firmware
-      // was built with:  "\x1F<name>\t<description>|inst0|inst1|..."
-      // The header is marked by a leading 0x1F (unit separator). It can't be '@'
-      // (the Teensy->ESP32 relay treats '@' as a line-start and would truncate
-      // the catalog) nor '\n' (that line is newline-framed); 0x1F never appears
-      // in patch names. Old firmware sends no header -> synth stays default.
-      const raw = c.value ? base64ToString(c.value) : '';
-      const parts = raw.split('|').filter((x) => x.length > 0);
-      // The header may carry a 3rd \t-field "GM": a General-MIDI engine sends NO
-      // instrument names (they'd overflow BLE's 512 B) and we render the standard
-      // GM_INSTRUMENTS locally instead.
-      let isGM = false;
-      if (parts.length && parts[0].startsWith('\x1f')) {
-        const fields = parts.shift()!.slice(1).split('\t');
-        const name = (fields[0] ?? '').trim();
-        const description = (fields[1] ?? '').trim();
-        if ((fields[2] ?? '').trim() === 'GM') isGM = true;
-        if (name) setCatSynth({ name, description: description || DEFAULT_SYNTH.description });
-      }
-      if (isGM) setCatInstruments(GM_INSTRUMENTS as unknown as string[]);
-      else if (parts.length) setCatInstruments(parts);
+      feedCatalog(instrAsmRef, c.value, applyInstrStr);
     } catch {}
-  }, []);
+  }, [feedCatalog, applySongsStr, applyInstrStr]);
 
   const subscribeStatus = useCallback(async (device: Device) => {
     // Bigger MTU so the status JSON fits one notification and the sources list
@@ -382,25 +430,41 @@ export function useTdsp() {
         readSources();
       }
     );
-    // Catalog (Dexed songs + instruments): read once, re-read on "changed" notify.
-    // The ESP32 requests fresh lists from the Teensy on connect, so a notify fires
-    // shortly after we subscribe.
+    // Catalog (Dexed songs + instruments): read once, then reassemble the chunked
+    // burst the device streams on each "changed" notify (a long list — e.g. the
+    // full 320-voice Dexed set — spans several notifications).
     await readCatalog();
     songsSubRef.current = device.monitorCharacteristicForService(
       TDSP_SVC_UUID,
       TDSP_SONGS_UUID,
-      (err) => {
-        if (!err) readCatalog();
+      (err, ch) => {
+        if (!err) feedCatalog(songsAsmRef, ch?.value, applySongsStr);
       }
     );
     instrSubRef.current = device.monitorCharacteristicForService(
       TDSP_SVC_UUID,
       TDSP_INSTR_UUID,
-      (err) => {
-        if (!err) readCatalog();
+      (err, ch) => {
+        if (!err) feedCatalog(instrAsmRef, ch?.value, applyInstrStr);
       }
     );
-  }, [readSources, readCatalog]);
+    // Force a fresh catalog burst now that our notify subscriptions are live: the
+    // ESP32's on-connect send can fire before we've subscribed, so its chunks
+    // would be lost. Re-request, then retry once if a chunk went missing (an
+    // in-flight reassembler that never completed leaves its ref non-null).
+    const kickCatalog = () =>
+      device
+        .writeCharacteristicWithResponseForService(
+          TDSP_SVC_UUID,
+          TDSP_CMD_UUID,
+          bytesToBase64([CMD.REFRESH_CAT])
+        )
+        .catch(() => {});
+    await kickCatalog();
+    setTimeout(() => {
+      if (songsAsmRef.current || instrAsmRef.current) kickCatalog();
+    }, 2500);
+  }, [readSources, readCatalog, feedCatalog, applySongsStr, applyInstrStr]);
 
   const scanAndConnect = useCallback(async () => {
     const mgr = managerRef.current;

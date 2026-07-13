@@ -131,6 +131,8 @@ static bool g_sdReady = false;
   #include "SynthBackendOpl3.h"     // OPL3 + DMXOPL GM (needs lib/TDspYmfm OPL3 engine; see spec)
 #elif defined(TDSP_SYNTH_YMFM)
   #include "SynthBackendYmfm.h"
+#elif defined(TDSP_SYNTH_DEXED_POOL)
+  #include "SynthBackendDexedPool.h" // MPE-capable Dexed: pool of engines, one per note
 #else
   #include "SynthBackendDexed.h"
 #endif
@@ -346,10 +348,10 @@ static void songStop() {
 // over the UART link. The ESP32 serves it on BLE so the app renders its pickers
 // from whatever the device reports — adding a song/instrument is then a firmware
 // change only, no app update. Sent when the ESP32 asks (@GETCAT, on BLE connect).
-static void sendCatalog() {
-    kit.uart().print("@SONGS=");
-    for (int i = 0; i < g_numSongs; ++i) { if (i) kit.uart().print('|'); kit.uart().print(g_songs[i].name); }
-    kit.uart().print('\n');
+static void sendCatalog(Print& out) {
+    out.print("@SONGS=");
+    for (int i = 0; i < g_numSongs; ++i) { if (i) out.print('|'); out.print(g_songs[i].name); }
+    out.print('\n');
     // @INSTR carries an optional synth header as its first '|'-field so the app
     // MIDI page labels itself from the engine THIS firmware was built with:
     //   @INSTR=<0x1F><synthName>\t<synthDescription>|inst0|inst1|...
@@ -357,33 +359,33 @@ static void sendCatalog() {
     // '@' — the ESP32 relay treats every '@' as a UART line-start (see
     // t-dsp_esp32_bt_receiver), so a '@' inside the value truncates the line and
     // the whole catalog is dropped. 0x1F never appears in patch names.
-    kit.uart().print("@INSTR=");
-    kit.uart().write((uint8_t)0x1F);
-    kit.uart().print(synthName());
-    kit.uart().print('\t');
-    kit.uart().print(synthDescription());
+    out.print("@INSTR=");
+    out.write((uint8_t)0x1F);
+    out.print(synthName());
+    out.print('\t');
+    out.print(synthDescription());
     if (synthIsGM()) {
         // A General-MIDI engine uses the 128 STANDARD program names. Streaming ~2 KB
         // of names over the UART would overflow the ESP32's line buffer AND a single
         // BLE characteristic (512 B cap) — so we just flag "GM" (a 3rd \t-field on the
         // header) and the app renders the standard GM 0..127 names itself.
-        kit.uart().print("\tGM");
+        out.print("\tGM");
     } else {
-        for (int i = 0; i < synthNumInstruments(); ++i) { kit.uart().print('|'); kit.uart().print(synthInstrumentName(i)); }
+        for (int i = 0; i < synthNumInstruments(); ++i) { out.print('|'); out.print(synthInstrumentName(i)); }
     }
-    kit.uart().print('\n');
-    Serial.printf("[cat] catalog sent to ESP32 (synth=%s)\n", synthName());
+    out.print('\n');
+    Serial.printf("[cat] catalog sent (synth=%s)\n", synthName());
 }
 
 // Refresh = re-scan the SD card (picking up songs just added over USB / a reader)
 // and re-send the catalog. Triggered by the app's Refresh button (@GETCAT) and on
 // each BLE connect. Retries SD.begin so a card inserted after boot still mounts.
-static void refreshCatalog() {
+static void refreshCatalog(Print& out) {
 #if TDSP_HAS_SDCARD
     if (!g_sdReady) { g_sdReady = SD.begin(BUILTIN_SDCARD); Serial.printf("[sd] retry: %s\n", g_sdReady ? "ready" : "no card"); }
 #endif
     buildSongList();
-    sendCatalog();
+    sendCatalog(out);
 }
 
 // --- Live MIDI IN (DIN on Serial1 + USB host) -> MPE-aware router -> synth ----
@@ -410,6 +412,26 @@ static void applyMidiMode(bool mpe) {
     g_player.setProgramChangeEnabled(!mpe);
     synthSetMpeMode(mpe);   // backend hook (no-op except TSF)
     Serial.printf("[mode] %s\n", mpe ? "MPE (per-note bend/pressure)" : "normal MIDI");
+}
+
+// Dispatch one '@'-prefixed control line. This is the single source of truth for the
+// text protocol, shared by BOTH transports: the ESP32 relay (BLE app -> Serial7) and
+// the USB CDC port (a Web Serial browser page, no ESP32 required). `reply` is the
+// stream a query answers on (only @GETCAT replies) so each channel gets its own
+// catalog. Returns true if the line was a recognized command.
+static bool handleControlLine(const char* line, Print& reply) {
+    if      (strncmp(line, "@VOL=", 5) == 0)      setMasterVolumePct(atoi(line + 5));
+    else if (strncmp(line, "@DXVOICE=", 9) == 0) { synthSetInstrument(atoi(line + 9));
+                                 if (g_mpeMode) synthSetMpeMode(true); }   // re-sync ch10 (MPE member)
+    else if (strncmp(line, "@SONG=", 6) == 0) {
+        if (strcmp(line + 6, "stop") == 0) songStop();
+        else songStart(atoi(line + 6));   // @SONG=<song index>
+    }
+    else if (strcmp(line, "@GETCAT") == 0)        refreshCatalog(reply);   // re-scan SD + send catalog
+    else if (strncmp(line, "@HPF=", 5) == 0)      setDacHpfMode(atoi(line + 5));
+    else if (strncmp(line, "@MIDIMODE=", 10) == 0) applyMidiMode(atoi(line + 10) != 0);
+    else return false;
+    return true;
 }
 
 void setup() {
@@ -603,6 +625,80 @@ static void runMpeTest() {
     Serial.println("[mpetest] done (back to normal MIDI)");
 }
 
+#ifdef TDSP_SYNTH_DEXED_POOL
+// Pizz clip test ('K'): load a patch (default 273 = "PIZZ STGS"), fire a single note
+// at rising velocities, and report the SYNTH-SUM peak + railed-sample count. The probe
+// (dxpClip) sits BEFORE the 0.62 mix make-up, so per-engine int16 flat-topping shows up
+// here even though the final-bus peak (outPeak) is scaled down and looks clean. This is
+// the definitive answer to "is the snap at note-onset actually clipping?".
+static void runPizzClipTest(int inst) {
+    if (g_player.isPlaying()) songStop();
+    g_synthSink->onAllNotesOff(0);
+    synthSetInstrument(inst);
+    delay(60);
+    Serial.printf("[cliptest] inst %d = %s ; rail=%.4f (synth-sum, pre-0.62-mix)\n",
+                  inst, synthInstrumentName(inst), (double)ClipProbe_F32::kRail);
+    const uint8_t vels[] = {40, 64, 80, 100, 110, 120, 127};
+    const int note = 60;
+    for (uint8_t v : vels) {
+        g_synthSink->onAllNotesOff(0); delay(40);
+        dxpClip.reset();
+        float pkOut = 0.0f;
+        g_synthSink->onNoteOn(1, note, v);
+        uint32_t t0 = millis();
+        while (millis() - t0 < 300) { if (peakOut.available()) { float p = peakOut.read(); if (p > pkOut) pkOut = p; } delay(2); }
+        g_synthSink->onNoteOff(1, note, 0);
+        uint32_t clipped = dxpClip.clipped(), total = dxpClip.total();
+        float pkSum = dxpClip.peak();
+        float pct = total ? (100.0f * (float)clipped / (float)total) : 0.0f;
+        Serial.printf("[cliptest] vel %3u: sumPeak=%.4f  railed=%lu/%lu (%.2f%%)  outPeak=%.3f  %s\n",
+                      v, (double)pkSum, (unsigned long)clipped, (unsigned long)total, (double)pct, (double)pkOut,
+                      clipped > 8 ? "*** CLIPPING ***" : (pkSum >= ClipProbe_F32::kRail ? "(touches rail)" : "clean"));
+        delay(120);
+    }
+    g_synthSink->onAllNotesOff(0);
+    Serial.println("[cliptest] done");
+}
+
+// Onset capture ('J'): record the synth-sum waveform from a single note-on and dump it
+// over serial as floats. The PC then FFTs it (aliasing = inharmonic fold-back partials)
+// and inspects the first samples (zero-crossing / step discontinuity at note-onset).
+static void captureOneNote(int note, int vel) {
+    g_synthSink->onAllNotesOff(0); delay(60);
+    dxpClip.armCapture();
+    g_synthSink->onNoteOn(1, note, vel);
+    uint32_t t0 = millis();
+    while (!dxpClip.captureDone() && millis() - t0 < 1500) delay(2);
+    g_synthSink->onNoteOff(1, note, 0);
+    int n = dxpClip.captureCount();
+    const float *c = dxpClip.capture();
+    Serial.printf("[cap] note=%d vel=%d begin %d\n", note, vel, n);
+    char lb[220];
+    for (int i = 0; i < n; ) {
+        int p = 0;
+        for (int k = 0; k < 16 && i < n; k++, i++)
+            p += snprintf(lb + p, sizeof(lb) - p, "%.6g ", (double)c[i]);
+        Serial.println(lb);
+    }
+    Serial.println("[cap] end");
+}
+
+static void runPizzCapture(int inst, int, int vel) {
+    if (g_player.isPlaying()) songStop();
+    g_synthSink->onAllNotesOff(0);
+    synthSetInstrument(inst);
+    delay(80);
+    Serial.printf("[cap] inst %d = %s vel=%d rate=%.0f N=%d\n",
+                  inst, synthInstrumentName(inst), vel,
+                  (double)AUDIO_SAMPLE_RATE_EXACT, ClipProbe_F32::kCapN);
+    // low -> high: FM aliasing (fold-back past Nyquist) worsens with fundamental pitch
+    const int notes[] = {48, 60, 72, 84, 96};
+    for (int nn : notes) captureOneNote(nn, vel);
+    g_synthSink->onAllNotesOff(0);
+    Serial.println("[cap] ALLDONE");
+}
+#endif
+
 void loop() {
     // Flash-mode passthrough owns the loop (also handles @BOOTAPP@); in run mode this
     // ticks the slow LED heartbeat and returns false.
@@ -618,8 +714,26 @@ void loop() {
     while (g_usbMidi.read()) { /* USB-host MIDI handlers fire per message */ }
     g_player.tick();
 
-    if (Serial.available()) {
+    // USB CDC input serves two roles: '@'-prefixed control LINES (the same protocol
+    // the ESP32 relays from BLE — lets a Web Serial browser page drive the device with
+    // NO ESP32 attached) and single debug KEYS (t/a/s/W/...). A byte of '@' starts a
+    // command line; anything else is a key. They can't collide (keys are never '@').
+    static char usbLine[160];
+    static size_t usbN = 0;
+    static bool usbInCmd = false;
+    while (Serial.available()) {
         int c = Serial.read();
+        if (usbInCmd) {
+            if (c == '\n' || usbN >= sizeof(usbLine) - 1) {
+                usbLine[usbN] = 0;
+                if (!handleControlLine(usbLine, Serial)) Serial.printf("[usb] ? %s\n", usbLine);
+                usbN = 0; usbInCmd = false;
+            } else if (c != '\r') {
+                usbLine[usbN++] = (char)c;
+            }
+            continue;
+        }
+        if (c == '@') { usbInCmd = true; usbN = 0; usbLine[usbN++] = '@'; continue; }
         if (!kit.handleChar(Serial, c)) {     // g / r / U handled by the kit
             if (c == 'P') { kit.uart().write('p'); Serial.println("[cmd] -> ESP32: ENTER pairing mode"); }
             else if (c == 'F') { kit.uart().write('f'); Serial.println("[cmd] -> ESP32: FORGET bond + pairing mode"); }
@@ -656,6 +770,10 @@ void loop() {
             else if (c == 'B') { runPitchBendTest(); }         // audible pitch-bend sweep on ch1
             else if (c == 'E') { applyMidiMode(!g_mpeMode); }  // toggle MIDI <-> MPE mode locally
             else if (c == 'A') { runMpeTest(); }               // simulate an MPE note (bend + pressure)
+#ifdef TDSP_SYNTH_DEXED_POOL
+            else if (c == 'K') { runPizzClipTest(273); }       // pizz clip probe: is the attack snap clipping?
+            else if (c == 'J') { runPizzCapture(273, 60, 110); } // capture onset waveform -> serial (aliasing/zero-cross)
+#endif
         }
     }
 
@@ -669,17 +787,8 @@ void loop() {
             if (n) {
                 // Control lines from the ESP32 (relayed from the BLE app) are acted
                 // on here; everything else is just mirrored to USB with an [esp] tag.
-                if (strncmp(line, "@VOL=", 5) == 0) setMasterVolumePct(atoi(line + 5));
-                else if (strncmp(line, "@DXVOICE=", 9) == 0) { synthSetInstrument(atoi(line + 9));
-                                 if (g_mpeMode) synthSetMpeMode(true); }   // re-sync ch10 (MPE member)
-                else if (strncmp(line, "@SONG=", 6) == 0) {
-                    if (strcmp(line + 6, "stop") == 0) songStop();
-                    else songStart(atoi(line + 6));   // @SONG=<song index>
-                }
-                else if (strcmp(line, "@GETCAT") == 0) refreshCatalog();  // re-scan SD + send catalog
-                else if (strncmp(line, "@HPF=", 5) == 0) setDacHpfMode(atoi(line + 5));
-                else if (strncmp(line, "@MIDIMODE=", 10) == 0) applyMidiMode(atoi(line + 10) != 0);
-                else Serial.printf("[esp] %s\n", line);
+                // @GETCAT replies back to the ESP32 over its UART.
+                if (!handleControlLine(line, kit.uart())) Serial.printf("[esp] %s\n", line);
             }
             n = 0;
         } else if (c != '\r') {
@@ -702,5 +811,12 @@ void loop() {
                       AudioProcessorUsageMax(), AudioMemoryUsageMax());
         AudioProcessorUsageMaxReset();   // make cpuMax a per-second rolling peak
         AudioMemoryUsageMaxReset();
+#ifdef TDSP_SYNTH_DEXED_POOL
+        // Synth-sum clip watch (pre-0.62 mix): shows per-engine int16 railing that the
+        // final outPeak hides. During real song playback, railed>0 == audible clipping.
+        Serial.printf("  [synth] sumPeak=%.4f railed=%lu/%lu\n",
+                      (double)dxpClip.peak(), (unsigned long)dxpClip.clipped(), (unsigned long)dxpClip.total());
+        dxpClip.reset();
+#endif
     }
 }

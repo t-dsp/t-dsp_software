@@ -24,60 +24,44 @@ AudioConnection_F32   c_synthR   (g_synthToF32, 0, outR, 3);
 DexedSink             g_dexedSink(&g_dexed);
 tdsp::MidiSink       *g_synthSink = &g_dexedSink;
 
-// Curated instrument list: index (sent by the app as @DXVOICE=<i>) -> a bundled
-// DX7 patch (bank, voice) from dexed_banks_data.h. Bank 2 = the rom1a factory
-// cartridge.
-struct DxInstrument { uint8_t bank, voice; const char *name; };
-static const DxInstrument kInstruments[] = {
-    // Keys                                        (bank, voice-index)
-    {2, 10, "E.Piano"},     {2,  7, "Grand Piano"}, {0,  0, "FM Rhodes"},
-    {3,  2, "E.Piano 2"},   {2, 18, "Harpsichord"}, {2, 19, "Clav"},
-    {3,  6, "Celeste"},
-    // Organs
-    {2, 16, "Organ"},       {2, 17, "Pipe Organ"},
-    // Strings / ensemble
-    {2,  3, "Strings"},     {6,  2, "String Ens"},  {2,  6, "Orchestra"},
-    {8, 17, "Pizzicato"},
-    // Brass
-    {2,  0, "Brass"},       {6,  5, "Trumpet"},     {8, 11, "Synth Brass"},
-    // Winds
-    {2, 23, "Flute"},       {8,  5, "Pan Flute"},   {4,  2, "Oboe"},
-    {4,  3, "Clarinet"},    {4,  4, "Sax"},         {4, 17, "Harmonica"},
-    // Guitar / plucked
-    {2, 11, "Guitar"},      {6, 14, "Jazz Guitar"}, {3, 21, "Sitar"},
-    {3, 28, "Harp"},
-    // Bass
-    {2, 14, "Bass"},        {6, 11, "E.Bass"},      {6, 17, "Fretless"},
-    // Synth / lead
-    {2, 13, "Syn Lead"},    {0, 20, "Mini Moog"},   {0, 12, "Jupiter 8"},
-    {0,  7, "Synclavier"},
-    // Mallets / bells / perc
-    {2, 20, "Vibes"},       {2, 21, "Marimba"},     {4, 23, "Xylophone"},
-    {2, 25, "Tub Bells"},   {4, 21, "Glockenspiel"},{2, 26, "Steel Drum"},
-    {2, 27, "Timpani"},
-    // Voice
-    {2, 29, "Voice"},       {1, 29, "Choir"},
-};
-static const int kNumInstruments = sizeof(kInstruments) / sizeof(kInstruments[0]);
+// Expose ALL bundled DX7 voices, browsable by bank: a global instrument index
+// (sent by the app as @DXVOICE=<i>) maps to (bank, voice) across the 10 banks x
+// 32 voices in dexed_banks_data.h — index = bank * kVoicesPerBank + voice, 320
+// total. Names are streamed as "<bankName>: <voiceName>" so the app/control page
+// can group the flat list back into per-bank sections by splitting on ": ".
+static const int kNumInstruments = tdsp::dexed::kNumBanks * tdsp::dexed::kVoicesPerBank;  // 320
 static int g_synthInstrument = 0;
 
 static const char *synthName()        { return "Dexed"; }
 static const char *synthDescription() { return "6-op FM (DX7) synth, played by the MIDI IN port and the songs below."; }
-static bool        synthIsGM()         { return false; }  // curated Dexed patch list -> names streamed to the app
+static bool        synthIsGM()         { return false; }  // full DX7 voice set -> names streamed to the app
 static void        synthSetMpeMode(bool /*mpe*/) {}       // MPE not wired for this backend (router still bends)
 static int         synthNumInstruments()        { return kNumInstruments; }
-static const char *synthInstrumentName(int i)   { return kInstruments[i].name; }
 static int         synthInstrument()            { return g_synthInstrument; }
 
-// Load a curated instrument (runs from loop/handlers, never the audio ISR).
+// "<bankName>: <voiceName>" for global index i. Returns a pointer to a shared
+// static buffer — valid only until the next call, which is fine for the catalog
+// stream (each name is printed before the next is fetched) and for logging.
+static const char *synthInstrumentName(int i) {
+    static char buf[32];
+    int bank  = i / tdsp::dexed::kVoicesPerBank;
+    int voice = i % tdsp::dexed::kVoicesPerBank;
+    char vname[tdsp::dexed::kVoiceNameBufBytes];
+    if (!tdsp::dexed::copyVoiceName(bank, voice, vname, sizeof(vname))) vname[0] = 0;
+    snprintf(buf, sizeof(buf), "%s: %s", tdsp::dexed::bankName(bank), vname);
+    return buf;
+}
+
+// Load a voice by global index (runs from loop/handlers, never the audio ISR).
 static void synthSetInstrument(int idx) {
     if (idx < 0) idx = 0;
     if (idx >= kNumInstruments) idx = kNumInstruments - 1;
-    const DxInstrument &in = kInstruments[idx];
+    int bank  = idx / tdsp::dexed::kVoicesPerBank;
+    int voice = idx % tdsp::dexed::kVoicesPerBank;
     g_dexed.panic();
-    if (tdsp::dexed::loadVoice(g_dexed, in.bank, in.voice)) {
+    if (tdsp::dexed::loadVoice(g_dexed, bank, voice)) {
         g_synthInstrument = idx;
-        Serial.printf("[synth] instrument %d = %s (bank %d voice %d)\n", idx, in.name, in.bank, in.voice);
+        Serial.printf("[synth] instrument %d = %s (bank %d voice %d)\n", idx, synthInstrumentName(idx), bank, voice);
     }
 }
 

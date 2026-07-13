@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T-DSP USB Control</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.4 system-ui, sans-serif; background: #14161a; color: #e6e8ec; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 18px;
+           background: #1b1e24; border-bottom: 1px solid #2a2e36; position: sticky; top: 0; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  #synth { color: #8b93a1; font-size: 13px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #d9534f; flex: 0 0 auto; }
+  .dot.on { background: #5cb85c; }
+  main { max-width: 640px; margin: 0 auto; padding: 18px; display: grid; gap: 16px; }
+  .card { background: #1b1e24; border: 1px solid #2a2e36; border-radius: 10px; padding: 14px 16px; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+             color: #8b93a1; margin: 0 0 10px; }
+  label { display: block; font-size: 13px; margin-bottom: 6px; color: #b8bec9; }
+  select, input[type=range], button { font: inherit; }
+  select { width: 100%; padding: 8px; background: #14161a; color: #e6e8ec;
+           border: 1px solid #333844; border-radius: 6px; }
+  input[type=range] { width: 100%; }
+  .row { display: flex; gap: 10px; align-items: center; }
+  .row > * { flex: 1; }
+  button { padding: 9px 14px; background: #2f6feb; color: #fff; border: none;
+           border-radius: 6px; cursor: pointer; }
+  button.ghost { background: #262a33; }
+  button:disabled { opacity: .4; cursor: default; }
+  .seg { display: flex; border: 1px solid #333844; border-radius: 6px; overflow: hidden; }
+  .seg button { border-radius: 0; background: #14161a; color: #b8bec9; }
+  .seg button.active { background: #2f6feb; color: #fff; }
+  #vol-val { flex: 0 0 48px; text-align: right; color: #8b93a1; }
+  pre#log { background: #0e1013; border: 1px solid #2a2e36; border-radius: 8px;
+            padding: 10px; height: 150px; overflow: auto; font-size: 12px;
+            color: #8b93a1; margin: 0; white-space: pre-wrap; }
+  .note { color: #8b93a1; font-size: 12px; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>T-DSP USB Control</h1>
+  <span id="synth"></span>
+  <span style="flex:1"></span>
+  <button id="connect">Connect</button>
+</header>
+
+<main>
+  <div class="card" id="unsupported" style="display:none">
+    <h2>Web Serial not available</h2>
+    <p class="note">This page needs the Web Serial API — open it in Chrome or Edge (desktop),
+    served from <b>https://</b> or <b>http://localhost</b>. Firefox and Safari don't support it.</p>
+  </div>
+
+  <div class="card">
+    <h2>Master volume</h2>
+    <div class="row">
+      <input type="range" id="vol" min="0" max="100" value="80" disabled>
+      <span id="vol-val">80%</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Song</h2>
+    <div class="row">
+      <select id="song" disabled></select>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="play" disabled>Play</button>
+      <button id="stop" class="ghost" disabled>Stop</button>
+      <button id="refresh" class="ghost" disabled>Refresh SD</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Instrument</h2>
+    <select id="instr" disabled></select>
+    <div class="row" style="margin-top:10px">
+      <button id="instr-prev" class="ghost" disabled>◀ Prev</button>
+      <button id="instr-next" class="ghost" disabled>Next ▶</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>MIDI mode</h2>
+    <div class="seg" id="mode">
+      <button data-v="0" class="active" disabled>Normal MIDI</button>
+      <button data-v="1" disabled>MPE</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>DAC high-pass</h2>
+    <select id="hpf" disabled>
+      <option value="0">Off</option>
+      <option value="1">Mode 1</option>
+      <option value="2">Mode 2</option>
+      <option value="3">Mode 3</option>
+    </select>
+  </div>
+
+  <div class="card">
+    <h2>Serial log</h2>
+    <pre id="log"></pre>
+  </div>
+</main>
+
+<script>
+// Standard General MIDI program names — used when the device reports a GM engine
+// (@INSTR header carries a "GM" flag instead of streaming 128 names).
+const GM_NAMES = ["Acoustic Grand Piano","Bright Acoustic Piano","Electric Grand Piano","Honky-tonk Piano","Electric Piano 1","Electric Piano 2","Harpsichord","Clavinet","Celesta","Glockenspiel","Music Box","Vibraphone","Marimba","Xylophone","Tubular Bells","Dulcimer","Drawbar Organ","Percussive Organ","Rock Organ","Church Organ","Reed Organ","Accordion","Harmonica","Tango Accordion","Acoustic Guitar (nylon)","Acoustic Guitar (steel)","Electric Guitar (jazz)","Electric Guitar (clean)","Electric Guitar (muted)","Overdriven Guitar","Distortion Guitar","Guitar Harmonics","Acoustic Bass","Electric Bass (finger)","Electric Bass (pick)","Fretless Bass","Slap Bass 1","Slap Bass 2","Synth Bass 1","Synth Bass 2","Violin","Viola","Cello","Contrabass","Tremolo Strings","Pizzicato Strings","Orchestral Harp","Timpani","String Ensemble 1","String Ensemble 2","Synth Strings 1","Synth Strings 2","Choir Aahs","Voice Oohs","Synth Voice","Orchestra Hit","Trumpet","Trombone","Tuba","Muted Trumpet","French Horn","Brass Section","Synth Brass 1","Synth Brass 2","Soprano Sax","Alto Sax","Tenor Sax","Baritone Sax","Oboe","English Horn","Bassoon","Clarinet","Piccolo","Flute","Recorder","Pan Flute","Blown Bottle","Shakuhachi","Whistle","Ocarina","Lead 1 (square)","Lead 2 (sawtooth)","Lead 3 (calliope)","Lead 4 (chiff)","Lead 5 (charang)","Lead 6 (voice)","Lead 7 (fifths)","Lead 8 (bass + lead)","Pad 1 (new age)","Pad 2 (warm)","Pad 3 (polysynth)","Pad 4 (choir)","Pad 5 (bowed)","Pad 6 (metallic)","Pad 7 (halo)","Pad 8 (sweep)","FX 1 (rain)","FX 2 (soundtrack)","FX 3 (crystal)","FX 4 (atmosphere)","FX 5 (brightness)","FX 6 (goblins)","FX 7 (echoes)","FX 8 (sci-fi)","Sitar","Banjo","Shamisen","Koto","Kalimba","Bagpipe","Fiddle","Shanai","Tinkle Bell","Agogo","Steel Drums","Woodblock","Taiko Drum","Melodic Tom","Synth Drum","Reverse Cymbal","Guitar Fret Noise","Breath Noise","Seashore","Bird Tweet","Telephone Ring","Helicopter","Applause","Gunshot"];
+
+let port, writer, reader, keepReading = false;
+const $ = id => document.getElementById(id);
+const enc = new TextEncoder();
+
+function log(s) {
+  const el = $('log');
+  el.textContent += s + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+async function send(line) {
+  if (!writer) return;
+  await writer.write(enc.encode(line + '\n'));
+  log('> ' + line);
+}
+
+// ---- connection ----
+if (!('serial' in navigator)) { $('unsupported').style.display = 'block'; $('connect').disabled = true; }
+
+$('connect').onclick = async () => {
+  if (port) { await disconnect(); return; }
+  try {
+    port = await navigator.serial.requestPort();
+    await port.open({ baudRate: 115200 });
+    writer = port.writable.getWriter();
+    setConnected(true);
+    readLoop();
+    await send('@GETCAT');           // pull song + instrument catalog
+  } catch (e) { log('! ' + e.message); port = null; }
+};
+
+async function disconnect() {
+  keepReading = false;
+  try { await reader?.cancel(); } catch {}
+  try { writer?.releaseLock(); } catch {}
+  try { await port?.close(); } catch {}
+  port = writer = reader = null;
+  setConnected(false);
+}
+
+function setConnected(on) {
+  $('dot').classList.toggle('on', on);
+  $('connect').textContent = on ? 'Disconnect' : 'Connect';
+  ['vol','song','play','stop','refresh','instr','instr-prev','instr-next','hpf'].forEach(id => $(id).disabled = !on);
+  document.querySelectorAll('#mode button').forEach(b => b.disabled = !on);
+  if (!on) $('synth').textContent = '';
+}
+
+async function readLoop() {
+  keepReading = true;
+  const dec = new TextDecoder();
+  let buf = '';
+  reader = port.readable.getReader();
+  try {
+    while (keepReading) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).replace(/\r$/, '');
+        buf = buf.slice(nl + 1);
+        handleLine(line);
+      }
+    }
+  } catch (e) { log('! ' + e.message); }
+  finally { try { reader.releaseLock(); } catch {} }
+}
+
+// ---- device -> UI ----
+function handleLine(line) {
+  if (line.startsWith('@SONGS=')) { fillSongs(line.slice(7)); }
+  else if (line.startsWith('@INSTR=')) { fillInstr(line.slice(7)); }
+  else if (line) { log(line); }   // debug / heartbeat — just echo
+}
+
+function fillSongs(payload) {
+  const names = payload ? payload.split('|') : [];
+  const sel = $('song');
+  sel.innerHTML = names.map((n, i) => `<option value="${i}">${escapeHtml(n)}</option>`).join('');
+}
+
+function fillInstr(payload) {
+  // payload = <0x1F>name<TAB>desc[<TAB>GM]  |inst0|inst1|...
+  if (payload.charCodeAt(0) === 0x1F) payload = payload.slice(1);
+  const parts = payload.split('|');
+  const header = parts.shift().split('\t');
+  const [name, desc, gmFlag] = header;
+  $('synth').textContent = name + (desc ? ' — ' + desc : '');
+  const names = gmFlag === 'GM' ? GM_NAMES : parts;
+  const sel = $('instr');
+  // Group by bank when names arrive as "<bank>: <voice>" (Dexed's full 320-voice
+  // set); otherwise render a flat list. The <option> value is always the global
+  // instrument index the device expects in @DXVOICE=.
+  const groups = new Map();
+  names.forEach((n, i) => {
+    const sep = n.indexOf(': ');
+    const bank = sep > 0 ? n.slice(0, sep) : '';
+    const label = sep > 0 ? n.slice(sep + 2) : n;
+    if (!groups.has(bank)) groups.set(bank, []);
+    groups.get(bank).push({ i, label });
+  });
+  let html = '';
+  for (const [bank, items] of groups) {
+    const opts = items.map(o => `<option value="${o.i}">${o.i}: ${escapeHtml(o.label)}</option>`).join('');
+    html += bank ? `<optgroup label="${escapeHtml(bank)}">${opts}</optgroup>` : opts;
+  }
+  sel.innerHTML = html;
+}
+
+function escapeHtml(s) { return s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+
+// ---- UI -> device ----
+$('vol').oninput = e => { $('vol-val').textContent = e.target.value + '%'; };
+$('vol').onchange = e => send('@VOL=' + e.target.value);
+$('play').onclick = () => send('@SONG=' + $('song').value);
+$('stop').onclick = () => send('@SONG=stop');
+$('refresh').onclick = () => send('@GETCAT');
+$('instr').onchange = e => send('@DXVOICE=' + e.target.value);
+// Prev/Next step through the flat option list (across bank <optgroup>s) and send
+// the newly-selected global index.
+function stepInstr(delta) {
+  const sel = $('instr');
+  const n = sel.options.length;
+  if (!n) return;
+  sel.selectedIndex = Math.min(n - 1, Math.max(0, sel.selectedIndex + delta));
+  send('@DXVOICE=' + sel.value);
+}
+$('instr-prev').onclick = () => stepInstr(-1);
+$('instr-next').onclick = () => stepInstr(1);
+$('hpf').onchange = e => send('@HPF=' + e.target.value);
+document.querySelectorAll('#mode button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#mode button').forEach(x => x.classList.toggle('active', x === b));
+  send('@MIDIMODE=' + b.dataset.v);
+});
+</script>
+</body>
+</html>
