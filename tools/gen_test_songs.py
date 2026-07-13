@@ -3,6 +3,16 @@
 # Event tuple: (deltaMs, kind, channel, data1, data2)
 ON, OFF, CC, PB, CP = "ON", "OFF", "CC", "PB", "CP"
 
+import math
+
+def cc_ramp(ch, cc, v0, v1, total_ms, step_ms=15):
+    # Smooth CC ramp (used for CC74 timbre / MPE Y-axis).
+    n = max(1, round(total_ms / step_ms)); out = []
+    for i in range(1, n + 1):
+        v = round(v0 + (v1 - v0) * i / n)
+        out.append((step_ms, CC, ch, cc, max(0, min(127, v))))
+    return out
+
 def cp_ramp(ch, p0, p1, total_ms, step_ms=15):
     # Smooth channel-pressure (MPE Z) ramp from p0 to p1 over total_ms, as fine steps.
     n = max(1, round(total_ms / step_ms))
@@ -144,6 +154,44 @@ def mpe_pressure():
     ev.append((60, OFF, 1, 60, 0))
     return ev
 
+def mpe_demo():
+    # A guided tour of EVERY MPE function on one instrument (loop it, change the patch to
+    # hear each). Member channels: MIDI ch2 = ev-channel 1, ch3 = ev-channel 2.
+    n = 62; ch = 1
+    rpn12 = lambda c: [(0, CC, c, 101, 0), (0, CC, c, 100, 0), (0, CC, c, 6, 12)]  # bend range 12
+    ev = []
+    # 1) PITCH BEND (X): up an octave and back, then down and back
+    ev.append((0, ON, ch, n, 100)); ev += rpn12(ch)
+    ev += glide(ch, CENTER, 16383, 700) + glide(ch, 16383, 0, 1200) + glide(ch, 0, CENTER, 700)
+    ev.append((200, OFF, ch, n, 0))
+    # 2) TIMBRE (Y / CC74): brightness sweeps up and down
+    ev.append((350, ON, ch, n, 100))
+    ev += cc_ramp(ch, 74, 64, 127, 700) + cc_ramp(ch, 74, 127, 0, 900) + cc_ramp(ch, 74, 0, 64, 500)
+    ev.append((200, OFF, ch, n, 0))
+    # 3) PRESSURE (Z): volume + brightness swell up and down
+    ev.append((350, ON, ch, n, 100))
+    ev += cp_ramp(ch, 0, 127, 800) + cp_ramp(ch, 127, 0, 800)
+    ev.append((200, OFF, ch, n, 0))
+    # 4) ALL THREE AT ONCE (one expressive note)
+    ev.append((350, ON, ch, n, 100)); ev += rpn12(ch)
+    for i in range(1, 49):
+        p = i / 48.0
+        lsb, msb = bend(round(CENTER + (16383 - CENTER) * math.sin(p * 2 * math.pi)))
+        ev.append((25, PB, ch, lsb, msb))
+        ev.append((0, CC, ch, 74, max(0, min(127, round(63 + 64 * (0.5 - 0.5 * math.cos(p * 2 * math.pi)))))))
+        ev.append((0, CP, ch, max(0, min(127, round(127 * (0.5 - 0.5 * math.cos(p * 2 * math.pi))))), 0))
+    ev.append((200, OFF, ch, n, 0))
+    # 5) PER-NOTE INDEPENDENCE: two notes; bend + press ONLY the top one
+    ev.append((400, ON, 1, 60, 100))                 # anchor (MIDI ch2), stays put
+    ev.append((0, ON, 2, 64, 100)); ev += rpn12(2)   # expressive (MIDI ch3)
+    for i in range(1, 41):
+        p = i / 40.0
+        lsb, msb = bend(round(CENTER + CENTER * 0.6 * math.sin(p * 2 * math.pi)))
+        ev.append((30, PB, 2, lsb, msb))
+        ev.append((0, CP, 2, max(0, min(127, round(127 * (0.5 - 0.5 * math.cos(p * 2 * math.pi))))), 0))
+    ev.append((200, OFF, 1, 60, 0)); ev.append((0, OFF, 2, 64, 0))
+    return ev
+
 TESTS = [
     ("kSweep",    "01 Midi Test Sweep",      sweep(),        "false"),
     ("kChord",    "02 Midi Test Chord",      chord(),        "false"),
@@ -154,6 +202,7 @@ TESTS = [
     ("kMpeBend",  "07 MPE Test Bend",        mpe_bend(),     "true"),
     ("kMpeOct",   "08 MPE Test Octave",      mpe_octave(),   "true"),
     ("kMpePress", "09 MPE Test Pressure",    mpe_pressure(), "true"),
+    ("kMpeDemo",  "10 MPE Full Demo",        mpe_demo(),     "true"),
 ]
 
 def emit():

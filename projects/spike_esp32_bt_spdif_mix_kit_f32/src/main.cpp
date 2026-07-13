@@ -572,6 +572,8 @@ static void applyMidiMode(bool mpe) {
 // catalog. Returns true if the line was a recognized command.
 #ifdef TDSP_SYNTH_DEXED_POOL
 static void runGainSweep(int startIdx = 0);   // ReplayGain sweep; resumable from a voice index
+static void runMpeSweep(int startIdx);        // MPE demo on each instrument; resumable
+static void runAxisProof(int axis);           // capture 1 note with an MPE axis at full
 #endif
 
 static bool handleControlLine(const char* line, Print& reply) {
@@ -608,6 +610,8 @@ static bool handleControlLine(const char* line, Print& reply) {
         Serial.printf("[timbre] mask=%u  bright=%d vib=%d trem=%d\n", g_poolSink.timbreMask(),
                       (m & 2) != 0, (m & 4) != 0, (m & 8) != 0);
     }
+    else if (strncmp(line, "@MPESWEEP=", 10) == 0) runMpeSweep(atoi(line + 10));   // MPE demo on each instrument from <start>
+    else if (strncmp(line, "@PROOF=", 7) == 0)     runAxisProof(atoi(line + 7));   // capture 1 note w/ axis at full (0=press 1=timbre 2=bend 3=neutral)
     else if (strncmp(line, "@LFOMODE=", 9) == 0) {     // 0 = respect patch LFO, 1 = force LFO
         bool force = atoi(line + 9) != 0;
         g_poolSink.setLfoForce(force);
@@ -921,23 +925,29 @@ static void runLoopbackCapture(int inst, int note, int vel) {
     g_synthSink->onAllNotesOff(0);
 }
 
-// Pressure proof ('Q'): hold ONE note at full pressure under the CURRENT @PRESSURE mask
-// and capture the synth sum, so the PC can prove the modulation is real — pitch wobble
-// (vibrato), amplitude oscillation (tremolo/volume), or timbre (brightness). Set the mask
-// with @PRESSURE=<n> first, then press Q.
-static void runPressureProof(void) {
+// Axis proof ('Q' = pressure; @PROOF=<axis>): hold ONE note with one MPE axis pushed to
+// full and capture the synth sum, so the PC can measure that the axis really modulates —
+// pitch (bend, axis 2), spectral centroid (timbre->brightness, axis 1), amplitude
+// (pressure->volume, axis 0), or a neutral reference (axis 3). Routings are forced to the
+// obvious mapping for the measurement, then restored.
+static void runAxisProof(int axis) {
     if (g_player.isPlaying()) songStop();
     g_synthSink->onAllNotesOff(0);
     bool wasMpe = g_mpeMode;
-    applyMidiMode(true);                                   // MPE: per-note pressure to one engine
+    uint8_t sp = g_poolSink.pressureMask(), st = g_poolSink.timbreMask();
+    applyMidiMode(true);
     synthSetInstrument(48);                                // a sustained voice
     if (g_dvol < -30.0f) { g_dvol = -12.0f; if (g_codecOk) applyVol(); }
+    g_poolSink.setPressureMask(3);                         // pressure -> volume+brightness
+    g_poolSink.setTimbreMask(2);                           // timbre   -> brightness
     delay(90);
-    Serial.printf("[proof] mask=%u note=60 ch2 pressure=127 rate=%.0f N=%d\n",
-                  g_poolSink.pressureMask(), (double)AUDIO_SAMPLE_RATE_EXACT, ClipProbe_F32::kCapN);
+    const char *nm = (axis == 0) ? "pressure" : (axis == 1) ? "timbre" : (axis == 2) ? "bend+7" : "neutral";
+    Serial.printf("[proof] axis=%s note=60 ch2 N=%d\n", nm, ClipProbe_F32::kCapN);
     g_synthSink->onNoteOn(2, 60, 110);
-    g_synthSink->onPressure(2, 1.0f);                      // full pressure
-    delay(150);                                            // let the LFO/EG settle
+    if      (axis == 0) g_synthSink->onPressure(2, 1.0f);
+    else if (axis == 1) g_synthSink->onTimbre(2, 1.0f);
+    else if (axis == 2) g_synthSink->onPitchBend(2, 7.0f);
+    delay(150);
     dxpClip.armCapture();
     uint32_t t0 = millis();
     while (!dxpClip.captureDone() && millis() - t0 < 1000) delay(2);
@@ -945,7 +955,50 @@ static void runPressureProof(void) {
     dumpFloatsTagged("PROOF", dxpClip.capture(), dxpClip.captureCount());
     Serial.println("[proof] done");
     g_synthSink->onAllNotesOff(0);
+    g_poolSink.setPressureMask(sp); g_poolSink.setTimbreMask(st);
     applyMidiMode(wasMpe);
+}
+static void runPressureProof(void) { runAxisProof(0); }
+
+// Compact per-note MPE gesture set: bend up/down, then timbre (CC74) sweep, then
+// pressure swell — ~3 s. Uses whatever routing is currently set. Drives g_synthSink
+// directly on member channel `ch`.
+static void mpeGestures(uint8_t ch, uint8_t note) {
+    g_synthSink->onNoteOn(ch, note, 100);                                    // bend (X)
+    for (int i = 0; i <= 30; i++) { g_synthSink->onPitchBend(ch, 12.0f * sinf(i / 30.0f * 2 * PI)); delay(30); }
+    g_synthSink->onPitchBend(ch, 0); g_synthSink->onNoteOff(ch, note, 0); delay(120);
+    g_synthSink->onNoteOn(ch, note, 100);                                    // timbre (Y / CC74)
+    for (int i = 0; i <= 30; i++) { g_synthSink->onTimbre(ch, 0.5f - 0.5f * cosf(i / 30.0f * 2 * PI)); delay(30); }
+    g_synthSink->onTimbre(ch, 0.5f); g_synthSink->onNoteOff(ch, note, 0); delay(120);
+    g_synthSink->onNoteOn(ch, note, 100);                                    // pressure (Z)
+    for (int i = 0; i <= 30; i++) { g_synthSink->onPressure(ch, 0.5f - 0.5f * cosf(i / 30.0f * 2 * PI)); delay(30); }
+    g_synthSink->onPressure(ch, 0); g_synthSink->onNoteOff(ch, note, 0); delay(120);
+}
+
+// MPE sweep ('Z' / @MPESWEEP=<start>): play the MPE gesture demo on EVERY instrument in
+// turn so you can hear how each patch responds to bend/timbre/pressure. Resets to the
+// default demo routing (pressure=vol+bright, timbre=bright, mod=vibrato), restores after.
+// Abort by sending any byte. Resumable from an index via @MPESWEEP=<start>.
+static void runMpeSweep(int startIdx) {
+    if (g_player.isPlaying()) songStop();
+    g_synthSink->onAllNotesOff(0);
+    bool wasMpe = g_mpeMode;
+    uint8_t sp = g_poolSink.pressureMask(), sm = g_poolSink.modMask(), st = g_poolSink.timbreMask();
+    applyMidiMode(true);
+    g_poolSink.setPressureMask(3); g_poolSink.setTimbreMask(2); g_poolSink.setModMask(4);
+    if (g_dvol < -20.0f) { g_dvol = -10.0f; if (g_codecOk) applyVol(); }
+    if (startIdx < 0) startIdx = 0;
+    Serial.printf("[mpesweep] MPE demo (bend/timbre/pressure) on each instrument from %d; send any key to stop\n", startIdx);
+    for (int i = startIdx; i < kNumInstruments; i++) {
+        if (Serial.available()) { Serial.read(); Serial.printf("[mpesweep] stopped at %d (resume: @MPESWEEP=%d)\n", i, i); break; }
+        synthSetInstrument(i);
+        Serial.printf("[mpesweep] %3d = %s\n", i, synthInstrumentName(i)); Serial.flush();
+        mpeGestures(2, 60);
+    }
+    g_synthSink->onAllNotesOff(0);
+    g_poolSink.setPressureMask(sp); g_poolSink.setModMask(sm); g_poolSink.setTimbreMask(st);
+    applyMidiMode(wasMpe);
+    Serial.println("[mpesweep] done");
 }
 
 // Slot scan ('Y'): play a loud note and report the peak on EACH of the 8 TDM input
@@ -1210,6 +1263,7 @@ void loop() {
             else if (c == 'L') { runLoopbackCapture(13, 60, 110); }  // capture digital + analog loopback (13 JUPITER exemplifies the snap)
             else if (c == 'Y') { runSlotScan(); }                    // scan all 8 TDM-in slots for the ADC loopback signal
             else if (c == 'Q') { runPressureProof(); }               // capture a full-pressure note (prove vibrato/tremolo)
+            else if (c == 'Z') { runMpeSweep(synthInstrument()); }   // MPE demo on every instrument from the current one
             else if (c == 'N') { runGainSweep(); }              // ReplayGain: sweep all 320 voices, print trim table
 #endif
         }
