@@ -42,6 +42,7 @@ public:
         v->on = true; v->ch = ch; v->note = note; v->eng = e; v->age = ++_seq;
         _load[e]++;
         if (_mpe && ch >= 1 && ch <= 16) _chEng[ch] = (int8_t)e;   // set AFTER any steal
+        _eng[e]->setGain(kEngineGain);   // reset: don't inherit a prior note's pressure gain
         _eng[e]->keydown(note, vel);
     }
 
@@ -60,9 +61,42 @@ public:
         const int16_t counts = clampCounts((int)(semitones / (float)kBendRange * 8192.0f));
         forEachTarget(ch, [&](AudioSynthDexed *e) { e->setPitchbendRange((uint8_t)kBendRange); e->setPitchbend(counts); });
     }
+    // ---- Pressure (MPE Z-axis) routing -------------------------------------
+    // What channel pressure modulates is configurable (a bitmask, any combination):
+    enum {
+        PRESS_VOL    = 1,   // per-note output gain  — strong VOLUME swell, ANY patch
+        PRESS_BRIGHT = 2,   // Dexed aftertouch -> EG bias — brightness/timbre, ANY patch
+        PRESS_VIB    = 4,   // Dexed aftertouch -> PITCH (LFO vibrato) — needs the LFO
+        PRESS_TREM   = 8,   // Dexed aftertouch -> AMP   (LFO tremolo) — needs the LFO
+    };
+    static constexpr float kEngineGain = 0.8f;   // must match synthBegin()'s setGain
+    static constexpr float kPressFloor = 0.22f;  // VOL: 0 pressure -> 22% gain; full -> 100%
+
+    void     setPressureMask(uint8_t m) { _pressMask = m; applyPressureConfig(); }
+    uint8_t  pressureMask() const       { return _pressMask; }
+
+    // (Re)program each engine's Dexed aftertouch target from the mask. VIB/TREM force the
+    // LFO to run (setLFOSpeed) so they respond even on patches whose LFO speed is 0. Call
+    // after every voice load (loadVoice can reset controller/LFO state).
+    void applyPressureConfig() {
+        const uint8_t dexed = (uint8_t)(((_pressMask & PRESS_VIB)  ? 1 : 0)    // Dexed PITCH
+                                      | ((_pressMask & PRESS_TREM) ? 2 : 0)    // Dexed AMP
+                                      | ((_pressMask & PRESS_BRIGHT)? 4 : 0)); // Dexed EG
+        const bool needLfo = _pressMask & (PRESS_VIB | PRESS_TREM);
+        for (uint8_t i = 0; i < _n; ++i) {
+            _eng[i]->setAftertouchRange(99);
+            _eng[i]->setAftertouchTarget(dexed);
+            if (needLfo) _eng[i]->setLFOSpeed(30);   // ~a few Hz so vib/trem are audible
+        }
+    }
+
     void onPressure(uint8_t ch, float value) override {
         const uint8_t v = toMidi7(value);
-        forEachTarget(ch, [&](AudioSynthDexed *e) { e->setAftertouch(v); });
+        // VOL on -> swell gain from kPressFloor..1; VOL off -> hold gain at base.
+        const float g = (_pressMask & PRESS_VOL)
+                          ? kEngineGain * (kPressFloor + (1.0f - kPressFloor) * value)
+                          : kEngineGain;
+        forEachTarget(ch, [&](AudioSynthDexed *e) { e->setAftertouch(v); e->setGain(g); });
     }
     void onModWheel(uint8_t /*ch*/, float value) override {
         const uint8_t v = toMidi7(value);
@@ -90,6 +124,7 @@ private:
     int8_t   _chEng[17];    // MPE: member channel (1..16) -> engine, -1 = unmapped
     uint8_t  _rr = 0;       // normal-mode round-robin cursor
     uint32_t _seq = 0;      // monotonic age stamp for oldest-note stealing
+    uint8_t  _pressMask = PRESS_VOL | PRESS_BRIGHT;   // what pressure modulates (default)
 
     uint8_t maxVoices() const {
         uint16_t m = (uint16_t)_n * _vpe;

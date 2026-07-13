@@ -251,14 +251,11 @@ static void synthSetInstrument(int idx) {
     for (int i = 0; i < kPoolN; ++i) {
         g_pool[i]->panic();
         tdsp::dexed::loadVoice(*g_pool[i], bank, voice);
-        // Make MPE channel pressure (-> Dexed aftertouch) audible on EVERY patch. Route
-        // it to EG bias: unlike the PITCH/AMP targets (which are gated by the patch's LFO
-        // and do nothing on LFO-less voices), EG modulates operator amplitude DIRECTLY
-        // (dx7note.cpp: amod_3 = (eg_mod+1)<<17). eg_mod defaults to 0 = the un-pressed
-        // sound, so this never changes no-pressure playback.
-        g_pool[i]->setAftertouchRange(99);      // 0..99 sensitivity — full
-        g_pool[i]->setAftertouchTarget(4);      // bitmask: 1=pitch 2=amp 4=eg  -> EG (direct)
     }
+    // Re-apply the pressure routing (aftertouch target / LFO) after loading — loadVoice
+    // can reset controller + LFO state. What pressure modulates is configurable via the
+    // sink's mask (@PRESSURE=); default = VOLUME + BRIGHTNESS.
+    g_poolSink.applyPressureConfig();
     g_synthInstrument = idx;
     // ReplayGain-style per-voice loudness trim (baked table in DexedVoiceGains.h). One
     // bus gain for the whole pool is correct: the pool is single-timbre (one voice at a

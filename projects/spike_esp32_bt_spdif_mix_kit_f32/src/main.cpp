@@ -589,6 +589,14 @@ static bool handleControlLine(const char* line, Print& reply) {
     else if (strncmp(line, "@HPF=", 5) == 0)      setDacHpfMode(atoi(line + 5));
     else if (strncmp(line, "@LOOP=", 6) == 0)   { g_loop = (atoi(line + 6) != 0);
                                  Serial.printf("[song] loop %s\n", g_loop ? "ON" : "off"); }
+#ifdef TDSP_SYNTH_DEXED_POOL
+    else if (strncmp(line, "@PRESSURE=", 10) == 0) {   // MPE pressure routing bitmask:
+        uint8_t m = (uint8_t)atoi(line + 10);          // 1=VOL 2=BRIGHT 4=VIB 8=TREM (combine)
+        g_poolSink.setPressureMask(m);
+        Serial.printf("[press] mask=%u  vol=%d bright=%d vib=%d trem=%d\n", m,
+                      (m & 1) != 0, (m & 2) != 0, (m & 4) != 0, (m & 8) != 0);
+    }
+#endif
     else if (strncmp(line, "@MIDIMODE=", 10) == 0) applyMidiMode(atoi(line + 10) != 0);
     else return false;
     return true;
