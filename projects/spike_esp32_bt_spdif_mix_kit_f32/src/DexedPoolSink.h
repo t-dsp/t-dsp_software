@@ -42,7 +42,8 @@ public:
         v->on = true; v->ch = ch; v->note = note; v->eng = e; v->age = ++_seq;
         _load[e]++;
         if (_mpe && ch >= 1 && ch <= 16) _chEng[ch] = (int8_t)e;   // set AFTER any steal
-        _eng[e]->setGain(kEngineGain);   // reset: don't inherit a prior note's pressure gain
+        if (ch <= 16) { _chPress[ch] = 1.0f; _chTimbre[ch] = 1.0f; }  // fresh note = full until expression arrives
+        _eng[e]->setGain(kEngineGain);   // reset: don't inherit a prior note's expression gain
         _eng[e]->keydown(note, vel);
     }
 
@@ -78,7 +79,7 @@ public:
 
     void     setPressureMask(uint8_t m) { _pressMask = m; applyExprConfig(); }
     void     setModMask(uint8_t m)      { _modMask = (uint8_t)(m & ~DEST_VOL); applyExprConfig(); }
-    void     setTimbreMask(uint8_t m)   { _timbreMask = (uint8_t)(m & ~DEST_VOL); applyExprConfig(); }
+    void     setTimbreMask(uint8_t m)   { _timbreMask = m; applyExprConfig(); }   // timbre may drive VOLUME too
     void     setLfoForce(bool on)       { _lfoForce = on; applyExprConfig(); }
     uint8_t  pressureMask() const       { return _pressMask; }
     uint8_t  modMask() const            { return _modMask; }
@@ -110,23 +111,32 @@ public:
         }
     }
 
+    // Per-note output gain, combining every VOLUME-routed source (pressure and/or timbre)
+    // multiplicatively so they coexist without fighting. Each contributes kPressFloor..1.
+    float combinedGain(uint8_t ch) const {
+        const float pv = (ch <= 16) ? _chPress[ch]  : 1.0f;
+        const float tv = (ch <= 16) ? _chTimbre[ch] : 1.0f;
+        const float pf = (_pressMask  & DEST_VOL) ? kPressFloor + (1.0f - kPressFloor) * pv : 1.0f;
+        const float tf = (_timbreMask & DEST_VOL) ? kPressFloor + (1.0f - kPressFloor) * tv : 1.0f;
+        return kEngineGain * pf * tf;
+    }
     void onPressure(uint8_t ch, float value) override {
+        if (ch <= 16) _chPress[ch] = value;
         const uint8_t v = toMidi7(value);
-        // VOL routed -> swell gain from kPressFloor..1; else hold at base.
-        const float g = (_pressMask & DEST_VOL)
-                          ? kEngineGain * (kPressFloor + (1.0f - kPressFloor) * value)
-                          : kEngineGain;
+        const float g = combinedGain(ch);
         forEachTarget(ch, [&](AudioSynthDexed *e) { e->setAftertouch(v); e->setGain(g); });
     }
     void onModWheel(uint8_t /*ch*/, float value) override {
         const uint8_t v = toMidi7(value);
         forEachEngine([&](AudioSynthDexed *e) { e->setModWheel(v); });   // target set in applyExprConfig
     }
-    // MPE Y-axis: CC74 timbre. Per-note (forEachTarget) like pressure — routed via the
-    // Dexed BREATH controller (target set in applyExprConfig).
+    // MPE Y-axis: CC74 timbre. Per-note (forEachTarget) — Dexed BREATH controller for
+    // brightness, and (default) a per-note VOLUME swell so the slide is clearly audible.
     void onTimbre(uint8_t ch, float value) override {
+        if (ch <= 16) _chTimbre[ch] = value;
         const uint8_t v = toMidi7(value);
-        forEachTarget(ch, [&](AudioSynthDexed *e) { e->setBreathController(v); });
+        const float g = combinedGain(ch);
+        forEachTarget(ch, [&](AudioSynthDexed *e) { e->setBreathController(v); e->setGain(g); });
     }
     void onSustain(uint8_t /*ch*/, bool on) override {
         forEachEngine([&](AudioSynthDexed *e) { e->setSustain(on); });
@@ -152,8 +162,10 @@ private:
     uint32_t _seq = 0;      // monotonic age stamp for oldest-note stealing
     uint8_t  _pressMask  = DEST_VOL | DEST_BRIGHT;   // pressure routing (default: volume + brightness)
     uint8_t  _modMask    = DEST_VIB;                 // mod-wheel routing (default: vibrato)
-    uint8_t  _timbreMask = DEST_BRIGHT;              // CC74 timbre routing (default: brightness)
+    uint8_t  _timbreMask = DEST_VOL | DEST_BRIGHT;   // CC74 timbre routing (default: volume + brightness = punchy)
     bool     _lfoForce   = true;                     // force LFO so vib/trem work on any patch
+    float    _chPress[17]  = {0};                    // per-channel latest pressure 0..1 (for combined VOL gain)
+    float    _chTimbre[17] = {0};                    // per-channel latest CC74 timbre 0..1
 
     uint8_t maxVoices() const {
         uint16_t m = (uint16_t)_n * _vpe;

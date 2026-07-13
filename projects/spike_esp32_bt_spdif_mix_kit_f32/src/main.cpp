@@ -574,6 +574,7 @@ static void applyMidiMode(bool mpe) {
 static void runGainSweep(int startIdx = 0);   // ReplayGain sweep; resumable from a voice index
 static void runMpeSweep(int startIdx);        // MPE demo on each instrument; resumable
 static void runAxisProof(int axis);           // capture 1 note with an MPE axis at full
+static void runMpeCheck(void);                // measure every instrument under MPE; flag silent/clip
 #endif
 
 static bool handleControlLine(const char* line, Print& reply) {
@@ -612,6 +613,7 @@ static bool handleControlLine(const char* line, Print& reply) {
     }
     else if (strncmp(line, "@MPESWEEP=", 10) == 0) runMpeSweep(atoi(line + 10));   // MPE demo on each instrument from <start>
     else if (strncmp(line, "@PROOF=", 7) == 0)     runAxisProof(atoi(line + 7));   // capture 1 note w/ axis at full (0=press 1=timbre 2=bend 3=neutral)
+    else if (strcmp(line, "@MPECHECK") == 0)       runMpeCheck();                  // QA every instrument under MPE (silent/clip)
     else if (strncmp(line, "@LFOMODE=", 9) == 0) {     // 0 = respect patch LFO, 1 = force LFO
         bool force = atoi(line + 9) != 0;
         g_poolSink.setLfoForce(force);
@@ -999,6 +1001,42 @@ static void runMpeSweep(int startIdx) {
     g_poolSink.setPressureMask(sp); g_poolSink.setModMask(sm); g_poolSink.setTimbreMask(st);
     applyMidiMode(wasMpe);
     Serial.println("[mpesweep] done");
+}
+
+// MPE check (@MPECHECK): fast automated QA over ALL instruments — play each with MPE
+// expression (pressure+timbre+bend at once) and measure the synth-sum peak, flagging
+// SILENT (broken/empty patch) or CLIP. The audible-listen equivalent, but measured.
+static void runMpeCheck(void) {
+    if (g_player.isPlaying()) songStop();
+    g_synthSink->onAllNotesOff(0);
+    bool wasMpe = g_mpeMode;
+    uint8_t sp = g_poolSink.pressureMask(), st = g_poolSink.timbreMask(), sm = g_poolSink.modMask();
+    applyMidiMode(true);
+    g_poolSink.setPressureMask(3); g_poolSink.setTimbreMask(3); g_poolSink.setModMask(4);
+    if (g_dvol < -20.0f) { g_dvol = -12.0f; if (g_codecOk) applyVol(); }
+    Serial.println("[mpecheck] every instrument w/ MPE expression; flags SILENT / CLIP. Any key stops.");
+    int silent = 0, clip = 0;
+    for (int i = 0; i < kNumInstruments; i++) {
+        if (Serial.available()) { Serial.read(); Serial.printf("[mpecheck] stopped at %d\n", i); break; }
+        synthSetInstrument(i);
+        dxpClip.reset();
+        g_synthSink->onNoteOn(2, 60, 110);
+        g_synthSink->onPressure(2, 0.9f); g_synthSink->onTimbre(2, 0.9f); g_synthSink->onPitchBend(2, 3.0f);
+        uint32_t t0 = millis(); while (millis() - t0 < 200) delay(2);
+        float pk = dxpClip.peak(); uint32_t railed = dxpClip.clipped();
+        g_synthSink->onNoteOff(2, 60, 0);
+        bool isSilent = pk < 0.01f, isClip = railed > 50;
+        if (isSilent) silent++;
+        if (isClip)   clip++;
+        Serial.printf("[mpecheck] %3d peak=%.3f railed=%lu %-8s %s\n", i, (double)pk, (unsigned long)railed,
+                      isSilent ? "SILENT" : isClip ? "CLIP" : "ok", synthInstrumentName(i));
+        Serial.flush();
+        delay(25);
+    }
+    g_synthSink->onAllNotesOff(0);
+    g_poolSink.setPressureMask(sp); g_poolSink.setTimbreMask(st); g_poolSink.setModMask(sm);
+    applyMidiMode(wasMpe);
+    Serial.printf("[mpecheck] DONE: %d silent, %d clipping (of %d)\n", silent, clip, kNumInstruments);
 }
 
 // Slot scan ('Y'): play a loud note and report the peak on EACH of the 8 TDM input

@@ -63,7 +63,7 @@ export default function App() {
   // Expression routing bitmasks (1=volume 2=brightness 4=vibrato 8=tremolo).
   const [pressMask, setPressMask] = useState(3);   // pressure: default vol+bright
   const [modMask, setModMask] = useState(4);       // mod wheel: default vibrato (no volume bit)
-  const [timbreMask, setTimbreMask] = useState(2); // CC74 timbre (MPE Y): default brightness
+  const [timbreMask, setTimbreMask] = useState(3); // CC74 timbre (MPE Y): default volume + brightness (punchy)
   const [lfoForce, setLfoForce] = useState(true);  // force LFO so vib/trem work on any patch
   const connected = state === 'connected';
 
@@ -385,6 +385,7 @@ function SettingsModal({
 
               <View style={{ height: 10 }} />
               <Text style={styles.dim}>Timbre — CC74 slide (MPE Y-axis)</Text>
+              <SecondaryButton label={`${timbreMask & 1 ? '☑' : '☐'}  Timbre → Volume`} onPress={() => onToggleTimbreBit(1)} />
               <SecondaryButton label={`${timbreMask & 2 ? '☑' : '☐'}  Timbre → Brightness`} onPress={() => onToggleTimbreBit(2)} />
               <SecondaryButton label={`${timbreMask & 4 ? '☑' : '☐'}  Timbre → Vibrato`} onPress={() => onToggleTimbreBit(4)} />
               <SecondaryButton label={`${timbreMask & 8 ? '☑' : '☐'}  Timbre → Tremolo`} onPress={() => onToggleTimbreBit(8)} />
