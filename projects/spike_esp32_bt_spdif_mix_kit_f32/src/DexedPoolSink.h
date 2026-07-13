@@ -86,7 +86,14 @@ public:
         for (uint8_t i = 0; i < _n; ++i) {
             _eng[i]->setAftertouchRange(99);
             _eng[i]->setAftertouchTarget(dexed);
-            if (needLfo) _eng[i]->setLFOSpeed(30);   // ~a few Hz so vib/trem are audible
+            if (needLfo) {
+                _eng[i]->setLFOSpeed(30);          // ~a few Hz so vib/trem oscillate
+                _eng[i]->setLFOWaveform(0);        // triangle/sine — smooth
+                // Vibrato depth = pitch_mod (pressure) * LFO pitch-mod SENSITIVITY. Force
+                // it to max so pressure->vibrato works regardless of the patch's own value;
+                // tremolo (amp) is driven directly by pressure*lfo_val and needs no sens.
+                if (_pressMask & PRESS_VIB) _eng[i]->setLFOPitchModulationSensitivity(7);
+            }
         }
     }
 

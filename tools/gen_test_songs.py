@@ -132,12 +132,15 @@ def mpe_pressure():
     # sound via the pool's aftertouch->EG routing. FIRST 3 SLOW up/down cycles, THEN 6
     # FASTER up/down cycles — so pressure is heard both as a slow swell and quick pulses.
     ev = [(0, ON, 1, 60, 100), (40, CP, 1, 0, 0)]
-    for _ in range(3):                      # 3 slow up/down swells (~1.8 s each)
+    for _ in range(2):                      # 2 slow up/down swells (~1.8 s each)
         ev += cp_ramp(1, 0, 127, 900)
         ev += cp_ramp(1, 127, 0, 900)
-    for _ in range(6):                      # 6 faster up/down swells (~0.6 s each)
+    for _ in range(4):                      # 4 quick up/down swells (~0.6 s each)
         ev += cp_ramp(1, 0, 127, 300)
         ev += cp_ramp(1, 127, 0, 300)
+    for _ in range(2):                      # 2 more slow up/down swells
+        ev += cp_ramp(1, 0, 127, 900)
+        ev += cp_ramp(1, 127, 0, 900)
     ev.append((60, OFF, 1, 60, 0))
     return ev
 
