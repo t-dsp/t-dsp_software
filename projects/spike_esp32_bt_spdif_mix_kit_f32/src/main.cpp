@@ -903,6 +903,33 @@ static void runLoopbackCapture(int inst, int note, int vel) {
     g_synthSink->onAllNotesOff(0);
 }
 
+// Pressure proof ('Q'): hold ONE note at full pressure under the CURRENT @PRESSURE mask
+// and capture the synth sum, so the PC can prove the modulation is real — pitch wobble
+// (vibrato), amplitude oscillation (tremolo/volume), or timbre (brightness). Set the mask
+// with @PRESSURE=<n> first, then press Q.
+static void runPressureProof(void) {
+    if (g_player.isPlaying()) songStop();
+    g_synthSink->onAllNotesOff(0);
+    bool wasMpe = g_mpeMode;
+    applyMidiMode(true);                                   // MPE: per-note pressure to one engine
+    synthSetInstrument(48);                                // a sustained voice
+    if (g_dvol < -30.0f) { g_dvol = -12.0f; if (g_codecOk) applyVol(); }
+    delay(90);
+    Serial.printf("[proof] mask=%u note=60 ch2 pressure=127 rate=%.0f N=%d\n",
+                  g_poolSink.pressureMask(), (double)AUDIO_SAMPLE_RATE_EXACT, ClipProbe_F32::kCapN);
+    g_synthSink->onNoteOn(2, 60, 110);
+    g_synthSink->onPressure(2, 1.0f);                      // full pressure
+    delay(150);                                            // let the LFO/EG settle
+    dxpClip.armCapture();
+    uint32_t t0 = millis();
+    while (!dxpClip.captureDone() && millis() - t0 < 1000) delay(2);
+    g_synthSink->onNoteOff(2, 60, 0);
+    dumpFloatsTagged("PROOF", dxpClip.capture(), dxpClip.captureCount());
+    Serial.println("[proof] done");
+    g_synthSink->onAllNotesOff(0);
+    applyMidiMode(wasMpe);
+}
+
 // Slot scan ('Y'): play a loud note and report the peak on EACH of the 8 TDM input
 // slots, so we can see which slot (if any) carries the ADC loopback signal.
 static void runSlotScan(void) {
@@ -1164,6 +1191,7 @@ void loop() {
             else if (c == 'H') { dumpAdcWorstJump(); }          // dump worst ANALOG (loopback) step during playback
             else if (c == 'L') { runLoopbackCapture(13, 60, 110); }  // capture digital + analog loopback (13 JUPITER exemplifies the snap)
             else if (c == 'Y') { runSlotScan(); }                    // scan all 8 TDM-in slots for the ADC loopback signal
+            else if (c == 'Q') { runPressureProof(); }               // capture a full-pressure note (prove vibrato/tremolo)
             else if (c == 'N') { runGainSweep(); }              // ReplayGain: sweep all 320 voices, print trim table
 #endif
         }

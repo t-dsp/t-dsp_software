@@ -42,6 +42,7 @@ export default function App() {
     setHpf,
     setMidiMode,
     setLoop,
+    setPressure,
     refreshCatalog,
   } = useTdsp();
   const [showSettings, setShowSettings] = useState(false);
@@ -56,6 +57,8 @@ export default function App() {
   const [mpe, setMpe] = useState(false);
   // Loop the current song (local UI state; sent to the device on change).
   const [loop, setLoopState] = useState(false);
+  // MPE pressure routing bitmask (1=volume 2=brightness 4=vibrato 8=tremolo). Default = vol+bright.
+  const [pressMask, setPressMask] = useState(3);
   const connected = state === 'connected';
 
   // Initialize the HPF controls from the device's reported state once per
@@ -85,6 +88,11 @@ export default function App() {
     const next = !loop;
     setLoopState(next);
     setLoop(next);
+  };
+  const onTogglePressBit = (bit: number) => {
+    const next = pressMask ^ bit;
+    setPressMask(next);
+    setPressure(next);
   };
 
   const openSettings = () => {
@@ -147,6 +155,8 @@ export default function App() {
         onStopSong={stopSong}
         loop={loop}
         onToggleLoop={onToggleLoop}
+        pressMask={pressMask}
+        onTogglePressBit={onTogglePressBit}
         dxVoice={dxVoice}
         onSelectVoice={(i) => {
           setDxVoiceState(i);
@@ -195,6 +205,8 @@ function SettingsModal({
   onStopSong,
   loop,
   onToggleLoop,
+  pressMask,
+  onTogglePressBit,
   dxVoice,
   onSelectVoice,
   song,
@@ -222,6 +234,8 @@ function SettingsModal({
   onStopSong: () => void;
   loop: boolean;
   onToggleLoop: () => void;
+  pressMask: number;
+  onTogglePressBit: (bit: number) => void;
   dxVoice: number;
   onSelectVoice: (index: number) => void;
   song: number;
@@ -323,6 +337,17 @@ function SettingsModal({
                 label={mpe ? 'Mode: MPE (per-note expression)' : 'Mode: Normal MIDI'}
                 onPress={onToggleMpe}
               />
+
+              <Text style={styles.sectionLabel}>Pressure (MPE Z) controls</Text>
+              <Text style={styles.dim}>
+                What channel pressure modulates. Volume &amp; Brightness work on any patch;
+                Vibrato &amp; Tremolo add an LFO.
+              </Text>
+              <View style={{ height: 8 }} />
+              <SecondaryButton label={`${pressMask & 1 ? '☑' : '☐'}  Volume`} onPress={() => onTogglePressBit(1)} />
+              <SecondaryButton label={`${pressMask & 2 ? '☑' : '☐'}  Brightness`} onPress={() => onTogglePressBit(2)} />
+              <SecondaryButton label={`${pressMask & 4 ? '☑' : '☐'}  Vibrato`} onPress={() => onTogglePressBit(4)} />
+              <SecondaryButton label={`${pressMask & 8 ? '☑' : '☐'}  Tremolo`} onPress={() => onTogglePressBit(8)} />
 
               <Text style={styles.sectionLabel}>Song</Text>
               <Dropdown label="Song" options={songs} value={song} onSelect={onSelectSong} />

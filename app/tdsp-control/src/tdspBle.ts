@@ -39,6 +39,7 @@ export const CMD = {
   SET_HPF: 0x24, // + 1 byte: TAC5212 DAC highpass mode (0=off,1=1Hz,2=12Hz,3=96Hz)
   SET_MIDI_MODE: 0x25, // + 1 byte: 0 = normal MIDI, 1 = MPE (per-note expression)
   SET_LOOP: 0x26, // + 1 byte: 0/1 — loop the current song when it ends
+  SET_PRESSURE: 0x27, // + 1 byte: MPE pressure routing bitmask (1=vol 2=bright 4=vib 8=trem)
 } as const;
 
 // TAC5212 DAC highpass filter modes — byte sent via SET_HPF. Maps to the
@@ -604,6 +605,11 @@ export function useTdsp() {
     (on: boolean) => writeByteCmd(CMD.SET_LOOP, on ? 1 : 0),
     [writeByteCmd]
   );
+  // MPE pressure routing bitmask: 1=volume 2=brightness 4=vibrato 8=tremolo (combine).
+  const setPressure = useCallback(
+    (mask: number) => writeByteCmd(CMD.SET_PRESSURE, mask & 0xff),
+    [writeByteCmd]
+  );
   // Ask the device to re-scan its SD card and re-send the catalog. The device
   // NOTIFYs the songs/instruments chars, which re-reads via the subscription; we
   // also re-read after a short delay in case the notify is missed.
@@ -696,6 +702,7 @@ export function useTdsp() {
     setHpf,
     setMidiMode,
     setLoop,
+    setPressure,
     refreshCatalog,
   };
 }
