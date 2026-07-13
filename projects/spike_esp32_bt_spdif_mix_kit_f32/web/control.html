@@ -106,6 +106,12 @@
       <label class="cbx"><input type="checkbox" class="mod" data-bit="8" disabled> Tremolo</label>
       <label class="cbx"><input type="checkbox" class="mod" data-bit="2" disabled> Brightness</label>
     </div>
+    <label style="margin:0 0 4px">Timbre — CC74 slide (MPE&nbsp;Y-axis)</label>
+    <div class="row" style="flex-wrap:wrap; gap:14px; margin-bottom:12px">
+      <label class="cbx"><input type="checkbox" class="tim" data-bit="2" checked disabled> Brightness</label>
+      <label class="cbx"><input type="checkbox" class="tim" data-bit="4" disabled> Vibrato</label>
+      <label class="cbx"><input type="checkbox" class="tim" data-bit="8" disabled> Tremolo</label>
+    </div>
     <label style="margin:0 0 4px">Pressure (aftertouch / MPE&nbsp;Z)</label>
     <div class="row" style="flex-wrap:wrap; gap:14px; margin-bottom:12px">
       <label class="cbx"><input type="checkbox" class="press" data-bit="1" checked disabled> Volume</label>
@@ -188,7 +194,7 @@ function setConnected(on) {
   $('connect').textContent = on ? 'Disconnect' : 'Connect';
   ['vol','song','play','stop','refresh','instr','instr-search','instr-prev','instr-next','hpf','loop'].forEach(id => $(id).disabled = !on);
   document.querySelectorAll('#mode button').forEach(b => b.disabled = !on);
-  document.querySelectorAll('.press, .mod').forEach(c => c.disabled = !on);
+  document.querySelectorAll('.press, .mod, .tim').forEach(c => c.disabled = !on);
   document.querySelectorAll('#lfomode button').forEach(b => b.disabled = !on);
   if (!on) $('synth').textContent = '';
 }
@@ -297,6 +303,7 @@ function bitmaskOf(sel) {
 }
 document.querySelectorAll('.press').forEach(c => c.onchange = () => send('@PRESSURE=' + bitmaskOf('.press')));
 document.querySelectorAll('.mod').forEach(c => c.onchange = () => send('@MODWHEEL=' + bitmaskOf('.mod')));
+document.querySelectorAll('.tim').forEach(c => c.onchange = () => send('@TIMBRE=' + bitmaskOf('.tim')));
 document.querySelectorAll('#lfomode button').forEach(b => b.onclick = () => {
   document.querySelectorAll('#lfomode button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');

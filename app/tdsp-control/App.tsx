@@ -45,6 +45,7 @@ export default function App() {
     setPressure,
     setModWheel,
     setLfoMode,
+    setTimbre,
     refreshCatalog,
   } = useTdsp();
   const [showSettings, setShowSettings] = useState(false);
@@ -62,6 +63,7 @@ export default function App() {
   // Expression routing bitmasks (1=volume 2=brightness 4=vibrato 8=tremolo).
   const [pressMask, setPressMask] = useState(3);   // pressure: default vol+bright
   const [modMask, setModMask] = useState(4);       // mod wheel: default vibrato (no volume bit)
+  const [timbreMask, setTimbreMask] = useState(2); // CC74 timbre (MPE Y): default brightness
   const [lfoForce, setLfoForce] = useState(true);  // force LFO so vib/trem work on any patch
   const connected = state === 'connected';
 
@@ -102,6 +104,11 @@ export default function App() {
     const next = modMask ^ bit;
     setModMask(next);
     setModWheel(next);
+  };
+  const onToggleTimbreBit = (bit: number) => {
+    const next = timbreMask ^ bit;
+    setTimbreMask(next);
+    setTimbre(next);
   };
   const onSetLfoForce = (force: boolean) => {
     setLfoForce(force);
@@ -172,6 +179,8 @@ export default function App() {
         onTogglePressBit={onTogglePressBit}
         modMask={modMask}
         onToggleModBit={onToggleModBit}
+        timbreMask={timbreMask}
+        onToggleTimbreBit={onToggleTimbreBit}
         lfoForce={lfoForce}
         onSetLfoForce={onSetLfoForce}
         dxVoice={dxVoice}
@@ -226,6 +235,8 @@ function SettingsModal({
   onTogglePressBit,
   modMask,
   onToggleModBit,
+  timbreMask,
+  onToggleTimbreBit,
   lfoForce,
   onSetLfoForce,
   dxVoice,
@@ -259,6 +270,8 @@ function SettingsModal({
   onTogglePressBit: (bit: number) => void;
   modMask: number;
   onToggleModBit: (bit: number) => void;
+  timbreMask: number;
+  onToggleTimbreBit: (bit: number) => void;
   lfoForce: boolean;
   onSetLfoForce: (force: boolean) => void;
   dxVoice: number;
@@ -369,6 +382,12 @@ function SettingsModal({
               <SecondaryButton label={`${modMask & 4 ? '☑' : '☐'}  Mod Wheel → Vibrato`} onPress={() => onToggleModBit(4)} />
               <SecondaryButton label={`${modMask & 8 ? '☑' : '☐'}  Mod Wheel → Tremolo`} onPress={() => onToggleModBit(8)} />
               <SecondaryButton label={`${modMask & 2 ? '☑' : '☐'}  Mod Wheel → Brightness`} onPress={() => onToggleModBit(2)} />
+
+              <View style={{ height: 10 }} />
+              <Text style={styles.dim}>Timbre — CC74 slide (MPE Y-axis)</Text>
+              <SecondaryButton label={`${timbreMask & 2 ? '☑' : '☐'}  Timbre → Brightness`} onPress={() => onToggleTimbreBit(2)} />
+              <SecondaryButton label={`${timbreMask & 4 ? '☑' : '☐'}  Timbre → Vibrato`} onPress={() => onToggleTimbreBit(4)} />
+              <SecondaryButton label={`${timbreMask & 8 ? '☑' : '☐'}  Timbre → Tremolo`} onPress={() => onToggleTimbreBit(8)} />
 
               <View style={{ height: 10 }} />
               <Text style={styles.dim}>Pressure (aftertouch / MPE Z)</Text>

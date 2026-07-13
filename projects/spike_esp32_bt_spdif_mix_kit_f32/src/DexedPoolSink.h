@@ -78,9 +78,11 @@ public:
 
     void     setPressureMask(uint8_t m) { _pressMask = m; applyExprConfig(); }
     void     setModMask(uint8_t m)      { _modMask = (uint8_t)(m & ~DEST_VOL); applyExprConfig(); }
+    void     setTimbreMask(uint8_t m)   { _timbreMask = (uint8_t)(m & ~DEST_VOL); applyExprConfig(); }
     void     setLfoForce(bool on)       { _lfoForce = on; applyExprConfig(); }
     uint8_t  pressureMask() const       { return _pressMask; }
     uint8_t  modMask() const            { return _modMask; }
+    uint8_t  timbreMask() const         { return _timbreMask; }
     bool     lfoForce() const           { return _lfoForce; }
 
     static uint8_t dexedTarget(uint8_t mask) {   // dest bits -> Dexed target bitmask (1=pitch 2=amp 4=eg)
@@ -93,14 +95,17 @@ public:
     // own LFO alone (only natively-LFO patches — the [V]/[T]-tagged ones — respond). Call
     // after every voice load (loadVoice resets controller/LFO state).
     void applyExprConfig() {
-        const uint8_t both = _modMask | _pressMask;
+        // Three sources -> three Dexed controllers: mod wheel, aftertouch, breath (= CC74
+        // timbre, the MPE Y-axis). Each routes to pitch/amp/eg per its mask.
+        const uint8_t all = _modMask | _pressMask | _timbreMask;
         for (uint8_t i = 0; i < _n; ++i) {
-            _eng[i]->setAftertouchRange(99); _eng[i]->setAftertouchTarget(dexedTarget(_pressMask));
-            _eng[i]->setModWheelRange(99);   _eng[i]->setModWheelTarget(dexedTarget(_modMask));
-            if (_lfoForce && (both & (DEST_VIB | DEST_TREM))) {
+            _eng[i]->setAftertouchRange(99);      _eng[i]->setAftertouchTarget(dexedTarget(_pressMask));
+            _eng[i]->setModWheelRange(99);        _eng[i]->setModWheelTarget(dexedTarget(_modMask));
+            _eng[i]->setBreathControllerRange(99); _eng[i]->setBreathControllerTarget(dexedTarget(_timbreMask));
+            if (_lfoForce && (all & (DEST_VIB | DEST_TREM))) {
                 _eng[i]->setLFOSpeed(30);
                 _eng[i]->setLFOWaveform(0);
-                if (both & DEST_VIB) _eng[i]->setLFOPitchModulationSensitivity(7);
+                if (all & DEST_VIB) _eng[i]->setLFOPitchModulationSensitivity(7);
             }
         }
     }
@@ -115,7 +120,13 @@ public:
     }
     void onModWheel(uint8_t /*ch*/, float value) override {
         const uint8_t v = toMidi7(value);
-        forEachEngine([&](AudioSynthDexed *e) { e->setModWheel(v); });
+        forEachEngine([&](AudioSynthDexed *e) { e->setModWheel(v); });   // target set in applyExprConfig
+    }
+    // MPE Y-axis: CC74 timbre. Per-note (forEachTarget) like pressure — routed via the
+    // Dexed BREATH controller (target set in applyExprConfig).
+    void onTimbre(uint8_t ch, float value) override {
+        const uint8_t v = toMidi7(value);
+        forEachTarget(ch, [&](AudioSynthDexed *e) { e->setBreathController(v); });
     }
     void onSustain(uint8_t /*ch*/, bool on) override {
         forEachEngine([&](AudioSynthDexed *e) { e->setSustain(on); });
@@ -139,9 +150,10 @@ private:
     int8_t   _chEng[17];    // MPE: member channel (1..16) -> engine, -1 = unmapped
     uint8_t  _rr = 0;       // normal-mode round-robin cursor
     uint32_t _seq = 0;      // monotonic age stamp for oldest-note stealing
-    uint8_t  _pressMask = DEST_VOL | DEST_BRIGHT;   // pressure routing (default: volume + brightness)
-    uint8_t  _modMask   = DEST_VIB;                 // mod-wheel routing (default: vibrato)
-    bool     _lfoForce  = true;                     // force LFO so vib/trem work on any patch
+    uint8_t  _pressMask  = DEST_VOL | DEST_BRIGHT;   // pressure routing (default: volume + brightness)
+    uint8_t  _modMask    = DEST_VIB;                 // mod-wheel routing (default: vibrato)
+    uint8_t  _timbreMask = DEST_BRIGHT;              // CC74 timbre routing (default: brightness)
+    bool     _lfoForce   = true;                     // force LFO so vib/trem work on any patch
 
     uint8_t maxVoices() const {
         uint16_t m = (uint16_t)_n * _vpe;

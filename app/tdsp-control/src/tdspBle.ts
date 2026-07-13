@@ -42,6 +42,7 @@ export const CMD = {
   SET_PRESSURE: 0x27, // + 1 byte: MPE pressure routing bitmask (1=vol 2=bright 4=vib 8=trem)
   SET_MODWHEEL: 0x28, // + 1 byte: mod-wheel routing bitmask (2=bright 4=vib 8=trem)
   SET_LFOMODE: 0x29, // + 1 byte: 0 respect patch LFO / 1 force LFO on any patch
+  SET_TIMBRE: 0x2a, // + 1 byte: CC74 timbre (MPE Y) routing bitmask (2=bright 4=vib 8=trem)
 } as const;
 
 // TAC5212 DAC highpass filter modes — byte sent via SET_HPF. Maps to the
@@ -622,6 +623,11 @@ export function useTdsp() {
     (force: boolean) => writeByteCmd(CMD.SET_LFOMODE, force ? 1 : 0),
     [writeByteCmd]
   );
+  // CC74 timbre (MPE Y-axis / slide) routing bitmask: 2=brightness 4=vibrato 8=tremolo.
+  const setTimbre = useCallback(
+    (mask: number) => writeByteCmd(CMD.SET_TIMBRE, mask & 0xff),
+    [writeByteCmd]
+  );
   // Ask the device to re-scan its SD card and re-send the catalog. The device
   // NOTIFYs the songs/instruments chars, which re-reads via the subscription; we
   // also re-read after a short delay in case the notify is missed.
@@ -717,6 +723,7 @@ export function useTdsp() {
     setPressure,
     setModWheel,
     setLfoMode,
+    setTimbre,
     refreshCatalog,
   };
 }

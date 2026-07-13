@@ -602,6 +602,12 @@ static bool handleControlLine(const char* line, Print& reply) {
         Serial.printf("[mod] mask=%u  bright=%d vib=%d trem=%d\n", g_poolSink.modMask(),
                       (m & 2) != 0, (m & 4) != 0, (m & 8) != 0);
     }
+    else if (strncmp(line, "@TIMBRE=", 8) == 0) {      // CC74 timbre (MPE Y) routing (VOL ignored):
+        uint8_t m = (uint8_t)atoi(line + 8);           // 2=BRIGHT 4=VIB 8=TREM (combine)
+        g_poolSink.setTimbreMask(m);
+        Serial.printf("[timbre] mask=%u  bright=%d vib=%d trem=%d\n", g_poolSink.timbreMask(),
+                      (m & 2) != 0, (m & 4) != 0, (m & 8) != 0);
+    }
     else if (strncmp(line, "@LFOMODE=", 9) == 0) {     // 0 = respect patch LFO, 1 = force LFO
         bool force = atoi(line + 9) != 0;
         g_poolSink.setLfoForce(force);
