@@ -67,15 +67,16 @@ bool copyVoiceName(int bank, int voice, char *out, int outLen) {
 
 uint8_t voiceLfoTags(int bank, int voice) {
     if (!indicesValid(bank, voice)) return 0;
-    // Packed VMEM LFO block sits just before the name (kVmemNameOffset = 117):
-    //   112 speed, 113 delay, 114 pitch-mod-depth (PMD), 115 amp-mod-depth (AMD),
-    //   116 = sync | wave<<1 | pitch-mod-sens<<4.
+    // Packed-VMEM LFO block: 112 = speed, 114 = pitch-mod-depth (PMD), 115 = amp-mod-depth
+    // (AMD). Tag NATIVE movement — a running LFO (speed>0) with real depth — so the tag is
+    // selective (patches that actually vibrato/tremolo), not the ~all-patches "could
+    // respond to a controller" set (which is what FORCE mode gives you anyway).
+    const uint8_t spd = pgm_read_byte(&progmem_bank[bank][voice][112]);
     const uint8_t pmd = pgm_read_byte(&progmem_bank[bank][voice][114]);
     const uint8_t amd = pgm_read_byte(&progmem_bank[bank][voice][115]);
-    const uint8_t pms = (uint8_t)((pgm_read_byte(&progmem_bank[bank][voice][116]) >> 4) & 0x07);
     uint8_t tags = 0;
-    if (pmd > 0 || pms > 0) tags |= 1;   // LFO is wired to pitch  -> vibrato-capable
-    if (amd > 0)            tags |= 2;   // LFO is wired to amp    -> tremolo-capable
+    if (spd > 0 && pmd > 0) tags |= 1;   // native vibrato
+    if (spd > 0 && amd > 0) tags |= 2;   // native tremolo
     return tags;
 }
 
