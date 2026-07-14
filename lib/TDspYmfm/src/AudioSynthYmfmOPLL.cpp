@@ -140,12 +140,18 @@ uint8_t AudioSynthYmfmOPLL::volNibble(uint8_t velocity) {
 
 // Effective 4-bit volume for a sounding voice: note-on velocity plus the channel's
 // MPE pressure, so pressure swells a held note toward full volume (0 = loudest).
+// Then, during multitimbral song playback (channel in GM-map mode, no picker override),
+// add the Tier-2 ReplayGain per-program attenuation so loud GM programs don't dominate.
 uint8_t AudioSynthYmfmOPLL::voiceVol(int c) const {
     uint8_t ch = m_chan[c];
     float pr = (ch >= 1 && ch <= 16) ? m_pressure[ch] : 0.0f;
     int v = (int)m_vel[c] + (int)(pr * 127.0f + 0.5f);   // pressure adds loudness on top of velocity
     if (v > 127) v = 127;
-    return volNibble((uint8_t)v);
+    int att = volNibble((uint8_t)v);
+    if (m_songNorm && ch >= 1 && ch <= 16 && m_override[ch] < 0)   // GM-map mode only (not audition)
+        att += m_progAtten[m_program[ch]];                         // coarse ~3 dB/step, cut-only
+    if (att > 15) att = 15;
+    return (uint8_t)att;
 }
 
 void AudioSynthYmfmOPLL::applyPitch(int c) {
@@ -239,6 +245,24 @@ void AudioSynthYmfmOPLL::setUserVoice(const uint8_t patch[8]) {
     AudioNoInterrupts();
     for (uint8_t r = 0; r < 8; r++) writeReg(r, patch[r]);
     AudioInterrupts();
+}
+
+// Tier-2 song norm: bake a 128-entry linear-gain table into per-program nibble-step
+// attenuation. OPLL can only attenuate (nibble 0 = loudest), so gains >= 1.0 map to 0
+// steps (no boost) and gains < 1.0 map to round(-20*log10(g) / 3 dB-per-step), clamped
+// to the 4-bit range. nullptr disables the feature (back to velocity/pressure only).
+FLASHMEM void AudioSynthYmfmOPLL::setGmSongTrim(const float *table128) {
+    if (!table128) { m_songNorm = false; for (int i = 0; i < 128; i++) m_progAtten[i] = 0; return; }
+    for (int i = 0; i < 128; i++) {
+        float g = table128[i];
+        int steps = 0;
+        if (g > 0.0f && g < 1.0f) {
+            steps = (int)(-20.0f * log10f(g) / 3.0f + 0.5f);   // ~3 dB per OPLL volume step
+            if (steps < 0) steps = 0; else if (steps > 15) steps = 15;
+        }
+        m_progAtten[i] = (uint8_t)steps;
+    }
+    m_songNorm = true;
 }
 
 void AudioSynthYmfmOPLL::setInstrumentOverride(uint8_t channel, int inst) {

@@ -14,13 +14,23 @@
 #include <Audio.h>
 #include <AudioSynthTsf.h>
 #include "TsfSink.h"
+#include "ReplayGain.h"      // shared K-weighted meter + ILoudnessMeter (Tier-1 sweep)
+#include "SF2TsfGmTrim.h"    // per-GM-program trims (serves both tiers on this GM backend)
 
 AudioSynthTsf        g_tsfSynth;                        // stereo int16: 0=L, 1=R
 AudioConvert_I16toF32 g_tsfToF32L, g_tsfToF32R;
 AudioConnection      c_tsfL(g_tsfSynth, 0, g_tsfToF32L, 0);
 AudioConnection      c_tsfR(g_tsfSynth, 1, g_tsfToF32R, 0);
-AudioConnection_F32  c_tsfFL(g_tsfToF32L, 0, outL, 3);
-AudioConnection_F32  c_tsfFR(g_tsfToF32R, 0, outR, 3);
+// Tier-1 audition trim: one bus gain (L+R set together) between the raw F32 and mix slot 3.
+// The loudness probe (g_tsfLoud) taps the RAW L pre-trim so the 'N' sweep measures
+// unnormalized program loudness. See REPLAYGAIN.md.
+AudioEffectGain_F32  g_tsfTrimL, g_tsfTrimR;
+AudioConnection_F32  c_tsfTrimInL(g_tsfToF32L, 0, g_tsfTrimL, 0);
+AudioConnection_F32  c_tsfTrimInR(g_tsfToF32R, 0, g_tsfTrimR, 0);
+AudioConnection_F32  c_tsfFL(g_tsfTrimL, 0, outL, 3);
+AudioConnection_F32  c_tsfFR(g_tsfTrimR, 0, outR, 3);
+tdsp::LoudnessProbe_F32 g_tsfLoud;                      // K-weighted meter on the RAW sum
+AudioConnection_F32  c_tsfLoud(g_tsfToF32L, 0, g_tsfLoud, 0);
 
 // --- MPE axis-proof capture probe -------------------------------------------
 // Taps the TSF synth sum (left, pre-mix) so the shared runAxisProof (@PROOF) can
@@ -72,6 +82,17 @@ static const char *synthInstrumentName(int i) {
 }
 static int         synthInstrument()          { return g_synthInstrument; }
 
+// --- ReplayGain hooks (see REPLAYGAIN.md) ------------------------------------
+// TSF is multitimbral during song playback, so it uses both tiers. Being General MIDI, the
+// audition trim (index = GM program) and the song-norm trim (channel's GM program) read the
+// SAME per-program loudness table (SF2TsfGmTrim.h) — one measurement serves both.
+#define TDSP_HAS_REPLAYGAIN 1
+#define TDSP_REPLAYGAIN_MULTITIMBRAL 1     // songStart neutralizes the audition trim
+static tdsp::ILoudnessMeter *synthLoudness()     { return &g_tsfLoud; }
+static AudioEffectGain_F32  *synthAuditionTrim() { return &g_tsfTrimL; }   // R set alongside in synthSetInstrument
+static float                 synthVoiceTrim(int idx) { return sf2TsfGmTrim(idx); }
+static const char           *synthTrimSymbol()   { return "kSf2TsfGmTrim"; }
+
 // The app's single picker "auditions" one GM program on every melodic channel; a
 // song's own Program Change events re-diversify per channel as it plays.
 static void synthSetInstrument(int idx) {
@@ -86,7 +107,11 @@ static void synthSetInstrument(int idx) {
         AudioInterrupts();
     }
     g_synthInstrument = idx;
-    Serial.printf("[synth] all channels -> GM %d = %s\n", idx, synthInstrumentName(idx));
+    // Tier-1 audition trim: all channels play this one GM program, so a single bus gain
+    // (L+R together) normalizes it. Channel volume above stays 1.0 so it doesn't fight this.
+    g_tsfTrimL.setGain(sf2TsfGmTrim(idx));
+    g_tsfTrimR.setGain(sf2TsfGmTrim(idx));
+    Serial.printf("[synth] all channels -> GM %d = %s (trim=%.3f)\n", idx, synthInstrumentName(idx), (double)sf2TsfGmTrim(idx));
 }
 
 // MPE mode hook (called by main.cpp applyMidiMode). MPE is single-timbre: every member
@@ -95,7 +120,7 @@ static void synthSetInstrument(int idx) {
 // the other channels' programs alone. Per-note bend range is handled by the router.
 static void synthSetMpeMode(bool mpe) {
     if (!g_tsf) return;
-    g_tsfSink.setMpe(mpe);   // gate CC74-as-cutoff / pressure-as-volume: MPE axes vs GM file controllers
+    g_tsfSink.setMpe(mpe);   // gate CC74-as-cutoff: MPE = timbre axis, GM = ignore file CC74
     AudioNoInterrupts();
     for (int ch = 0; ch < 16; ch++) tsf_channel_midi_control(g_tsf, ch, 74, 127);  // timbre neutral (patch-open)
     if (mpe) {
@@ -128,6 +153,7 @@ static void synthBegin() {
     }
     g_tsfSynth.begin(g_tsf);
     g_tsfSynth.setGain(1.0f);
+    g_tsfSink.setGmSongTrim(kSf2TsfGmTrim);   // Tier-2 per-GM-program song norm (unity until swept)
 
     // TSF renders GM drums on channel 10 itself, so pass every channel through.
     g_player.setChannelMask(tdsp::MidiFilePlayer::kMaskAll);

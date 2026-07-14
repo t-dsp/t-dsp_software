@@ -17,15 +17,25 @@
 // bus is F32). Included by main.cpp AFTER outL/outR + g_player + g_sdReady.
 #pragma once
 #include <AudioSynthYmfmOPLL.h>
+#include <AudioEffectGain_F32.h>
 #include "OpllSink.h"
 #include "Pss140Patches.h"   // baked 100 PSS-140 user-voice patches (study-only; see NOTICE.md)
+#include "ReplayGain.h"      // shared K-weighted meter + ILoudnessMeter (Tier-1 sweep)
+#include "OpllVoiceTrim.h"   // Tier-1 (audition) per-picker-voice trims
+#include "OpllGmSongTrim.h"  // Tier-2 (song norm) per-GM-program trims
 
-AudioSynthYmfmOPLL  g_opll;                               // stereo int16: out 0=L, 1=R
-AudioConvert_I16toF32 g_synthToF32L, g_synthToF32R;       // int16 -> F32 bridges (L, R)
-AudioConnection     c_opllL(g_opll, 0, g_synthToF32L, 0);
-AudioConnection     c_opllR(g_opll, 1, g_synthToF32R, 0);
-AudioConnection_F32 c_synthL(g_synthToF32L, 0, outL, 3);
-AudioConnection_F32 c_synthR(g_synthToF32R, 0, outR, 3);
+// OPLL is MONO (update() transmits identical L/R): convert one channel to F32, then fan the
+// (Tier-1 audition-)trimmed signal to both mix channels. The loudness probe taps the RAW
+// (pre-trim) F32 so the 'N' sweep measures unnormalized voice level. See REPLAYGAIN.md.
+AudioSynthYmfmOPLL  g_opll;                               // int16, out 0=L (== out 1=R)
+AudioConvert_I16toF32 g_synthToF32;                       // int16 -> F32 bridge (mono)
+AudioConnection     c_opll(g_opll, 0, g_synthToF32, 0);
+tdsp::LoudnessProbe_F32 g_opllProbe;                      // K-weighted meter on the RAW sum
+AudioConnection_F32 c_opllProbe(g_synthToF32, 0, g_opllProbe, 0);
+AudioEffectGain_F32 g_opllTrim;                           // Tier-1 audition bus gain
+AudioConnection_F32 c_opllTrimIn(g_synthToF32, 0, g_opllTrim, 0);
+AudioConnection_F32 c_synthL(g_opllTrim, 0, outL, 3);     // mono -> both mix channels
+AudioConnection_F32 c_synthR(g_opllTrim, 0, outR, 3);
 OpllSink        g_opllSink(&g_opll);
 tdsp::MidiSink *g_synthSink = &g_opllSink;
 
@@ -65,12 +75,26 @@ static void synthSetInstrument(int idx) {
     for (uint8_t ch = 1; ch <= 16; ch++)
         if (ch != 10) g_opll.setInstrumentOverride(ch, inst);   // leave the drum channel alone
     g_synthInstrument = idx;
-    Serial.printf("[synth] all channels -> %s\n", synthInstrumentName(idx));
+    // Tier-1 audition trim: all channels now play this one voice, so a single bus gain
+    // normalizes exactly what's sounding (unity until OpllVoiceTrim.h is swept).
+    g_opllTrim.setGain(opllVoiceTrim(idx));
+    Serial.printf("[synth] all channels -> %s (trim=%.3f)\n", synthInstrumentName(idx), (double)opllVoiceTrim(idx));
 }
+
+// --- ReplayGain hooks (see REPLAYGAIN.md) ------------------------------------
+// OPLL is multitimbral during song playback, so it uses BOTH tiers: Tier-1 audition bus
+// gain (g_opllTrim, above) and Tier-2 per-GM-program engine attenuation (setGmSongTrim).
+#define TDSP_HAS_REPLAYGAIN 1
+#define TDSP_REPLAYGAIN_MULTITIMBRAL 1     // songStart neutralizes the audition trim
+static tdsp::ILoudnessMeter *synthLoudness()     { return &g_opllProbe; }
+static AudioEffectGain_F32  *synthAuditionTrim() { return &g_opllTrim; }
+static float                 synthVoiceTrim(int idx) { return opllVoiceTrim(idx); }
+static const char           *synthTrimSymbol()   { return "kOpllVoiceTrim"; }
 
 static void synthBegin() {
     g_opll.begin();                    // reset chip + resampler (instruments are chip-ROM)
     g_opll.setGain(3.5f);              // OPLL's 9-bit DAC runs quiet; lift for a usable level
+    g_opll.setGmSongTrim(kOpllGmSongTrim);   // Tier-2 per-GM-program song norm (unity until swept)
     // OPLL handles GM drums on channel 10 itself (rhythm section), so let the player
     // pass every channel through (Dexed/OPM leave the default kMaskNoDrums).
     g_player.setChannelMask(tdsp::MidiFilePlayer::kMaskAll);

@@ -135,6 +135,8 @@ static bool g_sdReady = false;
   #include "SynthBackendSF2.h"      // SF2 sampled General MIDI (lib/TDspSF2 + sf22aswt, PSRAM)
 #elif defined(TDSP_SYNTH_OPL3)
   #include "SynthBackendOpl3.h"     // OPL3 + DMXOPL GM (needs lib/TDspYmfm OPL3 engine; see spec)
+#elif defined(TDSP_SYNTH_OPLL_POOL)
+  #include "SynthBackendOpllPool.h" // OPLL YM2413 chip pool — full 3-axis MPE (bend+pressure+timbre)
 #elif defined(TDSP_SYNTH_OPLL)
   #include "SynthBackendOpll.h"     // OPLL (YM2413) — the PSS-140 chip: 15 ROM voices + rhythm
 #elif defined(TDSP_SYNTH_YMFM)
@@ -459,6 +461,12 @@ static void songStart(int idx) {
     // by the previous song carries into this one — and the mode-switch path below only runs
     // when the mode actually changes, so a MIDI->MIDI start would otherwise never reset.
     g_synthSink->onAllNotesOff(0);
+#ifdef TDSP_REPLAYGAIN_MULTITIMBRAL
+    // A song is multitimbral (each channel runs its own program), so the Tier-1 audition
+    // bus trim — set to the last picker voice — no longer describes what's sounding. Reset
+    // it to unity; Tier-2 per-GM-program normalization (in the engine/sink) takes over.
+    synthAuditionTrim()->setGain(1.0f);
+#endif
     // Baked rich-event test sequence: set the device mode (MPE tests need per-note
     // expression) then hand the events straight to the player — no expansion needed.
     if (r.mev) {
@@ -578,8 +586,10 @@ static void applyMidiMode(bool mpe) {
 // the USB CDC port (a Web Serial browser page, no ESP32 required). `reply` is the
 // stream a query answers on (only @GETCAT replies) so each channel gets its own
 // catalog. Returns true if the line was a recognized command.
+#ifdef TDSP_HAS_REPLAYGAIN
+static void runGainSweep(int startIdx = 0);   // ReplayGain sweep (any backend); resumable from a voice index
+#endif
 #ifdef TDSP_SYNTH_DEXED_POOL
-static void runGainSweep(int startIdx = 0);   // ReplayGain sweep; resumable from a voice index
 static void runMpeSweep(int startIdx);        // MPE demo on each instrument; resumable
 static void runAxisProof(int axis);           // capture 1 note with an MPE axis at full
 static void runMpeCheck(void);                // measure every instrument under MPE; flag silent/clip
@@ -590,7 +600,7 @@ static void runAxisProof(int axis);           // MPE axis proof ported to TSF (v
 
 static bool handleControlLine(const char* line, Print& reply) {
     if      (strncmp(line, "@VOL=", 5) == 0)      setMasterVolumePct(atoi(line + 5));
-#ifdef TDSP_SYNTH_DEXED_POOL
+#ifdef TDSP_HAS_REPLAYGAIN
     else if (strncmp(line, "@GAIN=", 6) == 0)     runGainSweep(atoi(line + 6));   // resume sweep from index
 #endif
     else if (strncmp(line, "@DXVOICE=", 9) == 0) { synthSetInstrument(atoi(line + 9));
@@ -1167,16 +1177,20 @@ static void dumpAdcWorstJump(void) {
     }
     Serial.println("[ajump] end");
 }
+#endif  // TDSP_SYNTH_DEXED_POOL — end of Dexed-pool-only capture diagnostics
 
-// --- ReplayGain sweep ('N') --------------------------------------------------
-// Measures the loudness of every one of the 320 DX7 voices and prints a
-// paste-ready kDexedVoiceTrim[] table for DexedVoiceGains.h (see that header for
-// the bake workflow). For each voice it plays a fixed reference note and records
-// the MAX short-term K-weighted loudness (the loudest ~100 ms window, dxpClip is
-// K-weighted per BS.1770) — this matches PERCEIVED loudness, so bright and
-// percussive patches no longer read quiet and then blast. Trims are centered on
+// --- ReplayGain sweep ('N') — BACKEND-AGNOSTIC (see REPLAYGAIN.md) ------------
+// Measures the loudness of every one of the backend's synthNumInstruments() voices
+// and prints a paste-ready trim table (labeled with synthTrimSymbol(), e.g.
+// kDexedVoiceTrim[] / kOpllVoiceTrim[]) for that backend's table header. For each
+// voice it plays a fixed reference note and records the MAX short-term K-weighted
+// loudness (the loudest ~100 ms window) via the backend's ILoudnessMeter
+// (synthLoudness()) — K-weighted per ITU-R BS.1770, matching PERCEIVED loudness, so
+// bright and percussive patches no longer read quiet and then blast. Trims center on
 // the median voice loudness; a loose peak cap keeps boosts sane and the downstream
-// bus limiter (dxpLimit) catches whatever peaks through.
+// bus limiter/clamp catches whatever peaks through. Any backend that defines
+// TDSP_HAS_REPLAYGAIN and provides the hooks gets this sweep.
+#ifdef TDSP_HAS_REPLAYGAIN
 static int cmpFloatAsc(const void *a, const void *b) {
     float fa = *(const float *)a, fb = *(const float *)b;
     return (fa > fb) - (fa < fb);
@@ -1222,24 +1236,25 @@ FLASHMEM static void runGainSweep(int startIdx) {
     // Pass 1 — for each voice, max short-term K-weighted loudness + raw peak. EVERY voice is
     // printed (host stitches the per-voice "V=.. loud=.. peak=.." lines into the table), so a
     // freeze mid-sweep only loses the current voice — resume with "@GAIN=<next index>".
+    tdsp::ILoudnessMeter *probe = synthLoudness();
     for (int i = startIdx; i < N; ++i) {
         g_synthSink->onAllNotesOff(0);
-        synthSetInstrument(i);             // NOTE: this sets dxpTrim to the baked value...
-        dxpTrim.setGain(1.0f);             // ...so force UNITY — we must measure RAW loudness.
+        synthSetInstrument(i);             // NOTE: this sets the audition trim to the baked value...
+        synthAuditionTrim()->setGain(1.0f);// ...so force UNITY — we must measure RAW loudness.
         sweepWait(60);
-        dxpClip.reset();                   // clears RMS, peak, and K-weight filter state
+        probe->reset();                    // clears RMS, peak, and K-weight filter state
         g_synthSink->onNoteOn(1, kNote, kVel);
         float maxST = 0.0f;
         for (int w = 0; w < kWindows; ++w) {
-            dxpClip.resetRms();            // new 100ms window; keep filter state (no restart) + peak
+            probe->resetRms();             // new 100ms window; keep filter state (no restart) + peak
             sweepWait(kWinMs);
-            float st = dxpClip.rms();
+            float st = probe->rms();
             if (st > maxST) maxST = st;
         }
         g_synthSink->onNoteOff(1, kNote, 0);
         sweepWait(kTailMs);
         loud[i] = maxST;                   // perceptual loudness of this voice
-        peak[i] = dxpClip.peak();          // raw peak accumulated across the whole note
+        peak[i] = probe->peak();           // raw peak accumulated across the whole note
         Serial.printf("[gain] V=%d/%d loud=%.5f peak=%.5f  %s\n",
                       i, N, (double)loud[i], (double)peak[i], synthInstrumentName(i));
     }
@@ -1263,9 +1278,10 @@ FLASHMEM static void runGainSweep(int startIdx) {
     Serial.printf("[gain] target(median) loud=%.4f over %d sounding voices; peakCeil=%.2f\n",
                   (double)target, m, (double)kPeakCeil);
 
-    // Pass 2 — compute + print the paste-ready table.
-    Serial.println("[gain] ---- paste the block below over kDexedVoiceTrim[] in DexedVoiceGains.h ----");
-    Serial.println("static const float kDexedVoiceTrim[320] = {");
+    // Pass 2 — compute + print the paste-ready table (labeled per the active backend).
+    Serial.printf("[gain] ---- paste the block below over %s[] in the backend's trim header ----\n",
+                  synthTrimSymbol());
+    Serial.printf("static const float %s[%d] = {\n", synthTrimSymbol(), N);
     char lb[200];
     for (int i = 0; i < N; ++i) {
         float byLoud = loud[i] > 1e-5f ? target    / loud[i] : 1.0f;
@@ -1373,7 +1389,9 @@ void loop() {
             else if (c == 'Y') { runSlotScan(); }                    // scan all 8 TDM-in slots for the ADC loopback signal
             else if (c == 'Q') { runPressureProof(); }               // capture a full-pressure note (prove vibrato/tremolo)
             else if (c == 'Z') { runMpeSweep(synthInstrument()); }   // MPE demo on every instrument from the current one
-            else if (c == 'N') { runGainSweep(); }              // ReplayGain: sweep all 320 voices, print trim table
+#endif
+#ifdef TDSP_HAS_REPLAYGAIN
+            else if (c == 'N') { runGainSweep(); }              // ReplayGain: sweep every voice, print trim table
 #endif
         }
     }

@@ -72,6 +72,15 @@ public:
     void controlChange(uint8_t channel, uint8_t cc, uint8_t v); // 120/123 -> notes off
     void allNotesOff();
 
+    // --- Tier-2 ReplayGain (per-GM-program song normalization) -----------------
+    // Level-match a multitimbral GM song, where each channel runs its own program (a bus
+    // trim can't distinguish channels). `table` is 128 linear gains (1.0 = unity); OPLL's
+    // only per-channel lever is the coarse 4-bit volume nibble (~3 dB/step) and it can only
+    // ATTENUATE, so trims are quantized to nibble steps and clamped to cut-only (gains > 1
+    // become no-op). Applies only while a channel is in GM-map mode (no picker override) —
+    // i.e. during song playback, not audition. Pass nullptr to disable. See REPLAYGAIN.md.
+    void setGmSongTrim(const float *table128);
+
     void setGain(float g) { m_gain = g; }
     int  activeVoices() const {
         int n = 0;
@@ -136,6 +145,12 @@ private:
     float    m_bend[17]    = {0};     // pitch bend, semitones
     float    m_pressure[17] = {0};    // per-channel pressure 0..1 (MPE Z -> volume)
     int8_t   m_override[17];          // forced instrument (0..15), -1 = use GM map
+
+    // Tier-2 song norm: per-GM-program extra attenuation in 4-bit volume-nibble steps
+    // (0 = no cut). Precomputed by setGmSongTrim(); applied in voiceVol() when the voice's
+    // channel is in GM-map mode. m_songNorm gates the whole feature off when no table set.
+    uint8_t  m_progAtten[128] = {0};
+    bool     m_songNorm = false;
 
     // rhythm section
     uint8_t  m_rhythmBits = 0;        // currently-latched drum key bits (0x0E low 5)

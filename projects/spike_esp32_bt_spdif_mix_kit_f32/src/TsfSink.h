@@ -12,16 +12,21 @@
 #include <Audio.h>       // AudioNoInterrupts / AudioInterrupts
 #include <tsf.h>
 #include <MidiSink.h>
+#include "ReplayGain.h"  // gmProgramTrim() — Tier-2 per-GM-program song norm
 
 class TsfSink : public tdsp::MidiSink {
 public:
     explicit TsfSink(tsf **t) : _t(t) {}
 
     // MPE vs normal-GM gate. In MPE mode CC74 is the timbre/slide axis (-> per-channel
-    // lowpass cutoff) and channel pressure is the volume/Z axis; in normal GM playback
-    // those same messages are file controllers we must NOT let hijack the channel. Driven
-    // from applyMidiMode()/synthSetMpeMode() in main.cpp.
+    // lowpass cutoff); in normal GM playback CC74 is a file controller we must NOT let
+    // slam the filter shut. Driven from applyMidiMode()/synthSetMpeMode() in main.cpp.
     void setMpe(bool m) { _mpe = m; }
+
+    // Tier-2 ReplayGain: a 128-entry per-GM-program linear-gain table applied per-channel
+    // (via tsf_channel_set_volume, which files never touch — CC7/CC11 aren't routed here)
+    // on Program Change during normal GM playback. nullptr disables. See REPLAYGAIN.md.
+    void setGmSongTrim(const float *table128) { _gmTrim = table128; }
 
     void onNoteOn(uint8_t ch, uint8_t note, uint8_t vel) override {
         tsf *t = *_t; if (!t) return;
@@ -33,7 +38,14 @@ public:
     }
     void onProgramChange(uint8_t ch, uint8_t prog) override {
         tsf *t = *_t; if (!t) return;
-        AudioNoInterrupts(); tsf_channel_set_presetnumber(t, ch - 1, prog, ch == 10 ? 1 : 0); AudioInterrupts();
+        AudioNoInterrupts();
+        tsf_channel_set_presetnumber(t, ch - 1, prog, ch == 10 ? 1 : 0);
+        // Tier-2 song norm: level-match this channel to its program's loudness. Only in
+        // normal GM playback (in MPE, channel volume is the pressure/Z axis) and not on the
+        // drum channel (ch10). Unity table = transparent.
+        if (_gmTrim && !_mpe && ch != 10)
+            tsf_channel_set_volume(t, ch - 1, tdsp::gmProgramTrim(_gmTrim, prog));
+        AudioInterrupts();
     }
     // pitchRange is set to 48 semis in synthBegin (covers normal +-2 AND MPE +-48).
     void onPitchBend(uint8_t ch, float semitones) override {
@@ -100,6 +112,7 @@ public:
 
 private:
     tsf **_t;
-    bool  _mpe = false;   // false = normal GM playback (ignore file CC74/pressure); true = MPE axes
+    bool  _mpe = false;   // false = normal GM playback (ignore file CC74); true = MPE timbre axis
+    const float *_gmTrim = nullptr;   // Tier-2 per-GM-program trim table (128), null = off
     static uint8_t to7(float v) { return (uint8_t)((v < 0 ? 0 : v > 1 ? 1 : v) * 127.0f + 0.5f); }
 };

@@ -20,6 +20,7 @@
 #include "DexedPoolSink.h"
 #include "DexedVoiceBank.h"
 #include "DexedVoiceGains.h"
+#include "ReplayGain.h"          // shared ILoudnessMeter interface (Tier-1 sweep)
 
 // Pool size / per-engine polyphony. kPoolN engines * kPoolVpe voices = normal-mode
 // polyphony; kPoolN = max simultaneous MPE notes (one engine each). Starting point
@@ -107,7 +108,10 @@ AudioConnection_F32 cpoutR(dxpLimit, 0, outR, 3);
 // it (hard fault). Must match ClipProbe_F32::kCapN.
 DMAMEM static float g_dxpCapBuf[8192];
 
-class ClipProbe_F32 : public AudioStream_F32 {
+// Also implements tdsp::ILoudnessMeter so the backend-agnostic runGainSweep() can drive
+// it through the shared interface (reset/resetRms/rms/peak below), identical to the lean
+// LoudnessProbe_F32 the other backends use — the pool just carries extra diagnostics.
+class ClipProbe_F32 : public AudioStream_F32, public tdsp::ILoudnessMeter {
 public:
     ClipProbe_F32(void) : AudioStream_F32(1, inputQueueArray) {}
     void update(void) override {
@@ -155,15 +159,15 @@ public:
         if (pk > m_peak) m_peak = pk;
         AudioStream_F32::release(b);
     }
-    void     reset(void)    { __disable_irq(); m_clip = 0; m_total = 0; m_peak = 0.0f; resetRmsLocked(); resetKWeight(); __enable_irq(); }
+    void     reset(void) override    { __disable_irq(); m_clip = 0; m_total = 0; m_peak = 0.0f; resetRmsLocked(); resetKWeight(); __enable_irq(); }
     // Zero just the RMS accumulator (keep peak + K-weight filter state) so the sweep can
     // measure back-to-back short-term windows within one held note without a filter restart.
-    void     resetRms(void) { __disable_irq(); resetRmsLocked(); __enable_irq(); }
+    void     resetRms(void) override { __disable_irq(); resetRmsLocked(); __enable_irq(); }
     uint32_t clipped(void)  const { return m_clip; }
     uint32_t total(void)    const { return m_total; }
-    float    peak(void)     const { return m_peak; }
+    float    peak(void)     const override { return m_peak; }
     // K-weighted RMS of the synth sum since the last resetRms()/reset() (perceptual loudness).
-    float    rms(void)      const { double n = (double)m_rmsN; return n > 0 ? (float)sqrt(m_sumSq / n) : 0.0f; }
+    float    rms(void)      const override { double n = (double)m_rmsN; return n > 0 ? (float)sqrt(m_sumSq / n) : 0.0f; }
     static constexpr float kRail = 0.999f;   // int16 rail = 32767/32768 ~ 0.99997
 
     // --- Onset capture: record kCapN samples of the synth sum starting when armed,
@@ -282,3 +286,13 @@ static void synthBegin() {
     dxpSum.gain(0, 1.0f); dxpSum.gain(1, 1.0f); dxpSum.gain(2, 0.0f); dxpSum.gain(3, 0.0f);
     synthSetInstrument(g_synthInstrument);
 }
+
+// --- ReplayGain hooks (see REPLAYGAIN.md) ------------------------------------
+// The pool is single-timbre, so Tier-1 (audition) fully covers it; there is no Tier-2
+// song norm. dxpClip is the loudness meter, dxpTrim the audition bus gain, and the baked
+// per-voice table lives in DexedVoiceGains.h.
+#define TDSP_HAS_REPLAYGAIN 1
+static tdsp::ILoudnessMeter *synthLoudness()     { return &dxpClip; }
+static AudioEffectGain_F32  *synthAuditionTrim() { return &dxpTrim; }
+static float                 synthVoiceTrim(int idx) { return dexedVoiceTrim(idx); }
+static const char           *synthTrimSymbol()   { return "kDexedVoiceTrim"; }
