@@ -454,6 +454,11 @@ static void songStart(int idx) {
     if (idx >= g_numSongs) idx = g_numSongs - 1;
     g_songSel = idx;
     SongRef &r = g_songs[idx];
+    // Clean slate for EVERY song, in EVERY mode: silence sounding notes and clear latched
+    // per-engine expression (bend / mod / aftertouch). Without this, a bend left mid-glide
+    // by the previous song carries into this one — and the mode-switch path below only runs
+    // when the mode actually changes, so a MIDI->MIDI start would otherwise never reset.
+    g_synthSink->onAllNotesOff(0);
     // Baked rich-event test sequence: set the device mode (MPE tests need per-note
     // expression) then hand the events straight to the player — no expansion needed.
     if (r.mev) {
@@ -483,6 +488,7 @@ static void songStop() {
     g_songWasPlaying = false;   // a manual stop must NOT trigger the loop-restart
     if (!g_player.isPlaying()) return;
     g_player.stop();
+    g_synthSink->onAllNotesOff(0);   // recenter bend + kill notes so a mid-glide stop is clean
     Serial.println("[song] stopped");
 }
 
@@ -739,7 +745,7 @@ void setup() {
 // test notes on each, and log the resulting output peak. The "prog N -> on" line is
 // printed and flushed BEFORE rendering, so if the engine hangs or faults on a specific
 // patch the LAST serial line names the culprit. Backend-agnostic (drives g_synthSink).
-static void runInstrumentSelfTest() {
+FLASHMEM static void runInstrumentSelfTest() {
     if (g_player.isPlaying()) songStop();
     g_synthSink->onAllNotesOff(0);
     delay(50);
@@ -777,7 +783,7 @@ static void runInstrumentSelfTest() {
 
 // Pitch-bend audible test ('B'): hold a sustained strings note on ch1 and sweep the
 // bend 0 -> +2 -> -2 -> 0 semitones over ~4 s. If bend works you hear the note glide.
-static void runPitchBendTest() {
+FLASHMEM static void runPitchBendTest() {
     if (g_player.isPlaying()) songStop();
     Serial.println("[pbtest] ch1 strings, note 60 held; bend sweep 0->+2->-2->0 semis (~4s)");
     g_synthSink->onProgramChange(1, 48);      // String Ensemble 1 (sustained -> bend clearly audible)
@@ -800,7 +806,7 @@ static void runPitchBendTest() {
 // member channel — RPN bend range 48, a note, then a pressure swell + pitch-bend sweep.
 // Verifies the router -> sink -> TSF expression path: outPeak should FOLLOW the pressure
 // (swell up then down), proving per-note pressure->volume works, plus the bend glides.
-static void runMpeTest() {
+FLASHMEM static void runMpeTest() {
     if (g_player.isPlaying()) songStop();
     applyMidiMode(true);                      // MPE mode (ch10 melodic, router bend 48)
     const uint8_t ch = 2;                     // an MPE member channel
@@ -886,7 +892,7 @@ FLASHMEM static void runAxisProof(int axis) {
 // (dxpClip) sits BEFORE the 0.62 mix make-up, so per-engine int16 flat-topping shows up
 // here even though the final-bus peak (outPeak) is scaled down and looks clean. This is
 // the definitive answer to "is the snap at note-onset actually clipping?".
-static void runPizzClipTest(int inst) {
+FLASHMEM static void runPizzClipTest(int inst) {
     if (g_player.isPlaying()) songStop();
     g_synthSink->onAllNotesOff(0);
     synthSetInstrument(inst);
@@ -938,7 +944,7 @@ static void captureOneNote(int note, int vel) {
     Serial.println("[cap] end");
 }
 
-static void runPizzCapture(int inst, int, int vel) {
+FLASHMEM static void runPizzCapture(int inst, int, int vel) {
     if (g_player.isPlaying()) songStop();
     g_synthSink->onAllNotesOff(0);
     synthSetInstrument(inst);
@@ -969,7 +975,7 @@ static void dumpFloatsTagged(const char *tag, const float *c, int n) {
 // and the re-digitized analog output (adcProbe, via the OUT->IN loopback) for the same
 // event. Comparing them (after latency alignment) shows whether the codec/analog stage
 // adds a per-note transient the clean digital signal doesn't have.
-static void runLoopbackCapture(int inst, int note, int vel) {
+FLASHMEM static void runLoopbackCapture(int inst, int note, int vel) {
     if (g_player.isPlaying()) songStop();
     g_synthSink->onAllNotesOff(0);
     synthSetInstrument(inst);
@@ -995,7 +1001,7 @@ static void runLoopbackCapture(int inst, int note, int vel) {
 // pitch (bend, axis 2), spectral centroid (timbre->brightness, axis 1), amplitude
 // (pressure->volume, axis 0), or a neutral reference (axis 3). Routings are forced to the
 // obvious mapping for the measurement, then restored.
-static void runAxisProof(int axis) {
+FLASHMEM static void runAxisProof(int axis) {
     if (g_player.isPlaying()) songStop();
     g_synthSink->onAllNotesOff(0);
     bool wasMpe = g_mpeMode;
@@ -1044,7 +1050,7 @@ static void mpeGestures(uint8_t ch, uint8_t note) {
 // turn so you can hear how each patch responds to bend/timbre/pressure. Resets to the
 // default demo routing (pressure=vol+bright, timbre=bright, mod=vibrato), restores after.
 // Abort by sending any byte. Resumable from an index via @MPESWEEP=<start>.
-static void runMpeSweep(int startIdx) {
+FLASHMEM static void runMpeSweep(int startIdx) {
     if (g_player.isPlaying()) songStop();
     g_synthSink->onAllNotesOff(0);
     bool wasMpe = g_mpeMode;
@@ -1069,7 +1075,7 @@ static void runMpeSweep(int startIdx) {
 // MPE check (@MPECHECK): fast automated QA over ALL instruments — play each with MPE
 // expression (pressure+timbre+bend at once) and measure the synth-sum peak, flagging
 // SILENT (broken/empty patch) or CLIP. The audible-listen equivalent, but measured.
-static void runMpeCheck(void) {
+FLASHMEM static void runMpeCheck(void) {
     if (g_player.isPlaying()) songStop();
     g_synthSink->onAllNotesOff(0);
     bool wasMpe = g_mpeMode;
@@ -1082,10 +1088,12 @@ static void runMpeCheck(void) {
     for (int i = 0; i < kNumInstruments; i++) {
         if (Serial.available()) { Serial.read(); Serial.printf("[mpecheck] stopped at %d\n", i); break; }
         synthSetInstrument(i);
+        delay(40);                                        // let each engine's panic-release settle so
+                                                          // fast-envelope patches' attack isn't swallowed
         dxpClip.reset();
-        g_synthSink->onNoteOn(2, 60, 110);
-        g_synthSink->onPressure(2, 0.9f); g_synthSink->onTimbre(2, 0.9f); g_synthSink->onPitchBend(2, 3.0f);
-        uint32_t t0 = millis(); while (millis() - t0 < 200) delay(2);
+        g_synthSink->onNoteOn(2, 60, 110);                // plain note = the true "does it sound?" test
+        g_synthSink->onPitchBend(2, 2.0f);               // a small bend so MPE dispatch is exercised too
+        uint32_t t0 = millis(); while (millis() - t0 < 300) delay(2);
         float pk = dxpClip.peak(); uint32_t railed = dxpClip.clipped();
         g_synthSink->onNoteOff(2, 60, 0);
         bool isSilent = pk < 0.01f, isClip = railed > 50;
@@ -1104,7 +1112,7 @@ static void runMpeCheck(void) {
 
 // Slot scan ('Y'): play a loud note and report the peak on EACH of the 8 TDM input
 // slots, so we can see which slot (if any) carries the ADC loopback signal.
-static void runSlotScan(void) {
+FLASHMEM static void runSlotScan(void) {
     if (g_player.isPlaying()) songStop();
     g_synthSink->onAllNotesOff(0);
     synthSetInstrument(13);
@@ -1187,7 +1195,7 @@ static void sweepWait(uint32_t ms) {
         yield();
     }
 }
-static void runGainSweep(int startIdx) {
+FLASHMEM static void runGainSweep(int startIdx) {
     static const int   kNote     = 60;     // C4 reference note
     static const int   kVel      = 100;
     static const int   kWinMs    = 100;    // short-term loudness window (~ear integration time)

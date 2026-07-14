@@ -144,7 +144,18 @@ public:
     void onAllNotesOff(uint8_t /*ch*/) override { panic(); }
 
     void panic() {
-        for (uint8_t i = 0; i < _n; ++i) _eng[i]->panic();
+        for (uint8_t i = 0; i < _n; ++i) {
+            _eng[i]->panic();
+            // Clear stale per-engine expression too — panic() alone kills the notes but
+            // leaves the last bend / controller values latched, so the next note (or the
+            // first note of the next song) would start pre-bent or pre-swelled.
+            _eng[i]->setPitchbend((int16_t)0);      // recenter (0 counts = no bend)
+            _eng[i]->setModWheel(0);
+            _eng[i]->setAftertouch(0);
+            _eng[i]->setBreathController(0);
+            _eng[i]->setGain(kEngineGain);          // drop any swelled VOLUME gain
+        }
+        for (uint8_t i = 0; i < 17; ++i) { _chPress[i] = 1.0f; _chTimbre[i] = 1.0f; }
         reset();
     }
 

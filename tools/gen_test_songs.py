@@ -38,6 +38,18 @@ def glide(ch, v0, v1, total_ms, step_ms=10):
         out.append((step_ms, PB, ch, *bend(v)))
     return out
 
+def semis_to_bend(semi):
+    # semitone offset (relative to note) -> 14-bit bend value, assuming per-note range = 12.
+    return max(0, min(16383, round(CENTER + semi / 12.0 * 8192.0)))
+
+def vib(ch, amp_semi, cycles, total_ms, center_semi=0.0, step_ms=20):
+    # Per-note vibrato as a small sine pitch-bend around center_semi (per-note => forEachTarget).
+    n = max(1, round(total_ms / step_ms)); out = []
+    for i in range(1, n + 1):
+        s = center_semi + amp_semi * math.sin(2 * math.pi * cycles * i / n)
+        out.append((step_ms, PB, ch, *bend(semis_to_bend(s))))
+    return out
+
 def sweep():
     ev = []
     notes = list(range(48, 73)) + list(range(71, 47, -1))  # chromatic up 2 oct span then back
@@ -192,6 +204,93 @@ def mpe_demo():
     ev.append((200, OFF, 1, 60, 0)); ev.append((0, OFF, 2, 64, 0))
     return ev
 
+def mpe_showcase():
+    # A short MUSICAL piece (not a test sweep) that shows off the gestures a piano roll
+    # physically cannot do — designed to loop and to sound good on ONE sustained, clearly-
+    # pitched voice (analog strings / brass / a synth lead). Member channels: ev-ch 1..4
+    # = MIDI ch 2..5. Everything expressive rides per-note pitch bend (our strongest axis)
+    # and per-note channel pressure (volume swell); vibrato is a small sine bend (also
+    # per-note). rpn12 sets each voice's bend range to 12 so the semitone math is exact.
+    rpn12 = lambda c: [(0, CC, c, 101, 0), (0, CC, c, 100, 0), (0, CC, c, 6, 12)]
+    ev = []
+
+    # ---- I. FAN-OUT BLOOM -------------------------------------------------
+    # Four voices strike in UNISON on C4, then glide outward into a C-major chord spread
+    # over two octaves (C3 - E4 - G4 - C5). Impossible without per-note bend: on a normal
+    # keyboard four notes on one pitch can only ever stay one pitch.
+    for c in (1, 2, 3, 4):
+        ev.append((0, ON, c, 60, 96)); ev += rpn12(c)      # all four at C4
+    ev.append((250, PB, 1, *bend(CENTER)))                 # brief unison hold
+    tgt = {1: -12, 2: +4, 3: +7, 4: +12}                   # -> C3, E4, G4, C5
+    for c, s in tgt.items():
+        ev += glide(c, CENTER, semis_to_bend(s), 2200, step_ms=20)
+    # bloomed chord breathes (all four swell together, then settle)
+    for c in (1, 2, 3, 4): ev += cp_ramp(c, 0, 110, 900)
+    for c in (1, 2, 3, 4): ev += cp_ramp(c, 110, 40, 900)
+    ev += [(0, OFF, 1, 60, 0), (0, OFF, 2, 60, 0), (0, OFF, 3, 60, 0), (0, OFF, 4, 60, 0)]
+
+    # ---- II. BREATHING CHORD ----------------------------------------------
+    # A Cmaj7 held as real notes; each voice swells on its OWN pressure envelope at a
+    # different phase, and two voices get gentle vibrato at different rates -> the chord
+    # shimmers and breathes like a live string section rather than a static pad.
+    voices = [(1, 60), (2, 64), (3, 67), (4, 71)]          # C4 E4 G4 B4
+    ev.append((350, ON, 1, 60, 88))
+    for c, n in voices[1:]: ev.append((0, ON, c, n, 88)); ev += rpn12(c)
+    ev += rpn12(1)
+    # staggered pressure swells (phase-offset) — interleave as independent streams
+    for c, delay in ((1, 0), (2, 500), (3, 1000), (4, 250)):
+        seg = [(delay, CP, c, 0, 0)] if delay else [(0, CP, c, 0, 0)]
+        seg += cp_ramp(c, 0, 120, 1400) + cp_ramp(c, 120, 30, 1400)
+        ev += seg
+    # per-note vibrato on the 3rd and top (different speeds), everyone else dead steady
+    ev += vib(2, 0.18, 6, 1800) + vib(4, 0.12, 4, 1800)
+    for c, n in voices: ev.append((0, OFF, c, n, 0))
+
+    # ---- III. GUITAR BEND LEAD --------------------------------------------
+    # A dead-steady power-chord drone (C3 + G3) while a lead voice plays a bluesy phrase
+    # with classic string bends + vibrato. The drone NOT moving while the lead bends is the
+    # per-note proof — on a mono-bend synth the whole chord would slide with the lead.
+    ev.append((400, ON, 1, 48, 92)); ev += rpn12(1)        # C3 drone
+    ev.append((0, ON, 2, 55, 92)); ev += rpn12(2)          # G3 drone
+    ev += rpn12(3)                                          # lead channel armed
+    def lead(note, bend_semi, hold_ms):
+        s = []
+        s.append((0, ON, 3, note, 108))
+        s += glide(3, CENTER, semis_to_bend(bend_semi), 180, step_ms=18)   # bend up into pitch
+        s += vib(3, 0.25, max(1, hold_ms // 300), hold_ms, center_semi=bend_semi)  # vibrato at target
+        s.append((0, OFF, 3, note, 0))
+        return s
+    ev += lead(62, +2, 650)     # D4 bend up to E4
+    ev += lead(67, +2, 650)     # G4 bend up to A4
+    ev += lead(64, +3, 900)     # E4 bend up a minor third to G4, longer
+    ev += [(150, OFF, 1, 48, 0), (0, OFF, 2, 55, 0)]
+
+    # ---- IV. CHORD MORPH (voice leading) ----------------------------------
+    # Strike Cmaj (C4 E4 G4 C5) once, then GLIDE the four voices through I - IV - V - I.
+    # You hear each voice move independently to the next chord tone (per-note portamento) —
+    # a slow pedal-steel voice-leading you cannot get from re-triggered block chords.
+    struck = {1: 60, 2: 64, 3: 67, 4: 72}
+    for c, n in struck.items(): ev.append((0, ON, c, n, 84)); ev += rpn12(c)
+    ev.append((600, PB, 1, *bend(CENTER)))
+    # target NOTES per chord; delta = target - struck (stays within +-12)
+    prog = [
+        {1: 60, 2: 65, 3: 69, 4: 72},   # F  (C  F  A  C)
+        {1: 59, 2: 67, 3: 71, 4: 74},   # G  (B  G  B  D)
+        {1: 60, 2: 64, 3: 67, 4: 72},   # C  (C  E  G  C)  resolve
+    ]
+    cur = {c: 0 for c in struck}
+    for chord_targets in prog:
+        for c in (1, 2, 3, 4):
+            s0 = semis_to_bend(cur[c]); s1 = semis_to_bend(chord_targets[c] - struck[c])
+            ev += glide(c, s0, s1, 1500, step_ms=22)
+            cur[c] = chord_targets[c] - struck[c]
+        ev.append((500, PB, 1, *bend(semis_to_bend(cur[1]))))   # let each chord ring
+    # final swell + release on the resolved Cmaj
+    for c in (1, 2, 3, 4): ev += cp_ramp(c, 30, 120, 1000)
+    for c in (1, 2, 3, 4): ev += cp_ramp(c, 120, 0, 1200)
+    for c, n in struck.items(): ev.append((0, OFF, c, n, 0))
+    return ev
+
 TESTS = [
     ("kSweep",    "01 Midi Test Sweep",      sweep(),        "false"),
     ("kChord",    "02 Midi Test Chord",      chord(),        "false"),
@@ -203,6 +302,7 @@ TESTS = [
     ("kMpeOct",   "08 MPE Test Octave",      mpe_octave(),   "true"),
     ("kMpePress", "09 MPE Test Pressure",    mpe_pressure(), "true"),
     ("kMpeDemo",  "10 MPE Full Demo",        mpe_demo(),     "true"),
+    ("kMpeShow",  "11 MPE Showcase",         mpe_showcase(), "true"),
 ]
 
 def emit():
@@ -227,7 +327,9 @@ def emit():
     L.append("")
     for var, name, ev, mpe in TESTS:
         L.append(f"// {name}  ({len(ev)} events)")
-        L.append(f"static const MidiFileEvent {var}[] = {{")
+        # PROGMEM keeps the array in (memory-mapped, directly-readable) flash instead of
+        # letting the linker copy it into DTCM/RAM1 at boot — RAM1 is tight on this build.
+        L.append(f"static const MidiFileEvent {var}[] PROGMEM = {{")
         line = "  "
         for e in ev:
             tok = "{%d,%s,%d,%d,%d}," % e
