@@ -291,6 +291,37 @@ def mpe_showcase():
     for c, n in struck.items(): ev.append((0, OFF, c, n, 0))
     return ev
 
+def mpe_timbre():
+    # ISOLATED CC#74 (MPE Y / timbre) test. Nothing else moves — no pitch bend, no
+    # pressure, constant velocity — so ANY change you hear is purely per-note brightness
+    # (the pool maps CC#74 -> that note's modulator level / FM depth). Pick a SUSTAINED,
+    # FM-rich voice first (Organ, or a PSS-140 brass/synth) to hear it clearly.
+    # Member channels: ev-ch 1 = MIDI ch2, ev-ch 2 = MIDI ch3.
+    ch = 1
+    ev = []
+    # 1) ONE held note: slow full brightness sweep dark->bright->dark, then faster.
+    ev.append((0, ON, ch, 60, 100))
+    ev.append((0, CC, ch, 74, 0))                       # start dark
+    ev += cc_ramp(ch, 74, 0, 127, 1600) + cc_ramp(ch, 74, 127, 0, 1600)
+    ev += cc_ramp(ch, 74, 0, 127, 800)  + cc_ramp(ch, 74, 127, 0, 800)
+    ev.append((300, OFF, ch, 60, 0))
+    # 2) STEPPED brightness: hold a note, JUMP CC#74 through discrete levels (~0.6 s each)
+    #    so you hear distinct timbre steps, not a glide.
+    ev.append((350, ON, ch, 62, 100))
+    first = True
+    for v in (0, 32, 64, 96, 127, 64, 0):
+        ev.append((0 if first else 600, CC, ch, 74, v)); first = False
+    ev.append((600, OFF, ch, 62, 0))
+    # 3) PER-NOTE INDEPENDENCE (the MPE proof): two held notes a fifth apart. Sweep CC#74
+    #    on the TOP note only while the BOTTOM stays dark; then swap. On a shared-timbre
+    #    engine both would morph together — here only the swept note changes.
+    ev.append((400, ON, 1, 55, 100)); ev.append((0, CC, 1, 74, 0))   # bottom (MIDI ch2), dark
+    ev.append((0, ON, 2, 67, 100));   ev.append((0, CC, 2, 74, 0))   # top (MIDI ch3), dark
+    ev += cc_ramp(2, 74, 0, 127, 1300) + cc_ramp(2, 74, 127, 0, 1300)  # sweep TOP only
+    ev += cc_ramp(1, 74, 0, 127, 1300) + cc_ramp(1, 74, 127, 0, 1300)  # swap: sweep BOTTOM only
+    ev.append((250, OFF, 1, 55, 0)); ev.append((0, OFF, 2, 67, 0))
+    return ev
+
 TESTS = [
     ("kSweep",    "01 Midi Test Sweep",      sweep(),        "false"),
     ("kChord",    "02 Midi Test Chord",      chord(),        "false"),
@@ -303,6 +334,7 @@ TESTS = [
     ("kMpePress", "09 MPE Test Pressure",    mpe_pressure(), "true"),
     ("kMpeDemo",  "10 MPE Full Demo",        mpe_demo(),     "true"),
     ("kMpeShow",  "11 MPE Showcase",         mpe_showcase(), "true"),
+    ("kMpeTimbre","12 MPE Timbre",           mpe_timbre(),   "true"),
 ]
 
 def emit():
