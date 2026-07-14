@@ -79,8 +79,10 @@ defines `TDSP_HAS_REPLAYGAIN`; the onset/PROOF/jump captures stay Dexed-pool-onl
 
 ## Regenerating a backend's table (on-device, per build)
 
-The trim table is **device-specific** (it depends on the codec/output chain), so it's
-measured on hardware, not computed offline. Ships at **unity** until swept.
+The trim table is measured on hardware (a patch's loudness can't be predicted from its
+data), not computed offline. It's measured at the **digital** synth sum (the probe taps the
+F32 bus *before* the codec), so the numbers are **board-independent** — any board running
+the firmware yields the same table. Ships at **unity** until swept.
 
 1. Flash the target env (e.g. `teensy41_opll`), open the serial monitor.
 2. Press **`N`**. It plays a fixed reference note (C4, vel 100) through every instrument,
@@ -95,9 +97,14 @@ measured on hardware, not computed offline. Ships at **unity** until swept.
 3. Paste the block over the backend's table header (`DexedVoiceGains.h`,
    `OpllVoiceTrim.h`, …) and reflash.
 
-**Tier-2 GM tables** (multitimbral backends) are swept the same way but with the picker
-forced to *audition each GM program 0–127* and measuring — the sweep is the same code; the
-table is 128 entries applied per-channel on Program Change.
+**Tier-2 tables** don't need their own sweep:
+- **GM backends (TSF)** — Tier-1 index *is* the GM program, so the one `N` sweep already
+  produced the per-GM-program table; both tiers read it.
+- **OPLL** — a song funnels every GM program through the fixed `gmToInstrument()` map onto
+  one of the 15 ROM voices, which the `N` sweep already measured (`kOpllVoiceTrim[0..14]`).
+  So the 128-entry Tier-2 table is **derived** at `synthBegin`
+  (`kOpllVoiceTrim[gmToInstrument(p)-1]`), not swept — rebuilt automatically whenever
+  `kOpllVoiceTrim` is re-swept. (The 100 PSS-140 patches never play in a song.)
 
 Downstream, the per-bus `SoftLimit_F32` (Dexed pool) / clamp catches any coincident-voice
 peaks that a per-voice trim can't prevent (stacking), so trims can be honest about loudness
@@ -110,7 +117,7 @@ without risking hard clip.
 |---------|-----------------|------------------|-------------|
 | Dexed pool | ✅ (`kDexedVoiceTrim[320]`) | n/a (single-timbre) | ✅ |
 | Dexed (single) | pattern ready | n/a | — |
-| OPLL | ✅ (`kOpllVoiceTrim[115]`) | ✅ coarse (3 dB nibble) | Tier-1 ✅ (jay-mint 2026-07-14); Tier-2 ⬜ unity (no per-GM sweep yet) |
+| OPLL | ✅ (`kOpllVoiceTrim[115]`) | ✅ coarse (3 dB nibble), **derived** from Tier-1 | Tier-1 ✅ (jay-mint 2026-07-14); Tier-2 needs no sweep — see below |
 | SF2 / TSF | ✅ | ✅ (float ch volume) | ✅ both tiers (`kSf2TsfGmTrim[128]`, jay-mint 2026-07-14) |
 | OPL3 | pattern ready | pattern ready (TL) | — |
 | OPM | pattern ready | pattern ready (TL) | — |

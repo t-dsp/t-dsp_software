@@ -21,8 +21,7 @@
 #include "OpllSink.h"
 #include "Pss140Patches.h"   // baked 100 PSS-140 user-voice patches (study-only; see NOTICE.md)
 #include "ReplayGain.h"      // shared K-weighted meter + ILoudnessMeter (Tier-1 sweep)
-#include "OpllVoiceTrim.h"   // Tier-1 (audition) per-picker-voice trims
-#include "OpllGmSongTrim.h"  // Tier-2 (song norm) per-GM-program trims
+#include "OpllVoiceTrim.h"   // Tier-1 (audition) per-picker-voice trims (Tier-2 derives from these)
 
 // OPLL is MONO (update() transmits identical L/R): convert one channel to F32, then fan the
 // (Tier-1 audition-)trimmed signal to both mix channels. The loudness probe taps the RAW
@@ -94,7 +93,15 @@ static const char           *synthTrimSymbol()   { return "kOpllVoiceTrim"; }
 static void synthBegin() {
     g_opll.begin();                    // reset chip + resampler (instruments are chip-ROM)
     g_opll.setGain(3.5f);              // OPLL's 9-bit DAC runs quiet; lift for a usable level
-    g_opll.setGmSongTrim(kOpllGmSongTrim);   // Tier-2 per-GM-program song norm (unity until swept)
+    // Tier-2 song norm is DERIVED, not swept: in a GM song every channel's program is
+    // funneled by gmToInstrument() onto one of the 15 ROM voices, whose loudness we already
+    // measured in the Tier-1 audition table (kOpllVoiceTrim[0..14]). So a program's trim ==
+    // its mapped ROM voice's trim — no separate per-GM sweep needed (PSS-140 patches never
+    // play in a song; they're picker-only). Rebuild this whenever kOpllVoiceTrim is re-swept.
+    static float s_gmSongTrim[128];
+    for (int p = 0; p < 128; ++p)
+        s_gmSongTrim[p] = opllVoiceTrim(g_opll.gmToInstrument((uint8_t)p) - 1);  // ROM 1..15 -> idx 0..14
+    g_opll.setGmSongTrim(s_gmSongTrim);
     // OPLL handles GM drums on channel 10 itself (rhythm section), so let the player
     // pass every channel through (Dexed/OPM leave the default kMaskNoDrums).
     g_player.setChannelMask(tdsp::MidiFilePlayer::kMaskAll);
