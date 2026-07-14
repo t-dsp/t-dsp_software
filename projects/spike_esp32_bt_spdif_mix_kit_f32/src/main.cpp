@@ -135,6 +135,8 @@ static bool g_sdReady = false;
   #include "SynthBackendSF2.h"      // SF2 sampled General MIDI (lib/TDspSF2 + sf22aswt, PSRAM)
 #elif defined(TDSP_SYNTH_OPL3)
   #include "SynthBackendOpl3.h"     // OPL3 + DMXOPL GM (needs lib/TDspYmfm OPL3 engine; see spec)
+#elif defined(TDSP_SYNTH_OPLL)
+  #include "SynthBackendOpll.h"     // OPLL (YM2413) — the PSS-140 chip: 15 ROM voices + rhythm
 #elif defined(TDSP_SYNTH_YMFM)
   #include "SynthBackendYmfm.h"
 #elif defined(TDSP_SYNTH_DEXED_POOL)
