@@ -62,8 +62,19 @@ public:
     void onAllNotesOff(uint8_t ch) override {
         tsf *t = *_t; if (!t) return;
         AudioNoInterrupts();
-        if (ch == 0) tsf_note_off_all(t);             // panic
-        else         tsf_channel_note_off_all(t, ch - 1);
+        if (ch == 0) {
+            tsf_note_off_all(t);                      // panic all notes
+            // Recenter per-channel MPE expression too. Pressure maps to channel VOLUME
+            // (tsf_channel_set_volume); without this, a note that released at low pressure
+            // leaves its channel quiet/silent, and the next song/instrument on that channel
+            // plays attenuated -> the "worked great then faded out" drift, cured by reboot.
+            for (int c = 0; c < 16; c++) {
+                tsf_channel_set_volume(t, c, 1.0f);
+                tsf_channel_set_pitchwheel(t, c, 8192);   // recenter bend
+            }
+        } else {
+            tsf_channel_note_off_all(t, ch - 1);
+        }
         AudioInterrupts();
     }
 

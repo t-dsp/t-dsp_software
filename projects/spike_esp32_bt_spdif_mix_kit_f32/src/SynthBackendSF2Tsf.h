@@ -79,8 +79,10 @@ static void synthSetInstrument(int idx) {
     if (idx > 127) idx = 127;
     if (g_tsf) {
         AudioNoInterrupts();
-        for (int ch = 0; ch < 16; ch++)
+        for (int ch = 0; ch < 16; ch++) {
             if (ch != 9) tsf_channel_set_presetnumber(g_tsf, ch, idx, 0);  // leave drum ch (9) alone
+            tsf_channel_set_volume(g_tsf, ch, 1.0f);  // clear leftover MPE-pressure attenuation
+        }
         AudioInterrupts();
     }
     g_synthInstrument = idx;
