@@ -459,12 +459,14 @@ struct tsf_voice
 	struct tsf_voice_envelope ampenv, modenv;
 	struct tsf_voice_lowpass lowpass;
 	struct tsf_voice_lfo modlfo, viblfo;
+	float filterFcOffset;   // T-DSP: cents added to region->initialFilterFc for MPE CC74 timbre (0 = neutral)
 };
 
 struct tsf_channel
 {
 	unsigned short presetIndex, bank, pitchWheel, midiPan, midiVolume, midiExpression, midiRPN, midiData : 14, sustain : 1;
 	float panOffset, gainDB, pitchRange, tuning;
+	float cutoffCents;   // T-DSP: per-channel CC74 timbre offset in cents (0 = neutral); pushed to this channel's voices
 };
 
 struct tsf_channels
@@ -1232,7 +1234,9 @@ static void tsf_voice_render(tsf* f, struct tsf_voice* v, float* outputBuffer, i
 	double tmpSourceSamplePosition = v->sourceSamplePosition;
 	struct tsf_voice_lowpass tmpLowpass = v->lowpass;
 
-	TSF_BOOL dynamicLowpass = (region->modLfoToFilterFc || region->modEnvToFilterFc);
+	// T-DSP: v->filterFcOffset (MPE CC74 timbre) also forces the dynamic path so a held
+	// note's cutoff tracks the slide live, even for patches with no LFO/env->Fc routing.
+	TSF_BOOL dynamicLowpass = (region->modLfoToFilterFc || region->modEnvToFilterFc || v->filterFcOffset != 0.0f);
 	float tmpSampleRate = f->outSampleRate, tmpInitialFilterFc, tmpModLfoToFilterFc, tmpModEnvToFilterFc;
 
 	TSF_BOOL dynamicPitchRatio = (region->modLfoToPitch || region->modEnvToPitch || region->vibLfoToPitch);
@@ -1242,7 +1246,7 @@ static void tsf_voice_render(tsf* f, struct tsf_voice* v, float* outputBuffer, i
 	TSF_BOOL dynamicGain = (region->modLfoToVolume != 0);
 	float noteGain = 0, tmpModLfoToVolume;
 
-	if (dynamicLowpass) tmpInitialFilterFc = (float)region->initialFilterFc, tmpModLfoToFilterFc = (float)region->modLfoToFilterFc, tmpModEnvToFilterFc = (float)region->modEnvToFilterFc;
+	if (dynamicLowpass) tmpInitialFilterFc = (float)region->initialFilterFc + v->filterFcOffset, tmpModLfoToFilterFc = (float)region->modLfoToFilterFc, tmpModEnvToFilterFc = (float)region->modEnvToFilterFc;
 	else tmpInitialFilterFc = 0, tmpModLfoToFilterFc = 0, tmpModEnvToFilterFc = 0;
 
 	if (dynamicPitchRatio) pitchRatio = 0, tmpModLfoToPitch = (float)region->modLfoToPitch, tmpVibLfoToPitch = (float)region->vibLfoToPitch, tmpModEnvToPitch = (float)region->modEnvToPitch;
@@ -1633,6 +1637,7 @@ TSFDEF int tsf_note_on(tsf* f, int preset_index, int key, float vel)
 		}
 		else
 		{
+			voice->filterFcOffset = 0.0f;   // T-DSP: no channel state on the direct note-on path
 			tsf_voice_calcpitchratio(voice, 0, f->outSampleRate);
 			// The SFZ spec is silent about the pan curve, but a 3dB pan law seems common. This sqrt() curve matches what Dimension LE does; Alchemy Free seems closer to sin(adjustedPan * pi/2).
 			voice->panFactorLeft  = TSF_SQRTF(0.5f - region->pan);
@@ -1759,6 +1764,7 @@ static void tsf_channel_setup_voice(tsf* f, struct tsf_voice* v)
 	float newpan = v->region->pan + c->panOffset;
 	v->playingChannel = f->channels->activeChannel;
 	v->noteGainDB += c->gainDB;
+	v->filterFcOffset = c->cutoffCents;   // T-DSP: inherit the channel's current CC74 timbre
 	tsf_voice_calcpitchratio(v, (c->pitchWheel == 8192 ? c->tuning : ((c->pitchWheel / 16383.0f * c->pitchRange * 2.0f) - c->pitchRange + c->tuning)), f->outSampleRate);
 	if      (newpan <= -0.5f) { v->panFactorLeft = 1.0f; v->panFactorRight = 0.0f; }
 	else if (newpan >=  0.5f) { v->panFactorLeft = 0.0f; v->panFactorRight = 1.0f; }
@@ -1797,6 +1803,7 @@ static struct tsf_channel* tsf_channel_init(tsf* f, int channel)
 		c->gainDB = 0.0f;
 		c->pitchRange = 2.0f;
 		c->tuning = 0.0f;
+		c->cutoffCents = 0.0f;   // T-DSP: CC74 timbre neutral until the controller sends it
 	}
 	return &f->channels->channels[channel];
 }
@@ -1808,6 +1815,17 @@ static void tsf_channel_applypitch(tsf* f, int channel, struct tsf_channel* c)
 	for (v = f->voices, vEnd = v + f->voiceNum; v != vEnd; v++)
 		if (v->playingPreset != -1 && v->playingChannel == channel)
 			tsf_voice_calcpitchratio(v, pitchShift, f->outSampleRate);
+}
+
+// T-DSP: push the channel's CC74 timbre offset (cents) onto its live voices. The render
+// loop re-reads v->filterFcOffset each block (dynamicLowpass), so held notes track the
+// slide. Mirrors tsf_channel_applypitch — same "update every sounding voice" pattern.
+static void tsf_channel_applycutoff(tsf* f, int channel, struct tsf_channel* c)
+{
+	struct tsf_voice *v, *vEnd;
+	for (v = f->voices, vEnd = v + f->voiceNum; v != vEnd; v++)
+		if (v->playingPreset != -1 && v->playingChannel == channel)
+			v->filterFcOffset = c->cutoffCents;
 }
 
 TSFDEF int tsf_channel_set_presetindex(tsf* f, int channel, int preset_index)
@@ -2011,7 +2029,14 @@ TSFDEF int tsf_channel_midi_control(tsf* f, int channel, int controller, int con
 		case 100 /*RPN_LSB*/         : c->midiRPN = (unsigned short)(((c->midiRPN == 0xFFFF ? 0 : c->midiRPN) & 0x3F80) |  control_value); return 1;
 		case  98 /*NRPN_LSB*/        : c->midiRPN = 0xFFFF; return 1;
 		case  99 /*NRPN_MSB*/        : c->midiRPN = 0xFFFF; return 1;
-		case  64 /*SUSTAIN*/         : tsf_channel_set_sustain(f, channel, (int)(control_value >= 64)); return 1;
+		case  74 /*SOUND_CONTROLLER5 / MPE TIMBRE*/ :
+			// T-DSP: CC74 = MPE Y-axis (brightness). Map absolute 0..127 so full (127) is
+			// neutral (patch-open) and lower values close the lowpass, up to kTimbreSpan
+			// cents darker. Rest-at-open means normal GM playback (never sends CC74) is
+			// untouched, matching the Dexed pool's "note starts full, expression swells down".
+			c->cutoffCents = ((control_value / 127.0f) - 1.0f) * 4800.0f;   // 4 octaves of downward sweep
+			tsf_channel_applycutoff(f, channel, c);
+			return 1;
 		case 120 /*ALL_SOUND_OFF*/   : tsf_channel_sounds_off_all(f, channel); return 1;
 		case 123 /*ALL_NOTES_OFF*/   : tsf_channel_note_off_all(f, channel);   return 1;
 		case 121 /*ALL_CTRL_OFF*/    :

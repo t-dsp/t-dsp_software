@@ -46,9 +46,11 @@ public:
     }
     // MPE expression. Pressure (Z-axis) -> per-channel volume, which TSF applies to
     // LIVE voices, so a held note swells with finger pressure. Timbre (CC74, the
-    // slide/Y-axis) is forwarded but TSF has no per-channel filter-cutoff control, so
-    // it's currently inert (a follow-up would patch TSF's filter). At rest (normal
-    // MIDI, no pressure sent) volume stays 1.0, so this is a no-op outside MPE.
+    // slide/Y-axis) -> per-channel lowpass cutoff: TSF's CC74 handler was patched
+    // (tsf_channel_midi_control) to close each channel's filter as the slide drops,
+    // and the render loop tracks it on held notes. At rest (normal MIDI: no pressure,
+    // no CC74) volume stays 1.0 and the filter stays patch-open, so this is a no-op
+    // outside MPE.
     void onPressure(uint8_t ch, float v) override {
         tsf *t = *_t; if (!t) return;
         AudioNoInterrupts(); tsf_channel_set_volume(t, ch - 1, v); AudioInterrupts();

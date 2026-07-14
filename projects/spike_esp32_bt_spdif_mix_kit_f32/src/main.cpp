@@ -578,6 +578,9 @@ static void runMpeSweep(int startIdx);        // MPE demo on each instrument; re
 static void runAxisProof(int axis);           // capture 1 note with an MPE axis at full
 static void runMpeCheck(void);                // measure every instrument under MPE; flag silent/clip
 #endif
+#ifdef TDSP_SYNTH_SF2_TSF
+static void runAxisProof(int axis);           // MPE axis proof ported to TSF (validates CC#74->cutoff)
+#endif
 
 static bool handleControlLine(const char* line, Print& reply) {
     if      (strncmp(line, "@VOL=", 5) == 0)      setMasterVolumePct(atoi(line + 5));
@@ -622,6 +625,9 @@ static bool handleControlLine(const char* line, Print& reply) {
         synthSetInstrument(g_synthInstrument);         // reload so RESPECT restores the patch's own LFO
         Serial.printf("[lfo] mode = %s\n", force ? "FORCE (vib/trem on any patch)" : "RESPECT patch LFO");
     }
+#endif
+#ifdef TDSP_SYNTH_SF2_TSF
+    else if (strncmp(line, "@PROOF=", 7) == 0)     runAxisProof(atoi(line + 7));   // capture 1 note w/ axis at full (0=press 1=timbre 2=bend 3=neutral)
 #endif
     else if (strncmp(line, "@MIDIMODE=", 10) == 0) applyMidiMode(atoi(line + 10) != 0);
     else return false;
@@ -818,6 +824,61 @@ static void runMpeTest() {
     applyMidiMode(false);
     Serial.println("[mpetest] done (back to normal MIDI)");
 }
+
+#ifdef TDSP_SYNTH_SF2_TSF
+// --- MPE axis proof (@PROOF), TSF port --------------------------------------
+// The Dexed-pool axis proof (below) depends on that backend's ClipProbe + routing
+// masks, so here is the TSF equivalent. Hold ONE note on an MPE member channel with
+// a single axis pushed to full and capture the synth sum, so the PC can measure that
+// the axis modulates the waveform: pitch (bend, axis 2), spectral centroid
+// (timbre -> lowpass cutoff, axis 1 — the CC#74 path this backend just gained),
+// amplitude (pressure -> volume, axis 0), or a neutral reference (axis 3). TSF routes
+// timbre/pressure natively (no routing masks), so this is just: MPE mode, note on,
+// push the axis, capture. Compare @PROOF=1 (timbre pushed to fully-closed) against
+// @PROOF=3 (neutral / patch-open): a LOWER spectral centroid proves CC#74 shut the filter.
+static void dumpFloatsTagged(const char *tag, const float *c, int n) {
+    Serial.printf("[lb] %s begin %d\n", tag, n);
+    char lb[220];
+    for (int i = 0; i < n; ) {
+        int p = 0;
+        for (int k = 0; k < 16 && i < n; k++, i++)
+            p += snprintf(lb + p, sizeof(lb) - p, "%.6g ", (double)c[i]);
+        Serial.println(lb);
+    }
+    Serial.printf("[lb] %s end\n", tag);
+}
+
+FLASHMEM static void runAxisProof(int axis) {
+    if (g_player.isPlaying()) songStop();
+    g_synthSink->onAllNotesOff(0);
+    bool wasMpe = g_mpeMode;
+    applyMidiMode(true);
+    synthSetInstrument(48);                                // GM 48 = String Ensemble 1: sustained, filter-rich
+    if (g_dvol < -30.0f) { g_dvol = -12.0f; if (g_codecOk) applyVol(); }
+    delay(90);
+    const char *nm = (axis == 0) ? "pressure" : (axis == 1) ? "timbre" : (axis == 2) ? "bend+7" : "neutral";
+    Serial.printf("[proof] axis=%s note=60 ch2 N=%d\n", nm, ClipProbe_F32::kCapN);
+    // Recenter ch2's expression before the note so each proof is INDEPENDENT of the
+    // previous one's axis — else a prior bend/timbre latches on the channel and the next
+    // capture starts pre-modulated. Neutral = bend 0, timbre open (1.0), full pressure.
+    g_synthSink->onPitchBend(2, 0.0f);
+    g_synthSink->onTimbre(2, 1.0f);
+    g_synthSink->onPressure(2, 1.0f);
+    g_synthSink->onNoteOn(2, 60, 110);
+    if      (axis == 0) g_synthSink->onPressure(2, 1.0f);
+    else if (axis == 1) g_synthSink->onTimbre(2, 0.0f);   // CC#74=0 -> filter fully closed (darkest vs neutral)
+    else if (axis == 2) g_synthSink->onPitchBend(2, 7.0f);
+    delay(150);
+    dxpClip.armCapture();
+    uint32_t t0 = millis();
+    while (!dxpClip.captureDone() && millis() - t0 < 1000) delay(2);
+    g_synthSink->onNoteOff(2, 60, 0);
+    dumpFloatsTagged("PROOF", dxpClip.capture(), dxpClip.captureCount());
+    Serial.println("[proof] done");
+    g_synthSink->onAllNotesOff(0);
+    applyMidiMode(wasMpe);
+}
+#endif
 
 #ifdef TDSP_SYNTH_DEXED_POOL
 // Pizz clip test ('K'): load a patch (default 273 = "PIZZ STGS"), fire a single note

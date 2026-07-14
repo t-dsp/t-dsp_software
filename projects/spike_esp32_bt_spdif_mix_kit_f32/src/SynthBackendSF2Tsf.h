@@ -22,6 +22,40 @@ AudioConnection      c_tsfR(g_tsfSynth, 1, g_tsfToF32R, 0);
 AudioConnection_F32  c_tsfFL(g_tsfToF32L, 0, outL, 3);
 AudioConnection_F32  c_tsfFR(g_tsfToF32R, 0, outR, 3);
 
+// --- MPE axis-proof capture probe -------------------------------------------
+// Taps the TSF synth sum (left, pre-mix) so the shared runAxisProof (@PROOF) can
+// capture a note and let the PC measure that an MPE axis really modulates the
+// waveform — for the timbre axis, that CC#74 opens/closes the per-voice lowpass.
+// Onset-capture only; the pool's full ClipProbe_F32 (K-weighting / clip / click
+// detection) isn't needed for GM. Named ClipProbe_F32 so runAxisProof compiles
+// against ClipProbe_F32::kCapN in both backends (only one is ever built). Buffer
+// in DMAMEM (RAM2) — a 32 KB array in RAM1 starves the stack (see pool backend).
+DMAMEM static float g_tsfCapBuf[8192];
+class ClipProbe_F32 : public AudioStream_F32 {
+public:
+    static const int kCapN = 8192;                     // ~171 ms @ 48 kHz
+    ClipProbe_F32(void) : AudioStream_F32(1, inputQueueArray) {}
+    void update(void) override {
+        audio_block_f32_t *b = receiveReadOnly_f32(0);
+        if (!b) return;
+        for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+            float s = b->data[i];
+            if (m_arm && m_idx < kCapN) { g_tsfCapBuf[m_idx++] = s; if (m_idx >= kCapN) m_arm = false; }
+        }
+        AudioStream_F32::release(b);
+    }
+    void         armCapture(void)        { __disable_irq(); m_idx = 0; m_arm = true; __enable_irq(); }
+    bool         captureDone(void) const { return !m_arm; }
+    int          captureCount(void) const { return m_idx; }
+    const float *capture(void)     const { return g_tsfCapBuf; }
+private:
+    audio_block_f32_t *inputQueueArray[1];
+    volatile bool m_arm = false;
+    volatile int  m_idx = 0;
+};
+ClipProbe_F32       dxpClip;
+AudioConnection_F32 c_tsfClip(g_tsfToF32L, 0, dxpClip, 0);
+
 tsf            *g_tsf = nullptr;                        // loaded in synthBegin
 TsfSink         g_tsfSink(&g_tsf);
 tdsp::MidiSink *g_synthSink = &g_tsfSink;
