@@ -120,6 +120,38 @@ AudioConnection_F32 c_pkBt   (btToF32L,   0, peakBt,    0);
 AudioConnection_F32 c_pkSp   (spdifIn,    0, peakSpdif, 0);
 AudioConnection_F32 c_pkOut  (outL,       0, peakOut,   0);
 
+// --- Development output capture (build-agnostic) -----------------------------
+// A capture-only probe on the FINAL digital output (same tap as peakOut / the DAC).
+// `@CAP[=<n>]` arms it, records the next samples of the actual DAC-bound signal into a
+// DMAMEM buffer, and dumps them over USB serial for tools/capture_analyze.py (FFT /
+// spectral-centroid "brightness" / RMS / WAV / plot). It taps the output BUS, not any
+// engine, so it works on every build now and in the future — a permanent dev instrument.
+DMAMEM static float g_capBuf[16384];
+class OutCaptureProbe_F32 : public AudioStream_F32 {
+public:
+    static const int kCapN = 16384;                     // ~371 ms @ 44.1 kHz
+    OutCaptureProbe_F32(void) : AudioStream_F32(1, m_inq) {}
+    void update(void) override {
+        audio_block_f32_t *b = receiveReadOnly_f32(0);
+        if (!b) return;
+        if (m_arm) for (int i = 0; i < AUDIO_BLOCK_SAMPLES && m_idx < kCapN; i++) {
+            g_capBuf[m_idx++] = b->data[i];
+            if (m_idx >= kCapN) m_arm = false;
+        }
+        AudioStream_F32::release(b);
+    }
+    void arm(void)         { __disable_irq(); m_idx = 0; m_arm = true; __enable_irq(); }
+    bool done(void) const  { return !m_arm; }
+    int  count(void) const { return m_idx; }
+    const float *data(void) const { return g_capBuf; }
+private:
+    audio_block_f32_t *m_inq[1];
+    volatile bool m_arm = false;
+    volatile int  m_idx = 0;
+};
+OutCaptureProbe_F32 g_outCap;
+AudioConnection_F32 c_capOut(outL, 0, g_outCap, 0);
+
 // SD-card ready flag — declared before the synth backend so the ymfm backend
 // can load its /ymfm/*.opm instrument banks in synthBegin() (set by SD.begin()
 // in setup(), which runs before synthBegin() is called).
@@ -646,6 +678,24 @@ static bool handleControlLine(const char* line, Print& reply) {
     else if (strncmp(line, "@PROOF=", 7) == 0)     runAxisProof(atoi(line + 7));   // capture 1 note w/ axis at full (0=press 1=timbre 2=bend 3=neutral)
 #endif
     else if (strncmp(line, "@MIDIMODE=", 10) == 0) applyMidiMode(atoi(line + 10) != 0);
+    else if (strncmp(line, "@CAP", 4) == 0) {          // capture output samples -> PC (tools/capture_analyze.py)
+        int n = (line[4] == '=') ? atoi(line + 5) : OutCaptureProbe_F32::kCapN;
+        if (n < 1) n = 1;
+        if (n > OutCaptureProbe_F32::kCapN) n = OutCaptureProbe_F32::kCapN;
+        g_outCap.arm();
+        uint32_t t0 = millis();
+        while (!g_outCap.done() && millis() - t0 < 2000) delay(1);   // wait for the buffer to fill
+        int got = g_outCap.count(); if (got > n) got = n;
+        reply.printf("[cap] begin %d rate %d\n", got, (int)AUDIO_SAMPLE_RATE_EXACT);
+        const float *c = g_outCap.data();
+        char lb[220];
+        for (int i = 0; i < got; ) {
+            int p = 0;
+            for (int k = 0; k < 16 && i < got; k++, i++) p += snprintf(lb + p, sizeof(lb) - p, "%.6g ", (double)c[i]);
+            reply.println(lb);
+        }
+        reply.println("[cap] end");
+    }
     else return false;
     return true;
 }

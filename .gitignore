@@ -36,3 +36,7 @@ projects/*/docs/*.pdf
 references/OpenAudio_ArduinoLibrary/
 references/teensy-4-async-inputs/
 references/teensy-4-usbAudio/
+
+# Python bytecode
+__pycache__/
+*.pyc
