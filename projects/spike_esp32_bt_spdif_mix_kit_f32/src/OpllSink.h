@@ -19,7 +19,10 @@ public:
     void onNoteOff(uint8_t ch, uint8_t note, uint8_t)     override { _opll->noteOff(ch, note); }
     void onProgramChange(uint8_t ch, uint8_t prog)        override { _opll->programChange(ch, prog); }
     void onPitchBend(uint8_t ch, float semitones)         override { _opll->pitchBend(ch, semitones); }
+    void onPressure (uint8_t ch, float v)                 override { _opll->channelPressure(ch, v); }  // MPE Z -> volume
     void onModWheel (uint8_t /*ch*/, float /*v*/)         override {}   // no-op (OPLL has no mod routing here)
+    // onTimbre intentionally NOT overridden: OPLL can't do per-note timbre (fixed ROM
+    // voices + a single shared user-voice bank), so CC#74 is a deliberate no-op.
     void onSustain  (uint8_t ch, bool on)                 override { _opll->controlChange(ch, 64, on ? 127 : 0); }
     void onAllNotesOff(uint8_t /*ch*/)                    override { _opll->allNotesOff(); }
 

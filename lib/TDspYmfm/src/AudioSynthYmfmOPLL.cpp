@@ -70,9 +70,9 @@ AudioSynthYmfmOPLL::AudioSynthYmfmOPLL()
     : AudioStream(0, nullptr), m_chip(m_intf) {
     for (int c = 0; c < kNumChannels; c++) {
         m_note[c] = -1; m_chan[c] = 0; m_age[c] = 0;
-        m_baseNote[c] = 0.0f; m_reg2x[c] = 0; m_inst[c] = 1; m_keyOn[c] = false;
+        m_baseNote[c] = 0.0f; m_reg2x[c] = 0; m_inst[c] = 1; m_vel[c] = 100; m_keyOn[c] = false;
     }
-    for (int i = 0; i < 17; i++) { m_program[i] = 0; m_bend[i] = 0.0f; m_override[i] = -1; }
+    for (int i = 0; i < 17; i++) { m_program[i] = 0; m_bend[i] = 0.0f; m_pressure[i] = 0.0f; m_override[i] = -1; }
 }
 
 FLASHMEM void AudioSynthYmfmOPLL::begin() {
@@ -84,7 +84,7 @@ FLASHMEM void AudioSynthYmfmOPLL::begin() {
         writeReg(0x20 + c, 0x00);   // key off, block 0
         writeReg(0x30 + c, 0x0F);   // instrument 0, max attenuation (silent)
         m_note[c] = -1; m_chan[c] = 0; m_age[c] = 0;
-        m_baseNote[c] = 0.0f; m_reg2x[c] = 0; m_inst[c] = 1; m_keyOn[c] = false;
+        m_baseNote[c] = 0.0f; m_reg2x[c] = 0; m_inst[c] = 1; m_vel[c] = 100; m_keyOn[c] = false;
     }
     m_rhythmBits = 0; m_rhythmMode = false;
     AudioInterrupts();
@@ -99,7 +99,7 @@ FLASHMEM void AudioSynthYmfmOPLL::begin() {
     m_chip.generate(&m_cur, 1);
     m_prev = m_cur;
 
-    for (int i = 1; i <= 16; i++) { m_program[i] = 0; m_bend[i] = 0.0f; m_override[i] = -1; }
+    for (int i = 1; i <= 16; i++) { m_program[i] = 0; m_bend[i] = 0.0f; m_pressure[i] = 0.0f; m_override[i] = -1; }
     m_ready = true;
 }
 
@@ -136,6 +136,16 @@ uint8_t AudioSynthYmfmOPLL::volNibble(uint8_t velocity) {
     int att = (127 - (int)velocity) * 13 / 127;
     if (att < 0) att = 0; if (att > 15) att = 15;
     return (uint8_t)att;
+}
+
+// Effective 4-bit volume for a sounding voice: note-on velocity plus the channel's
+// MPE pressure, so pressure swells a held note toward full volume (0 = loudest).
+uint8_t AudioSynthYmfmOPLL::voiceVol(int c) const {
+    uint8_t ch = m_chan[c];
+    float pr = (ch >= 1 && ch <= 16) ? m_pressure[ch] : 0.0f;
+    int v = (int)m_vel[c] + (int)(pr * 127.0f + 0.5f);   // pressure adds loudness on top of velocity
+    if (v > 127) v = 127;
+    return volNibble((uint8_t)v);
 }
 
 void AudioSynthYmfmOPLL::applyPitch(int c) {
@@ -189,10 +199,11 @@ void AudioSynthYmfmOPLL::noteOn(uint8_t channel, uint8_t note, uint8_t velocity)
     AudioNoInterrupts();
     int c = allocChannel(channel, note);
     m_inst[c]     = (uint8_t)inst;
+    m_vel[c]      = velocity;
     m_baseNote[c] = (float)note;
     m_keyOn[c]    = false;
-    // 0x3x: instrument (high nibble) | volume (low nibble). Set before key-on.
-    writeReg(0x30 + c, (uint8_t)((inst << 4) | volNibble(velocity)));
+    // 0x3x: instrument (high nibble) | volume (low nibble, velocity + pressure). Set before key-on.
+    writeReg(0x30 + c, (uint8_t)((inst << 4) | voiceVol(c)));
     applyPitch(c);                       // 0x1x/0x2x with key still off
     // Clock the chip once so it samples KON=0 before we raise KON=1 (see OPL3 wrapper:
     // a rapid off->on on the same voice otherwise misses the key edge and never
@@ -245,6 +256,18 @@ void AudioSynthYmfmOPLL::pitchBend(uint8_t channel, float semitones) {
     AudioInterrupts();
 }
 
+// MPE channel pressure -> live volume swell for every sounding voice on the channel.
+void AudioSynthYmfmOPLL::channelPressure(uint8_t channel, float amount) {
+    if (channel < 1 || channel > 16) return;
+    if (amount < 0.0f) amount = 0.0f; else if (amount > 1.0f) amount = 1.0f;
+    m_pressure[channel] = amount;
+    AudioNoInterrupts();
+    for (int c = 0; c < kNumChannels; c++)
+        if (m_note[c] >= 0 && m_chan[c] == channel)
+            writeReg(0x30 + c, (uint8_t)((m_inst[c] << 4) | voiceVol(c)));
+    AudioInterrupts();
+}
+
 void AudioSynthYmfmOPLL::controlChange(uint8_t channel, uint8_t cc, uint8_t v) {
     if (channel < 1 || channel > 16) return;
     switch (cc) {
@@ -267,6 +290,7 @@ void AudioSynthYmfmOPLL::allNotesOff() {
         if (m_note[c] >= 0) keyOff(c);
         m_note[c] = -1;
     }
+    for (int i = 1; i <= 16; i++) m_pressure[i] = 0.0f;   // drop latched MPE pressure
     m_rhythmBits = 0;
     if (m_rhythmMode) writeReg(0x0E, 0x20);
     AudioInterrupts();

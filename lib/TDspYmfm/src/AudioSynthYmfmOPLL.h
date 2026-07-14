@@ -53,6 +53,11 @@ public:
     void noteOff(uint8_t channel, uint8_t note);
     void programChange(uint8_t channel, uint8_t program);   // melodic patch 0..127
     void pitchBend(uint8_t channel, float semitones);       // per-channel, pre-scaled
+    // MPE Z-axis (channel pressure), 0..1 -> per-note volume swell. This is the ONE
+    // expression axis beyond bend the OPLL can honestly do: it re-writes the 4-bit
+    // volume nibble live. (Per-note timbre is impossible — ROM voices are fixed and the
+    // user voice is a single shared bank.)
+    void channelPressure(uint8_t channel, float amount);
 
     // --- direct patch control (bypasses the GM->ROM map) -----------------------
     // Load an 8-byte OPLL user-voice patch (registers $00..$07) into instrument
@@ -97,6 +102,7 @@ private:
     void keyOff(int c);
     int  allocChannel(uint8_t midiCh, uint8_t note);
     static uint8_t volNibble(uint8_t velocity);  // MIDI velocity -> 4-bit attenuation
+    uint8_t voiceVol(int c) const;               // 0x30 low nibble from velocity + channel pressure
 
     // percussion (rhythm section)
     void enableRhythm();
@@ -122,11 +128,13 @@ private:
     float    m_baseNote[kNumChannels];// played note float, pre-bend
     uint8_t  m_reg2x[kNumChannels];   // last 0x2x value (sustain|keyon|block|fnum-hi)
     uint8_t  m_inst[kNumChannels];    // OPLL instrument (1..15) loaded on this voice
+    uint8_t  m_vel[kNumChannels];     // note-on velocity per voice (base for pressure->volume)
     bool     m_keyOn[kNumChannels];
 
     // per-MIDI-channel state (index 1..16)
     uint8_t  m_program[17];           // current GM program per channel
     float    m_bend[17]    = {0};     // pitch bend, semitones
+    float    m_pressure[17] = {0};    // per-channel pressure 0..1 (MPE Z -> volume)
     int8_t   m_override[17];          // forced instrument (0..15), -1 = use GM map
 
     // rhythm section
