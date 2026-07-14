@@ -110,7 +110,7 @@ without risking hard clip.
 |---------|-----------------|------------------|-------------|
 | Dexed pool | ✅ (`kDexedVoiceTrim[320]`) | n/a (single-timbre) | ✅ |
 | Dexed (single) | pattern ready | n/a | — |
-| OPLL | ✅ (`kOpllVoiceTrim[115]`) | ✅ coarse (3 dB nibble) | ⬜ unity |
-| SF2 / TSF | ✅ | ✅ (float ch volume) | ⬜ unity |
+| OPLL | ✅ (`kOpllVoiceTrim[115]`) | ✅ coarse (3 dB nibble) | Tier-1 ✅ (jay-mint 2026-07-14); Tier-2 ⬜ unity (no per-GM sweep yet) |
+| SF2 / TSF | ✅ | ✅ (float ch volume) | ✅ both tiers (`kSf2TsfGmTrim[128]`, jay-mint 2026-07-14) |
 | OPL3 | pattern ready | pattern ready (TL) | — |
 | OPM | pattern ready | pattern ready (TL) | — |
