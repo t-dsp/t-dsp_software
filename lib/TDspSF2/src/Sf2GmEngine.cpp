@@ -276,19 +276,7 @@ AudioSynthWavetable::instrument_data* Sf2GmEngine::ensureInstrument(int instInde
             if (!instrumentInUse(m_slot[s].instIndex) && m_slot[s].lastUsed < best) {
                 best = m_slot[s].lastUsed; target = s;
             }
-        if (target < 0) {
-            // Every resident instrument is pinned by a still-releasing voice AND PSRAM is
-            // full (e.g. rapid program switching leaves 24 voices in release). Rather than
-            // drop the note, FORCE-evict the LRU slot: hard-kill the voices reading it (a
-            // cut release tail is acceptable) so its samples can be freed and reused.
-            best = UINT32_MAX;
-            for (int s = 0; s < m_numSlots; s++)
-                if (m_slot[s].lastUsed < best) { best = m_slot[s].lastUsed; target = s; }
-            if (target < 0) return nullptr;
-            const AudioSynthWavetable::instrument_data* victim = m_slot[target].inst;
-            for (int i = 0; i < m_numVoices; i++)
-                if (m_vInst[i] == victim) { m_voice[i].kill(); m_vNote[i] = -1; m_vInst[i] = nullptr; }
-        }
+        if (target < 0) return nullptr;   // everything pinned (should not happen)
     }
 
     Slot& sl = m_slot[target];
@@ -298,9 +286,31 @@ AudioSynthWavetable::instrument_data* Sf2GmEngine::ensureInstrument(int instInde
     }
     AudioSynthWavetable::instrument_data* old = sl.inst;
     AudioSynthWavetable::instrument_data* loaded = nullptr;
-    // Load_instrument frees THIS reader's previous sample data (PSRAM) before loading.
-    if (!sl.reader.Load_instrument(instIndex, loaded)) {
-        return old ? old : nullptr;       // keep prior patch; degrade, don't crash
+    // Load_instrument first frees THIS slot's own previous sample data (PSRAM), then loads
+    // the new one. GeneralUser instruments are ~1 MB, so 8 MB PSRAM holds only a handful and
+    // a load fails (EXTRAM budget) long before the 24 slots fill. When that happens, evict the
+    // least-recently-used OTHER slot no live voice pins — freeing its PSRAM (samples_usedRam is
+    // a global budget) — and retry, until it fits or nothing is left to free. This makes the
+    // resident cache PSRAM-bounded, not slot-bounded, so any instrument can always load.
+    bool loadOk = sl.reader.Load_instrument(instIndex, loaded);
+    while (!loadOk) {
+        int victim = -1; uint32_t best = UINT32_MAX;
+        for (int s = 0; s < m_numSlots; s++)
+            if (s != target && m_slot[s].inst && !instrumentInUse(m_slot[s].instIndex)
+                && m_slot[s].lastUsed < best) { best = m_slot[s].lastUsed; victim = s; }
+        if (victim < 0) break;                          // nothing else is evictable
+        m_slot[victim].reader.Unload();                 // release its PSRAM (global usedRam)
+        delete m_slot[victim].inst;
+        m_slot[victim].inst = nullptr;
+        m_slot[victim].instIndex = -1;
+        loadOk = sl.reader.Load_instrument(instIndex, loaded);
+    }
+    if (!loadOk) {
+        // Couldn't fit even after evicting every free slot. This slot's own prior data was
+        // already freed by the first attempt, so it no longer sounds — clear it and give up.
+        if (old) delete old;
+        sl.inst = nullptr; sl.instIndex = -1;
+        return nullptr;
     }
     // Drums are one-shots. Several GeneralUser drum samples loop (open hi-hat, toms that
     // inherit loop=1 from the instrument's global zone) with 15-48 s release envelopes, so

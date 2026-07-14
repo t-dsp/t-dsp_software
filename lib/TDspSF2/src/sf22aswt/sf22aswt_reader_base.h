@@ -65,6 +65,9 @@ namespace SF22ASWT
 
         void printSF2ErrorInfo(Print &print);
         bool ReadSampleDataFromFile(instrument_data_temp &inst, bool forceUseInternalRam = false);
+        // Public wrapper so an external resident-instrument cache can release this reader's
+        // sample data (PSRAM) without loading a new instrument. Safe no-op if nothing loaded.
+        void Unload() { if (samples != nullptr) FreePrevSampleData(); }
 
       protected:
         ReaderBase() {}

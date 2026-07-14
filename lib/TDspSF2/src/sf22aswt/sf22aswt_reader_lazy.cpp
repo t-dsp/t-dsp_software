@@ -271,7 +271,30 @@ namespace SF22ASWT
             inst.samples[si].MOD_AMP_INIT_GAIN = get_decibel_value(bags, si, SFGenerator::modLfoToVolume, 0, -96, 96);
             inst.samples[si].MOD_AMP_SCND_GAIN = inst.samples[si].MOD_AMP_INIT_GAIN * -1; //decibel_value(bags, si, SFGenerator::modLfoToVolume, 0, -96, 96) * -1;
         }
-        
+
+        // T-DSP patch: AudioSynthWavetable plays exactly ONE sample per key -- its selector
+        // scans sample_note_ranges for the first entry covering the note. Velocity-layer
+        // zones that share a key range therefore get loaded into PSRAM but are NEVER chosen,
+        // which is pure bloat that makes rich, velocity-layered fonts (GeneralUser) overflow
+        // the resident cache and go silent. Keep only the FIRST zone per distinct
+        // note_range (the one the selector would pick) and drop the rest, so an instrument's
+        // resident size shrinks to just the samples that can actually sound.
+        {
+            int kept = 0;
+            for (int si = 0; si < inst.sample_count; si++) {
+                bool dup = false;
+                for (int j = 0; j < kept; j++)
+                    if (inst.sample_note_ranges[j] == inst.sample_note_ranges[si]) { dup = true; break; }
+                if (dup) continue;
+                if (kept != si) {
+                    inst.samples[kept]           = inst.samples[si];
+                    inst.sample_note_ranges[kept] = inst.sample_note_ranges[si];
+                }
+                kept++;
+            }
+            inst.sample_count = (uint8_t)kept;
+        }
+
         file.close();
         return true;
     }
