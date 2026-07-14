@@ -21,8 +21,12 @@ one-time fixes below; a newer distro needs fewer of them.
 Git Bash has no `sshpass`/`plink`, and the flashing session runs headless, so drive `ssh`
 with an **`SSH_ASKPASS` helper** and force it with `SSH_ASKPASS_REQUIRE=force`:
 
+Put the box's login password in the `JAYMINT_PW` env var (`export JAYMINT_PW=...` in your
+shell, or a git-ignored `.env` you `source`) — **never commit it.** Better still, drop
+password auth entirely: `ssh-copy-id jay@jay-mint.local` and delete the askpass dance below.
+
 ```bash
-# one-time: a helper that just echoes the password
+# one-time: a helper that echoes the password from the env
 printf '#!/bin/sh\necho "$JAYMINT_PW"\n' > askpass.sh && chmod +x askpass.sh
 
 SSH() { SSH_ASKPASS=./askpass.sh SSH_ASKPASS_REQUIRE=force DISPLAY=:0 \
