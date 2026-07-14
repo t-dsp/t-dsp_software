@@ -17,6 +17,12 @@ class TsfSink : public tdsp::MidiSink {
 public:
     explicit TsfSink(tsf **t) : _t(t) {}
 
+    // MPE vs normal-GM gate. In MPE mode CC74 is the timbre/slide axis (-> per-channel
+    // lowpass cutoff) and channel pressure is the volume/Z axis; in normal GM playback
+    // those same messages are file controllers we must NOT let hijack the channel. Driven
+    // from applyMidiMode()/synthSetMpeMode() in main.cpp.
+    void setMpe(bool m) { _mpe = m; }
+
     void onNoteOn(uint8_t ch, uint8_t note, uint8_t vel) override {
         tsf *t = *_t; if (!t) return;
         AudioNoInterrupts(); tsf_channel_note_on(t, ch - 1, note, vel / 127.0f); AudioInterrupts();
@@ -53,10 +59,21 @@ public:
     // outside MPE.
     void onPressure(uint8_t ch, float v) override {
         tsf *t = *_t; if (!t) return;
+        // Channel pressure is the MPE Z-axis and maps to per-channel VOLUME. In NORMAL GM
+        // playback a file's OWN mono aftertouch (routinely automated on brass/wind parts)
+        // must NOT drive volume: a low aftertouch value turns the whole channel down to
+        // near-silence and the part wobbles up/down with the curve. Only honor it in MPE.
+        if (!_mpe) return;
         AudioNoInterrupts(); tsf_channel_set_volume(t, ch - 1, v); AudioInterrupts();
     }
     void onTimbre(uint8_t ch, float v) override {
         tsf *t = *_t; if (!t) return;
+        // CC74 is the MPE timbre/slide (Y-axis) -> per-channel lowpass cutoff. In NORMAL GM
+        // playback a file's OWN CC74 (Brightness, routinely automated on strings/brass) must
+        // NOT be taken this way: our mapping clamps the channel filter shut (up to 4 octaves)
+        // and cutoffCents is sticky, so one low CC74 silences the part for the rest of the song
+        // AND across restarts. Only honor CC74-as-cutoff in MPE mode; GM leaves the patch open.
+        if (!_mpe) return;
         AudioNoInterrupts(); tsf_channel_midi_control(t, ch - 1, 74, to7(v)); AudioInterrupts();
     }
     void onAllNotesOff(uint8_t ch) override {
@@ -71,6 +88,9 @@ public:
             for (int c = 0; c < 16; c++) {
                 tsf_channel_set_volume(t, c, 1.0f);
                 tsf_channel_set_pitchwheel(t, c, 8192);   // recenter bend
+                tsf_channel_midi_control(t, c, 74, 127);  // recenter CC74 timbre -> lowpass patch-open
+                // ^ cutoffCents is sticky (only zeroed at channel creation), so a part that
+                //   closed its filter mid-song would otherwise stay silent across a restart.
             }
         } else {
             tsf_channel_note_off_all(t, ch - 1);
@@ -80,5 +100,6 @@ public:
 
 private:
     tsf **_t;
+    bool  _mpe = false;   // false = normal GM playback (ignore file CC74/pressure); true = MPE axes
     static uint8_t to7(float v) { return (uint8_t)((v < 0 ? 0 : v > 1 ? 1 : v) * 127.0f + 0.5f); }
 };

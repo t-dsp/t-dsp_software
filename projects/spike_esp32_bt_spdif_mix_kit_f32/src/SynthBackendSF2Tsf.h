@@ -95,7 +95,9 @@ static void synthSetInstrument(int idx) {
 // the other channels' programs alone. Per-note bend range is handled by the router.
 static void synthSetMpeMode(bool mpe) {
     if (!g_tsf) return;
+    g_tsfSink.setMpe(mpe);   // gate CC74-as-cutoff / pressure-as-volume: MPE axes vs GM file controllers
     AudioNoInterrupts();
+    for (int ch = 0; ch < 16; ch++) tsf_channel_midi_control(g_tsf, ch, 74, 127);  // timbre neutral (patch-open)
     if (mpe) {
         for (int ch = 0; ch < 16; ch++) tsf_channel_set_presetnumber(g_tsf, ch, g_synthInstrument, 0);
     } else {
