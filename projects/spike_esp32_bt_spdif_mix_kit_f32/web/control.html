@@ -99,6 +99,16 @@
   </div>
 
   <div class="card">
+    <h2>ReplayGain</h2>
+    <div class="seg" id="rg">
+      <button data-v="1" class="active" disabled>On</button>
+      <button data-v="0" disabled>Off</button>
+    </div>
+    <p class="note">Loudness normalization across voices &amp; GM programs (K-weighted). Off = raw
+      synth output. Applies to the whole synth.</p>
+  </div>
+
+  <div class="card">
     <h2>Expression — controller &rarr; sound</h2>
     <label style="margin:0 0 4px">Mod Wheel (every keyboard)</label>
     <div class="row" style="flex-wrap:wrap; gap:14px; margin-bottom:12px">
@@ -178,6 +188,7 @@ $('connect').onclick = async () => {
     setConnected(true);
     readLoop();
     await send('@GETCAT');           // pull song + instrument catalog
+    await send('@RG');               // sync the ReplayGain toggle to the device state
   } catch (e) { log('! ' + e.message); port = null; }
 };
 
@@ -197,7 +208,14 @@ function setConnected(on) {
   document.querySelectorAll('#mode button').forEach(b => b.disabled = !on);
   document.querySelectorAll('.press, .mod, .tim').forEach(c => c.disabled = !on);
   document.querySelectorAll('#lfomode button').forEach(b => b.disabled = !on);
+  document.querySelectorAll('#rg button').forEach(b => b.disabled = !on);
   if (!on) $('synth').textContent = '';
+}
+
+// Reflect the device's ReplayGain state on the segmented toggle.
+function setRgUI(on) {
+  document.querySelectorAll('#rg button').forEach(b =>
+    b.classList.toggle('active', (b.dataset.v === '1') === on));
 }
 
 async function readLoop() {
@@ -225,6 +243,7 @@ async function readLoop() {
 function handleLine(line) {
   if (line.startsWith('@SONGS=')) { fillSongs(line.slice(7)); }
   else if (line.startsWith('@INSTR=')) { fillInstr(line.slice(7)); }
+  else if (line.startsWith('@RG=')) { setRgUI(line.slice(4).trim() === '1'); }
   else if (line) { log(line); }   // debug / heartbeat — just echo
 }
 
@@ -328,6 +347,10 @@ $('hpf').onchange = e => send('@HPF=' + e.target.value);
 document.querySelectorAll('#mode button').forEach(b => b.onclick = () => {
   document.querySelectorAll('#mode button').forEach(x => x.classList.toggle('active', x === b));
   send('@MIDIMODE=' + b.dataset.v);
+});
+document.querySelectorAll('#rg button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#rg button').forEach(x => x.classList.toggle('active', x === b));
+  send('@RG=' + b.dataset.v);
 });
 </script>
 </body>

@@ -171,6 +171,12 @@ static bool g_sdReady = false;
   #include "SynthBackendOpllPool.h" // OPLL YM2413 chip pool — full 3-axis MPE (bend+pressure+timbre)
 #elif defined(TDSP_SYNTH_OPLL)
   #include "SynthBackendOpll.h"     // OPLL (YM2413) — the PSS-140 chip: 15 ROM voices + rhythm
+#elif defined(TDSP_SYNTH_PLAITS)
+  #include "SynthBackendPlaits.h"   // authentic Mutable Plaits macro-oscillator (lib/TDspPlaits2, MIT, MPE)
+#elif defined(TDSP_SYNTH_RINGS)
+  #include "SynthBackendRings.h"    // Rings-style modal/string resonator (DaisySP, lib/TDspRings, MIT, MPE)
+#elif defined(TDSP_SYNTH_VA)
+  #include "SynthBackendDaisyVa.h"  // DaisySP virtual-analog: 2 osc -> ladder -> ADSR (lib/TDspDaisyVa, MIT, MPE)
 #elif defined(TDSP_SYNTH_YMFM)
   #include "SynthBackendYmfm.h"
 #elif defined(TDSP_SYNTH_DEXED_POOL)
@@ -678,6 +684,19 @@ static bool handleControlLine(const char* line, Print& reply) {
     else if (strncmp(line, "@PROOF=", 7) == 0)     runAxisProof(atoi(line + 7));   // capture 1 note w/ axis at full (0=press 1=timbre 2=bend 3=neutral)
 #endif
     else if (strncmp(line, "@MIDIMODE=", 10) == 0) applyMidiMode(atoi(line + 10) != 0);
+#ifdef TDSP_HAS_REPLAYGAIN
+    else if (strncmp(line, "@RG=", 4) == 0) {          // ReplayGain master switch (Tier-1 + Tier-2)
+        tdsp::g_replayGainOn = (atoi(line + 4) != 0);
+        // Re-apply the Tier-1 audition trim under the new state — but only when NOT mid-song:
+        // a playing song already neutralizes Tier-1, and its Tier-2 per-channel trims re-gate
+        // on the next Program Change (gmProgramTrim() honors the switch), so re-selecting the
+        // instrument here would needlessly stomp the song's per-channel programs.
+        if (!g_player.isPlaying()) synthSetInstrument(g_synthInstrument);
+        reply.printf("@RG=%d\n", tdsp::g_replayGainOn ? 1 : 0);
+        Serial.printf("[synth] ReplayGain %s\n", tdsp::g_replayGainOn ? "ON" : "off");
+    }
+    else if (strcmp(line, "@RG") == 0) reply.printf("@RG=%d\n", tdsp::g_replayGainOn ? 1 : 0);  // query
+#endif
     else if (strncmp(line, "@CAP", 4) == 0) {          // capture output samples -> PC (tools/capture_analyze.py)
         int n = (line[4] == '=') ? atoi(line + 5) : OutCaptureProbe_F32::kCapN;
         if (n < 1) n = 1;

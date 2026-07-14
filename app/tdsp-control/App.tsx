@@ -41,6 +41,7 @@ export default function App() {
     setDxVoice,
     setHpf,
     setMidiMode,
+    setReplayGain,
     setLoop,
     setPressure,
     setModWheel,
@@ -58,6 +59,8 @@ export default function App() {
   const [hpfCutIdx, setHpfCutIdx] = useState(1); // 12 Hz
   // MIDI vs MPE mode — mirrors status.mpe once per connection, then local toggle wins.
   const [mpe, setMpe] = useState(false);
+  // ReplayGain loudness normalization — mirrors status.rg once per connection (device default on).
+  const [rg, setRg] = useState(true);
   // Loop the current song (local UI state; sent to the device on change).
   const [loop, setLoopState] = useState(false);
   // Expression routing bitmasks (1=volume 2=brightness 4=vibrato 8=tremolo).
@@ -82,6 +85,7 @@ export default function App() {
       setHpfOn(m !== 0);
       if (m > 0) setHpfCutIdx(m - 1);
       setMpe(!!status.mpe);
+      setRg(status.rg !== false);
     }
   }, [connected, status]);
 
@@ -89,6 +93,11 @@ export default function App() {
     const next = !mpe;
     setMpe(next);
     setMidiMode(next);
+  };
+  const onToggleRg = () => {
+    const next = !rg;
+    setRg(next);
+    setReplayGain(next);
   };
   const onToggleLoop = () => {
     const next = !loop;
@@ -204,6 +213,8 @@ export default function App() {
         }}
         mpe={mpe}
         onToggleMpe={onToggleMpe}
+        rg={rg}
+        onToggleRg={onToggleRg}
       />
     </SafeAreaView>
   );
@@ -250,6 +261,8 @@ function SettingsModal({
   onSelectHpfCut,
   mpe,
   onToggleMpe,
+  rg,
+  onToggleRg,
 }: {
   visible: boolean;
   onClose: () => void;
@@ -285,6 +298,8 @@ function SettingsModal({
   onSelectHpfCut: (index: number) => void;
   mpe: boolean;
   onToggleMpe: () => void;
+  rg: boolean;
+  onToggleRg: () => void;
 }) {
   const [pane, setPane] = useState<SettingsPane>('menu');
 
@@ -374,6 +389,17 @@ function SettingsModal({
               <SecondaryButton
                 label={mpe ? 'Mode: MPE (per-note expression)' : 'Mode: Normal MIDI'}
                 onPress={onToggleMpe}
+              />
+
+              <Text style={styles.sectionLabel}>Loudness</Text>
+              <Text style={styles.dim}>
+                ReplayGain evens out perceived loudness across voices and GM programs
+                (K-weighted). Off plays the synth's raw output.
+              </Text>
+              <View style={{ height: 10 }} />
+              <SecondaryButton
+                label={rg ? 'ReplayGain: On' : 'ReplayGain: Off'}
+                onPress={onToggleRg}
               />
 
               <Text style={styles.sectionLabel}>Expression — controller → sound</Text>

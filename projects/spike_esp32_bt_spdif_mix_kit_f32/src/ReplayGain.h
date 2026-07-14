@@ -87,11 +87,23 @@ private:
     float m_k2x1 = 0, m_k2x2 = 0, m_k2y1 = 0, m_k2y2 = 0;   // stage2 state
 };
 
+// Global ReplayGain master switch. When false, BOTH tiers report unity so every synth
+// plays its raw (un-normalized) output. Toggled live via the @RG control command
+// (main.cpp) — reachable from control.html (Web Serial) and the app (BLE, via the ESP32).
+// Default on = the shipped behavior (with unswept tables it is a no-op until a table is
+// baked, at which point this switch A/Bs normalized vs. raw for the whole synth).
+inline bool g_replayGainOn = true;
+
+// Gate a Tier-1 audition-trim value on the master switch: the baked per-voice trim when
+// ReplayGain is on, unity when off. Backends wrap synthAuditionTrim()->setGain(...) in this.
+static inline float auditionTrim(float bakedTrim) { return g_replayGainOn ? bakedTrim : 1.0f; }
+
 // Tier-2 per-GM-program trim accessor. `table` is a 128-entry array of linear gains
 // (1.0 = unity); a sink calls this on Program Change and multiplies the channel's gain.
-// Bounds-checked so a stray program byte can't index out of range.
+// Bounds-checked so a stray program byte can't index out of range. Returns unity when the
+// global switch is off, so one gate here disables Tier-2 for every multitimbral backend.
 static inline float gmProgramTrim(const float *table, int program) {
-    if (!table || program < 0 || program > 127) return 1.0f;
+    if (!g_replayGainOn || !table || program < 0 || program > 127) return 1.0f;
     return table[program];
 }
 

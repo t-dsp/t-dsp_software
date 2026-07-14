@@ -43,6 +43,7 @@ export const CMD = {
   SET_MODWHEEL: 0x28, // + 1 byte: mod-wheel routing bitmask (2=bright 4=vib 8=trem)
   SET_LFOMODE: 0x29, // + 1 byte: 0 respect patch LFO / 1 force LFO on any patch
   SET_TIMBRE: 0x2a, // + 1 byte: CC74 timbre (MPE Y) routing bitmask (2=bright 4=vib 8=trem)
+  SET_REPLAYGAIN: 0x2b, // + 1 byte: 0 = off, 1 = on — ReplayGain loudness normalization
 } as const;
 
 // TAC5212 DAC highpass filter modes — byte sent via SET_HPF. Maps to the
@@ -137,6 +138,7 @@ export type TdspStatus = {
   vol: number; // master headphone volume 0..100 (%)
   hpf: number; // TAC5212 DAC highpass mode 0..3 (0=off) — reported by the device
   mpe: boolean; // false = normal MIDI, true = MPE (per-note expression)
+  rg: boolean; // ReplayGain loudness normalization on/off (device default on)
   peer: string; // connected source name, if any
 };
 
@@ -191,6 +193,7 @@ function parseStatus(raw: string | null | undefined): TdspStatus | null {
       vol: typeof j.vol === 'number' ? j.vol : 50,
       hpf: typeof j.hpf === 'number' ? j.hpf : 0,
       mpe: !!j.mpe,
+      rg: j.rg === undefined ? true : !!j.rg,
       peer: typeof j.peer === 'string' ? j.peer : '',
     };
   } catch {
@@ -603,6 +606,11 @@ export function useTdsp() {
     (mpe: boolean) => writeByteCmd(CMD.SET_MIDI_MODE, mpe ? 1 : 0),
     [writeByteCmd]
   );
+  // ReplayGain loudness normalization for the whole synth: false = off (raw), true = on.
+  const setReplayGain = useCallback(
+    (on: boolean) => writeByteCmd(CMD.SET_REPLAYGAIN, on ? 1 : 0),
+    [writeByteCmd]
+  );
   // Loop the current song when it reaches the end (great for the built-in test sequences).
   const setLoop = useCallback(
     (on: boolean) => writeByteCmd(CMD.SET_LOOP, on ? 1 : 0),
@@ -719,6 +727,7 @@ export function useTdsp() {
     setDxVoice,
     setHpf,
     setMidiMode,
+    setReplayGain,
     setLoop,
     setPressure,
     setModWheel,

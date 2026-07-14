@@ -268,7 +268,7 @@ static void synthSetInstrument(int idx) {
     // ReplayGain-style per-voice loudness trim (baked table in DexedVoiceGains.h). One
     // bus gain for the whole pool is correct: the pool is single-timbre (one voice at a
     // time). 1.0 = unity until the 'N' sweep has been run and its output baked in.
-    dxpTrim.setGain(dexedVoiceTrim(idx));
+    dxpTrim.setGain(tdsp::auditionTrim(dexedVoiceTrim(idx)));
     Serial.printf("[synth] pool instrument %d = %s (bank %d voice %d) trim=%.3f\n",
                   idx, synthInstrumentName(idx), bank, voice, (double)dexedVoiceTrim(idx));
 }

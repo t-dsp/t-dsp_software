@@ -76,7 +76,7 @@ static void synthSetInstrument(int idx) {
     g_synthInstrument = idx;
     // Tier-1 audition trim: all channels now play this one voice, so a single bus gain
     // normalizes exactly what's sounding (unity until OpllVoiceTrim.h is swept).
-    g_opllTrim.setGain(opllVoiceTrim(idx));
+    g_opllTrim.setGain(tdsp::auditionTrim(opllVoiceTrim(idx)));
     Serial.printf("[synth] all channels -> %s (trim=%.3f)\n", synthInstrumentName(idx), (double)opllVoiceTrim(idx));
 }
 
@@ -92,7 +92,8 @@ static const char           *synthTrimSymbol()   { return "kOpllVoiceTrim"; }
 
 static void synthBegin() {
     g_opll.begin();                    // reset chip + resampler (instruments are chip-ROM)
-    g_opll.setGain(3.5f);              // OPLL's 9-bit DAC runs quiet; lift for a usable level
+    g_opll.setGain(5.5f);              // OPLL's 9-bit DAC runs quiet; lift ~+4 dB to sit at the
+                                       // TSF backend's level (single-note self-test peak ~0.74)
     // Tier-2 song norm is DERIVED, not swept: in a GM song every channel's program is
     // funneled by gmToInstrument() onto one of the 15 ROM voices, whose loudness we already
     // measured in the Tier-1 audition table (kOpllVoiceTrim[0..14]). So a program's trim ==

@@ -148,8 +148,8 @@ static void synthSetInstrument(int idx) {
     g_synthInstrument = idx;
     // Tier-1 audition trim: all channels play this one GM program, so a single bus gain
     // (L+R together) normalizes it. Channel volume above stays 1.0 so it doesn't fight this.
-    g_tsfTrimL.setGain(sf2TsfGmTrim(idx));
-    g_tsfTrimR.setGain(sf2TsfGmTrim(idx));
+    g_tsfTrimL.setGain(tdsp::auditionTrim(sf2TsfGmTrim(idx)));
+    g_tsfTrimR.setGain(tdsp::auditionTrim(sf2TsfGmTrim(idx)));
     Serial.printf("[synth] all channels -> GM %d = %s (trim=%.3f)\n", idx, synthInstrumentName(idx), (double)sf2TsfGmTrim(idx));
 }
 

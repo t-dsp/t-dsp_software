@@ -89,6 +89,7 @@ enum : uint8_t {
   CMD_SET_MODWHEEL = 0x28,  // 2nd byte = mod-wheel routing bitmask (2=bright 4=vib 8=trem)
   CMD_SET_LFOMODE  = 0x29,  // 2nd byte = 0 respect patch LFO / 1 force LFO on any patch
   CMD_SET_TIMBRE   = 0x2A,  // 2nd byte = CC74 timbre (MPE Y) routing bitmask (2=bright 4=vib 8=trem)
+  CMD_SET_REPLAYGAIN=0x2B,  // 2nd byte = 0 off / 1 on; ReplayGain loudness normalization, relayed to Teensy
 };
 
 BluetoothA2DPSink a2dp_sink;
@@ -101,6 +102,7 @@ static bool               g_discoverable = false;  // we track this; the A2DP li
 static uint8_t            g_volume = 50;            // master volume 0..100 (%), last set from the app
 static uint8_t            g_hpf    = 0;             // TAC5212 DAC highpass mode 0..3, last set from the app
 static uint8_t            g_midiMode = 0;           // 0 = normal MIDI, 1 = MPE; last set from the app
+static uint8_t            g_replayGain = 1;          // 0 = off, 1 = on; ReplayGain normalization (Teensy default on)
 
 // Relay the master volume to the Teensy over UART0 as a framed line "@VOL=<n>".
 // The Teensy owns the TAC5212 codec; it parses this line and calls setDvol() on
@@ -120,6 +122,7 @@ static void relayDxVoice(uint8_t idx) { Serial.printf("@DXVOICE=%u\n", idx); }
 // Teensy, which owns the codec and calls g_codec.setDacHpf().
 static void relayHpf(uint8_t mode)    { Serial.printf("@HPF=%u\n", mode); }
 static void relayMidiMode(uint8_t m)  { Serial.printf("@MIDIMODE=%u\n", m); }
+static void relayReplayGain(uint8_t on){ Serial.printf("@RG=%u\n", on ? 1 : 0); }
 static void relayLoop(uint8_t on)     { Serial.printf("@LOOP=%u\n", on ? 1 : 0); }
 static void relayPressure(uint8_t m)  { Serial.printf("@PRESSURE=%u\n", m); }
 static void relayModWheel(uint8_t m)  { Serial.printf("@MODWHEEL=%u\n", m); }
@@ -239,9 +242,10 @@ static void buildStatus(char *buf, size_t n) {
   const char *peer = connected ? a2dp_sink.get_peer_name() : "";
   if (!peer) peer = "";
   // conn: A2DP source connected?  disc: discoverable (pairing)?  vol: master 0..100
-  // hpf: TAC5212 DAC highpass mode 0..3 (0=off)  mpe: 0 normal MIDI / 1 MPE.
-  snprintf(buf, n, "{\"conn\":%d,\"disc\":%d,\"vol\":%u,\"hpf\":%u,\"mpe\":%u,\"peer\":\"%s\"}",
-           connected ? 1 : 0, g_discoverable ? 1 : 0, g_volume, g_hpf, g_midiMode, peer);
+  // hpf: TAC5212 DAC highpass mode 0..3 (0=off)  mpe: 0 normal MIDI / 1 MPE
+  // rg: ReplayGain 0 off / 1 on.
+  snprintf(buf, n, "{\"conn\":%d,\"disc\":%d,\"vol\":%u,\"hpf\":%u,\"mpe\":%u,\"rg\":%u,\"peer\":\"%s\"}",
+           connected ? 1 : 0, g_discoverable ? 1 : 0, g_volume, g_hpf, g_midiMode, g_replayGain, peer);
 }
 
 // Refresh the status characteristic value and notify any subscribed client.
@@ -408,6 +412,14 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
           g_midiMode = v[1] ? 1 : 0;
           Serial.printf("[ble] cmd: SET MIDI MODE %s\n", g_midiMode ? "MPE" : "MIDI");
           relayMidiMode(g_midiMode);   // -> Teensy: @MIDIMODE=<0|1>
+        }
+        break;
+      case CMD_SET_REPLAYGAIN:
+        if (v.size() >= 2) {
+          g_replayGain = v[1] ? 1 : 0;
+          Serial.printf("[ble] cmd: SET REPLAYGAIN %s\n", g_replayGain ? "on" : "off");
+          relayReplayGain(g_replayGain);   // -> Teensy: @RG=<0|1>
+          pushStatus();                    // mirror new state back to the app
         }
         break;
       case CMD_SET_LOOP:

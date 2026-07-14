@@ -1,0 +1,24 @@
+{
+  "name": "TDspRings",
+  "version": "0.1.0",
+  "description": "Mutable-Instruments-Rings-style modal/string physical-modelling resonator, via the DaisySP (Electrosmith, MIT) ModalVoice + StringVoice DSP. Vendors only the PhysicalModeling chain (modal/string/resonator/KarplusString) + its Filters/Dynamics/Noise/Utility deps. AudioSynthRings wraps a DaisySP voice as a mono int16 AudioStream node; RingsSink is a MidiSink-driven, MPE-aware polyphonic voice pool. Modal + sympathetic-string modes.",
+  "keywords": ["rings", "daisysp", "modal", "resonator", "physical-modelling", "mpe", "teensy", "t-dsp"],
+  "frameworks": "arduino",
+  "platforms": "teensy",
+  "dependencies": {
+    "Audio": "*",
+    "TDspMidi": "*"
+  },
+  "license": "MIT",
+  "build": {
+    "flags": [
+      "-I src",
+      "-I src/daisysp",
+      "-I src/daisysp/Utility",
+      "-I src/daisysp/Filters",
+      "-I src/daisysp/Dynamics",
+      "-I src/daisysp/Noise",
+      "-I src/daisysp/PhysicalModeling"
+    ]
+  }
+}

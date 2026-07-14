@@ -1,0 +1,23 @@
+{
+  "name": "TDspDaisyVa",
+  "version": "0.1.0",
+  "description": "Virtual-analog synth voice built from DaisySP (Electrosmith, MIT): two band-limited (PolyBLEP) oscillators -> Moog ladder filter -> ADSR. AudioSynthDaisyVa wraps a voice as a mono int16 AudioStream node (idle-gated); DaisyVaSink is a MidiSink-driven, MPE-aware polyphonic pool with a small preset bank. NOT ElectroTechnique's GPL TSynth code.",
+  "keywords": ["virtual-analog", "va", "daisysp", "subtractive", "mpe", "teensy", "t-dsp"],
+  "frameworks": "arduino",
+  "platforms": "teensy",
+  "dependencies": {
+    "Audio": "*",
+    "TDspMidi": "*"
+  },
+  "license": "MIT",
+  "build": {
+    "flags": [
+      "-I src",
+      "-I src/daisysp",
+      "-I src/daisysp/Utility",
+      "-I src/daisysp/Synthesis",
+      "-I src/daisysp/Filters",
+      "-I src/daisysp/Control"
+    ]
+  }
+}
