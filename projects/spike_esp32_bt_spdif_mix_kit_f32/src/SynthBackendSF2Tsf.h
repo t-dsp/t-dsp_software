@@ -17,6 +17,45 @@
 #include "ReplayGain.h"      // shared K-weighted meter + ILoudnessMeter (Tier-1 sweep)
 #include "SF2TsfGmTrim.h"    // per-GM-program trims (serves both tiers on this GM backend)
 
+// ---- Resident font selection (compile-time) --------------------------------
+// TSF holds the ENTIRE font's samples resident in PSRAM (int16, the T-DSP patch), so the
+// font must fit the installed PSRAM. Pick one at build time with -D TSF_FONT_xxx; each maps
+// to a file that must exist on the SD card at the named path. The variants are downsampled
+// GeneralUser builds (tools/sf2/build_gu_fonts.py) trading fidelity for size. Full size /
+// PSRAM / quality matrix + which platformio env selects each: tools/sf2/FONTS.md.
+// Default (no flag) = TimGM6mb, the compact 8 MB-safe baseline — unchanged behavior.
+#if   defined(TSF_FONT_GU_FULL)
+  #define TSF_FONT_PATH "/sf2/gm_gu_full.sf2"
+  #define TSF_FONT_DESC "GeneralUser native 44k (~30.6 MB smpl — needs 32-64 MB custom board)"
+#elif defined(TSF_FONT_GU24)
+  #define TSF_FONT_PATH "/sf2/gm_gu24.sf2"
+  #define TSF_FONT_DESC "GeneralUser 24kHz (~22.3 MB smpl — needs 32 MB+ PSRAM)"
+#elif defined(TSF_FONT_GU22)
+  #define TSF_FONT_PATH "/sf2/gm_gu22.sf2"
+  #define TSF_FONT_DESC "GeneralUser 22kHz (~20.8 MB smpl — needs 32 MB+ PSRAM)"
+#elif defined(TSF_FONT_GU18)
+  #define TSF_FONT_PATH "/sf2/gm_gu18.sf2"
+  #define TSF_FONT_DESC "GeneralUser 18kHz (~17.1 MB smpl — needs ~24 MB+ PSRAM)"
+#elif defined(TSF_FONT_GU16)
+  #define TSF_FONT_PATH "/sf2/gm_gu16.sf2"
+  #define TSF_FONT_DESC "GeneralUser 16kHz (~15.4 MB smpl — tight/over on 16 MB)"
+#elif defined(TSF_FONT_GU14)
+  #define TSF_FONT_PATH "/sf2/gm_gu14.sf2"
+  #define TSF_FONT_DESC "GeneralUser 14kHz (~13.5 MB smpl — 16 MB push)"
+#elif defined(TSF_FONT_GU12)
+  #define TSF_FONT_PATH "/sf2/gm_gu12.sf2"
+  #define TSF_FONT_DESC "GeneralUser 12kHz (~11.7 MB smpl — 16 MB SAFE)"
+#elif defined(TSF_FONT_GU8)
+  #define TSF_FONT_PATH "/sf2/gm_gu8.sf2"
+  #define TSF_FONT_DESC "GeneralUser 8kHz (~8.0 MB smpl — 16 MB; lo-fi)"
+#elif defined(TSF_FONT_PATH)
+  #define TSF_FONT_DESC "custom (explicit TSF_FONT_PATH)"
+#else
+  #define TSF_FONT_PATH "/sf2/gm_tsf.sf2"
+  #define TSF_FONT_DESC "TimGM6mb (~5.5 MB smpl — 8 MB-safe baseline)"
+#endif
+extern "C" uint8_t external_psram_size;   // Teensy core: detected PSRAM MB (0/8/16)
+
 AudioSynthTsf        g_tsfSynth;                        // stereo int16: 0=L, 1=R
 AudioConvert_I16toF32 g_tsfToF32L, g_tsfToF32R;
 AudioConnection      c_tsfL(g_tsfSynth, 0, g_tsfToF32L, 0);
@@ -135,13 +174,16 @@ static void synthSetMpeMode(bool mpe) {
 
 static void synthBegin() {
     if (!g_sdReady) {
-        Serial.println("[synth] TSF: no SD card -> engine idle (need /sf2/gm_tsf.sf2)");
+        Serial.println("[synth] TSF: no SD card -> engine idle (need " TSF_FONT_PATH ")");
         return;
     }
-    Serial.println("[synth] TSF: loading /sf2/gm_tsf.sf2 (compact SF2 into PSRAM)...");
-    g_tsf = tsfLoadFromSD("/sf2/gm_tsf.sf2");
+    Serial.printf("[synth] TSF: font = %s  (%d MB PSRAM installed)\n",
+                  TSF_FONT_DESC, (int)external_psram_size);
+    Serial.println("[synth] TSF: loading " TSF_FONT_PATH " (whole SF2 into PSRAM)...");
+    g_tsf = tsfLoadFromSD(TSF_FONT_PATH);
     if (!g_tsf) {
-        Serial.println("[synth] TSF: load FAILED (missing, or too big for PSRAM) -> engine idle");
+        Serial.println("[synth] TSF: load FAILED (missing " TSF_FONT_PATH
+                       ", or too big for PSRAM) -> engine idle");
         return;
     }
     tsf_set_output(g_tsf, TSF_STEREO_UNWEAVED, (int)AUDIO_SAMPLE_RATE_EXACT, -4.0f);
