@@ -290,9 +290,14 @@ void AudioSynthYmfmOPLL::allNotesOff() {
         if (m_note[c] >= 0) keyOff(c);
         m_note[c] = -1;
     }
-    for (int i = 1; i <= 16; i++) m_pressure[i] = 0.0f;   // drop latched MPE pressure
+    for (int i = 1; i <= 16; i++) { m_pressure[i] = 0.0f; m_bend[i] = 0.0f; }  // clear latched expression
+    // Fully reset rhythm mode. Otherwise it stays latched after the first drum hit,
+    // permanently reserving melodic voices 6-8 (9-voice pool -> 6) — so a restarted
+    // song runs starved from measure 1 and later-entering parts (horn/strings) never
+    // get a voice. Rhythm re-enables automatically on the next drum note.
     m_rhythmBits = 0;
-    if (m_rhythmMode) writeReg(0x0E, 0x20);
+    m_rhythmMode = false;
+    writeReg(0x0E, 0x00);                 // rhythm section fully off -> back to 9 melodic voices
     AudioInterrupts();
 }
 
