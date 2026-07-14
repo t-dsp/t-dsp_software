@@ -53,6 +53,17 @@ public:
     void noteOff(uint8_t channel, uint8_t note);
     void programChange(uint8_t channel, uint8_t program);   // melodic patch 0..127
     void pitchBend(uint8_t channel, float semitones);       // per-channel, pre-scaled
+
+    // --- direct patch control (bypasses the GM->ROM map) -----------------------
+    // Load an 8-byte OPLL user-voice patch (registers $00..$07) into instrument
+    // slot 0. There is ONE user-voice bank shared by all channels, so all channels
+    // playing instrument 0 share the last patch loaded here (mono-timbral user voice).
+    void setUserVoice(const uint8_t patch[8]);
+    // Force a channel's instrument: 0 = the user voice, 1..15 = a built-in ROM
+    // instrument, -1 = clear (revert to the GM program map). A ProgramChange on the
+    // channel also clears the override. Used by the app picker to audition a specific
+    // ROM or PSS-140 voice on every channel.
+    void setInstrumentOverride(uint8_t channel, int inst);
     void controlChange(uint8_t channel, uint8_t cc, uint8_t v); // 120/123 -> notes off
     void allNotesOff();
 
@@ -116,6 +127,7 @@ private:
     // per-MIDI-channel state (index 1..16)
     uint8_t  m_program[17];           // current GM program per channel
     float    m_bend[17]    = {0};     // pitch bend, semitones
+    int8_t   m_override[17];          // forced instrument (0..15), -1 = use GM map
 
     // rhythm section
     uint8_t  m_rhythmBits = 0;        // currently-latched drum key bits (0x0E low 5)

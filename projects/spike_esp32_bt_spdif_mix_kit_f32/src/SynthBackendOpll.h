@@ -18,6 +18,7 @@
 #pragma once
 #include <AudioSynthYmfmOPLL.h>
 #include "OpllSink.h"
+#include "Pss140Patches.h"   // baked 100 PSS-140 user-voice patches (study-only; see NOTICE.md)
 
 AudioSynthYmfmOPLL  g_opll;                               // stereo int16: out 0=L, 1=R
 AudioConvert_I16toF32 g_synthToF32L, g_synthToF32R;       // int16 -> F32 bridges (L, R)
@@ -31,28 +32,40 @@ tdsp::MidiSink *g_synthSink = &g_opllSink;
 static int g_synthInstrument = 0;   // app-picker "audition" program (0..127)
 
 static const char *synthName()        { return "OPLL (YM2413)"; }
-static const char *synthDescription() { return "Yamaha YM2413 OPLL — the PSS-140 chip: 2-op FM, 15 ROM instruments + rhythm, General MIDI."; }
-static bool        synthIsGM()         { return true; }   // songs drive per-channel GM programs
+static const char *synthDescription() { return "Yamaha YM2413 OPLL — the PSS-140 chip: 2-op FM. 15 built-in ROM voices + the 100 real PSS-140 patches."; }
+static bool        synthIsGM()         { return false; }  // picker streams our own two-bank list
 static void        synthSetMpeMode(bool /*mpe*/) {}       // MPE not wired for this backend
 
-// Picker exposes the GM program space; the engine folds each onto its 15 timbres. We
-// report the OPLL instrument a program lands on, so the app shows something honest.
-static int         synthNumInstruments()      { return 128; }
+// Two banks exposed directly (no lossy GM->15 collapse):
+//   index  0..14   -> "ROM: <name>"      = OPLL built-in instrument 1..15
+//   index 15..114  -> "PSS-140: <name>"  = a baked PSS-140 user-voice patch
+// The "ROM: "/"PSS-140: " prefixes make control.html group them into two banks
+// (it splits names on ": " into <optgroup>s). Songs still map their per-channel GM
+// program changes onto the 15 ROM voices via the engine's gmToInstrument().
+static const int kNumRom = 15;
+static int synthNumInstruments() { return kNumRom + kPss140Count; }
 static const char *synthInstrumentName(int i) {
-    if (i < 0 || i > 127) return "";
-    return g_opll.instrumentName(g_opll.gmToInstrument((uint8_t)i));
+    static char buf[40];                       // catalog prints entries sequentially -> one buffer is fine
+    if (i < 0 || i >= kNumRom + kPss140Count) return "";
+    if (i < kNumRom) snprintf(buf, sizeof(buf), "ROM: %s", g_opll.instrumentName(i + 1));
+    else             snprintf(buf, sizeof(buf), "PSS-140: %s", kPss140Names[i - kNumRom]);
+    return buf;
 }
 static int         synthInstrument()          { return g_synthInstrument; }
 
-// The app's single picker "auditions" one GM program on every channel; a song's own
-// Program Change events re-diversify per channel as it plays.
+// The picker "auditions" one voice on every channel. ROM entries force a built-in
+// instrument; PSS-140 entries load that 8-byte user voice and force slot 0. A song's
+// own Program Change events clear the override per channel and re-diversify as it plays.
 static void synthSetInstrument(int idx) {
+    const int total = kNumRom + kPss140Count;
     if (idx < 0) idx = 0;
-    if (idx > 127) idx = 127;
+    if (idx >= total) idx = total - 1;
+    if (idx >= kNumRom) g_opll.setUserVoice(kPss140Patches[idx - kNumRom]);
+    const int inst = (idx < kNumRom) ? (idx + 1) : 0;   // ROM 1..15, or 0 = user voice
     for (uint8_t ch = 1; ch <= 16; ch++)
-        if (ch != 10) g_opll.programChange(ch, (uint8_t)idx);   // leave the drum channel alone
+        if (ch != 10) g_opll.setInstrumentOverride(ch, inst);   // leave the drum channel alone
     g_synthInstrument = idx;
-    Serial.printf("[synth] all channels -> GM %d = OPLL %s\n", idx, synthInstrumentName(idx));
+    Serial.printf("[synth] all channels -> %s\n", synthInstrumentName(idx));
 }
 
 static void synthBegin() {
@@ -61,5 +74,6 @@ static void synthBegin() {
     // OPLL handles GM drums on channel 10 itself (rhythm section), so let the player
     // pass every channel through (Dexed/OPM leave the default kMaskNoDrums).
     g_player.setChannelMask(tdsp::MidiFilePlayer::kMaskAll);
-    Serial.printf("[synth] OPLL (YM2413) ready: %d ROM instruments + rhythm\n", g_opll.numInstruments());
+    Serial.printf("[synth] OPLL (YM2413) ready: %d voices (%d ROM + %d PSS-140) + rhythm\n",
+                  kNumRom + kPss140Count, kNumRom, kPss140Count);
 }

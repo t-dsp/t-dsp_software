@@ -72,7 +72,7 @@ AudioSynthYmfmOPLL::AudioSynthYmfmOPLL()
         m_note[c] = -1; m_chan[c] = 0; m_age[c] = 0;
         m_baseNote[c] = 0.0f; m_reg2x[c] = 0; m_inst[c] = 1; m_keyOn[c] = false;
     }
-    for (int i = 0; i < 17; i++) { m_program[i] = 0; m_bend[i] = 0.0f; }
+    for (int i = 0; i < 17; i++) { m_program[i] = 0; m_bend[i] = 0.0f; m_override[i] = -1; }
 }
 
 FLASHMEM void AudioSynthYmfmOPLL::begin() {
@@ -99,7 +99,7 @@ FLASHMEM void AudioSynthYmfmOPLL::begin() {
     m_chip.generate(&m_cur, 1);
     m_prev = m_cur;
 
-    for (int i = 1; i <= 16; i++) { m_program[i] = 0; m_bend[i] = 0.0f; }
+    for (int i = 1; i <= 16; i++) { m_program[i] = 0; m_bend[i] = 0.0f; m_override[i] = -1; }
     m_ready = true;
 }
 
@@ -181,11 +181,14 @@ void AudioSynthYmfmOPLL::noteOn(uint8_t channel, uint8_t note, uint8_t velocity)
 
     if (channel == 10) { drumOn(note, velocity); return; }
 
-    uint8_t inst = (uint8_t)gmToInstrument(m_program[channel]);
+    // A picker override (0 = user voice, 1..15 = ROM) wins; otherwise fall back to
+    // the GM->ROM map so songs' per-channel program changes still pick a voice.
+    int inst = (m_override[channel] >= 0) ? m_override[channel]
+                                          : gmToInstrument(m_program[channel]);
 
     AudioNoInterrupts();
     int c = allocChannel(channel, note);
-    m_inst[c]     = inst;
+    m_inst[c]     = (uint8_t)inst;
     m_baseNote[c] = (float)note;
     m_keyOn[c]    = false;
     // 0x3x: instrument (high nibble) | volume (low nibble). Set before key-on.
@@ -217,6 +220,20 @@ void AudioSynthYmfmOPLL::noteOff(uint8_t channel, uint8_t note) {
 void AudioSynthYmfmOPLL::programChange(uint8_t channel, uint8_t program) {
     if (channel < 1 || channel > 16) return;
     m_program[channel] = program & 0x7F;
+    m_override[channel] = -1;   // a song's program change reverts this channel to the GM map
+}
+
+// Write an 8-byte user-voice patch into OPLL registers $00..$07 (instrument slot 0).
+void AudioSynthYmfmOPLL::setUserVoice(const uint8_t patch[8]) {
+    AudioNoInterrupts();
+    for (uint8_t r = 0; r < 8; r++) writeReg(r, patch[r]);
+    AudioInterrupts();
+}
+
+void AudioSynthYmfmOPLL::setInstrumentOverride(uint8_t channel, int inst) {
+    if (channel < 1 || channel > 16) return;
+    if (inst < -1) inst = -1; else if (inst > 15) inst = 15;
+    m_override[channel] = (int8_t)inst;
 }
 
 void AudioSynthYmfmOPLL::pitchBend(uint8_t channel, float semitones) {
