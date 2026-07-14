@@ -168,6 +168,12 @@ public:
 	// frequency instead of noteToFreq(note). Lets a caller apply SF2 scaleTuning
 	// (compressed key tracking) without disturbing note-range sample selection.
 	void playNoteFreq(int note, float freq, int amp = DEFAULT_AMPLITUDE) { setState(note, amp, freq); }
+
+	// Immediately silence AND detach from the current sample (unlike stop(), which
+	// enters release and keeps READING the sample). Same known-safe state as right
+	// after setInstrument(), so the caller may then free that sample's data. Used by
+	// the SF2 cache to force-evict an instrument whose voices are only in release.
+	void kill(void) { cli(); current_sample = NULL; env_state = STATE_IDLE; state_change = true; sei(); }
 	bool isPlaying(void) { return env_state != STATE_IDLE; }
 	void setFrequency(float freq);
 	virtual void update(void);

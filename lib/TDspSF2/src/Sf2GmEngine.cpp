@@ -201,7 +201,15 @@ bool Sf2GmEngine::buildPresetMap(const char* sf2Path) {
         int drumPi = -1;
         for (uint32_t i = 0; i + 1 < PHN; i++) {              // skip trailing EOP
             uint16_t preset = rd16(PHDR, i * 38 + 20), bank = rd16(PHDR, i * 38 + 22);
-            if (bank == 0 && preset < 128) { if (progPi[preset] < 0) progPi[preset] = i; }
+            if (bank == 0 && preset < 128) {
+                if (progPi[preset] < 0) {
+                    progPi[preset] = i;
+                    // grab the font's real preset name (achPresetName: 20 bytes at offset 0)
+                    char *dst = m_progName[preset]; const uint8_t *src = PHDR + i * 38;
+                    int k = 0; for (; k < 20 && src[k]; k++) dst[k] = (src[k] >= 32 && src[k] < 127) ? (char)src[k] : ' ';
+                    dst[k] = 0;
+                }
+            }
             else if (bank == kDrumBank)    { if (preset == 0) drumPi = i; else if (drumPi < 0) drumPi = i; }
         }
         for (int p = 0; p < 128; p++)
@@ -268,7 +276,19 @@ AudioSynthWavetable::instrument_data* Sf2GmEngine::ensureInstrument(int instInde
             if (!instrumentInUse(m_slot[s].instIndex) && m_slot[s].lastUsed < best) {
                 best = m_slot[s].lastUsed; target = s;
             }
-        if (target < 0) return nullptr;   // everything pinned (should not happen)
+        if (target < 0) {
+            // Every resident instrument is pinned by a still-releasing voice AND PSRAM is
+            // full (e.g. rapid program switching leaves 24 voices in release). Rather than
+            // drop the note, FORCE-evict the LRU slot: hard-kill the voices reading it (a
+            // cut release tail is acceptable) so its samples can be freed and reused.
+            best = UINT32_MAX;
+            for (int s = 0; s < m_numSlots; s++)
+                if (m_slot[s].lastUsed < best) { best = m_slot[s].lastUsed; target = s; }
+            if (target < 0) return nullptr;
+            const AudioSynthWavetable::instrument_data* victim = m_slot[target].inst;
+            for (int i = 0; i < m_numVoices; i++)
+                if (m_vInst[i] == victim) { m_voice[i].kill(); m_vNote[i] = -1; m_vInst[i] = nullptr; }
+        }
     }
 
     Slot& sl = m_slot[target];
@@ -411,5 +431,8 @@ static const char* const kGmNames[128] = {
 
 const char* Sf2GmEngine::melodicName(int gm) const {
     if (gm < 0 || gm > 127) return "";
-    return kGmNames[gm];
+    // The font's REAL bank-0 preset name if it has one; otherwise flag the gap so the
+    // picker shows which GM slots this SF2 actually lacks (rather than a generic GM label).
+    if (m_progName[gm][0]) return m_progName[gm];
+    return "(none in SF2)";
 }

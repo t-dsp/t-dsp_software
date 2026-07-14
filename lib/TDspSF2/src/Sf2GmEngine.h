@@ -107,6 +107,11 @@ private:
     int16_t *m_instRoot  = nullptr;     // representative root key (for the scale pivot)
     int      m_instCount = 0;
 
+    // The font's ACTUAL bank-0 preset name per GM program (from phdr achPresetName),
+    // so melodicName() shows what's really in the SF2 rather than the generic GM label.
+    // Empty string = the font has no bank-0 preset for that program (a real gap).
+    char     m_progName[128][21] = {};
+
     // resolve which SF2 instrument a channel+note should sound right now
     int  resolveInstrument(uint8_t channel, uint8_t note) const;
     bool isDrumInstrument(int idx) const;   // referenced by the drum kit? (-> force one-shot)
