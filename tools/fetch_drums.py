@@ -349,9 +349,15 @@ def _force_channel10(mid: bytes) -> bytes | None:
     """Rewrite every channel-voice message's channel nibble to 9 (MIDI ch 10).
 
     A crude but effective normalizer: drum-machine transcriptions sometimes land
-    on channel 0. We only touch running-status-free files (dmp_midi emits
-    explicit status bytes), which is the common case; if parsing looks unsafe we
-    return the file unchanged so a valid SMF is never corrupted.
+    on channel 0. Handles RUNNING STATUS correctly — the dmp_midi files DO use it
+    (a status byte is omitted when it repeats), so the old "running-status-free"
+    assumption silently corrupted them: it wrote the ch-10 status byte over the
+    PREVIOUS byte (a delta-time), turning a 0x00 delta into 0x99, which a parser
+    then reads as a VLQ delta of 3236 ticks (~3.4 s) — the "one hit then a long
+    gap" bug. We now rewrite the channel nibble ONLY on an explicit status byte;
+    running-status events inherit the (already-rewritten) channel automatically.
+    Returns the file unchanged if a chunk looks malformed, so a valid SMF is
+    never corrupted.
     """
     if mid[:4] != b"MThd":
         return None
@@ -376,8 +382,8 @@ def _force_channel10(mid: bytes) -> bytes | None:
                 if j >= end:
                     break
                 b = out[j]
-                if b == 0xFF:                  # meta
-                    j += 1
+                if b == 0xFF:                  # meta: FF <type> <len-vlq> <data>
+                    j += 2                     # skip 0xFF *and* the meta type byte
                     length_start = j
                     while j < end and (out[j] & 0x80):
                         j += 1
@@ -385,6 +391,7 @@ def _force_channel10(mid: bytes) -> bytes | None:
                     for k in range(length_start, j + 1):
                         mlen = (mlen << 7) | (out[k] & 0x7F)
                     j += 1 + mlen
+                    running = 0                # meta cancels running status
                     continue
                 if b in (0xF0, 0xF7):          # sysex
                     j += 1
@@ -395,16 +402,19 @@ def _force_channel10(mid: bytes) -> bytes | None:
                     for k in range(length_start, j + 1):
                         slen = (slen << 7) | (out[k] & 0x7F)
                     j += 1 + slen
+                    running = 0                # sysex cancels running status
                     continue
-                if b & 0x80:
+                if b & 0x80:                   # explicit status byte present
                     running = b
                     status = b
+                    explicit = True
                     j += 1
-                else:
-                    status = running           # running status; data byte
+                else:                          # running status: b is the 1st data byte
+                    status = running
+                    explicit = False
                 hi = status & 0xF0
                 if 0x80 <= hi <= 0xE0:
-                    if status & 0x80:           # we advanced past an explicit status
+                    if explicit:               # only an explicit status carries the nibble
                         out[j - 1] = hi | GM_DRUM_CHANNEL
                     ndata = 1 if hi in (0xC0, 0xD0) else 2
                     j += ndata
