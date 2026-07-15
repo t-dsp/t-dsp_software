@@ -107,6 +107,7 @@ export default function App() {
   const [level, setLevel] = useState<DirPage>(EMPTY_DIR); // current /dexed folder listing (lazy @DXLS)
   const [cartVoices, setCartVoices] = useState<string[]>([]); // open cart's 32 voice names (lazy @DXVL)
   const [libBusy, setLibBusy] = useState(false);          // a browse/voices fetch is in flight
+  const [libErr, setLibErr] = useState('');               // last /dexed browse error (shown in-UI for diagnosis)
   const [q, setQ] = useState({ voice: '', cart: '', groove: '' });
   const [busy, setBusy] = useState(false);
 
@@ -177,8 +178,8 @@ export default function App() {
           const more = await tp.browseDir(vpath, pg);
           folders = folders.concat(more.folders); carts = carts.concat(more.carts);
         }
-        if (alive) setLevel({ path: vpath, page: 0, npages: first.npages, folders, carts });
-      } catch { if (alive) setLevel({ ...EMPTY_DIR, path: vpath }); }
+        if (alive) { setLevel({ path: vpath, page: 0, npages: first.npages, folders, carts }); setLibErr(''); }
+      } catch (e) { if (alive) { setLevel({ ...EMPTY_DIR, path: vpath }); setLibErr(String((e as any)?.message || e || 'browse failed')); } }
       finally { if (alive) setLibBusy(false); }
     })();
     return () => { alive = false; };
@@ -388,7 +389,8 @@ export default function App() {
               {vpath === '' && <ListBtn label={'★ Bundled voices (' + cat.instruments.length + ')'} onPress={() => setVpath('@bundled')} />}
               {level.folders.map(f => <ListBtn key={'f' + f} label={'📁 ' + f} onPress={() => setVpath(vpath ? vpath + '/' + f : f)} />)}
               {level.carts.map(c => <ListBtn key={c.rel} label={'🎛 ' + c.name} onPress={() => setCart({ rel: c.rel, name: c.name })} />)}
-              {level.folders.length === 0 && level.carts.length === 0 && vpath !== '' && <Text style={s.muted}>(empty folder)</Text>}
+              {!!libErr && <Text style={[s.muted, { padding: 12 }]}>⚠ SD library: {libErr} — restart the dev server with `expo start --web -c` and hard-reload.</Text>}
+              {!libErr && level.folders.length === 0 && level.carts.length === 0 && <Text style={s.muted}>{vpath === '' ? 'No SD library found (/dexed empty?)' : '(empty folder)'}</Text>}
             </ScrollView>
           )}
         </View>
