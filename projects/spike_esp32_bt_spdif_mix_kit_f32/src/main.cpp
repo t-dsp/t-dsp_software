@@ -1196,7 +1196,10 @@ void setup() {
     // SD card (Teensy 4.1 built-in slot): scan /songs/*.mid so songs can be added
     // by copying files to the card. Falls back to the built-in songs if no card.
 #if TDSP_HAS_SDCARD
-    g_sdReady = SD.begin(BUILTIN_SDCARD);
+    // Retry SD.begin a few times: a card can need a moment after power-up, so a single
+    // attempt at boot often false-reports "no card" for a perfectly good card (it then
+    // mounts on a later @GETCAT/Refresh). Looping here mounts it at boot instead.
+    for (int i = 0; i < 10 && !g_sdReady; ++i) { g_sdReady = SD.begin(BUILTIN_SDCARD); if (!g_sdReady) delay(40); }
     Serial.printf("[sd] card %s\n", g_sdReady ? "ready" : "not present");
     // MTP: present the SD to the host over USB so songs can be dropped into /songs
     // without pulling the card. Serial (debug + ESP32 flash bridge) is unaffected.
