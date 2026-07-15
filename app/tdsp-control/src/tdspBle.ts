@@ -54,7 +54,7 @@ export const CMD = {
   PLAY_DRUM: 0x30, // + 1 byte: drum groove index (loops until stopped)
   STOP_DRUM: 0x31, // stop the drum groove
   SET_DRUM_KIT: 0x32, // + 1 byte: GM drum-kit index (into DRUM_KITS)
-  SET_DRUM_SPEED: 0x33, // + 1 byte: groove speed 25..200 (%)
+  SET_DRUM_SPEED: 0x33, // RESERVED — drum-speed control removed (drums follow master BPM). Kept so 0x33 isn't reused.
   SET_DRUM_VOL: 0x34, // + 1 byte: drum level 0..150 (%)
   SET_BPM: 0x35, // + 1 byte: master tempo 40..240 bpm (drives song + drum together)
   SET_DRUM_SYNCHRO: 0x36, // + 1 byte: 0/1 synchro start (groove begins on first note)
@@ -795,11 +795,8 @@ export function useTdsp() {
     (index: number) => writeByteCmd(CMD.SET_DRUM_KIT, index),
     [writeByteCmd]
   );
-  // Groove speed 25..200 (%) and drum level 0..150 (%), clamped to the byte payload.
-  const setDrumSpeed = useCallback(
-    (pct: number) => writeByteCmd(CMD.SET_DRUM_SPEED, Math.max(25, Math.min(200, Math.round(pct)))),
-    [writeByteCmd]
-  );
+  // Drum level 0..150 (%), clamped to the byte payload. (Drum tempo follows the
+  // master BPM — there is no separate drum-speed control.)
   const setDrumVol = useCallback(
     (pct: number) => writeByteCmd(CMD.SET_DRUM_VOL, Math.max(0, Math.min(150, Math.round(pct)))),
     [writeByteCmd]
@@ -944,7 +941,6 @@ export function useTdsp() {
     readFile,
     stopDrum,
     setDrumKit,
-    setDrumSpeed,
     setDrumVol,
     setBpm,
     setDrumSynchro,

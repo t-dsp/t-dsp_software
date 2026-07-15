@@ -538,11 +538,9 @@ static bool g_songWasPlaying = false;  // edge-detect natural song end (for loop
 // (g_player.tick() in loop) and drives the synth via g_synthSink.
 static void applyMidiMode(bool mpe);   // defined below; test songs flip mode on start
 
-// Drum controls (declared here so applyTempos can read g_drumSpeedPct). g_drumSel /
-// g_drumKit are used by the drum section further below.
+// Drum controls. g_drumSel / g_drumKit are used by the drum section further below.
 static int  g_drumSel      = 0;     // selected / currently-playing groove index
 static int  g_drumKit      = 0;     // index into kDrumKits ("instrument")
-static int  g_drumSpeedPct = 100;   // drum fine-trim on the master BPM (default 100 = exact)
 static int  g_drumVolPct   = 100;   // drum level 0..150 (% of file velocity)
 static bool g_drumSynchro  = false; // SYNCHRO START (PSS-140 style): groove starts on your first note
 static bool g_engineHasDrums = false;// engine renders ch10 (captured once at setup; not the live mask)
@@ -551,7 +549,7 @@ static bool g_engineHasDrums = false;// engine renders ch10 (captured once at se
 // The song and the groove each have a NATIVE tempo; the master BPM retimes both
 // to a single tempo so they stay locked, and moving it speeds/slows both together:
 //   song scale = masterBpm / songNativeBpm     (songNativeBpm: SD = real, built-in = estimate)
-//   drum scale = masterBpm / grooveNativeBpm  x  (drum trim %)
+//   drum scale = masterBpm / grooveNativeBpm
 // Downbeat align: whichever starts SECOND begins on the other's bar/loop downbeat
 // (both bars are 4/4 = 4*60000/masterBpm long once retimed, so they line up).
 // NOTE accurate lock needs the song's REAL tempo -> use an SD .mid; the baked
@@ -564,15 +562,14 @@ static bool          g_drumArmed     = false;   // SYNCHRO: groove loaded, waiti
 static uint32_t      g_drumArmedN    = 0;
 
 // Retime both players to the master BPM (call after changing BPM / native tempos).
-// g_drumSpeedPct is a fine trim on the drum only (default 100 = exactly master BPM).
 // This is the SINGLE tempo write path: feed the followers their native tempos,
 // then let the Conductor push the master BPM out to both (and to any future
 // follower — arp, LFO). The Conductor also keeps its Clock at the master BPM so
-// a tick consumer stays locked to the same grid.
+// a tick consumer stays locked to the same grid. The drum groove follows the
+// master BPM exactly — there is no separate drum-speed trim (one tempo, one knob).
 static void applyTempos() {
     g_songFollow.setNativeBpm(g_songBpm);
     g_drumFollow.setNativeBpm(g_drumFileBpm);
-    g_drumFollow.setTrim((float)g_drumSpeedPct);
     g_conductor.setBpm(g_masterBpm);
 }
 
@@ -774,13 +771,6 @@ static void setDrumKit(int i) {
     g_drumKit = i;
     if (drumEngineOk()) drumApplyKit();
     Serial.printf("[drum] kit -> %s (prog %u)\n", kDrumKits[i].name, kDrumKits[i].prog);
-}
-static void setDrumSpeed(int pct) {   // fine trim on the drum only (100 = exactly master BPM)
-    if (pct < 25) pct = 25;
-    if (pct > 200) pct = 200;
-    g_drumSpeedPct = pct;
-    applyTempos();
-    Serial.printf("[drum] speed trim -> %d%%\n", pct);
 }
 // Master tempo (BPM) — one knob retimes BOTH the song and the drum groove, live.
 static void setMasterBpm(int bpm) {
@@ -1030,7 +1020,6 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     }
     else if (strncmp(line, "@DRUMF=", 7) == 0)    drumStartFile(line + 7);  // @DRUMF=<filename> (browser, via catalog.tsv)
     else if (strncmp(line, "@DRUMKIT=", 9) == 0)   setDrumKit(atoi(line + 9));    // GM kit ("instrument")
-    else if (strncmp(line, "@DRUMSPEED=", 11) == 0) setDrumSpeed(atoi(line + 11)); // drum fine-trim %
     else if (strncmp(line, "@DRUMVOL=", 9) == 0)    setDrumVol(atoi(line + 9));    // 0..150 %
     else if (strncmp(line, "@BPM=", 5) == 0)        setMasterBpm(atoi(line + 5));  // master tempo (song+drum)
     else if (strncmp(line, "@DRUMSYNCHRO=", 13) == 0) { g_drumSynchro = (atoi(line + 13) != 0);   // start-on-first-note

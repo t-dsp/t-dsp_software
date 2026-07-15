@@ -102,7 +102,7 @@ enum : uint8_t {
   CMD_PLAY_DRUM    = 0x30,  // + 1 byte: drum groove index; loops until stopped (relayed as @DRUM=<i>)
   CMD_STOP_DRUM    = 0x31,  // stop the drum groove (@DRUM=stop)
   CMD_SET_DRUM_KIT = 0x32,  // + 1 byte: GM drum-kit index ("instrument") (@DRUMKIT=<i>)
-  CMD_SET_DRUM_SPEED=0x33,  // + 1 byte: groove speed 25..200 (%) (@DRUMSPEED=<pct>)
+  CMD_SET_DRUM_SPEED=0x33,  // RESERVED — drum-speed control removed (drums follow master BPM). Kept so 0x33 isn't reused.
   CMD_SET_DRUM_VOL = 0x34,  // + 1 byte: drum level 0..150 (%) (@DRUMVOL=<pct>)
   CMD_SET_BPM      = 0x35,  // + 1 byte: master tempo 40..240 bpm — song+drum (@BPM=<n>)
   CMD_SET_DRUM_SYNCHRO=0x36,// + 1 byte: 0/1 synchro start (groove begins on first note) (@DRUMSYNCHRO=<0|1>)
@@ -152,7 +152,6 @@ static void relayTimbre(uint8_t m)    { Serial.printf("@TIMBRE=%u\n", m); }
 static void relayDrum(uint8_t idx)    { Serial.printf("@DRUM=%u\n", idx); }
 static void relayDrumStop()           { Serial.printf("@DRUM=stop\n"); }
 static void relayDrumKit(uint8_t idx) { Serial.printf("@DRUMKIT=%u\n", idx); }
-static void relayDrumSpeed(uint8_t p) { Serial.printf("@DRUMSPEED=%u\n", p); }
 static void relayDrumVol(uint8_t p)   { Serial.printf("@DRUMVOL=%u\n", p); }
 static void relayBpm(uint8_t b)       { Serial.printf("@BPM=%u\n", b); }        // master tempo (song+drum)
 static void relayDrumSynchro(uint8_t s){ Serial.printf("@DRUMSYNCHRO=%u\n", s ? 1 : 0); }
@@ -528,12 +527,6 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
         if (v.size() >= 2) {
           Serial.printf("[ble] cmd: SET DRUM KIT %u\n", (uint8_t)v[1]);
           relayDrumKit((uint8_t)v[1]);   // -> Teensy: @DRUMKIT=<index>
-        }
-        break;
-      case CMD_SET_DRUM_SPEED:
-        if (v.size() >= 2) {
-          Serial.printf("[ble] cmd: SET DRUM SPEED %u%%\n", (uint8_t)v[1]);
-          relayDrumSpeed((uint8_t)v[1]); // -> Teensy: @DRUMSPEED=<pct>
         }
         break;
       case CMD_SET_DRUM_VOL:

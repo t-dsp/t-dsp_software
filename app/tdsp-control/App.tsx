@@ -112,7 +112,6 @@ export default function App() {
     playDrumFile,
     stopDrum,
     setDrumKit,
-    setDrumSpeed,
     setDrumVol,
     setBpm,
     setDrumSynchro,
@@ -136,10 +135,9 @@ export default function App() {
   const [rg, setRg] = useState(true);
   // Loop the current song (local UI state; sent to the device on change).
   const [loop, setLoopState] = useState(false);
-  // Drums — local UI state (no firmware readback). Groove/kit indices + speed/level %.
+  // Drums — local UI state (no firmware readback). Groove/kit indices + level %.
   const [drumGroove, setDrumGroove] = useState(0);
   const [drumKit, setDrumKitState] = useState(0);
-  const [drumSpeed, setDrumSpeedState] = useState(100);
   const [drumVol, setDrumVolState] = useState(100);
   const [bpm, setBpmState] = useState(120);          // master tempo (song + drum)
   const [drumSynchro, setDrumSynchroState] = useState(false);
@@ -280,9 +278,6 @@ export default function App() {
           setDrumKitState(i);
           setDrumKit(i);
         }}
-        drumSpeed={drumSpeed}
-        onPreviewDrumSpeed={setDrumSpeedState}
-        onCommitDrumSpeed={setDrumSpeed}
         drumVol={drumVol}
         onPreviewDrumVol={setDrumVolState}
         onCommitDrumVol={setDrumVol}
@@ -365,9 +360,6 @@ function SettingsModal({
   onStopDrum,
   drumKit,
   onSelectDrumKit,
-  drumSpeed,
-  onPreviewDrumSpeed,
-  onCommitDrumSpeed,
   drumVol,
   onPreviewDrumVol,
   onCommitDrumVol,
@@ -425,9 +417,6 @@ function SettingsModal({
   onStopDrum: () => void;
   drumKit: number;
   onSelectDrumKit: (index: number) => void;
-  drumSpeed: number;
-  onPreviewDrumSpeed: (pct: number) => void;
-  onCommitDrumSpeed: (pct: number) => void;
   drumVol: number;
   onPreviewDrumVol: (pct: number) => void;
   onCommitDrumVol: (pct: number) => void;
@@ -684,15 +673,6 @@ function SettingsModal({
               )}
 
               <StepSlider
-                label="Speed"
-                value={drumSpeed}
-                min={25}
-                max={200}
-                step={5}
-                onPreview={onPreviewDrumSpeed}
-                onCommit={onCommitDrumSpeed}
-              />
-              <StepSlider
                 label="Volume"
                 value={drumVol}
                 min={0}
@@ -811,7 +791,7 @@ function Stepper({ count, value, onStep }: { count: number; value: number; onSte
 
 // A slider with tap −/+ buttons on either side that nudge by `step` and commit
 // immediately. onPreview updates the on-screen value live (drag or tap); onCommit
-// sends to the device (slide-release or a tap). Used for drum speed / volume.
+// sends to the device (slide-release or a tap). Used for drum volume.
 function StepSlider({
   label,
   unit = '%',

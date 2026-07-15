@@ -130,13 +130,7 @@
       <button id="drum-kit-prev" class="ghost" disabled>◀ Prev</button>
       <button id="drum-kit-next" class="ghost" disabled>Next ▶</button>
     </div>
-    <label style="margin-top:12px">Speed <span id="drum-speed-val" style="color:#8b93a1">100%</span></label>
-    <div class="row">
-      <button id="drum-speed-dn" class="ghost step" disabled>−</button>
-      <input type="range" id="drum-speed" min="25" max="200" step="5" value="100" style="flex:6" disabled>
-      <button id="drum-speed-up" class="ghost step" disabled>+</button>
-    </div>
-    <label style="margin-top:8px">Volume <span id="drum-vol-val" style="color:#8b93a1">100%</span></label>
+    <label style="margin-top:12px">Volume <span id="drum-vol-val" style="color:#8b93a1">100%</span></label>
     <div class="row">
       <button id="drum-vol-dn" class="ghost step" disabled>−</button>
       <input type="range" id="drum-vol" min="0" max="150" step="5" value="100" style="flex:6" disabled>
@@ -342,7 +336,7 @@ function setConnected(on) {
   $('connect').textContent = on ? 'Disconnect' : 'Connect';
   ['vol','bpm','bpm-dn','bpm-up','song','play','stop','refresh','instr','instr-search','instr-prev','instr-next','hpf','loop',
    'drum','drum-bank','drum-prev','drum-next','drum-play','drum-stop','drum-synchro','drum-kit','drum-kit-prev','drum-kit-next',
-   'drum-speed','drum-vol','drum-speed-dn','drum-speed-up','drum-vol-dn','drum-vol-up',
+   'drum-vol','drum-vol-dn','drum-vol-up',
    'lib-back','lib-refresh','lib-pprev','lib-pnext'].forEach(id => $(id).disabled = !on);
   if (on && !$('drum-kit').options.length) {   // populate the fixed GM kit list once
     $('drum-kit').innerHTML = DRUM_KITS.map((n, i) => `<option value="${i}">${n}</option>`).join('');
@@ -673,7 +667,7 @@ $('bpm-up').onclick = () => nudgeBpm(5);
 $('play').onclick = () => send('@SONG=' + $('song').value);
 $('stop').onclick = () => send('@SONG=stop');
 $('loop').onchange = e => send('@LOOP=' + (e.target.checked ? 1 : 0));
-// Drums: groove play/stop + kit / speed / volume.
+// Drums: groove play/stop + kit / volume. Tempo follows the master BPM.
 $('drum-play').onclick = () => playCurrentGroove();
 $('drum-stop').onclick = () => send('@DRUM=stop');
 // Sort axis toggle (Genre / Pack) — rebuilds the bank list; resets to the All bank.
@@ -699,7 +693,7 @@ $('drum-prev').onclick = () => stepSelect('drum', -1, () => playCurrentGroove())
 $('drum-next').onclick = () => stepSelect('drum', 1, () => playCurrentGroove());
 $('drum-kit-prev').onclick = () => stepSelect('drum-kit', -1, v => send('@DRUMKIT=' + v));
 $('drum-kit-next').onclick = () => stepSelect('drum-kit', 1, v => send('@DRUMKIT=' + v));
-// Speed / volume: slider + tap −/+ buttons. `nudge` steps the range input by its
+// Volume: slider + tap −/+ buttons. `nudge` steps the range input by its
 // own `step` (5), clamps, updates the label, and sends the value.
 function bindStepSlider(rangeId, valId, cmd, step) {
   const r = $(rangeId), lab = $(valId);
@@ -715,7 +709,6 @@ function bindStepSlider(rangeId, valId, cmd, step) {
   $(rangeId + '-dn').onclick = () => nudge(-step);
   $(rangeId + '-up').onclick = () => nudge(step);
 }
-bindStepSlider('drum-speed', 'drum-speed-val', '@DRUMSPEED', 5);
 bindStepSlider('drum-vol', 'drum-vol-val', '@DRUMVOL', 5);
 function bitmaskOf(sel) {
   let mask = 0;
