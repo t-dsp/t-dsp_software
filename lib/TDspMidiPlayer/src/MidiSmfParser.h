@@ -43,8 +43,6 @@ static inline uint32_t readVar(const uint8_t *d, size_t end, size_t *i) {
     return v;
 }
 
-// Intermediate absolute-tick event (before delta encoding + sorting).
-struct TickEv { uint32_t tick; uint8_t kind; uint8_t ch; uint8_t d1; uint8_t d2; };
 struct Tempo  { uint32_t tick; uint32_t uspq; };
 
 // Same-tick emission order: program change first (so a note at the same tick
@@ -97,7 +95,8 @@ static inline float initialBpm(const uint8_t *d, size_t len) {
 }
 
 // Parse buf[0..len) into out[0..maxOut). Returns event count, or -1 on error.
-// Heap-allocates a scratch array sized to the note/controller count.
+// Streams the tracks with a k-way merge (no large heap scratch) — see below.
+// NOTE: writes into out[] while reading d[], so d and out MUST NOT alias.
 static int parseSmf(const uint8_t *d, size_t len, MidiFileEvent *out, int maxOut) {
     if (len < 14 || memcmp(d, "MThd", 4) != 0) return -1;
     uint16_t div = be16(d + 12);
@@ -157,71 +156,85 @@ static int parseSmf(const uint8_t *d, size_t len, MidiFileEvent *out, int maxOut
         return ms + (double)(tk - last) * ((double)uspq / tpq) / 1000.0;
     };
 
-    // Pass 2a: count channel-voice events we will keep (note/CC/bend/program,
-    // all 16 channels). Meta and sysex are skipped.
-    int total = 0;
-    for (int t = 0; t < nt; ++t) {
-        size_t i = tS[t], e = tE[t]; uint8_t status = 0;
-        while (i < e) {
-            readVar(d, e, &i); if (i >= e) break;
-            uint8_t b0 = d[i]; if (b0 & 0x80) { status = b0; i++; }
-            if (status == 0xFF) { if (i >= e) break; i++; uint32_t ml = readVar(d, e, &i); i += ml; }
-            else if (status == 0xF0 || status == 0xF7) { uint32_t sl = readVar(d, e, &i); i += sl; }
-            else {
-                uint8_t hi = status & 0xF0;
-                if (hi == 0x80 || hi == 0x90 || hi == 0xB0 || hi == 0xC0 || hi == 0xD0 || hi == 0xE0) total++;
-                i += (hi == 0xC0 || hi == 0xD0) ? 1 : 2;
-            }
-        }
-    }
-    if (total <= 0) return -1;
-    TickEv *ev = (TickEv *)malloc(sizeof(TickEv) * (size_t)total);
-    if (!ev) return -1;
+    // Streaming k-way merge across tracks. Every track is already monotonic in
+    // absolute tick, so we keep one small cursor per track (O(nt) state, nt<=32)
+    // and repeatedly emit the globally-earliest pending event — instead of
+    // collecting ALL events into a heap array and sorting them. That old approach
+    // needed a scratch block of 8*total bytes: ~121 KB for a dense piano sonata
+    // (~15k events), which malloc() CANNOT satisfy on a no-PSRAM board whose OCRAM
+    // heap is only ~80 KB after DMAMEM — so dense SD songs silently failed to load
+    // (parse returned -1). The merge needs no large allocation; it streams straight
+    // into out[] (hence d and out must not alias — the caller reads the file into a
+    // separate buffer).
+    //
+    // Ordering: within a track, events keep their file order (which the exporter
+    // already writes release-before-retrigger / program-before-note); across tracks
+    // a same-tick tie breaks by sortRank() then track index. This differs from the
+    // old whole-song stable_sort only for same-tick events INSIDE one track that the
+    // file happened to write out of sortRank order (rare, and keeping the file's own
+    // order is the safer reading — the sort could otherwise reorder a note-off ahead
+    // of the note-on the file intended first).
+    struct Cursor {
+        size_t i, e;        // read position and track end
+        uint32_t tick;      // absolute tick of the pending event
+        uint8_t status;     // running status
+        bool has;           // a decoded channel-voice event is pending?
+        uint8_t kind, ch, d1, d2;
+    };
+    Cursor cur[MAXTRK];
 
-    // Pass 2b: collect events with absolute ticks.
-    int ne = 0;
-    for (int t = 0; t < nt && ne < total; ++t) {
-        size_t i = tS[t], e = tE[t]; uint32_t tick = 0; uint8_t status = 0;
-        while (i < e && ne < total) {
-            tick += readVar(d, e, &i); if (i >= e) break;
-            uint8_t b0 = d[i]; if (b0 & 0x80) { status = b0; i++; }
-            if (status == 0xFF) { if (i >= e) break; i++; uint32_t ml = readVar(d, e, &i); i += ml; }
-            else if (status == 0xF0 || status == 0xF7) { uint32_t sl = readVar(d, e, &i); i += sl; }
+    // Decode the next KEPT channel-voice event from track c (skipping meta, sysex
+    // and poly-aftertouch), accumulating delta-ticks. Sets c.has=false at track end.
+    auto advance = [&](Cursor &c) {
+        while (c.i < c.e) {
+            c.tick += readVar(d, c.e, &c.i);
+            if (c.i >= c.e) break;
+            uint8_t b0 = d[c.i]; if (b0 & 0x80) { c.status = b0; c.i++; }
+            if (c.status == 0xFF) { if (c.i >= c.e) break; c.i++; uint32_t ml = readVar(d, c.e, &c.i); c.i += ml; }
+            else if (c.status == 0xF0 || c.status == 0xF7) { uint32_t sl = readVar(d, c.e, &c.i); c.i += sl; }
             else {
-                uint8_t hi = status & 0xF0, ch = status & 0x0F;
+                uint8_t hi = c.status & 0xF0, ch = c.status & 0x0F;
                 if (hi == 0xC0 || hi == 0xD0) {                 // 1 data byte
-                    if (i + 1 > e) break;
-                    uint8_t d1 = d[i]; i += 1;
-                    if      (hi == 0xC0) ev[ne++] = {tick, kProgramChange,   ch, d1, 0};
-                    else if (hi == 0xD0) ev[ne++] = {tick, kChannelPressure, ch, d1, 0};  // MPE Z-axis
+                    if (c.i + 1 > c.e) break;
+                    uint8_t d1 = d[c.i]; c.i += 1;
+                    c.kind = (hi == 0xC0) ? kProgramChange : kChannelPressure;   // 0xD0 = MPE Z-axis
+                    c.ch = ch; c.d1 = d1; c.d2 = 0; c.has = true; return;
                 } else {                                        // 2 data bytes
-                    if (i + 2 > e) break;
-                    uint8_t d1 = d[i], d2 = d[i + 1]; i += 2;
-                    if (hi == 0x90)      ev[ne++] = {tick, (uint8_t)(d2 ? kNoteOn : kNoteOff), ch, d1, d2};
-                    else if (hi == 0x80) ev[ne++] = {tick, kNoteOff, ch, d1, d2};
-                    else if (hi == 0xB0) ev[ne++] = {tick, kControlChange, ch, d1, d2};
-                    else if (hi == 0xE0) ev[ne++] = {tick, kPitchBend, ch, d1, d2};
-                    // 0xA0 (poly aftertouch) intentionally dropped.
+                    if (c.i + 2 > c.e) break;
+                    uint8_t d1 = d[c.i], d2 = d[c.i + 1]; c.i += 2;
+                    if      (hi == 0x90) { c.kind = d2 ? kNoteOn : kNoteOff; c.ch = ch; c.d1 = d1; c.d2 = d2; c.has = true; return; }
+                    else if (hi == 0x80) { c.kind = kNoteOff;       c.ch = ch; c.d1 = d1; c.d2 = d2; c.has = true; return; }
+                    else if (hi == 0xB0) { c.kind = kControlChange; c.ch = ch; c.d1 = d1; c.d2 = d2; c.has = true; return; }
+                    else if (hi == 0xE0) { c.kind = kPitchBend;     c.ch = ch; c.d1 = d1; c.d2 = d2; c.has = true; return; }
+                    // 0xA0 (poly aftertouch) and anything else: consumed, keep scanning.
                 }
             }
         }
-    }
+        c.has = false;
+    };
 
-    // Stable sort by (tick, sortRank) so same-tick ordering is deterministic.
-    std::stable_sort(ev, ev + ne, [](const TickEv &a, const TickEv &b) {
-        if (a.tick != b.tick) return a.tick < b.tick;
-        return sortRank(a.kind) < sortRank(b.kind);
-    });
+    for (int t = 0; t < nt; ++t) { cur[t] = {tS[t], tE[t], 0, 0, false, 0, 0, 0, 0}; advance(cur[t]); }
 
-    // Emit delta-ms stream; split gaps > 60000 ms into kRest padding.
-    int no = 0; uint32_t prevMs = 0;
-    for (int k = 0; k < ne && no < maxOut; ++k) {
-        uint32_t absMs = (uint32_t)(tickToMs(ev[k].tick) + 0.5);
+    // Emit the delta-ms stream; split gaps > 60000 ms into kRest padding.
+    int no = 0, emitted = 0; uint32_t prevMs = 0;
+    for (;;) {
+        int m = -1;                                  // track whose pending event is earliest
+        for (int t = 0; t < nt; ++t) {
+            if (!cur[t].has) continue;
+            if (m < 0) { m = t; continue; }
+            if (cur[t].tick != cur[m].tick) { if (cur[t].tick < cur[m].tick) m = t; }
+            else if (sortRank(cur[t].kind) < sortRank(cur[m].kind)) m = t;   // ties keep lower track index
+        }
+        if (m < 0) break;                            // all tracks drained
+        uint32_t absMs = (uint32_t)(tickToMs(cur[m].tick) + 0.5);
         uint32_t dd = (absMs > prevMs) ? (absMs - prevMs) : 0; prevMs = absMs;
         while (dd > 60000 && no < maxOut) { out[no++] = {60000, kRest, 0, 0, 0}; dd -= 60000; }
-        if (no < maxOut) out[no++] = {(uint16_t)dd, ev[k].kind, ev[k].ch, ev[k].d1, ev[k].d2};
+        if (no >= maxOut) break;                      // out buffer full
+        out[no++] = {(uint16_t)dd, cur[m].kind, cur[m].ch, cur[m].d1, cur[m].d2};
+        emitted++;
+        advance(cur[m]);
     }
-    free(ev);
+    if (emitted == 0) return -1;
     return no;
 }
 

@@ -113,6 +113,9 @@ enum : uint8_t {
   CMD_SET_ARP_LATCH= 0x3b,  // + 1 byte: 0/1 latch held notes (@ARPLATCH=<0|1>)
   CMD_READ_FILE    = 0x40,  // + N bytes: SD path string; Teensy streams it back on the FILE char (@READ=<path>)
   CMD_PLAY_DRUM_FILE=0x41,  // + N bytes: groove filename; plays /drums/<name> (@DRUMF=<filename>)
+  CMD_RELAY_LINE   = 0x42,  // + N bytes: a literal control line (e.g. "@DXPICK=<cart>\t<v>", "@REINDEX",
+                            //   "@SONG=<i>") relayed VERBATIM to the Teensy. The generic seam the new
+                            //   catalog app uses so BLE speaks the same @-protocol as Web Serial.
 };
 
 BluetoothA2DPSink a2dp_sink;
@@ -179,6 +182,9 @@ static BLECharacteristic *g_fileChar  = nullptr;   // generic file-transfer fram
 // string args (path / filename) — the generic catalog transport (CATALOG_TRANSPORT.md).
 static void relayReadFile(const char *path)  { Serial.printf("@READ=%s\n", path); }
 static void relayDrumFile(const char *fname) { Serial.printf("@DRUMF=%s\n", fname); }
+// Relay an arbitrary control line verbatim (the generic new-catalog seam). The app
+// sends the same @-lines it would over Web Serial; we just add the newline.
+static void relayLine(const char *line)      { Serial.print(line); Serial.print('\n'); }
 
 // Forward ONE Teensy line verbatim to the app as a single notification. Used for the
 // file-transfer stream: the Teensy already chunked each @FD to fit one MTU, so there
@@ -223,6 +229,9 @@ static void handleTeensyLine(const char *line) {
   else if (strncmp(line, "@MANIFESTS=", 11) == 0) { notifyRaw(g_fileChar, line); }
   else if (strncmp(line, "@FB=", 4) == 0 || strncmp(line, "@FD=", 4) == 0 ||
            strncmp(line, "@FE=", 4) == 0 || strncmp(line, "@FERR=", 6) == 0) { notifyRaw(g_fileChar, line); }
+  // @REINDEXED marks the end of a catalog rebuild — relay it so the app's reindex()
+  // (which sent @REINDEX via CMD_RELAY_LINE) knows the /tdsp DB is ready to re-read.
+  else if (strncmp(line, "@REINDEXED", 10) == 0) { notifyRaw(g_fileChar, line); }
 }
 
 // Ask the Teensy to (re)send its catalog over UART.
@@ -531,6 +540,12 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
         std::string fname(v.begin() + 1, v.end());
         Serial.printf("[ble] cmd: PLAY DRUM FILE %s\n", fname.c_str());
         relayDrumFile(fname.c_str());  // -> Teensy: @DRUMF=<filename>
+        break;
+      }
+      case CMD_RELAY_LINE: {
+        std::string ln(v.begin() + 1, v.end());   // opcode byte + literal control line
+        Serial.printf("[ble] cmd: RELAY %s\n", ln.c_str());
+        relayLine(ln.c_str());         // -> Teensy: <line>\n  (verbatim @-protocol)
         break;
       }
       case CMD_SET_DRUM_KIT:

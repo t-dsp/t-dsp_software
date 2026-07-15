@@ -65,6 +65,7 @@ export const CMD = {
   SET_ARP_LATCH: 0x3b, // + 1 byte: 0/1 — latch held notes
   READ_FILE: 0x40, // + N bytes: SD path string; firmware streams it back on the FILE char
   PLAY_DRUM_FILE: 0x41, // + N bytes: groove filename; plays /drums/<name> (@DRUMF=<filename>)
+  RELAY_LINE: 0x42, // + N bytes: a literal @-control line relayed verbatim to the Teensy (new-catalog seam)
 } as const;
 
 // GM drum kits — the "instrument" for the Drums menu. The index is sent via

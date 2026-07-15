@@ -1,1131 +1,406 @@
-// T-DSP Control — BLE control app for the ESP32 A2DP receiver.
-// Home screen = status + master volume + one Connect/Disconnect toggle.
-// Hamburger (☰) opens Settings: paired-source switcher, pairing, disconnect app.
-// Needs a custom dev/preview build (BLE is native): see README.md.
-
+// App.tsx — T-DSP unified control surface (react-native-web on desktop, native in the app).
+// One React/TS codebase over a platform-split transport (Web Serial / BLE). The on-device
+// catalog DB (/tdsp/*.ndjson, built by @REINDEX) is the source of truth; browsing is local,
+// only actions hit the wire. Old single-file UI preserved as App.old.tsx.
+import React, { useState, useRef, useEffect, useMemo } from 'react';
+import { View, Text, Pressable, ScrollView, FlatList, TextInput, Switch, StyleSheet, ActivityIndicator, Platform, Alert, useWindowDimensions } from 'react-native';
 import Slider from '@react-native-community/slider';
-import { StatusBar } from 'expo-status-bar';
-import { useEffect, useRef, useState } from 'react';
-import {
-  ActivityIndicator,
-  Modal,
-  Pressable,
-  SafeAreaView,
-  ScrollView,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
-import { ARP_PATTERNS, ARP_RATES, CMD, ConnState, DrumGroove, SynthInfo, TdspSource, useTdsp } from './src/tdspBle';
+import { createTransport } from './src/transportFactory';
+import { Catalog, EMPTY_CATALOG, loadCatalog, cartRel, Cart } from './src/catalog';
+import type { Transport } from './src/transport';
 
-// Two-axis (Genre / Pack) groove browser over the device's /drums/catalog.tsv
-// manifest. All filtering/paging is client-side; playing sends the groove FILENAME
-// (onPlayDrumFile), so the full 1000+ library browses without the firmware's 48-slot
-// flat-list cap. Each axis has an "All" bank so every groove is reachable either way.
-function DrumBrowser({
-  manifest,
-  onPlay,
-  onStop,
-}: {
-  manifest: DrumGroove[];
-  onPlay: (filename: string) => void;
-  onStop: () => void;
-}) {
-  const [byPack, setByPack] = useState(false);
-  const [bankIdx, setBankIdx] = useState(0);
-  const [rowIdx, setRowIdx] = useState(0);
-  const sortKey: 'genre' | 'pack' = byPack ? 'pack' : 'genre';
-  const banks = ['All', ...Array.from(new Set(manifest.map((r) => r[sortKey]).filter(Boolean))).sort()];
-  const bankSafe = Math.min(bankIdx, banks.length - 1);
-  const bank = banks[bankSafe] ?? 'All';
-  const rows = (bank === 'All' ? manifest : manifest.filter((r) => r[sortKey] === bank))
-    .slice()
-    .sort((a, b) => a.display.localeCompare(b.display));
-  const rowSafe = Math.min(rowIdx, Math.max(0, rows.length - 1));
-  const options = rows.map((r) => (r.bpm ? `${r.display}  ·  ${r.bpm} bpm` : r.display));
-  const current = rows[rowSafe];
-  const playRow = (i: number) => {
-    setRowIdx(i);
-    const r = rows[i];
-    if (r) onPlay(r.filename);
-  };
+// One level of the /dexed folder tree: subfolders + carts sitting directly at `path`.
+function dexedLevel(dexed: Cart[], path: string) {
+  const prefix = path ? path + '/' : '';
+  const folders = new Set<string>();
+  const carts: Cart[] = [];
+  for (const c of dexed) {
+    const f = c.folder || '';
+    if (f === path) { carts.push(c); continue; }
+    if (f.startsWith(prefix)) { const seg = f.slice(prefix.length).split('/')[0]; if (seg) folders.add(seg); }
+  }
+  return { folders: [...folders].sort((a, b) => a.localeCompare(b)), carts: carts.sort((a, b) => a.name.localeCompare(b.name)) };
+}
+const grooveFile = (g: { path: string; name: string }) => g.path.split('/').pop() || (g.name + '.mid');   // @DRUMF wants filename WITH .mid
+
+const C = { bg: '#0d1117', card: '#161b22', card2: '#0e131a', border: '#30363d', text: '#e6edf3', muted: '#8b949e', accent: '#3fb950', sel: 'rgba(31,111,235,0.28)', chip: '#21262d' };
+const ARP_PAT = ['Up', 'Down', 'Up/Down', 'Random'];
+const ARP_RATE = ['1/4', '1/8', '1/8T', '1/16', '1/16T', '1/32'];
+
+function notify(msg: string) { if (Platform.OS === 'web') (globalThis as any).alert?.(msg); else Alert.alert('T-DSP', msg); }
+
+// Header = a left column (title, then the current value under it) + the control
+// buttons on the right + the chevron. `value` is the live readout (selected voice,
+// song, BPM, groove…) shown under the title so it's visible collapsed or open.
+function Accordion({ title, status, value, id, onMeasure, open, onPress, headerActions, children }:
+  { title: string; status?: string; value?: string; id?: string; onMeasure?: (id: string, y: number) => void; open: boolean; onPress: () => void; headerActions?: React.ReactNode; children?: React.ReactNode }) {
+  const { width } = useWindowDimensions();
+  const narrow = width < 640;   // phone-ish: stack title, value, and controls on their own lines
+  const titleBlock = (
+    <View style={s.drawerLeft}>
+      <Text style={s.drawerTitle}>{title}</Text>
+      {!!value && <Text style={s.drawerValue} numberOfLines={1}>{value}</Text>}
+      {!value && !!status && <Text style={s.tag}>{status}</Text>}
+    </View>
+  );
   return (
-    <>
-      <Dropdown
-        label="Sort"
-        options={['By Genre', 'By Pack']}
-        value={byPack ? 1 : 0}
-        onSelect={(i) => { setByPack(i === 1); setBankIdx(0); setRowIdx(0); }}
-      />
-      <Dropdown
-        label="Bank"
-        options={banks}
-        value={bankSafe}
-        onSelect={(i) => { setBankIdx(i); setRowIdx(0); }}
-      />
-      <Dropdown label="Groove" options={options.length ? options : ['—']} value={rowSafe} onSelect={playRow} />
-      <Stepper count={rows.length} value={rowSafe} onStep={playRow} />
-      <Text style={styles.dim}>
-        {rows.length} groove{rows.length === 1 ? '' : 's'} in “{bank}”
-      </Text>
-      <View style={{ height: 8 }} />
-      <PrimaryButton
-        label={`▶  Play ${current?.display ?? 'Groove'}`}
-        onPress={() => current && onPlay(current.filename)}
-      />
-      <SecondaryButton label="Stop" onPress={onStop} />
-    </>
+    <View style={s.card} onLayout={id && onMeasure ? e => onMeasure(id, e.nativeEvent.layout.y) : undefined}>
+      <Pressable style={s.drawer} onPress={onPress}>
+        {titleBlock}
+        {!narrow && headerActions}
+        <Text style={[s.chev, open && s.chevOpen]}>›</Text>
+      </Pressable>
+      {narrow && !!headerActions && <View style={s.hdrActionsRow}>{headerActions}</View>}
+      {open && <View style={s.body}>{children}</View>}
+    </View>
   );
 }
+// A transport button for an accordion header (nested Pressable → doesn't toggle the drawer).
+// All header buttons share one uniform width (s.hdrBtn.minWidth).
+const HdrBtn = ({ label, onPress, stop }: { label: string; onPress: () => void; stop?: boolean }) => (
+  <Pressable onPress={onPress} style={[s.hdrBtn, stop && s.hdrBtnStop]}><Text style={s.hdrBtnText}>{label}</Text></Pressable>
+);
+const Row = ({ children }: any) => <View style={s.row}>{children}</View>;
+const Stat = ({ label, n, sub }: { label: string; n: number; sub?: string }) => (
+  <View style={s.stat}><Text style={s.statN}>{n}</Text><Text style={s.statL}>{label}</Text>{!!sub && <Text style={s.statSub}>{sub}</Text>}</View>
+);
+const ListBtn = ({ label, sel, onPress }: any) => (
+  <Pressable onPress={onPress} style={[s.listBtn, sel && s.listBtnSel]}><Text style={s.text} numberOfLines={1}>{label}</Text></Pressable>
+);
+const ROW_H = 41;   // fixed list-row height so FlatList.scrollToIndex is reliable
+type VItem = { key: string; label: string; i: number };
 
 export default function App() {
-  const {
-    state,
-    status,
-    error,
-    btReady,
-    volume,
-    sources,
-    songs,
-    instruments,
-    drums,
-    drumManifest,
-    drumKits,
-    isGM,
-    drumsOk,
-    synth,
-    scanAndConnect,
-    disconnect,
-    sendCommand,
-    setVolume,
-    connectSource,
-    forgetSource,
-    readSources,
-    playSong,
-    stopSong,
-    setDxVoice,
-    setHpf,
-    setMidiMode,
-    setReplayGain,
-    setLoop,
-    playDrum,
-    playDrumFile,
-    stopDrum,
-    setDrumKit,
-    setDrumVol,
-    setArpOn,
-    setArpPattern,
-    setArpRate,
-    setArpOct,
-    setArpLatch,
-    setBpm,
-    setDrumSynchro,
-    setPressure,
-    setModWheel,
-    setLfoMode,
-    setTimbre,
-    refreshCatalog,
-  } = useTdsp();
-  const [showSettings, setShowSettings] = useState(false);
-  // Dexed instrument + selected song — tracked locally (no firmware readback yet).
-  const [dxVoice, setDxVoiceState] = useState(0);
-  const [song, setSong] = useState(0);
-  // TAC5212 DAC highpass — tracked locally (no firmware readback yet). Default off;
-  // hpfCutIdx is the last-picked cutoff (0=1Hz, 1=12Hz, 2=96Hz) → filter mode idx+1.
-  const [hpfOn, setHpfOn] = useState(false);
-  const [hpfCutIdx, setHpfCutIdx] = useState(1); // 12 Hz
-  // MIDI vs MPE mode — mirrors status.mpe once per connection, then local toggle wins.
-  const [mpe, setMpe] = useState(false);
-  // ReplayGain loudness normalization — mirrors status.rg once per connection (device default on).
-  const [rg, setRg] = useState(true);
-  // Loop the current song (local UI state; sent to the device on change).
-  const [loop, setLoopState] = useState(false);
-  // Drums — local UI state (no firmware readback). Groove/kit indices + level %.
-  const [drumGroove, setDrumGroove] = useState(0);
-  const [drumKit, setDrumKitState] = useState(0);
-  const [drumVol, setDrumVolState] = useState(100);
-  // Arpeggiator — local UI state (no firmware readback). Rate default 11 = 1/16 (firmware default).
-  const [arpOn, setArpOnState] = useState(false);
-  const [arpPattern, setArpPatternState] = useState(0);
-  const [arpRate, setArpRateState] = useState(11);
-  const [arpOct, setArpOctState] = useState(1);
-  const [arpLatch, setArpLatchState] = useState(false);
-  const [bpm, setBpmState] = useState(120);          // master tempo (song + drum)
-  const [drumSynchro, setDrumSynchroState] = useState(false);
-  // Expression routing bitmasks (1=volume 2=brightness 4=vibrato 8=tremolo).
-  const [pressMask, setPressMask] = useState(3);   // pressure: default vol+bright
-  const [modMask, setModMask] = useState(4);       // mod wheel: default vibrato (no volume bit)
-  const [timbreMask, setTimbreMask] = useState(3); // CC74 timbre (MPE Y): default volume + brightness (punchy)
-  const [lfoForce, setLfoForce] = useState(true);  // force LFO so vib/trem work on any patch
-  const connected = state === 'connected';
+  const tpRef = useRef<Transport | null>(null); if (!tpRef.current) tpRef.current = createTransport();
+  const tp = tpRef.current;
+  const [connected, setConnected] = useState(false);
+  const [cat, setCat] = useState<Catalog>(EMPTY_CATALOG);
+  const [loaded, setLoaded] = useState(false);
+  const [openId, setOpenId] = useState<string>('conn');
+  const [vol, setVol] = useState(80);
+  const [bt, setBt] = useState({ conn: false, peer: '' });
+  const [arp, setArp] = useState({ on: false, pat: 0, rate: 0, oct: 1, latch: false });
+  const [drums, setDrums] = useState<{ kit: number; sel: string | null; playing: string | null }>({ kit: 0, sel: null, playing: null });
+  const [player, setPlayer] = useState<{ song: number; playing: boolean; name: string }>({ song: 0, playing: false, name: '' });
+  const [loop, setLoop] = useState(false);
+  const [bpm, setBpm] = useState(120);
+  const [songBpm, setSongBpm] = useState(120);            // tempo of the last song that played
+  const [selVoice, setSelVoice] = useState('');
+  const [cart, setCart] = useState<Cart | null>(null);
+  const [vpath, setVpath] = useState('');                 // dexed folder-browser current path ('' = root)
+  const [q, setQ] = useState({ voice: '', cart: '', groove: '' });
+  const [busy, setBusy] = useState(false);
 
-  // Initialize the HPF controls from the device's reported state once per
-  // connection (status.hpf: 0=off, 1/2/3 = 1/12/96 Hz). Mirrors the volume-init
-  // pattern in useTdsp; after this the local toggle is the source of truth.
-  const hpfInitedRef = useRef(false);
+  useEffect(() => tp.onLine(line => {
+    if (line.indexOf('"conn"') >= 0 && line.indexOf('"vol"') >= 0) {
+      const m = line.match(/\{.*\}/); if (m) { try { const j = JSON.parse(m[0]); setBt({ conn: !!j.conn, peer: j.peer || '' }); if (j.vol != null) setVol(j.vol); } catch {} }
+    } else if (line.startsWith('[song]')) {
+      // Follow the song's detected tempo: set master BPM to it (song + drums lock to that).
+      const m = line.match(/([\d.]+)\s*bpm/); if (m) { const b = Math.round(parseFloat(m[1])); if (b >= 20 && b <= 300) { setSongBpm(b); setBpm(b); tp.masterBpm(b); } }
+    }
+  }), []);
+
+  async function connect() {
+    try {
+      await tp.connect(); setConnected(true);
+      tp.arpOn(false); setArp(a => ({ ...a, on: false }));   // arp OFF by default (sync device to UI)
+      await load();
+    }
+    catch (e: any) { notify('Connect failed: ' + e + (Platform.OS === 'web' ? '\n\nClose any control.html tab (one page owns the port), then retry.' : '')); }
+  }
+  async function disconnect() { try { await tp.disconnect(); } catch {} setConnected(false); setLoaded(false); }
+  async function load() {
+    try { setCat(await loadCatalog(tp)); setLoaded(true); }
+    catch (e: any) {
+      const yes = Platform.OS === 'web'
+        ? (globalThis as any).confirm?.('Catalog load failed: ' + (e?.message || e) + '\n\nRebuild it now (@REINDEX)?')
+        : true;
+      if (yes) await reindex();
+    }
+  }
+  async function reindex() { setBusy(true); try { await tp.reindex(); await load(); } finally { setBusy(false); } }
+  const toggle = (id: string) => setOpenId(o => (o === id ? '' : id));
+
+  // Scroll a just-opened section up to the top so its body is visible without scrolling.
+  const scrollRef = useRef<ScrollView>(null);
+  const yPos = useRef<Record<string, number>>({});
+  const measureY = (id: string, y: number) => { yPos.current[id] = y; };
   useEffect(() => {
-    if (!connected) {
-      hpfInitedRef.current = false;
-      return;
-    }
-    if (status && !hpfInitedRef.current) {
-      hpfInitedRef.current = true;
-      const m = status.hpf ?? 0;
-      setHpfOn(m !== 0);
-      if (m > 0) setHpfCutIdx(m - 1);
-      setMpe(!!status.mpe);
-      setRg(status.rg !== false);
-    }
-  }, [connected, status]);
+    if (!openId) return;
+    // Snap the opened section's header to the top. Fire twice so the final scroll uses
+    // the Y after the layout resettles (the previously-open section collapses, and this
+    // section's body expands, both shifting positions).
+    const go = () => scrollRef.current?.scrollTo({ y: Math.max(0, (yPos.current[openId] ?? 0) - 4), animated: true });
+    const t1 = setTimeout(go, 60);
+    const t2 = setTimeout(go, 220);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+  }, [openId]);
 
-  const onToggleMpe = () => {
-    const next = !mpe;
-    setMpe(next);
-    setMidiMode(next);
-  };
-  const onToggleRg = () => {
-    const next = !rg;
-    setRg(next);
-    setReplayGain(next);
-  };
-  const onToggleLoop = () => {
-    const next = !loop;
-    setLoopState(next);
-    setLoop(next);
-  };
-  const onTogglePressBit = (bit: number) => {
-    const next = pressMask ^ bit;
-    setPressMask(next);
-    setPressure(next);
-  };
-  const onToggleModBit = (bit: number) => {
-    const next = modMask ^ bit;
-    setModMask(next);
-    setModWheel(next);
-  };
-  const onToggleTimbreBit = (bit: number) => {
-    const next = timbreMask ^ bit;
-    setTimbreMask(next);
-    setTimbre(next);
-  };
-  const onSetLfoForce = (force: boolean) => {
-    setLfoForce(force);
-    setLfoMode(force);
-  };
+  const dexedVoices = useMemo(() => cat.dexed.reduce((n, c) => n + (c.voices?.length || 0), 0), [cat.dexed]);
+  const bundled = useMemo(() => { const t = q.voice.toLowerCase(); return cat.instruments.filter(v => !t || (v.name || '').toLowerCase().includes(t)).slice(0, 400); }, [cat.instruments, q.voice]);
+  const carts = useMemo(() => { const t = q.cart.toLowerCase(); return cat.dexed.filter(c => !t || (c.name + ' ' + (c.folder || '')).toLowerCase().includes(t)).slice(0, 500); }, [cat.dexed, q.cart]);
+  const grooves = useMemo(() => { const t = q.groove.toLowerCase(); return cat.grooves.filter(g => !t || g.name.toLowerCase().includes(t)).slice(0, 500); }, [cat.grooves, q.groove]);
+  const level = useMemo(() => dexedLevel(cat.dexed, vpath), [cat.dexed, vpath]);
 
-  const openSettings = () => {
-    readSources(); // refresh the paired list when the menu opens
-    setShowSettings(true);
+  // The voices currently listed in Synth/Voices (a cart's voices, or the bundled set).
+  const voiceRef = useRef<FlatList<VItem>>(null);
+  const voiceData: VItem[] = useMemo(() =>
+    cart ? cart.voices.map((vn, i) => ({ key: 'c' + cart.path + ':' + i, label: (i + 1) + '. ' + vn, i }))
+      : vpath === '@bundled' ? cat.instruments.map(v => ({ key: 'b' + v.i, label: v.name, i: v.i }))
+        : [], [cart, vpath, cat.instruments]);
+  const pickVoice = (it: VItem) => { setSelVoice(it.key); if (it.key[0] === 'c' && cart) tp.dxPick(cartRel(cart), it.i); else if (it.key[0] === 'b') tp.dxVoice(it.i); };
+  const stepVoice = (dir: number) => { if (!voiceData.length) return; const idx = voiceData.findIndex(d => d.key === selVoice); const ni = Math.max(0, Math.min(voiceData.length - 1, (idx < 0 ? 0 : idx) + dir)); if (voiceData[ni]) pickVoice(voiceData[ni]); };
+  useEffect(() => {   // keep the selected voice in view (on pick + on list change)
+    const idx = voiceData.findIndex(d => d.key === selVoice);
+    if (idx >= 0) { const t = setTimeout(() => { try { voiceRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.5 }); } catch {} }, 60); return () => clearTimeout(t); }
+  }, [selVoice, voiceData]);
+
+  const stepGroove = (dir: number) => { if (!grooves.length) return; const idx = grooves.findIndex(g => g.path === drums.sel); const ni = Math.max(0, Math.min(grooves.length - 1, (idx < 0 ? 0 : idx) + dir)); const g = grooves[ni]; if (g) setDrums(d => ({ ...d, sel: g.path })); };
+  const stepSong = (dir: number) => {   // step the selected song; if one is playing, start the new one
+    if (!cat.songs.length) return;
+    const idx = cat.songs.findIndex(sg => sg.i === player.song);
+    const ni = Math.max(0, Math.min(cat.songs.length - 1, (idx < 0 ? 0 : idx) + dir));
+    const sg = cat.songs[ni]; if (!sg) return;
+    setPlayer(p => { if (p.playing) { tp.playSong(sg.i); return { ...p, song: sg.i, name: sg.name }; } return { ...p, song: sg.i }; });
   };
+  const stepBpm = (delta: number) => { const b = Math.max(20, Math.min(300, Math.round(bpm) + delta)); setBpm(b); tp.masterBpm(b); };
+  const stepArpPat = (dir: number) => { const i = (arp.pat + dir + ARP_PAT.length) % ARP_PAT.length; setArp(a => ({ ...a, pat: i })); tp.arpPattern(i); };
+
+  const headerStatus = !connected ? 'Not connected' :
+    [cat.engine || 'synth', cat.drumEngine ? cat.drumEngine + ' drums' : '', tp.name, bt.conn ? 'BT:' + (bt.peer || 'on') : '', drums.playing ? '♪ ' + drums.playing : ''].filter(Boolean).join('  ·  ');
 
   return (
-    <SafeAreaView style={styles.screen}>
-      <StatusBar style="light" />
-
-      <View style={styles.header}>
-        <View style={styles.headerText}>
-          <Text style={styles.title}>T-DSP Control</Text>
-          <Text style={styles.subtitle}>ESP32 Bluetooth receiver</Text>
-        </View>
-        {connected && (
-          <Pressable onPress={openSettings} hitSlop={14} style={styles.iconBtn}>
-            <Text style={styles.icon}>☰</Text>
+    <View style={s.app}>
+      {/* ===== header: brand, connect, master volume ===== */}
+      <View style={s.header}>
+        <View style={s.brandRow}>
+          <View style={[s.dot, connected && s.dotOn]} />
+          <Text style={s.brand}>T-DSP</Text>
+          <View style={{ flex: 1 }} />
+          <Pressable style={s.btn} onPress={() => (connected ? disconnect() : connect())}>
+            <Text style={s.btnText}>{connected ? 'Disconnect' : `${tp.name} • Connect`}</Text>
           </Pressable>
+        </View>
+        <Text style={s.statline}>{headerStatus}</Text>
+        <View style={s.volRow}>
+          <Text style={s.volLbl}>VOL</Text>
+          <Slider style={{ flex: 1, height: 34 }} minimumValue={0} maximumValue={100} step={1}
+            value={vol} minimumTrackTintColor={C.accent} maximumTrackTintColor={C.border} thumbTintColor={C.accent}
+            disabled={!connected} onValueChange={setVol} onSlidingComplete={v => tp.masterVolume(v)} />
+          <Text style={s.volVal}>{Math.round(vol)}</Text>
+        </View>
+      </View>
+
+      <ScrollView ref={scrollRef} style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 400 }}>
+        {!connected && <Text style={[s.muted, { textAlign: 'center', marginTop: 48 }]}>Connect a T-DSP device to begin.</Text>}
+        {connected && <>
+        {/* CONNECTION — catalog stats */}
+        <Accordion title="Connection" status={cat.engine || (connected ? 'connected' : '')} id="conn" onMeasure={measureY} open={openId === 'conn'} onPress={() => toggle('conn')}>
+          <Text style={s.muted}>Synth: <Text style={s.text}>{cat.engine || '—'}</Text>   ·   Transport: {tp.name}</Text>
+          {!loaded && <Text style={s.muted}>{connected ? 'Loading catalog…' : 'Connect to load the catalog.'}</Text>}
+          {loaded && (
+            <View style={s.statGrid}>
+              <Stat label="Instruments" n={cat.instruments.length} />
+              <Stat label="Dexed carts" n={cat.dexed.length} sub={dexedVoices ? dexedVoices + ' voices' : undefined} />
+              <Stat label="Grooves" n={cat.grooves.length} />
+              <Stat label="Songs" n={cat.songs.length} />
+              <Stat label="Soundfonts" n={cat.soundfonts.length} />
+              <Stat label="Drum kits" n={cat.drumkits.length} />
+            </View>
+          )}
+          <Pressable style={[s.btn, s.btnWide]} onPress={reindex} disabled={!connected || busy}>
+            {busy ? <ActivityIndicator color={C.text} /> : <Text style={s.btnText}>Rebuild catalog (@REINDEX)</Text>}
+          </Pressable>
+        </Accordion>
+
+        {/* BLUETOOTH */}
+        <Accordion title="Bluetooth" status={bt.conn ? 'connected' + (bt.peer ? ': ' + bt.peer : '') : 'off'} id="bt" onMeasure={measureY} open={openId === 'bt'} onPress={() => toggle('bt')}>
+          <Text style={s.muted}>{bt.conn ? 'Connected: ' + (bt.peer || 'source') : 'No audio source connected'}</Text>
+          <Row>
+            <Pressable style={s.btn} onPress={() => tp.espPair()}><Text style={s.btnText}>Pairing mode</Text></Pressable>
+            <Pressable style={[s.btn, s.btnGhost]} onPress={() => tp.espReconnect()}><Text style={s.btnText}>Reconnect</Text></Pressable>
+            <Pressable style={[s.btn, s.btnGhost]} onPress={() => tp.espForget()}><Text style={s.btnText}>Forget</Text></Pressable>
+          </Row>
+        </Accordion>
+
+        {/* TEMPO / BPM — master tempo; song + drums lock to it (@BPM=) */}
+        <Accordion title="Tempo" value={Math.round(bpm) + ' BPM'} id="bpm" onMeasure={measureY} open={openId === 'bpm'} onPress={() => toggle('bpm')}
+          headerActions={<>
+            <HdrBtn label="−" stop onPress={() => stepBpm(-1)} />
+            <HdrBtn label="＋" onPress={() => stepBpm(1)} />
+          </>}>
+          <Text style={{ color: C.text, textAlign: 'center', fontSize: 30, fontWeight: '800' }}>{Math.round(bpm)} <Text style={{ fontSize: 15, color: C.muted }}>BPM</Text></Text>
+          <View style={s.volRow}>
+            <Pressable style={s.pill} onPress={() => stepBpm(-1)}><Text style={s.text}>−</Text></Pressable>
+            <Slider style={{ flex: 1, height: 34 }} minimumValue={40} maximumValue={240} step={1} value={bpm}
+              minimumTrackTintColor={C.accent} maximumTrackTintColor={C.border} thumbTintColor={C.accent}
+              onValueChange={setBpm} onSlidingComplete={b => tp.masterBpm(b)} />
+            <Pressable style={s.pill} onPress={() => stepBpm(1)}><Text style={s.text}>＋</Text></Pressable>
+          </View>
+          <Pressable style={[s.btn, s.btnGhost]} onPress={() => { const b = player.playing ? songBpm : 120; setBpm(b); tp.masterBpm(b); }}>
+            <Text style={s.btnText}>Reset → {player.playing ? songBpm + ' (playing song)' : '120'} BPM</Text></Pressable>
+          <Text style={s.muted}>Master tempo — the MIDI song player and drum grooves lock to this. It auto-follows a song's detected tempo on play.</Text>
+        </Accordion>
+
+        {/* SYNTH / VOICES — folder browser over bundled voices + the whole /dexed library */}
+        <Accordion title="Synth / Voices"
+          value={voiceData.length ? (voiceData.find(d => d.key === selVoice)?.label || '—').replace(/^\d+\.\s*/, '')
+            : (vpath === '@bundled' ? 'Bundled' : vpath ? (vpath.split('/').pop() || '') : (cat.dexed.length ? cat.dexed.length + ' carts' : cat.instruments.length + ' voices'))}
+          id="synth" onMeasure={measureY} open={openId === 'synth'} onPress={() => toggle('synth')}
+          headerActions={voiceData.length ? <>
+            <HdrBtn label="‹" stop onPress={() => stepVoice(-1)} />
+            <HdrBtn label="›" stop onPress={() => stepVoice(1)} />
+          </> : undefined}>
+          {!loaded ? <Text style={s.muted}>Connect to load voices.</Text> : (
+            <>
+              {(cart || vpath) ? (
+                <Pressable style={[s.btn, s.btnGhost, { alignSelf: 'flex-start' }]} onPress={() => {
+                  if (cart) setCart(null);
+                  else if (vpath === '@bundled') setVpath('');
+                  else setVpath(vpath.split('/').slice(0, -1).join('/'));
+                }}><Text style={s.btnText}>‹ Back</Text></Pressable>
+              ) : null}
+              {voiceData.length ? (
+                <>
+                  <Text style={s.muted}>{cart ? cart.name + ' — ' + cart.voices.length + ' voices' : 'Bundled voices (' + cat.instruments.length + ')'}</Text>
+                  <FlatList ref={voiceRef} data={voiceData} style={s.list} nestedScrollEnabled keyExtractor={d => d.key}
+                    getItemLayout={(_, index) => ({ length: ROW_H, offset: ROW_H * index, index })}
+                    onScrollToIndexFailed={() => {}}
+                    renderItem={({ item }) => <ListBtn label={item.label} sel={selVoice === item.key} onPress={() => pickVoice(item)} />} />
+                </>
+              ) : (
+                <ScrollView style={s.list} nestedScrollEnabled>
+                  {vpath === '' && <ListBtn label={'★ Bundled voices (' + cat.instruments.length + ')'} onPress={() => setVpath('@bundled')} />}
+                  {level.folders.map(f => <ListBtn key={'f' + f} label={'📁 ' + f} onPress={() => setVpath(vpath ? vpath + '/' + f : f)} />)}
+                  {level.carts.map(c => <ListBtn key={c.path} label={'🎛 ' + c.name} onPress={() => setCart(c)} />)}
+                  {level.folders.length === 0 && level.carts.length === 0 && vpath !== '' && <Text style={s.muted}>(empty folder)</Text>}
+                </ScrollView>
+              )}
+            </>
+          )}
+        </Accordion>
+
+        {/* MIDI PLAYER — select a song; Play/Stop in the header (works collapsed); loop toggle */}
+        <Accordion title="MIDI Player"
+          value={(player.playing ? '♪ ' : '') + (cat.songs.find(sg => sg.i === player.song)?.name || '—')}
+          id="player" onMeasure={measureY} open={openId === 'player'} onPress={() => toggle('player')}
+          headerActions={<>
+            <HdrBtn label="‹" stop onPress={() => stepSong(-1)} />
+            <HdrBtn label="›" stop onPress={() => stepSong(1)} />
+            <HdrBtn label="▶" onPress={() => { const sg = cat.songs.find(x => x.i === player.song); tp.playSong(player.song); setPlayer(p => ({ ...p, playing: true, name: sg?.name || '' })); }} />
+            <HdrBtn label="■" stop onPress={() => { tp.stopSong(); setPlayer(p => ({ ...p, playing: false })); }} />
+          </>}>
+          {cat.songs.length === 0 ? <Text style={s.muted}>No songs indexed.</Text> : (
+            <ScrollView style={s.list} nestedScrollEnabled>
+              {cat.songs.map(sg => <ListBtn key={sg.i} label={(player.playing && player.song === sg.i ? '♪ ' : '') + sg.name} sel={player.song === sg.i}
+                onPress={() => setPlayer(p => ({ ...p, song: sg.i }))} />)}
+            </ScrollView>
+          )}
+          <Row><Text style={[s.muted, { flex: 1 }]}>Loop</Text>
+            <Switch value={loop} onValueChange={v => { setLoop(v); tp.songLoop(v); }} /></Row>
+        </Accordion>
+
+        {/* ARPEGGIATOR */}
+        <Accordion title="Arpeggiator" value={(arp.on ? '' : '(off)  ') + ARP_PAT[arp.pat] + '  ·  ' + ARP_RATE[arp.rate]} id="arp" onMeasure={measureY} open={openId === 'arp'} onPress={() => toggle('arp')}
+          headerActions={<>
+            <HdrBtn label="‹" stop onPress={() => stepArpPat(-1)} />
+            <HdrBtn label="›" stop onPress={() => stepArpPat(1)} />
+            <Switch value={arp.on} onValueChange={v => { setArp(a => ({ ...a, on: v })); tp.arpOn(v); }} style={{ marginLeft: 6 }} />
+          </>}>
+          <Row><Text style={[s.muted, { flex: 1 }]}>Enabled</Text>
+            <Switch value={arp.on} onValueChange={v => { setArp(a => ({ ...a, on: v })); tp.arpOn(v); }} /></Row>
+          <Row><Text style={[s.muted, { flex: 1 }]}>Pattern</Text>
+            {ARP_PAT.map((p, i) => <Pressable key={i} style={[s.pill, arp.pat === i && s.pillOn]} onPress={() => { setArp(a => ({ ...a, pat: i })); tp.arpPattern(i); }}><Text style={s.text}>{p}</Text></Pressable>)}</Row>
+          <Row><Text style={[s.muted, { flex: 1 }]}>Rate</Text>
+            {ARP_RATE.map((r, i) => <Pressable key={i} style={[s.pill, arp.rate === i && s.pillOn]} onPress={() => { setArp(a => ({ ...a, rate: i })); tp.arpRate(i); }}><Text style={s.text}>{r}</Text></Pressable>)}</Row>
+          <Row><Text style={[s.muted, { flex: 1 }]}>Octaves {arp.oct}</Text>
+            {[1, 2, 3, 4].map(n => <Pressable key={n} style={[s.pill, arp.oct === n && s.pillOn]} onPress={() => { setArp(a => ({ ...a, oct: n })); tp.arpOctaves(n); }}><Text style={s.text}>{n}</Text></Pressable>)}</Row>
+          <Row><Text style={[s.muted, { flex: 1 }]}>Latch</Text>
+            <Switch value={arp.latch} onValueChange={v => { setArp(a => ({ ...a, latch: v })); tp.arpLatch(v); }} /></Row>
+        </Accordion>
+
+        {/* DRUMS — only if the built engine renders ch10 drums (hidden e.g. on a no-PSRAM TSF build) */}
+        {cat.hasDrums && (
+        <Accordion title="Drums"
+          value={drums.playing ? '♪ ' + drums.playing : (cat.grooves.find(g => g.path === drums.sel)?.name || cat.drumkits[drums.kit]?.name || '—')}
+          id="drums" onMeasure={measureY} open={openId === 'drums'} onPress={() => toggle('drums')}
+          headerActions={<>
+            <HdrBtn label="‹" stop onPress={() => stepGroove(-1)} />
+            <HdrBtn label="›" stop onPress={() => stepGroove(1)} />
+            <HdrBtn label="▶" onPress={() => { const g = cat.grooves.find(x => x.path === drums.sel); if (g) { tp.playGrooveFile(grooveFile(g)); setDrums(d => ({ ...d, playing: g.name })); } }} />
+            <HdrBtn label="■" stop onPress={() => { tp.stopDrums(); setDrums(d => ({ ...d, playing: null })); }} />
+          </>}>
+          <Row><Text style={[s.muted, { flex: 1 }]}>Kit: {cat.drumkits[drums.kit]?.name || '—'}</Text>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              {cat.drumkits.map((k, i) => <Pressable key={i} style={[s.pill, drums.kit === i && s.pillOn]} onPress={() => { setDrums(d => ({ ...d, kit: i })); tp.drumKit(i); }}><Text style={s.text}>{k.name}</Text></Pressable>)}
+            </ScrollView></Row>
+          <TextInput style={s.input} placeholder="Search grooves…" placeholderTextColor={C.muted}
+            value={q.groove} onChangeText={t => setQ(x => ({ ...x, groove: t }))} />
+          {cat.grooves.length === 0 ? <Text style={s.muted}>No grooves indexed.</Text> : (
+            <ScrollView style={s.list} nestedScrollEnabled>
+              {grooves.map(g => <ListBtn key={g.path} label={(drums.playing === g.name ? '♪ ' : '') + g.name} sel={drums.sel === g.path}
+                onPress={() => setDrums(d => ({ ...d, sel: g.path }))} />)}
+            </ScrollView>
+          )}
+          <Row>
+            <Pressable style={[s.btn, s.grow1]} disabled={!drums.sel}
+              onPress={() => { const g = cat.grooves.find(x => x.path === drums.sel); if (g) { tp.playGrooveFile(grooveFile(g)); setDrums(d => ({ ...d, playing: g.name })); } }}><Text style={s.btnText}>▶ Play</Text></Pressable>
+            <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={() => { tp.stopDrums(); setDrums(d => ({ ...d, playing: null })); }}><Text style={s.btnText}>■ Stop</Text></Pressable>
+          </Row>
+        </Accordion>
         )}
-      </View>
 
-      <ConnCard state={state} btReady={btReady} status={status} />
-
-      {!connected ? (
-        <PrimaryButton
-          label={state === 'scanning' ? 'Scanning…' : state === 'connecting' ? 'Connecting…' : 'Connect App'}
-          busy={state === 'scanning' || state === 'connecting'}
-          disabled={!btReady || state !== 'idle'}
-          onPress={scanAndConnect}
-        />
-      ) : (
-        <>
-          <VolumeControl value={volume} onChange={setVolume} />
-          <PrimaryButton
-            label={status?.conn ? 'Disconnect Bluetooth Audio' : 'Connect Bluetooth Audio'}
-            onPress={() => sendCommand(status?.conn ? CMD.DISCONNECT : CMD.RECONNECT)}
-          />
-          <SecondaryButton label="Disconnect App" onPress={disconnect} />
-        </>
-      )}
-
-      {!btReady && <Text style={styles.warn}>Turn on Bluetooth to continue.</Text>}
-      {error ? <Text style={styles.error}>⚠ {error}</Text> : null}
-
-      <SettingsModal
-        visible={showSettings}
-        onClose={() => setShowSettings(false)}
-        sources={sources}
-        discoverable={!!status?.disc}
-        onConnectSource={connectSource}
-        onForgetSource={forgetSource}
-        onCommand={sendCommand}
-        audioConnected={!!status?.conn}
-        songs={songs}
-        instruments={instruments}
-        synth={synth}
-        onPlaySong={playSong}
-        onStopSong={stopSong}
-        loop={loop}
-        onToggleLoop={onToggleLoop}
-        drums={drums}
-        drumManifest={drumManifest}
-        onPlayDrumFile={playDrumFile}
-        drumKits={drumKits}
-        drumGroove={drumGroove}
-        onSelectDrum={setDrumGroove}
-        onPlayDrum={(i) => {
-          setDrumGroove(i);
-          playDrum(i);
-        }}
-        onStopDrum={stopDrum}
-        drumKit={drumKit}
-        onSelectDrumKit={(i) => {
-          setDrumKitState(i);
-          setDrumKit(i);
-        }}
-        drumVol={drumVol}
-        onPreviewDrumVol={setDrumVolState}
-        onCommitDrumVol={setDrumVol}
-        bpm={bpm}
-        onPreviewBpm={setBpmState}
-        onCommitBpm={setBpm}
-        drumSynchro={drumSynchro}
-        onToggleSynchro={() => {
-          const next = !drumSynchro;
-          setDrumSynchroState(next);
-          setDrumSynchro(next);
-        }}
-        isGM={drumsOk}
-        kitsOk={isGM}
-        pressMask={pressMask}
-        onTogglePressBit={onTogglePressBit}
-        modMask={modMask}
-        onToggleModBit={onToggleModBit}
-        timbreMask={timbreMask}
-        onToggleTimbreBit={onToggleTimbreBit}
-        lfoForce={lfoForce}
-        onSetLfoForce={onSetLfoForce}
-        dxVoice={dxVoice}
-        onSelectVoice={(i) => {
-          setDxVoiceState(i);
-          setDxVoice(i);
-        }}
-        song={song}
-        onSelectSong={setSong}
-        onRefreshCatalog={refreshCatalog}
-        hpfOn={hpfOn}
-        hpfCutIdx={hpfCutIdx}
-        onToggleHpf={() => {
-          const next = !hpfOn;
-          setHpfOn(next);
-          setHpf(next ? hpfCutIdx + 1 : 0);
-        }}
-        onSelectHpfCut={(i) => {
-          setHpfCutIdx(i);
-          if (hpfOn) setHpf(i + 1);
-        }}
-        mpe={mpe}
-        onToggleMpe={onToggleMpe}
-        rg={rg}
-        onToggleRg={onToggleRg}
-        arpOn={arpOn}
-        onToggleArp={() => {
-          const next = !arpOn;
-          setArpOnState(next);
-          setArpOn(next);
-        }}
-        arpPattern={arpPattern}
-        onSelectArpPattern={(i) => {
-          setArpPatternState(i);
-          setArpPattern(i);
-        }}
-        arpRate={arpRate}
-        onSelectArpRate={(i) => {
-          setArpRateState(i);
-          setArpRate(i);
-        }}
-        arpOct={arpOct}
-        onSelectArpOct={(oct) => {
-          setArpOctState(oct);
-          setArpOct(oct);
-        }}
-        arpLatch={arpLatch}
-        onToggleArpLatch={() => {
-          const next = !arpLatch;
-          setArpLatchState(next);
-          setArpLatch(next);
-        }}
-      />
-    </SafeAreaView>
-  );
-}
-
-type SettingsPane = 'menu' | 'bluetooth' | 'midi' | 'drums' | 'arp' | 'tac5212';
-
-// TAC5212 DAC highpass cutoffs — dropdown index maps to filter mode (index + 1),
-// i.e. 0→1 Hz (mode 1), 1→12 Hz (mode 2), 2→96 Hz (mode 3). Mode 0 = off.
-const HPF_CUTOFFS = ['1 Hz', '12 Hz', '96 Hz'];
-
-function SettingsModal({
-  visible,
-  onClose,
-  sources,
-  discoverable,
-  onConnectSource,
-  onForgetSource,
-  onCommand,
-  audioConnected,
-  songs,
-  instruments,
-  synth,
-  onPlaySong,
-  onStopSong,
-  loop,
-  onToggleLoop,
-  drums,
-  drumManifest,
-  onPlayDrumFile,
-  drumKits,
-  drumGroove,
-  onSelectDrum,
-  onPlayDrum,
-  onStopDrum,
-  drumKit,
-  onSelectDrumKit,
-  drumVol,
-  onPreviewDrumVol,
-  onCommitDrumVol,
-  bpm,
-  onPreviewBpm,
-  onCommitBpm,
-  drumSynchro,
-  onToggleSynchro,
-  arpOn,
-  onToggleArp,
-  arpPattern,
-  onSelectArpPattern,
-  arpRate,
-  onSelectArpRate,
-  arpOct,
-  onSelectArpOct,
-  arpLatch,
-  onToggleArpLatch,
-  isGM,
-  kitsOk,
-  pressMask,
-  onTogglePressBit,
-  modMask,
-  onToggleModBit,
-  timbreMask,
-  onToggleTimbreBit,
-  lfoForce,
-  onSetLfoForce,
-  dxVoice,
-  onSelectVoice,
-  song,
-  onSelectSong,
-  onRefreshCatalog,
-  hpfOn,
-  hpfCutIdx,
-  onToggleHpf,
-  onSelectHpfCut,
-  mpe,
-  onToggleMpe,
-  rg,
-  onToggleRg,
-}: {
-  visible: boolean;
-  onClose: () => void;
-  sources: TdspSource[];
-  discoverable: boolean;
-  onConnectSource: (addr: string) => void;
-  onForgetSource: (addr: string) => void;
-  onCommand: (op: number) => void;
-  audioConnected: boolean;
-  songs: string[];
-  instruments: string[];
-  synth: SynthInfo;
-  onPlaySong: (index: number) => void;
-  onStopSong: () => void;
-  loop: boolean;
-  onToggleLoop: () => void;
-  drums: string[];
-  drumManifest: DrumGroove[];
-  onPlayDrumFile: (filename: string) => void;
-  drumKits: string[];
-  drumGroove: number;
-  onSelectDrum: (index: number) => void;
-  onPlayDrum: (index: number) => void;
-  onStopDrum: () => void;
-  drumKit: number;
-  onSelectDrumKit: (index: number) => void;
-  drumVol: number;
-  onPreviewDrumVol: (pct: number) => void;
-  onCommitDrumVol: (pct: number) => void;
-  bpm: number;
-  onPreviewBpm: (bpm: number) => void;
-  onCommitBpm: (bpm: number) => void;
-  drumSynchro: boolean;
-  onToggleSynchro: () => void;
-  arpOn: boolean;
-  onToggleArp: () => void;
-  arpPattern: number;
-  onSelectArpPattern: (idx: number) => void;
-  arpRate: number;
-  onSelectArpRate: (idx: number) => void;
-  arpOct: number;
-  onSelectArpOct: (oct: number) => void;
-  arpLatch: boolean;
-  onToggleArpLatch: () => void;
-  isGM: boolean;
-  kitsOk: boolean;
-  pressMask: number;
-  onTogglePressBit: (bit: number) => void;
-  modMask: number;
-  onToggleModBit: (bit: number) => void;
-  timbreMask: number;
-  onToggleTimbreBit: (bit: number) => void;
-  lfoForce: boolean;
-  onSetLfoForce: (force: boolean) => void;
-  dxVoice: number;
-  onSelectVoice: (index: number) => void;
-  song: number;
-  onSelectSong: (index: number) => void;
-  onRefreshCatalog: () => void;
-  hpfOn: boolean;
-  hpfCutIdx: number;
-  onToggleHpf: () => void;
-  onSelectHpfCut: (index: number) => void;
-  mpe: boolean;
-  onToggleMpe: () => void;
-  rg: boolean;
-  onToggleRg: () => void;
-}) {
-  const [pane, setPane] = useState<SettingsPane>('menu');
-
-  // Always reopen on the top-level menu.
-  const close = () => {
-    setPane('menu');
-    onClose();
-  };
-  const title =
-    pane === 'bluetooth' ? 'Bluetooth'
-      : pane === 'midi' ? 'MIDI'
-        : pane === 'drums' ? 'Drums'
-          : pane === 'arp' ? 'Arpeggiator'
-            : pane === 'tac5212' ? 'TAC5212'
-            : 'Settings';
-
-  return (
-    <Modal visible={visible} animationType="slide" onRequestClose={close}>
-      <SafeAreaView style={styles.screen}>
-        <View style={styles.header}>
-          {pane === 'menu' ? (
-            <Text style={styles.title}>{title}</Text>
-          ) : (
-            <Pressable onPress={() => setPane('menu')} hitSlop={14} style={styles.backBtn}>
-              <Text style={styles.icon}>‹</Text>
-              <Text style={styles.backTitle}>{title}</Text>
-            </Pressable>
-          )}
-          <Pressable onPress={close} hitSlop={14} style={styles.iconBtn}>
-            <Text style={styles.icon}>✕</Text>
-          </Pressable>
-        </View>
-
-        <ScrollView contentContainerStyle={styles.settingsBody}>
-          {pane === 'menu' && (
-            <>
-              <MenuRow label="Bluetooth" detail="Pairing & paired sources" onPress={() => setPane('bluetooth')} />
-              <MenuRow label="MIDI" detail={`${synth.name} synth`} onPress={() => setPane('midi')} />
-              <MenuRow
-                label="Drums"
-                detail={drums.length ? `${drums.length} grooves` : 'Add grooves via USB'}
-                onPress={() => setPane('drums')}
-              />
-              <MenuRow label="Arpeggiator" detail="Step held notes to the BPM" onPress={() => setPane('arp')} />
-              <MenuRow label="TAC5212" detail="Codec highpass filter" onPress={() => setPane('tac5212')} />
-            </>
-          )}
-
-          {pane === 'bluetooth' && (
-            <>
-              <Text style={styles.sectionLabel}>Bluetooth Audio</Text>
-              <Text style={styles.dim}>
-                {audioConnected ? 'A source is connected and streaming.' : 'No source connected.'}
-              </Text>
-              <View style={{ height: 10 }} />
-              <SecondaryButton
-                label={audioConnected ? 'Disconnect Bluetooth Audio' : 'Reconnect Last Source'}
-                onPress={() => onCommand(audioConnected ? CMD.DISCONNECT : CMD.RECONNECT)}
-              />
-
-              <Text style={styles.sectionLabel}>Paired Sources</Text>
-              {sources.length === 0 ? (
-                <Text style={styles.dim}>
-                  No paired phones yet. Use “Enter Pairing Mode” below, then pair T-DSP from your phone’s
-                  Bluetooth settings.
-                </Text>
-              ) : (
-                sources.map((s) => (
-                  <SourceRow
-                    key={s.a}
-                    source={s}
-                    onConnect={() => onConnectSource(s.a)}
-                    onForget={() => onForgetSource(s.a)}
-                  />
-                ))
-              )}
-
-              <Text style={styles.sectionLabel}>Pairing</Text>
-              {discoverable && <Text style={styles.pairingHint}>● In pairing mode — discoverable as “T-DSP”</Text>}
-              <SecondaryButton
-                label={discoverable ? 'End Pairing Mode' : 'Enter Pairing Mode'}
-                onPress={() => onCommand(discoverable ? CMD.END_PAIRING : CMD.PAIRING_MODE)}
-              />
-            </>
-          )}
-
-          {pane === 'midi' && (
-            <>
-              <Text style={styles.sectionLabel}>{synth.name}</Text>
-              <Text style={styles.dim}>{synth.description}</Text>
-
-              <Text style={styles.sectionLabel}>Input Mode</Text>
-              <Text style={styles.dim}>
-                MPE gives per-note pitch bend + pressure for expressive controllers
-                (e.g. LinnStrument over USB or DIN). Normal MIDI keeps channel 10 as GM drums.
-              </Text>
-              <View style={{ height: 10 }} />
-              <SecondaryButton
-                label={mpe ? 'Mode: MPE (per-note expression)' : 'Mode: Normal MIDI'}
-                onPress={onToggleMpe}
-              />
-
-              <Text style={styles.sectionLabel}>Loudness</Text>
-              <Text style={styles.dim}>
-                ReplayGain evens out perceived loudness across voices and GM programs
-                (K-weighted). Off plays the synth's raw output.
-              </Text>
-              <View style={{ height: 10 }} />
-              <SecondaryButton
-                label={rg ? 'ReplayGain: On' : 'ReplayGain: Off'}
-                onPress={onToggleRg}
-              />
-
-              <Text style={styles.sectionLabel}>Expression — controller → sound</Text>
-
-              <Text style={styles.dim}>Mod Wheel (every keyboard)</Text>
-              <SecondaryButton label={`${modMask & 4 ? '☑' : '☐'}  Mod Wheel → Vibrato`} onPress={() => onToggleModBit(4)} />
-              <SecondaryButton label={`${modMask & 8 ? '☑' : '☐'}  Mod Wheel → Tremolo`} onPress={() => onToggleModBit(8)} />
-              <SecondaryButton label={`${modMask & 2 ? '☑' : '☐'}  Mod Wheel → Brightness`} onPress={() => onToggleModBit(2)} />
-
-              <View style={{ height: 10 }} />
-              <Text style={styles.dim}>Timbre — CC74 slide (MPE Y-axis)</Text>
-              <SecondaryButton label={`${timbreMask & 1 ? '☑' : '☐'}  Timbre → Volume`} onPress={() => onToggleTimbreBit(1)} />
-              <SecondaryButton label={`${timbreMask & 2 ? '☑' : '☐'}  Timbre → Brightness`} onPress={() => onToggleTimbreBit(2)} />
-              <SecondaryButton label={`${timbreMask & 4 ? '☑' : '☐'}  Timbre → Vibrato`} onPress={() => onToggleTimbreBit(4)} />
-              <SecondaryButton label={`${timbreMask & 8 ? '☑' : '☐'}  Timbre → Tremolo`} onPress={() => onToggleTimbreBit(8)} />
-
-              <View style={{ height: 10 }} />
-              <Text style={styles.dim}>Pressure (aftertouch / MPE Z)</Text>
-              <SecondaryButton label={`${pressMask & 1 ? '☑' : '☐'}  Pressure → Volume`} onPress={() => onTogglePressBit(1)} />
-              <SecondaryButton label={`${pressMask & 2 ? '☑' : '☐'}  Pressure → Brightness`} onPress={() => onTogglePressBit(2)} />
-              <SecondaryButton label={`${pressMask & 4 ? '☑' : '☐'}  Pressure → Vibrato`} onPress={() => onTogglePressBit(4)} />
-              <SecondaryButton label={`${pressMask & 8 ? '☑' : '☐'}  Pressure → Tremolo`} onPress={() => onTogglePressBit(8)} />
-
-              <View style={{ height: 10 }} />
-              <Text style={styles.dim}>
-                LFO for Vibrato/Tremolo. Force = works on any patch; Respect = only instruments tagged [V]/[T].
-              </Text>
-              <SecondaryButton
-                label={lfoForce ? 'LFO: Force on any patch' : 'LFO: Respect patch [V]/[T]'}
-                onPress={() => onSetLfoForce(!lfoForce)}
-              />
-
-              <Text style={styles.sectionLabel}>Song</Text>
-              <Dropdown label="Song" options={songs} value={song} onSelect={onSelectSong} />
-              <View style={{ height: 8 }} />
-              <PrimaryButton label={`▶  Play ${songs[song] ?? 'Song'}`} onPress={() => onPlaySong(song)} />
-              <SecondaryButton label="Stop" onPress={onStopSong} />
-              <SecondaryButton label={loop ? '☑  Loop: On' : '☐  Loop: Off'} onPress={onToggleLoop} />
-              <SecondaryButton label="↻  Refresh Songs (after adding via USB)" onPress={onRefreshCatalog} />
-
-              <Text style={styles.sectionLabel}>Instrument</Text>
-              <Dropdown label="Instrument" options={instruments} value={dxVoice} onSelect={onSelectVoice} />
-              <Stepper
-                count={instruments.length}
-                value={dxVoice}
-                onStep={(i) => onSelectVoice(i)}
-              />
-            </>
-          )}
-
-          {pane === 'drums' && (
-            <>
-              <Text style={styles.dim}>
-                A looping drum groove plays under whatever you perform live on the keyboard, through the
-                current engine. OPLL renders 5 rhythm sounds; SF2/TSF/OPL3 play every drum.
-              </Text>
-              {!isGM && (
-                <Text style={styles.pairingHint}>
-                  ⚠ {synth.name} has no channel-10 drum map — grooves stay silent. Flash an OPLL / OPL3 / SF2 / TSF build.
-                </Text>
-              )}
-
-              <StepSlider
-                label="Tempo"
-                unit=" bpm"
-                value={bpm}
-                min={60}
-                max={200}
-                step={5}
-                onPreview={onPreviewBpm}
-                onCommit={onCommitBpm}
-              />
-              <Text style={styles.dim}>One tempo for the song AND the drums — they lock together and move as you drag.</Text>
-              <SecondaryButton
-                label={drumSynchro ? '☑  Synchro start — begin on your first note' : '☐  Synchro start — begin on Play'}
-                onPress={onToggleSynchro}
-              />
-
-              <Text style={styles.sectionLabel}>Groove</Text>
-              {drumManifest.length > 0 ? (
-                // Rich manifest available → the two-axis Genre/Pack browser.
-                <DrumBrowser manifest={drumManifest} onPlay={onPlayDrumFile} onStop={onStopDrum} />
-              ) : drums.length === 0 ? (
-                <Text style={styles.dim}>
-                  No grooves on the SD card yet. Add them with tools/fetch_drums.py (they land in /drums),
-                  then tap “Refresh” below.
-                </Text>
-              ) : (
-                // Fallback: older firmware without the manifest → flat groove list.
-                <>
-                  <Dropdown label="Groove" options={drums} value={drumGroove} onSelect={onSelectDrum} />
-                  <Stepper count={drums.length} value={drumGroove} onStep={onSelectDrum} />
-                  <View style={{ height: 8 }} />
-                  <PrimaryButton
-                    label={`▶  Play ${drums[drumGroove] ?? 'Groove'}`}
-                    onPress={() => onPlayDrum(drumGroove)}
-                  />
-                  <SecondaryButton label="Stop" onPress={onStopDrum} />
-                </>
-              )}
-              <SecondaryButton label="↻  Refresh Grooves (after adding via USB)" onPress={onRefreshCatalog} />
-
-              <Text style={styles.sectionLabel}>Instrument (kit)</Text>
-              {kitsOk ? (
-                <>
-                  <Dropdown label="Kit" options={drumKits} value={drumKit} onSelect={onSelectDrumKit} />
-                  <Stepper count={drumKits.length} value={drumKit} onStep={onSelectDrumKit} />
-                </>
-              ) : (
-                <Text style={styles.dim}>
-                  {synth.name} has one fixed rhythm set — GM drum kits (Standard/Room/Power/…) apply only on
-                  the SF2/TSF soundfont engines.
-                </Text>
-              )}
-
-              <StepSlider
-                label="Volume"
-                value={drumVol}
-                min={0}
-                max={150}
-                step={5}
-                onPreview={onPreviewDrumVol}
-                onCommit={onCommitDrumVol}
-              />
-            </>
-          )}
-
-          {pane === 'arp' && (
-            <>
-              <SecondaryButton
-                label={arpOn ? '☑  Arpeggiator On' : '☐  Arpeggiator Off'}
-                onPress={onToggleArp}
-              />
-              <Text style={styles.dim}>
-                Hold a chord and it repeats in the chosen pattern, locked to the master BPM. Needs live MIDI
-                notes (a keyboard) — it does not arpeggiate the backing song or drum groove.
-              </Text>
-              <Text style={styles.sectionLabel}>Pattern</Text>
-              <Dropdown label="Pattern" options={[...ARP_PATTERNS]} value={arpPattern} onSelect={onSelectArpPattern} />
-              <Text style={styles.sectionLabel}>Rate</Text>
-              <Dropdown label="Rate" options={[...ARP_RATES]} value={arpRate} onSelect={onSelectArpRate} />
-              <Text style={styles.sectionLabel}>Octaves</Text>
-              <Dropdown
-                label="Octaves"
-                options={['1', '2', '3', '4']}
-                value={arpOct - 1}
-                onSelect={(i) => onSelectArpOct(i + 1)}
-              />
-              <View style={{ height: 8 }} />
-              <SecondaryButton
-                label={arpLatch ? '☑  Latch — keep arpeggiating after release' : '☐  Latch'}
-                onPress={onToggleArpLatch}
-              />
-            </>
-          )}
-
-          {pane === 'tac5212' && (
-            <>
-              <Text style={styles.sectionLabel}>Highpass Filter</Text>
-              <Text style={styles.dim}>
-                Removes low-frequency rumble from the DAC output. Off passes the full range through.
-              </Text>
-              <View style={{ height: 10 }} />
-              <SecondaryButton
-                label={hpfOn ? 'Highpass: On' : 'Highpass: Off'}
-                onPress={onToggleHpf}
-              />
-
-              {hpfOn && (
-                <>
-                  <Text style={styles.sectionLabel}>Cutoff</Text>
-                  <Dropdown label="Cutoff" options={HPF_CUTOFFS} value={hpfCutIdx} onSelect={onSelectHpfCut} />
-                </>
-              )}
-            </>
-          )}
-        </ScrollView>
-      </SafeAreaView>
-    </Modal>
-  );
-}
-
-function MenuRow({ label, detail, onPress }: { label: string; detail: string; onPress: () => void }) {
-  return (
-    <Pressable style={({ pressed }) => [styles.menuRow, pressed && styles.btnPressed]} onPress={onPress}>
-      <View style={{ flex: 1 }}>
-        <Text style={styles.menuLabel}>{label}</Text>
-        <Text style={styles.menuDetail}>{detail}</Text>
-      </View>
-      <Text style={styles.menuChevron}>›</Text>
-    </Pressable>
-  );
-}
-
-// Collapsible dropdown: a header row showing the current value that expands the
-// option list on tap and collapses again on select (pure JS, no native picker).
-function Dropdown({
-  label,
-  options,
-  value,
-  onSelect,
-}: {
-  label: string;
-  options: string[];
-  value: number;
-  onSelect: (index: number) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <View>
-      <Pressable style={({ pressed }) => [styles.menuRow, pressed && styles.btnPressed]} onPress={() => setOpen((o) => !o)}>
-        <View style={{ flex: 1 }}>
-          <Text style={styles.menuDetail}>{label}</Text>
-          <Text style={styles.menuLabel}>{options[value] ?? '—'}</Text>
-        </View>
-        <Text style={styles.menuChevron}>{open ? '▾' : '▸'}</Text>
-      </Pressable>
-      {open &&
-        options.map((opt, i) => (
-          <InstrumentRow
-            key={opt}
-            name={opt}
-            selected={i === value}
-            onPress={() => {
-              onSelect(i);
-              setOpen(false);
-            }}
-          />
-        ))}
+        {/* TAC5212 */}
+        <Accordion title="TAC5212" id="codec" onMeasure={measureY} open={openId === 'codec'} onPress={() => toggle('codec')}>
+          <Text style={s.muted}>Codec routing + trims. (Controls added as the command set lands.) Master output is the header volume.</Text>
+        </Accordion>
+        </>}
+      </ScrollView>
     </View>
   );
 }
 
-// Prev/next stepper (‹ ›) for quickly walking through options without opening the
-// dropdown. Wraps around at the ends. Disabled when there are fewer than 2 options.
-function Stepper({ count, value, onStep }: { count: number; value: number; onStep: (index: number) => void }) {
-  const disabled = count < 2;
-  const go = (delta: number) => {
-    if (disabled) return;
-    onStep((value + delta + count) % count);
-  };
-  return (
-    <View style={styles.stepperRow}>
-      <Pressable
-        disabled={disabled}
-        onPress={() => go(-1)}
-        style={({ pressed }) => [styles.stepBtn, disabled && styles.btnDisabled, pressed && styles.btnPressed]}
-      >
-        <Text style={styles.stepBtnText}>‹</Text>
-      </Pressable>
-      <Pressable
-        disabled={disabled}
-        onPress={() => go(1)}
-        style={({ pressed }) => [styles.stepBtn, disabled && styles.btnDisabled, pressed && styles.btnPressed]}
-      >
-        <Text style={styles.stepBtnText}>›</Text>
-      </Pressable>
-    </View>
-  );
-}
-
-// A slider with tap −/+ buttons on either side that nudge by `step` and commit
-// immediately. onPreview updates the on-screen value live (drag or tap); onCommit
-// sends to the device (slide-release or a tap). Used for drum volume.
-function StepSlider({
-  label,
-  unit = '%',
-  value,
-  min,
-  max,
-  step,
-  onPreview,
-  onCommit,
-}: {
-  label: string;
-  unit?: string;
-  value: number;
-  min: number;
-  max: number;
-  step: number;
-  onPreview: (v: number) => void;
-  onCommit: (v: number) => void;
-}) {
-  const bump = (delta: number) => {
-    const v = Math.max(min, Math.min(max, value + delta));
-    if (v === value) return;
-    onPreview(v);
-    onCommit(v);
-  };
-  return (
-    <>
-      <Text style={styles.sectionLabel}>
-        {label} — {value}
-        {unit}
-      </Text>
-      <View style={styles.adjustRow}>
-        <Pressable
-          onPress={() => bump(-step)}
-          style={({ pressed }) => [styles.adjBtn, value <= min && styles.btnDisabled, pressed && styles.btnPressed]}
-          disabled={value <= min}
-        >
-          <Text style={styles.adjBtnText}>−</Text>
-        </Pressable>
-        <Slider
-          style={styles.adjSlider}
-          minimumValue={min}
-          maximumValue={max}
-          step={step}
-          value={value}
-          onValueChange={onPreview}
-          onSlidingComplete={onCommit}
-          minimumTrackTintColor="#238636"
-          maximumTrackTintColor="#30363d"
-          thumbTintColor="#3fb950"
-        />
-        <Pressable
-          onPress={() => bump(step)}
-          style={({ pressed }) => [styles.adjBtn, value >= max && styles.btnDisabled, pressed && styles.btnPressed]}
-          disabled={value >= max}
-        >
-          <Text style={styles.adjBtnText}>+</Text>
-        </Pressable>
-      </View>
-    </>
-  );
-}
-
-function InstrumentRow({ name, selected, onPress }: { name: string; selected: boolean; onPress: () => void }) {
-  return (
-    <Pressable style={({ pressed }) => [styles.instRow, selected && styles.instRowOn, pressed && styles.btnPressed]} onPress={onPress}>
-      <Text style={[styles.instName, selected && styles.instNameOn]}>{name}</Text>
-      {selected && <Text style={styles.instCheck}>✓</Text>}
-    </Pressable>
-  );
-}
-
-function SourceRow({
-  source,
-  onConnect,
-  onForget,
-}: {
-  source: TdspSource;
-  onConnect: () => void;
-  onForget: () => void;
-}) {
-  return (
-    <View style={styles.srcRow}>
-      <Pressable style={styles.srcMain} onPress={source.c ? undefined : onConnect} disabled={source.c}>
-        <Text style={styles.srcName} numberOfLines={1}>
-          {source.n}
-        </Text>
-        <Text style={[styles.srcState, source.c && styles.srcStateOn]}>
-          {source.c ? '● connected' : 'tap to connect'}
-        </Text>
-      </Pressable>
-      <Pressable style={styles.srcForget} onPress={onForget} hitSlop={8}>
-        <Text style={styles.srcForgetTxt}>Forget</Text>
-      </Pressable>
-    </View>
-  );
-}
-
-function ConnCard({
-  state,
-  btReady,
-  status,
-}: {
-  state: ConnState;
-  btReady: boolean;
-  status: ReturnType<typeof useTdsp>['status'];
-}) {
-  const line =
-    state === 'connected'
-      ? 'Connected'
-      : state === 'connecting'
-        ? 'Connecting…'
-        : state === 'scanning'
-          ? 'Scanning…'
-          : btReady
-            ? 'Not connected'
-            : 'Bluetooth off';
-  return (
-    <View style={styles.card}>
-      <Row label="Link" value={line} />
-      {state === 'connected' && (
-        <>
-          <Row label="Audio source" value={status?.conn ? status.peer || 'connected' : 'none'} />
-          <Row label="Pairing mode" value={status?.disc ? 'ON — discoverable' : 'off'} highlight={status?.disc} />
-        </>
-      )}
-    </View>
-  );
-}
-
-function VolumeControl({ value, onChange }: { value: number; onChange: (v: number) => void }) {
-  return (
-    <View style={styles.volCard}>
-      <View style={styles.volHeader}>
-        <Text style={styles.volLabel}>Headphone Volume</Text>
-        <Text style={styles.volValue}>{Math.round(value)}%</Text>
-      </View>
-      <Slider
-        style={styles.slider}
-        minimumValue={0}
-        maximumValue={100}
-        step={1}
-        value={value}
-        onValueChange={onChange}
-        minimumTrackTintColor="#238636"
-        maximumTrackTintColor="#30363d"
-        thumbTintColor="#3fb950"
-      />
-    </View>
-  );
-}
-
-function Row({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
-  return (
-    <View style={styles.row}>
-      <Text style={styles.rowLabel}>{label}</Text>
-      <Text style={[styles.rowValue, highlight ? styles.rowValueHot : null]}>{value}</Text>
-    </View>
-  );
-}
-
-function PrimaryButton({
-  label,
-  onPress,
-  busy,
-  disabled,
-}: {
-  label: string;
-  onPress: () => void;
-  busy?: boolean;
-  disabled?: boolean;
-}) {
-  return (
-    <Pressable
-      onPress={onPress}
-      disabled={disabled}
-      style={({ pressed }) => [styles.btn, styles.btnPrimary, disabled ? styles.btnDisabled : null, pressed && styles.btnPressed]}
-    >
-      {busy ? <ActivityIndicator color="#fff" /> : <Text style={styles.btnPrimaryText}>{label}</Text>}
-    </Pressable>
-  );
-}
-
-function SecondaryButton({ label, onPress }: { label: string; onPress: () => void }) {
-  return (
-    <Pressable onPress={onPress} style={({ pressed }) => [styles.btn, styles.btnSecondary, pressed && styles.btnPressed]}>
-      <Text style={styles.btnSecondaryText}>{label}</Text>
-    </Pressable>
-  );
-}
-
-const styles = StyleSheet.create({
-  screen: { flex: 1, backgroundColor: '#0d1117', paddingHorizontal: 24, paddingTop: 60 },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 24 },
-  headerText: { flex: 1 },
-  title: { color: '#fff', fontSize: 32, fontWeight: '700' },
-  subtitle: { color: '#8b949e', fontSize: 15, marginTop: 2 },
-  iconBtn: { padding: 6 },
-  icon: { color: '#e6edf3', fontSize: 26, fontWeight: '700' },
-  card: { backgroundColor: '#161b22', borderRadius: 14, padding: 18, marginBottom: 28, borderWidth: 1, borderColor: '#21262d' },
-  volCard: { backgroundColor: '#161b22', borderRadius: 14, paddingHorizontal: 18, paddingVertical: 14, marginBottom: 16, borderWidth: 1, borderColor: '#21262d' },
-  volHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
-  volLabel: { color: '#e6edf3', fontSize: 16, fontWeight: '600' },
-  volValue: { color: '#3fb950', fontSize: 16, fontWeight: '700' },
-  slider: { width: '100%', height: 40 },
-  row: { flexDirection: 'row', justifyContent: 'space-between', paddingVertical: 6 },
-  rowLabel: { color: '#8b949e', fontSize: 15 },
-  rowValue: { color: '#e6edf3', fontSize: 15, fontWeight: '600' },
-  rowValueHot: { color: '#3fb950' },
-  btn: { borderRadius: 12, paddingVertical: 16, alignItems: 'center', marginBottom: 12 },
-  btnPrimary: { backgroundColor: '#238636' },
-  btnPrimaryText: { color: '#fff', fontSize: 17, fontWeight: '700' },
-  btnSecondary: { backgroundColor: '#21262d' },
-  btnSecondaryText: { color: '#e6edf3', fontSize: 16, fontWeight: '600' },
-  btnDisabled: { opacity: 0.4 },
-  btnPressed: { opacity: 0.7 },
-  warn: { color: '#d29922', fontSize: 14, marginTop: 8 },
-  error: { color: '#f85149', fontSize: 14, marginTop: 12 },
-  settingsBody: { paddingBottom: 40 },
-  backBtn: { flexDirection: 'row', alignItems: 'center', flex: 1 },
-  backTitle: { color: '#fff', fontSize: 32, fontWeight: '700', marginLeft: 4 },
-  menuRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#161b22', borderRadius: 12, borderWidth: 1, borderColor: '#21262d', paddingVertical: 16, paddingHorizontal: 16, marginBottom: 12 },
-  menuLabel: { color: '#e6edf3', fontSize: 17, fontWeight: '600' },
-  menuDetail: { color: '#8b949e', fontSize: 13, marginTop: 2 },
-  menuChevron: { color: '#6e7681', fontSize: 24, fontWeight: '700' },
-  instRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: '#161b22', borderRadius: 12, borderWidth: 1, borderColor: '#21262d', paddingVertical: 14, paddingHorizontal: 16, marginBottom: 10 },
-  instRowOn: { borderColor: '#238636', backgroundColor: '#12261a' },
-  instName: { color: '#e6edf3', fontSize: 16, fontWeight: '600' },
-  instNameOn: { color: '#3fb950' },
-  instCheck: { color: '#3fb950', fontSize: 18, fontWeight: '700' },
-  stepperRow: { flexDirection: 'row', gap: 10, marginTop: 10 },
-  stepBtn: { flex: 1, backgroundColor: '#21262d', borderRadius: 12, paddingVertical: 12, alignItems: 'center' },
-  stepBtnText: { color: '#e6edf3', fontSize: 22, fontWeight: '700' },
-  adjustRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  adjSlider: { flex: 1, height: 40 },
-  adjBtn: { width: 48, backgroundColor: '#21262d', borderRadius: 12, paddingVertical: 10, alignItems: 'center' },
-  adjBtnText: { color: '#e6edf3', fontSize: 24, fontWeight: '700' },
-  sectionLabel: { color: '#8b949e', fontSize: 13, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 1, marginTop: 18, marginBottom: 10 },
-  dim: { color: '#6e7681', fontSize: 14, lineHeight: 20 },
-  pairingHint: { color: '#3fb950', fontSize: 13, fontWeight: '600', marginBottom: 10 },
-  srcRow: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#161b22', borderRadius: 12, borderWidth: 1, borderColor: '#21262d', marginBottom: 10 },
-  srcMain: { flex: 1, paddingVertical: 14, paddingHorizontal: 16 },
-  srcName: { color: '#e6edf3', fontSize: 16, fontWeight: '600' },
-  srcState: { color: '#8b949e', fontSize: 13, marginTop: 2 },
-  srcStateOn: { color: '#3fb950', fontWeight: '700' },
-  srcForget: { paddingVertical: 14, paddingHorizontal: 16 },
-  srcForgetTxt: { color: '#f85149', fontSize: 14, fontWeight: '600' },
+const s = StyleSheet.create({
+  app: { flex: 1, backgroundColor: C.bg, paddingTop: Platform.OS === 'web' ? 0 : 34 },
+  header: { paddingHorizontal: 14, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: C.border, backgroundColor: C.bg },
+  brandRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  dot: { width: 11, height: 11, borderRadius: 6, backgroundColor: '#da3633' },
+  dotOn: { backgroundColor: C.accent },
+  brand: { color: C.text, fontWeight: '800', fontSize: 18, letterSpacing: 0.5 },
+  statline: { color: C.muted, fontSize: 12, marginTop: 3 },
+  volRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
+  volLbl: { color: C.muted, fontSize: 11, width: 26 },
+  volVal: { color: C.text, fontSize: 13, width: 28, textAlign: 'right' },
+  card: { backgroundColor: C.card, borderWidth: 1, borderColor: C.border, borderRadius: 10, marginHorizontal: 10, marginTop: 8, overflow: 'hidden' },
+  drawer: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, paddingVertical: 11 },
+  drawerLeft: { flex: 1, gap: 2 },
+  drawerTitle: { color: C.text, fontWeight: '600', fontSize: 15 },
+  drawerValue: { color: C.accent, fontSize: 14, fontWeight: '600' },
+  tag: { color: C.muted, fontSize: 12, backgroundColor: C.chip, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10, overflow: 'hidden', alignSelf: 'flex-start' },
+  chev: { color: C.muted, fontSize: 20, marginLeft: 'auto' },
+  chevOpen: { transform: [{ rotate: '90deg' }] },
+  body: { paddingHorizontal: 14, paddingBottom: 14, gap: 8 },
+  row: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
+  muted: { color: C.muted, fontSize: 13 },
+  text: { color: C.text, fontSize: 14 },
+  btn: { backgroundColor: '#238636', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 7, alignItems: 'center' },
+  btnWide: { marginTop: 4 },
+  grow1: { flex: 1 },
+  hdrActionsRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, paddingHorizontal: 14, paddingBottom: 12, marginTop: -2 },
+  hdrBtn: { backgroundColor: '#238636', paddingVertical: 9, borderRadius: 6, marginLeft: 5, minWidth: 84, alignItems: 'center' },
+  hdrBtnStop: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
+  hdrBtnText: { color: C.text, fontSize: 15, fontWeight: '700' },
+  btnGhost: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
+  btnText: { color: C.text, fontSize: 13, fontWeight: '600' },
+  input: { backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 7, color: C.text, paddingHorizontal: 10, paddingVertical: 8, fontSize: 14 },
+  list: { maxHeight: 300, borderWidth: 1, borderColor: C.border, borderRadius: 7 },
+  listBtn: { paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.border },
+  listBtnSel: { backgroundColor: C.sel },
+  pill: { backgroundColor: C.chip, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14 },
+  pillOn: { backgroundColor: C.sel, borderWidth: 1, borderColor: C.accent },
+  statGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  stat: { backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 8, paddingVertical: 10, paddingHorizontal: 12, minWidth: 96, flexGrow: 1, alignItems: 'center' },
+  statN: { color: C.text, fontSize: 22, fontWeight: '800' },
+  statL: { color: C.muted, fontSize: 12, marginTop: 2 },
+  statSub: { color: C.accent, fontSize: 11, marginTop: 1 },
 });
