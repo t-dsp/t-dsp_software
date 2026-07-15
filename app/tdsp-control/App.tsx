@@ -162,14 +162,25 @@ export default function App() {
   const grooves = useMemo(() => { const t = q.groove.toLowerCase(); return cat.grooves.filter(g => !t || g.name.toLowerCase().includes(t)).slice(0, 500); }, [cat.grooves, q.groove]);
 
   // Lazy /dexed browse: fetch the current folder level via @DXLS whenever the path changes
-  // (skip the synthetic '@bundled' view). A superseded reply is ignored via the `alive` gate.
+  // (skip the synthetic '@bundled' view). @DXLS is paged (32 entries/page), so walk all pages
+  // and concatenate — a folder can hold hundreds of carts. The `alive` gate drops a stale
+  // fetch when the user navigates away mid-walk.
   useEffect(() => {
     if (!loaded || vpath === '@bundled') { setLevel(EMPTY_DIR); return; }
     let alive = true;
     setLibBusy(true);
-    tp.browseDir(vpath).then(d => { if (alive) setLevel(d); })
-      .catch(() => { if (alive) setLevel({ ...EMPTY_DIR, path: vpath }); })
-      .finally(() => { if (alive) setLibBusy(false); });
+    (async () => {
+      try {
+        const first = await tp.browseDir(vpath, 0);
+        let folders = first.folders, carts = first.carts;
+        for (let pg = 1; pg < first.npages && alive; pg++) {
+          const more = await tp.browseDir(vpath, pg);
+          folders = folders.concat(more.folders); carts = carts.concat(more.carts);
+        }
+        if (alive) setLevel({ path: vpath, page: 0, npages: first.npages, folders, carts });
+      } catch { if (alive) setLevel({ ...EMPTY_DIR, path: vpath }); }
+      finally { if (alive) setLibBusy(false); }
+    })();
     return () => { alive = false; };
   }, [vpath, loaded]);
 
