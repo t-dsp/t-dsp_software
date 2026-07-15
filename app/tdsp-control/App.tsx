@@ -3,7 +3,7 @@
 // catalog DB (/tdsp/*.ndjson, built by @REINDEX) is the source of truth; browsing is local,
 // only actions hit the wire. Old single-file UI preserved as App.old.tsx.
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { View, Text, Pressable, ScrollView, FlatList, TextInput, Switch, StyleSheet, ActivityIndicator, Platform, Alert } from 'react-native';
+import { View, Text, Pressable, ScrollView, FlatList, TextInput, Switch, StyleSheet, ActivityIndicator, Platform, Alert, useWindowDimensions } from 'react-native';
 import Slider from '@react-native-community/slider';
 import { createTransport } from './src/transportFactory';
 import { Catalog, EMPTY_CATALOG, loadCatalog, cartRel, Cart } from './src/catalog';
@@ -34,17 +34,23 @@ function notify(msg: string) { if (Platform.OS === 'web') (globalThis as any).al
 // song, BPM, groove…) shown under the title so it's visible collapsed or open.
 function Accordion({ title, status, value, id, onMeasure, open, onPress, headerActions, children }:
   { title: string; status?: string; value?: string; id?: string; onMeasure?: (id: string, y: number) => void; open: boolean; onPress: () => void; headerActions?: React.ReactNode; children?: React.ReactNode }) {
+  const { width } = useWindowDimensions();
+  const narrow = width < 640;   // phone-ish: stack title, value, and controls on their own lines
+  const titleBlock = (
+    <View style={s.drawerLeft}>
+      <Text style={s.drawerTitle}>{title}</Text>
+      {!!value && <Text style={s.drawerValue} numberOfLines={1}>{value}</Text>}
+      {!value && !!status && <Text style={s.tag}>{status}</Text>}
+    </View>
+  );
   return (
     <View style={s.card} onLayout={id && onMeasure ? e => onMeasure(id, e.nativeEvent.layout.y) : undefined}>
       <Pressable style={s.drawer} onPress={onPress}>
-        <View style={s.drawerLeft}>
-          <Text style={s.drawerTitle}>{title}</Text>
-          {!!value && <Text style={s.drawerValue} numberOfLines={1}>{value}</Text>}
-          {!value && !!status && <Text style={s.tag}>{status}</Text>}
-        </View>
-        {headerActions}
+        {titleBlock}
+        {!narrow && headerActions}
         <Text style={[s.chev, open && s.chevOpen]}>›</Text>
       </Pressable>
+      {narrow && !!headerActions && <View style={s.hdrActionsRow}>{headerActions}</View>}
       {open && <View style={s.body}>{children}</View>}
     </View>
   );
@@ -121,9 +127,13 @@ export default function App() {
   const measureY = (id: string, y: number) => { yPos.current[id] = y; };
   useEffect(() => {
     if (!openId) return;
-    // Delay so the layout resettles (the previously-open section collapses, shifting Y).
-    const t = setTimeout(() => scrollRef.current?.scrollTo({ y: Math.max(0, (yPos.current[openId] ?? 0) - 4), animated: true }), 130);
-    return () => clearTimeout(t);
+    // Snap the opened section's header to the top. Fire twice so the final scroll uses
+    // the Y after the layout resettles (the previously-open section collapses, and this
+    // section's body expands, both shifting positions).
+    const go = () => scrollRef.current?.scrollTo({ y: Math.max(0, (yPos.current[openId] ?? 0) - 4), animated: true });
+    const t1 = setTimeout(go, 60);
+    const t2 = setTimeout(go, 220);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
   }, [openId]);
 
   const dexedVoices = useMemo(() => cat.dexed.reduce((n, c) => n + (c.voices?.length || 0), 0), [cat.dexed]);
@@ -376,7 +386,8 @@ const s = StyleSheet.create({
   btn: { backgroundColor: '#238636', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 7, alignItems: 'center' },
   btnWide: { marginTop: 4 },
   grow1: { flex: 1 },
-  hdrBtn: { backgroundColor: '#238636', paddingVertical: 7, borderRadius: 6, marginLeft: 5, minWidth: 84, alignItems: 'center' },
+  hdrActionsRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, paddingHorizontal: 14, paddingBottom: 12, marginTop: -2 },
+  hdrBtn: { backgroundColor: '#238636', paddingVertical: 9, borderRadius: 6, marginLeft: 5, minWidth: 84, alignItems: 'center' },
   hdrBtnStop: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
   hdrBtnText: { color: C.text, fontSize: 15, fontWeight: '700' },
   btnGhost: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
