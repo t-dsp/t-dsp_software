@@ -73,6 +73,18 @@
   </div>
 
   <div class="card">
+    <h2>Tempo</h2>
+    <label>BPM <span id="bpm-val" style="color:#8b93a1">120</span></label>
+    <div class="row">
+      <button id="bpm-dn" class="ghost step" disabled>−</button>
+      <input type="range" id="bpm" min="60" max="200" step="1" value="120" style="flex:6" disabled>
+      <button id="bpm-up" class="ghost step" disabled>+</button>
+    </div>
+    <p class="note">One tempo for the MIDI song AND the drum groove — they lock together and move
+      as you drag. Accurate lock needs a song with real tempo (an SD .mid); built-in demos are estimated.</p>
+  </div>
+
+  <div class="card">
     <h2>Song</h2>
     <div class="row">
       <select id="song" disabled></select>
@@ -90,17 +102,28 @@
   <div class="card">
     <h2>Drums</h2>
     <label>Groove</label>
+    <div class="row" id="drum-sort" style="gap:6px; margin-bottom:8px">
+      <button class="ghost step active" data-sort="genre" disabled style="flex:1">By Genre</button>
+      <button class="ghost step" data-sort="pack" disabled style="flex:1">By Pack</button>
+    </div>
     <div class="row">
+      <select id="drum-bank" disabled title="Browse a bank (All = every groove)"></select>
+    </div>
+    <div class="row" style="margin-top:8px">
       <select id="drum" disabled></select>
     </div>
     <div class="row" style="margin-top:8px">
       <button id="drum-prev" class="ghost" disabled>◀ Prev</button>
       <button id="drum-next" class="ghost" disabled>Next ▶</button>
+      <span id="drum-count" class="note" style="margin-left:auto; align-self:center"></span>
     </div>
     <div class="row" style="margin-top:8px">
       <button id="drum-play" disabled>Play</button>
       <button id="drum-stop" class="ghost" disabled>Stop</button>
     </div>
+    <label style="display:flex; align-items:center; gap:6px; margin-top:8px; font-size:13px; color:#b8bec9">
+      <input type="checkbox" id="drum-synchro" disabled> Synchro start — begin on your first keyboard note (PSS-140 style)
+    </label>
     <label style="margin-top:12px">Instrument (kit)</label>
     <select id="drum-kit" disabled></select>
     <div class="row" style="margin-top:8px">
@@ -317,8 +340,8 @@ async function disconnect() {
 function setConnected(on) {
   $('dot').classList.toggle('on', on);
   $('connect').textContent = on ? 'Disconnect' : 'Connect';
-  ['vol','song','play','stop','refresh','instr','instr-search','instr-prev','instr-next','hpf','loop',
-   'drum','drum-prev','drum-next','drum-play','drum-stop','drum-kit','drum-kit-prev','drum-kit-next',
+  ['vol','bpm','bpm-dn','bpm-up','song','play','stop','refresh','instr','instr-search','instr-prev','instr-next','hpf','loop',
+   'drum','drum-bank','drum-prev','drum-next','drum-play','drum-stop','drum-synchro','drum-kit','drum-kit-prev','drum-kit-next',
    'drum-speed','drum-vol','drum-speed-dn','drum-speed-up','drum-vol-dn','drum-vol-up',
    'lib-back','lib-refresh','lib-pprev','lib-pnext'].forEach(id => $(id).disabled = !on);
   if (on && !$('drum-kit').options.length) {   // populate the fixed GM kit list once
@@ -328,6 +351,7 @@ function setConnected(on) {
   document.querySelectorAll('.press, .mod, .tim').forEach(c => c.disabled = !on);
   document.querySelectorAll('#lfomode button').forEach(b => b.disabled = !on);
   document.querySelectorAll('#rg button').forEach(b => b.disabled = !on);
+  document.querySelectorAll('#drum-sort button').forEach(b => b.disabled = !on);
   if (!on) $('synth').textContent = '';
 }
 
@@ -361,7 +385,12 @@ async function readLoop() {
 // ---- device -> UI ----
 function handleLine(line) {
   if (line.startsWith('@SONGS=')) { fillSongs(line.slice(7)); }
-  else if (line.startsWith('@DRUMS=')) { fillDrums(line.slice(7)); }
+  else if (line.startsWith('@DRUMS=')) { fillDrums(line.slice(7)); }    // legacy flat list (fallback)
+  else if (line.startsWith('@MANIFESTS=')) { onManifests(line.slice(11)); }
+  else if (line.startsWith('@FB=')) { fileBegin(line.slice(4)); }
+  else if (line.startsWith('@FD=')) { fileData(line.slice(4)); }
+  else if (line.startsWith('@FE=')) { fileEnd(line.slice(4)); }
+  else if (line.startsWith('@FERR=')) { fileErr(line.slice(6)); }
   else if (line.startsWith('@INSTR=')) { fillInstr(line.slice(7)); }
   else if (line.startsWith('@DXLS=')) { fillLibDir(line.slice(6)); }
   else if (line.startsWith('@DXVL=')) { fillLibVoices(line.slice(6)); }
@@ -377,12 +406,108 @@ function fillSongs(payload) {
   sel.innerHTML = names.map((n, i) => `<option value="${i}">${escapeHtml(n)}</option>`).join('');
 }
 
+// LEGACY flat groove list (@DRUMS=name|name|…). Only used as a fallback when the
+// device advertises no drums manifest — the manifest browser (below) supersedes it.
 function fillDrums(payload) {
+  if (drumMode === 'manifest') return;   // manifest owns the list; ignore the legacy line
   const names = payload ? payload.split('|').filter(n => n.length) : [];
   const sel = $('drum');
+  drumMode = 'legacy';
   sel.innerHTML = names.map((n, i) => `<option value="${i}">${escapeHtml(n)}</option>`).join('');
   if (!names.length) $('drum-note').textContent =
     'No grooves on the SD card yet — run tools/fetch_drums.py to add /drums, then Refresh SD.';
+}
+
+// ---- Generic file transfer (@READ -> @FB/@FD/@FE frames, base64) -------------
+// The device streams any SD file as base64 chunks (see CATALOG_TRANSPORT.md). We
+// reassemble by seq, concatenate the base64, and decode once. One in-flight read.
+const US = '\x1f';
+let fileXfer = null;            // { id, path, bytes, chunks:[] }
+let pendingRead = null;        // { path, resolve, reject }
+function readFile(path) {
+  return new Promise((resolve, reject) => {
+    if (pendingRead) { reject(new Error('a file read is already in progress')); return; }
+    pendingRead = { path, resolve, reject };
+    send('@READ=' + path);
+  });
+}
+function fileBegin(s) { const f = s.split(US); fileXfer = { id: f[0], path: f[1], bytes: +f[2], chunks: [] }; }
+function fileData(s)  { const f = s.split(US); if (fileXfer && f[0] === fileXfer.id) fileXfer.chunks[+f[1]] = f[2]; }
+function fileErr(s)   { const f = s.split(US); const p = pendingRead; pendingRead = null; fileXfer = null;
+                        if (p) p.reject(new Error(f[1] || 'read error')); }
+function fileEnd(s) {
+  const f = s.split(US);
+  const p = pendingRead;
+  if (!fileXfer || !p) { fileXfer = null; return; }
+  const count = +f[1];
+  let b64 = '';
+  for (let i = 0; i < count; i++) { if (fileXfer.chunks[i] == null) { pendingRead = null; fileXfer = null; p.reject(new Error('missing chunk ' + i)); return; } b64 += fileXfer.chunks[i]; }
+  let text = '';
+  try {
+    const bin = atob(b64);
+    const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+    text = new TextDecoder().decode(bytes);
+  } catch (e) { pendingRead = null; fileXfer = null; p.reject(e); return; }
+  pendingRead = null; fileXfer = null;
+  p.resolve(text);
+}
+
+// ---- Manifest registry + two-axis drum browser ------------------------------
+// The device tells us which source to browse per role (@MANIFESTS). For the drums
+// role we @READ its catalog.tsv, parse it, and build a Genre/Pack browser entirely
+// client-side — the firmware knows nothing about facets or paging.
+let drumMode = 'legacy';       // 'legacy' (@DRUMS list) | 'manifest' (catalog.tsv)
+let drumCatalog = [];          // [{ filename, pack, genre, bpm, display }]
+let drumSort = 'genre';        // active axis
+let drumBank = 'All';          // active bank within the axis
+
+function onManifests(payload) {
+  const reg = {};
+  payload.split('|').forEach(e => { const [role, src] = e.split(US); if (role) reg[role] = src || ''; });
+  const src = reg.drums || 'none';
+  if (src.startsWith('file:')) {
+    readFile(src.slice(5))
+      .then(text => { drumCatalog = parseCatalog(text); drumMode = 'manifest'; buildDrumBrowser(); })
+      .catch(e => log('drum manifest: ' + e.message));   // leave the legacy list in place
+  }
+}
+
+function parseCatalog(text) {
+  const rows = [];
+  for (const ln of text.split('\n')) {
+    if (!ln || ln[0] === '#') continue;
+    const c = ln.split('\t');
+    if (c.length < 5) continue;
+    rows.push({ filename: c[0], pack: c[1], genre: c[2], bpm: c[3], display: c[4] });
+  }
+  return rows;
+}
+
+function buildDrumBrowser() {
+  // Bank list = the distinct values of the active axis, sorted, with "All" first.
+  const vals = [...new Set(drumCatalog.map(r => r[drumSort]).filter(Boolean))].sort();
+  const banks = ['All', ...vals];
+  if (!banks.includes(drumBank)) drumBank = 'All';
+  $('drum-bank').innerHTML = banks.map(b =>
+    `<option value="${escapeHtml(b)}"${b === drumBank ? ' selected' : ''}>${escapeHtml(b)}${
+      b === 'All' ? ` (${drumCatalog.length})` : ''}</option>`).join('');
+  refreshGrooveList();
+}
+
+function refreshGrooveList() {
+  const rows = (drumBank === 'All' ? drumCatalog : drumCatalog.filter(r => r[drumSort] === drumBank))
+    .slice().sort((a, b) => a.display.localeCompare(b.display));
+  $('drum').innerHTML = rows.map(r =>
+    `<option value="${escapeHtml(r.filename)}">${escapeHtml(r.display)}${
+      r.bpm ? `  ·  ${escapeHtml(r.bpm)} bpm` : ''}</option>`).join('');
+  $('drum-count').textContent = rows.length + (rows.length === 1 ? ' groove' : ' grooves');
+}
+
+// Play the current selection by the mode's addressing: filename (manifest) or index.
+function playCurrentGroove() {
+  const v = $('drum').value;
+  if (v === '') return;
+  send(drumMode === 'manifest' ? '@DRUMF=' + v : '@DRUM=' + v);
 }
 
 // Full instrument list, kept so the search box can filter without re-fetching.
@@ -398,10 +523,16 @@ function fillInstr(payload) {
   const isGM = header.includes('GM');       // streams standard GM program names
   const drumsOk = header.includes('DRUMS'); // renders channel-10 drums (incl. non-GM OPLL)
   $('synth').textContent = name + (desc ? ' — ' + desc : '');
+  // Drum KITS (Standard/Room/Power/…) are GM program-changes on ch10 — only the
+  // soundfont GM engines (TSF/SF2) honor them. OPLL has ONE fixed 5-sound hardware
+  // rhythm section, so its kit selector does nothing. Gate the kit control on GM-ness.
+  const kitsOk = isGM;
+  ['drum-kit', 'drum-kit-prev', 'drum-kit-next'].forEach(id => $(id).disabled = !kitsOk);
   // Drums note reflects the engine's real capability (drumsOk), not GM-ness.
-  $('drum-note').textContent = drumsOk
-    ? 'A looping groove plays under whatever you perform live. OPLL renders 5 rhythm sounds; SF2/TSF/OPL3 play every drum.'
-    : '⚠ ' + name + ' has no channel-10 drum map — grooves are silent. Flash an OPLL / OPL3 / SF2 / TSF build.';
+  $('drum-note').textContent =
+    !drumsOk ? '⚠ ' + name + ' has no channel-10 drum map — grooves are silent. Flash an OPLL / OPL3 / SF2 / TSF build.'
+    : kitsOk ? 'A looping groove plays under whatever you perform live. Pick a kit to change the drum sounds.'
+    : name + ' has ONE fixed rhythm set (5 sounds) — the kit selector applies only to SF2/TSF. Grooves with congas/shakers/toms won’t fully render here.';
   const names = isGM ? GM_NAMES : parts;
   // Group by bank when names arrive as "<bank>: <voice>" (Dexed's full 320-voice
   // set); otherwise a flat list. The <option> value is always the global
@@ -529,12 +660,32 @@ $('lib-pnext').onclick = () => { if (libPage < libNPages - 1) { libPage++; libLo
 // ---- UI -> device ----
 $('vol').oninput = e => { $('vol-val').textContent = e.target.value + '%'; };
 $('vol').onchange = e => send('@VOL=' + e.target.value);
+// Master tempo (BPM) — one knob for the song + the drum groove (they lock).
+$('bpm').oninput = e => { $('bpm-val').textContent = e.target.value; };
+$('bpm').onchange = e => send('@BPM=' + e.target.value);
+function nudgeBpm(d) {
+  const r = $('bpm'), v = Math.max(+r.min, Math.min(+r.max, +r.value + d));
+  if (v === +r.value) return;
+  r.value = v; $('bpm-val').textContent = v; send('@BPM=' + v);
+}
+$('bpm-dn').onclick = () => nudgeBpm(-5);
+$('bpm-up').onclick = () => nudgeBpm(5);
 $('play').onclick = () => send('@SONG=' + $('song').value);
 $('stop').onclick = () => send('@SONG=stop');
 $('loop').onchange = e => send('@LOOP=' + (e.target.checked ? 1 : 0));
 // Drums: groove play/stop + kit / speed / volume.
-$('drum-play').onclick = () => send('@DRUM=' + $('drum').value);
+$('drum-play').onclick = () => playCurrentGroove();
 $('drum-stop').onclick = () => send('@DRUM=stop');
+// Sort axis toggle (Genre / Pack) — rebuilds the bank list; resets to the All bank.
+document.querySelectorAll('#drum-sort button').forEach(b => b.onclick = () => {
+  if (drumMode !== 'manifest') return;
+  drumSort = b.dataset.sort; drumBank = 'All';
+  document.querySelectorAll('#drum-sort button').forEach(x => x.classList.toggle('active', x === b));
+  buildDrumBrowser();
+});
+// Bank picker — refilter the groove list (no device round-trip).
+$('drum-bank').onchange = e => { drumBank = e.target.value; refreshGrooveList(); };
+$('drum-synchro').onchange = e => send('@DRUMSYNCHRO=' + (e.target.checked ? 1 : 0));
 $('drum-kit').onchange = e => send('@DRUMKIT=' + e.target.value);
 // Prev/Next step a <select> and fire `cb` with the new index. `wrap` cycles at ends.
 function stepSelect(id, delta, cb) {
@@ -544,8 +695,8 @@ function stepSelect(id, delta, cb) {
   cb(s.value);
 }
 // Groove prev/next switches the groove LIVE (plays the newly-selected one).
-$('drum-prev').onclick = () => stepSelect('drum', -1, v => send('@DRUM=' + v));
-$('drum-next').onclick = () => stepSelect('drum', 1, v => send('@DRUM=' + v));
+$('drum-prev').onclick = () => stepSelect('drum', -1, () => playCurrentGroove());
+$('drum-next').onclick = () => stepSelect('drum', 1, () => playCurrentGroove());
 $('drum-kit-prev').onclick = () => stepSelect('drum-kit', -1, v => send('@DRUMKIT=' + v));
 $('drum-kit-next').onclick = () => stepSelect('drum-kit', 1, v => send('@DRUMKIT=' + v));
 // Speed / volume: slider + tap −/+ buttons. `nudge` steps the range input by its

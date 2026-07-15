@@ -51,6 +51,8 @@ export const CMD = {
   SET_DRUM_KIT: 0x32, // + 1 byte: GM drum-kit index (into DRUM_KITS)
   SET_DRUM_SPEED: 0x33, // + 1 byte: groove speed 25..200 (%)
   SET_DRUM_VOL: 0x34, // + 1 byte: drum level 0..150 (%)
+  SET_BPM: 0x35, // + 1 byte: master tempo 40..240 bpm (drives song + drum together)
+  SET_DRUM_SYNCHRO: 0x36, // + 1 byte: 0/1 synchro start (groove begins on first note)
 } as const;
 
 // GM drum kits — the "instrument" for the Drums menu. The index is sent via
@@ -680,6 +682,16 @@ export function useTdsp() {
     (pct: number) => writeByteCmd(CMD.SET_DRUM_VOL, Math.max(0, Math.min(150, Math.round(pct)))),
     [writeByteCmd]
   );
+  // Master tempo (BPM) — one knob for the song AND the drum groove; they lock together.
+  const setBpm = useCallback(
+    (bpm: number) => writeByteCmd(CMD.SET_BPM, Math.max(40, Math.min(240, Math.round(bpm)))),
+    [writeByteCmd]
+  );
+  // Synchro start: the groove begins on your first keyboard note (PSS-140 style).
+  const setDrumSynchro = useCallback(
+    (on: boolean) => writeByteCmd(CMD.SET_DRUM_SYNCHRO, on ? 1 : 0),
+    [writeByteCmd]
+  );
 
   // MPE pressure routing bitmask: 1=volume 2=brightness 4=vibrato 8=tremolo (combine).
   const setPressure = useCallback(
@@ -804,6 +816,8 @@ export function useTdsp() {
     setDrumKit,
     setDrumSpeed,
     setDrumVol,
+    setBpm,
+    setDrumSynchro,
     setPressure,
     setModWheel,
     setLfoMode,

@@ -62,6 +62,40 @@ static inline int sortRank(uint8_t kind) {
     }
 }
 
+// The file's INITIAL tempo in BPM — the set-tempo meta (FF 51 03) at the lowest
+// tick across all tracks, or 120 if none. Lightweight (scans meta only); used by
+// the mix-kit to lock a drum groove's tempo to a playing song (song = master).
+static inline float initialBpm(const uint8_t *d, size_t len) {
+    if (len < 14 || memcmp(d, "MThd", 4) != 0) return 120.0f;
+    uint32_t bestTick = 0xFFFFFFFFu, bestUspq = 500000; // default 120 bpm
+    for (size_t p = 14; p + 8 <= len; ) {
+        if (memcmp(d + p, "MTrk", 4) != 0) break;
+        uint32_t tl = be32(d + p + 4);
+        size_t i = p + 8, e = i + tl; if (e > len) e = len;
+        uint32_t tick = 0; uint8_t status = 0;
+        while (i < e) {
+            tick += readVar(d, e, &i); if (i >= e) break;
+            uint8_t b0 = d[i]; if (b0 & 0x80) { status = b0; i++; }
+            if (status == 0xFF) {
+                if (i >= e) break;
+                uint8_t meta = d[i++]; uint32_t ml = readVar(d, e, &i);
+                if (meta == 0x51 && ml == 3 && i + 3 <= e && tick < bestTick) {
+                    bestTick = tick;
+                    bestUspq = ((uint32_t)d[i] << 16) | (d[i + 1] << 8) | d[i + 2];
+                }
+                i += ml;
+            } else if (status == 0xF0 || status == 0xF7) {
+                uint32_t sl = readVar(d, e, &i); i += sl;
+            } else {
+                uint8_t hi = status & 0xF0; i += (hi == 0xC0 || hi == 0xD0) ? 1 : 2;
+            }
+        }
+        p = e;
+    }
+    if (bestUspq == 0) bestUspq = 500000;
+    return 60000000.0f / (float)bestUspq;
+}
+
 // Parse buf[0..len) into out[0..maxOut). Returns event count, or -1 on error.
 // Heap-allocates a scratch array sized to the note/controller count.
 static int parseSmf(const uint8_t *d, size_t len, MidiFileEvent *out, int maxOut) {

@@ -397,12 +397,15 @@ static void setMix(float bt, float tone, float spdif) {
 // non-blocking (ticked every loop()) so BT audio, the ESP32 relay, and app
 // control keep running and the app can stop/switch it mid-song.
 // Built-in songs baked into flash (always available, even with no SD card).
-struct BuiltinSong { const char *name; const SongEv *ev; uint32_t count; };
+// `bpm` is an ESTIMATE — these were transcoded to raw milliseconds, so their true
+// tempo is lost. It's the reference the master-BPM tempo scale divides by, so a
+// drum groove can lock to the song. For accurate lock use an SD .mid (real tempo).
+struct BuiltinSong { const char *name; const SongEv *ev; uint32_t count; float bpm; };
 static const BuiltinSong kBuiltinSongs[] = {
-    {"William Tell Overture",      kWilliamTellSong, sizeof(kWilliamTellSong) / sizeof(SongEv)},
-    {"Moonlight Sonata (3rd Mvt)", kMoonlightSong,   sizeof(kMoonlightSong)   / sizeof(SongEv)},
-    {"Billie Jean",                kBillieJeanSong,  sizeof(kBillieJeanSong)  / sizeof(SongEv)},
-    {"Bohemian Rhapsody",          kBohemianSong,    sizeof(kBohemianSong)    / sizeof(SongEv)},
+    {"William Tell Overture",      kWilliamTellSong, sizeof(kWilliamTellSong) / sizeof(SongEv), 152.0f},
+    {"Moonlight Sonata (3rd Mvt)", kMoonlightSong,   sizeof(kMoonlightSong)   / sizeof(SongEv), 120.0f},
+    {"Billie Jean",                kBillieJeanSong,  sizeof(kBillieJeanSong)  / sizeof(SongEv), 117.0f},
+    {"Bohemian Rhapsody",          kBohemianSong,    sizeof(kBohemianSong)    / sizeof(SongEv),  72.0f},
 };
 static const int kNumBuiltin = sizeof(kBuiltinSongs) / sizeof(kBuiltinSongs[0]);
 
@@ -464,19 +467,27 @@ FLASHMEM static void buildSongList() {
         r.ev = nullptr; r.count = 0; r.sd = false; r.path[0] = 0;
         r.mev = testsong::kTestSongs[i].ev; r.mcount = testsong::kTestSongs[i].count; r.mpe = testsong::kTestSongs[i].mpe;
     }
+    // SD songs BEFORE the baked built-ins: a real .mid carries its real tempo, so an
+    // SD copy of a built-in (same display name) must WIN — the baked SongEv versions
+    // were transcoded to raw ms and have NO tempo (they can't lock to a drum groove).
+    if (g_sdReady) {
+        if (!SD.exists("/songs")) SD.mkdir("/songs");   // a home to drop songs into
+        scanSongDir("/songs");
+        scanSongDir("/");                               // also accept .mid at the card root
+    }
+    // Baked built-ins LAST — a no-SD fallback only. Skipped when an SD song already
+    // provides that name, so the tempo-bearing SD copy is the one that plays.
+    int nBuiltin = 0;
     for (int i = 0; i < kNumBuiltin && g_numSongs < cap; ++i) {
-        SongRef &r = g_songs[g_numSongs++];
+        if (songNameExists(kBuiltinSongs[i].name)) continue;   // SD copy wins
+        SongRef &r = g_songs[g_numSongs++]; nBuiltin++;
         strncpy(r.name, kBuiltinSongs[i].name, sizeof(r.name) - 1); r.name[sizeof(r.name) - 1] = 0;
         r.ev = kBuiltinSongs[i].ev; r.count = kBuiltinSongs[i].count; r.sd = false; r.path[0] = 0;
         r.mev = nullptr; r.mcount = 0; r.mpe = false;
     }
-    if (!g_sdReady) return;
-    if (!SD.exists("/songs")) SD.mkdir("/songs");   // create it so there's a home to drop songs into
-    scanSongDir("/songs");
-    scanSongDir("/");                               // also accept .mid files dropped at the card root
-    Serial.printf("[sd] songs: %d total (%d test + %d built-in + %d SD)\n",
-                  g_numSongs, testsong::kNumTestSongs, kNumBuiltin,
-                  g_numSongs - testsong::kNumTestSongs - kNumBuiltin);
+    Serial.printf("[sd] songs: %d total (%d test + %d SD + %d baked fallback)\n",
+                  g_numSongs, testsong::kNumTestSongs,
+                  g_numSongs - testsong::kNumTestSongs - nBuiltin, nBuiltin);
 }
 
 static int  g_songSel = 0;          // selected / currently-playing song index
@@ -489,7 +500,40 @@ static bool g_songWasPlaying = false;  // edge-detect natural song end (for loop
 // (g_player.tick() in loop) and drives the synth via g_synthSink.
 static void applyMidiMode(bool mpe);   // defined below; test songs flip mode on start
 
-static void songStart(int idx) {
+// Drum controls (declared here so applyTempos can read g_drumSpeedPct). g_drumSel /
+// g_drumKit are used by the drum section further below.
+static int  g_drumSel      = 0;     // selected / currently-playing groove index
+static int  g_drumKit      = 0;     // index into kDrumKits ("instrument")
+static int  g_drumSpeedPct = 100;   // drum fine-trim on the master BPM (default 100 = exact)
+static int  g_drumVolPct   = 100;   // drum level 0..150 (% of file velocity)
+static bool g_drumSynchro  = false; // SYNCHRO START (PSS-140 style): groove starts on your first note
+static bool g_engineHasDrums = false;// engine renders ch10 (captured once at setup; not the live mask)
+
+// --- Master tempo (BPM) — one knob drives the song AND the drum groove -------
+// The song and the groove each have a NATIVE tempo; the master BPM retimes both
+// to a single tempo so they stay locked, and moving it speeds/slows both together:
+//   song scale = masterBpm / songNativeBpm     (songNativeBpm: SD = real, built-in = estimate)
+//   drum scale = masterBpm / grooveNativeBpm  x  (drum trim %)
+// Downbeat align: whichever starts SECOND begins on the other's bar/loop downbeat
+// (both bars are 4/4 = 4*60000/masterBpm long once retimed, so they line up).
+// NOTE accurate lock needs the song's REAL tempo -> use an SD .mid; the baked
+// built-ins only carry an estimate.
+static float         g_masterBpm     = 120.0f;  // the one tempo knob (40..240)
+static float         g_songBpm       = 120.0f;  // playing/last song NATIVE tempo
+static float         g_drumFileBpm   = 120.0f;  // selected groove's NATIVE tempo
+static elapsedMillis g_songBarClock;            // ms since the playing song's beat 1
+static bool          g_drumArmed     = false;   // SYNCHRO: groove loaded, waiting for the first live note
+static uint32_t      g_drumArmedN    = 0;
+
+// Retime both players to the master BPM (call after changing BPM / native tempos).
+// g_drumSpeedPct is a fine trim on the drum only (default 100 = exactly master BPM).
+static void applyTempos() {
+    g_player.setTempoScale(g_songBpm > 1.0f ? g_masterBpm / g_songBpm : 1.0f);
+    float drumScale = (g_drumFileBpm > 1.0f ? g_masterBpm / g_drumFileBpm : 1.0f);
+    g_drumPlayer.setTempoScale(drumScale * (g_drumSpeedPct / 100.0f));
+}
+
+FLASHMEM static void songStart(int idx) {
     if (g_numSongs == 0) return;
     if (idx < 0) idx = 0;
     if (idx >= g_numSongs) idx = g_numSongs - 1;
@@ -499,7 +543,13 @@ static void songStart(int idx) {
     // per-engine expression (bend / mod / aftertouch). Without this, a bend left mid-glide
     // by the previous song carries into this one — and the mode-switch path below only runs
     // when the mode actually changes, so a MIDI->MIDI start would otherwise never reset.
-    g_synthSink->onAllNotesOff(0);
+    // BUT don't panic channel 10 while a drum groove is looping — an all-channels reset
+    // would cut the drums for a beat when you press Play on a song. Spare ch10 then.
+    if (g_drumPlayer.isPlaying()) {
+        for (uint8_t ch = 1; ch <= 16; ++ch) if (ch != 10) g_synthSink->onAllNotesOff(ch);
+    } else {
+        g_synthSink->onAllNotesOff(0);
+    }
 #ifdef TDSP_REPLAYGAIN_MULTITIMBRAL
     // A song is multitimbral (each channel runs its own program), so the Tier-1 audition
     // bus trim — set to the last picker voice — no longer describes what's sounding. Reset
@@ -510,9 +560,11 @@ static void songStart(int idx) {
     // expression) then hand the events straight to the player — no expansion needed.
     if (r.mev) {
         applyMidiMode(r.mpe);
+        g_songBpm = 120.0f; applyTempos();                             // baked test seq: no tempo meta
         Serial.printf("[song] %s -> %s (%s, %lu events, start)\n", r.name, synthName(),
                       r.mpe ? "MPE" : "MIDI", (unsigned long)r.mcount);
         g_player.play(r.mev, r.mcount);
+        g_songBarClock = 0;
         return;
     }
     // A non-test song is normal MIDI; if a prior MPE test left the device in MPE mode,
@@ -520,22 +572,33 @@ static void songStart(int idx) {
     if (g_mpeMode) applyMidiMode(false);
     uint32_t n = 0;
     if (r.sd) {
-        int got = tdsp::smf::loadSmfFile(r.path, g_buf, MAX_EVENTS);   // parse from SD (main loop)
+        g_songBpm = 120.0f;
+        int got = tdsp::smf::loadSmfFile(r.path, g_buf, MAX_EVENTS, &g_songBpm);   // parse + tempo
         if (got <= 0) { Serial.printf("[song] SD load FAILED: %s\n", r.path); return; }
         n = (uint32_t)got;
-        Serial.printf("[song] %s (SD, %lu events) -> %s (start)\n", r.name, (unsigned long)n, synthName());
+        Serial.printf("[song] %s (SD, %lu events, %.1f bpm) -> %s (start)\n", r.name, (unsigned long)n, (double)g_songBpm, synthName());
     } else {
+        g_songBpm = 120.0f;                                            // baked SongEv: tempo estimate
+        for (int i = 0; i < kNumBuiltin; ++i)
+            if (kBuiltinSongs[i].ev == r.ev) { g_songBpm = kBuiltinSongs[i].bpm; break; }
         n = tdsp::expandLegacyNotes(r.ev, r.count, g_buf, MAX_EVENTS);  // baked SongEv -> events
-        Serial.printf("[song] %s -> %s (start)\n", r.name, synthName());
+        Serial.printf("[song] %s (%.1f bpm est) -> %s (start)\n", r.name, (double)g_songBpm, synthName());
     }
     if (n == 0) return;
-    g_player.play(g_buf, n);
+    applyTempos();   // retime the song (and groove) to the master BPM
+    g_player.play(g_buf, n);                    // immediate: starts right when you press Play
+    g_songBarClock = 0;
 }
 static void songStop() {
     g_songWasPlaying = false;   // a manual stop must NOT trigger the loop-restart
     if (!g_player.isPlaying()) return;
     g_player.stop();
-    g_synthSink->onAllNotesOff(0);   // recenter bend + kill notes so a mid-glide stop is clean
+    // recenter bend + kill the song's notes — but spare ch10 so a looping groove keeps going.
+    if (g_drumPlayer.isPlaying()) {
+        for (uint8_t ch = 1; ch <= 16; ++ch) if (ch != 10) g_synthSink->onAllNotesOff(ch);
+    } else {
+        g_synthSink->onAllNotesOff(0);
+    }
     Serial.println("[song] stopped");
 }
 
@@ -573,11 +636,6 @@ static const DrumKit kDrumKits[] = {
 };
 static const int kNumDrumKits = sizeof(kDrumKits) / sizeof(kDrumKits[0]);
 
-static int g_drumSel      = 0;      // selected / currently-playing groove index
-static int g_drumKit      = 0;      // index into kDrumKits ("instrument")
-static int g_drumSpeedPct = 100;    // playback speed 25..200 (%)
-static int g_drumVolPct   = 100;    // drum level 0..150 (% of file velocity)
-
 // Scan /drums for *.mid (created if missing). Each groove appears in the Drums
 // picker; drop a .mid on the card and Refresh to add one with no rebuild.
 static void buildDrumList() {
@@ -606,28 +664,64 @@ static void buildDrumList() {
 // song-player mask to kMaskAll in synthBegin() (TSF/SF2/OPL3/OPLL); melodic-only
 // engines leave kMaskNoDrums. This is the right signal — NOT synthIsGM(), which is
 // about streaming 128 GM program NAMES (OPLL reports false yet still plays drums).
-static bool drumEngineOk() { return g_player.channelMask() == tdsp::MidiFilePlayer::kMaskAll; }
+static bool drumEngineOk() { return g_engineHasDrums; }
+
+// While a groove is the drums, mute the SONG's own channel-10 track so a song with
+// its own drums (most full .mid) doesn't fight the groove — the groove IS the beat.
+// Restored when the groove stops. No-op on engines that don't do drums.
+static void muteSongDrums(bool mute) {
+    if (!g_engineHasDrums) return;
+    g_player.setChannelMask(mute ? tdsp::MidiFilePlayer::kMaskNoDrums
+                                 : tdsp::MidiFilePlayer::kMaskAll);
+}
 
 static void drumApplyKit() { g_synthSink->onProgramChange(10, kDrumKits[g_drumKit].prog); }
 
-static void drumStart(int idx) {
+FLASHMEM // Load + start a groove by its full SD path. Shared by the legacy numeric index
+// (flat menu / serial keys) and the browser's play-by-filename (@DRUMF=), which the
+// client resolves from catalog.tsv — so playback is decoupled from firmware scan order.
+static void drumStartPath(const char* path, const char* disp) {
     if (!drumEngineOk()) { Serial.printf("[drum] %s has no channel-10 drum map — use TSF/SF2/OPL3/OPLL\n", synthName()); return; }
+    g_drumFileBpm = 120.0f;
+    int got = tdsp::smf::loadSmfFile(path, g_drumBuf, MAX_DRUM_EVENTS, &g_drumFileBpm);
+    if (got <= 0) { Serial.printf("[drum] load FAILED: %s\n", path); return; }
+    drumApplyKit();
+    g_drumPlayer.setVelocityScale(g_drumVolPct / 100.0f);
+    applyTempos();   // groove plays at the master BPM (x fine trim)
+    // SYNCHRO START (PSS-140 style): arm the groove and let the FIRST live note kick
+    // it off on beat 1 (you pick the downbeat by when you play). Otherwise start NOW
+    // on beat 1 — immediate, right when you press Play (you time the press).
+    if (g_drumSynchro) {
+        g_drumArmed = true; g_drumArmedN = (uint32_t)got;
+        Serial.printf("[drum] %s SYNCHRO armed @ %.0f bpm — play a note to start\n", disp, (double)g_masterBpm);
+        return;
+    }
+    g_drumArmed = false;
+    muteSongDrums(true);                                        // groove is the drums now
+    g_drumPlayer.play(g_drumBuf, (uint32_t)got);               // immediate: beat 1 = now
+    Serial.printf("[drum] %s (%d ev, %.1f bpm) kit=%s @ master %.0f bpm vol=%d%%\n",
+                  disp, got, (double)g_drumFileBpm, kDrumKits[g_drumKit].name, (double)g_masterBpm, g_drumVolPct);
+}
+static void drumStart(int idx) {   // legacy numeric index (flat menu / serial C/D keys)
     if (g_numDrums == 0) { Serial.println("[drum] no grooves on SD (/drums) — run tools/fetch_drums.py"); return; }
     if (idx < 0) idx = 0;
     if (idx >= g_numDrums) idx = g_numDrums - 1;
     g_drumSel = idx;
-    int got = tdsp::smf::loadSmfFile(g_drums[idx].path, g_drumBuf, MAX_DRUM_EVENTS);
-    if (got <= 0) { Serial.printf("[drum] load FAILED: %s\n", g_drums[idx].path); return; }
-    drumApplyKit();
-    g_drumPlayer.setTempoScale(g_drumSpeedPct / 100.0f);
-    g_drumPlayer.setVelocityScale(g_drumVolPct / 100.0f);
-    g_drumPlayer.play(g_drumBuf, (uint32_t)got);            // g_drumPlayer loops (set in setup)
-    Serial.printf("[drum] %s (%d ev) kit=%s speed=%d%% vol=%d%%\n",
-                  g_drums[idx].name, got, kDrumKits[g_drumKit].name, g_drumSpeedPct, g_drumVolPct);
+    drumStartPath(g_drums[idx].path, g_drums[idx].name);
+}
+static void drumStartFile(const char* fname) {   // by filename — the browser's play path
+    char path[128]; snprintf(path, sizeof(path), "/drums/%s", fname);
+    char disp[64]; size_t c = strlen(fname);
+    if (c > 4 && strcasecmp(fname + c - 4, ".mid") == 0) c -= 4;   // strip .mid for the log
+    if (c > sizeof(disp) - 1) c = sizeof(disp) - 1;
+    memcpy(disp, fname, c); disp[c] = 0;
+    drumStartPath(path, disp);
 }
 static void drumStop() {
+    g_drumArmed = false;                                       // cancel a synchro-armed groove
+    muteSongDrums(false);                                      // give the song back its own drums
     if (!g_drumPlayer.isPlaying()) return;
-    g_drumPlayer.stop();                                    // releases the groove's ch10 notes
+    g_drumPlayer.stop();                                       // releases the groove's ch10 notes
     Serial.println("[drum] stopped");
 }
 static void setDrumKit(int i) {
@@ -637,12 +731,20 @@ static void setDrumKit(int i) {
     if (drumEngineOk()) drumApplyKit();
     Serial.printf("[drum] kit -> %s (prog %u)\n", kDrumKits[i].name, kDrumKits[i].prog);
 }
-static void setDrumSpeed(int pct) {
+static void setDrumSpeed(int pct) {   // fine trim on the drum only (100 = exactly master BPM)
     if (pct < 25) pct = 25;
     if (pct > 200) pct = 200;
     g_drumSpeedPct = pct;
-    g_drumPlayer.setTempoScale(pct / 100.0f);
-    Serial.printf("[drum] speed -> %d%%\n", pct);
+    applyTempos();
+    Serial.printf("[drum] speed trim -> %d%%\n", pct);
+}
+// Master tempo (BPM) — one knob retimes BOTH the song and the drum groove, live.
+static void setMasterBpm(int bpm) {
+    if (bpm < 40) bpm = 40;
+    if (bpm > 240) bpm = 240;
+    g_masterBpm = (float)bpm;
+    applyTempos();
+    Serial.printf("[tempo] master %d bpm\n", bpm);
 }
 static void setDrumVol(int pct) {
     if (pct < 0) pct = 0;
@@ -693,6 +795,18 @@ FLASHMEM static void sendCatalog(Print& out) {
     out.print("@DRUMS=");
     for (int i = 0; i < g_numDrums; ++i) { if (i) out.print('|'); out.print(g_drums[i].name); }
     out.print('\n');
+    // Manifest registry: which catalog SOURCE each surface should browse for the
+    // CURRENT synth/context. "file:<path>" is fetched generically via @READ (the
+    // client owns all browsing/facets/paging over it); "bundled:<id>" is a static
+    // list the client already ships; "engine" means use the @INSTR names above;
+    // "none" = unavailable right now. Re-sent on every catalog refresh, so when the
+    // synth changes the client re-points at the right manifest with NO hardcoded
+    // per-engine paths — this is how each surface "knows which manifest to use".
+    out.print("@MANIFESTS=");
+    out.print("drums\x1f");  out.print(g_sdReady ? "file:/drums/catalog.tsv" : "none");
+    out.print("|drumkit\x1fbundled:gmkits");
+    out.print("|instr\x1f"); out.print(synthIsGM() ? "bundled:gm128" : "engine");
+    out.print('\n');
     Serial.printf("[cat] catalog sent (synth=%s, %d drums)\n", synthName(), g_numDrums);
 }
 
@@ -708,13 +822,79 @@ static void refreshCatalog(Print& out) {
     sendCatalog(out);
 }
 
+// --- Generic chunked file read (surface-agnostic catalog transport) ----------
+// Any surface — web over USB CDC, or the app via ESP32/BLE — fetches an SD file
+// with @READ=<path>. The file streams back as base64 frames that survive BOTH the
+// '@...\n' UART line protocol and the BLE chunker:
+//     @FB=<id>\x1f<path>\x1f<bytes>     begin (total byte count)
+//     @FD=<id>\x1f<seq>\x1f<b64>        data chunk (360 raw bytes -> 480 b64 chars)
+//     @FE=<id>\x1f<count>               end (number of data frames)
+//     @FERR=<id>\x1f<reason>            error
+// Raw chunk = 576 bytes (a multiple of 3) so every non-final chunk base64-encodes
+// with NO '=' padding — the client concatenates all payloads into one valid base64
+// string and decodes once. This ONE primitive is the whole catalog transport: a new
+// catalog type is just a new file on the card + a client parser, no firmware change.
+// The client owns all browsing semantics (genre/pack facets, paging); the firmware
+// only serves bytes and plays a groove by name (@DRUMF=).
+static const char kB64[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+static uint8_t g_xferId = 0;
+
+static void streamFile(Print& out, const char* path) {
+    const uint8_t id = ++g_xferId;
+    File f = SD.open(path);
+    if (!f || f.isDirectory()) { if (f) f.close(); out.printf("@FERR=%u\x1f%s\n", id, "not found"); return; }
+    out.printf("@FB=%u\x1f%s\x1f%lu\n", id, path, (unsigned long)f.size());
+    uint8_t raw[360];   // 360 = mult of 3 (no mid-stream b64 pad) AND @FD line fits one ~512 BLE MTU
+    char b64[4 * (sizeof(raw) / 3) + 1];
+    uint32_t seq = 0;
+    for (;;) {
+        int n = f.read(raw, sizeof(raw));
+        if (n <= 0) break;
+        int o = 0, i = 0;
+        for (; i + 3 <= n; i += 3) {
+            uint32_t v = ((uint32_t)raw[i] << 16) | ((uint32_t)raw[i + 1] << 8) | raw[i + 2];
+            b64[o++] = kB64[(v >> 18) & 63]; b64[o++] = kB64[(v >> 12) & 63];
+            b64[o++] = kB64[(v >> 6) & 63];  b64[o++] = kB64[v & 63];
+        }
+        if (n - i == 1) {
+            uint32_t v = (uint32_t)raw[i] << 16;
+            b64[o++] = kB64[(v >> 18) & 63]; b64[o++] = kB64[(v >> 12) & 63];
+            b64[o++] = '='; b64[o++] = '=';
+        } else if (n - i == 2) {
+            uint32_t v = ((uint32_t)raw[i] << 16) | ((uint32_t)raw[i + 1] << 8);
+            b64[o++] = kB64[(v >> 18) & 63]; b64[o++] = kB64[(v >> 12) & 63];
+            b64[o++] = kB64[(v >> 6) & 63];  b64[o++] = '=';
+        }
+        b64[o] = 0;
+        out.printf("@FD=%u\x1f%lu\x1f%s\n", id, (unsigned long)seq++, b64);
+        // Pace the ESP32/BLE link so the relay + BLE stack drain each frame. The USB
+        // CDC path (web page) is flow-controlled, so stream it at full speed — pace
+        // anything that ISN'T the USB Serial (i.e. the Serial7 link to the ESP32).
+        if (&out != &Serial) delay(6);
+        if (n < (int)sizeof(raw)) break;   // final (short) read
+    }
+    f.close();
+    out.printf("@FE=%u\x1f%lu\n", id, (unsigned long)seq);
+}
+
 // --- Live MIDI IN (DIN on Serial1 + USB host) -> MPE-aware router -> synth ----
 // Both physical sources feed one MidiRouter, which normalizes pitch bend to
 // semitones (per-channel range: 2 in MIDI mode, 48 in MPE / RPN), CC74 -> timbre,
 // and channel pressure -> pressure. The router then drives the same g_synthSink the
 // song player uses. Callbacks are shared by the DIN (MIDI.h) and USB host (MIDIDevice)
 // sources — their setHandle* signatures match.
-static void midiNoteOn  (byte ch, byte note, byte vel) { g_router.handleNoteOn(ch, note, vel); }
+static void midiNoteOn  (byte ch, byte note, byte vel) {
+    // SYNCHRO START (PSS-140 style): the first live note kicks off an armed groove on
+    // beat 1 — you pick the downbeat by when you play. (vel 0 = note-off, ignore.)
+    if (g_drumArmed && vel > 0) {
+        muteSongDrums(true);
+        g_drumPlayer.play(g_drumBuf, g_drumArmedN);
+        g_drumArmed = false;
+        Serial.println("[drum] SYNCHRO start (first note)");
+    }
+    g_router.handleNoteOn(ch, note, vel);
+}
 static void midiNoteOff (byte ch, byte note, byte vel) { g_router.handleNoteOff(ch, note, vel); }
 static void midiCC      (byte ch, byte cc,   byte val) { g_router.handleControlChange(ch, cc, val); }
 static void midiPitch   (byte ch, int bend)            { g_router.handlePitchBend(ch, (int16_t)bend); }
@@ -798,13 +978,18 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         else songStart(atoi(line + 6));   // @SONG=<song index>
     }
     else if (strcmp(line, "@GETCAT") == 0)        refreshCatalog(reply);   // re-scan SD + send catalog
+    else if (strncmp(line, "@READ=", 6) == 0)     streamFile(reply, line + 6);  // generic file fetch (catalog transport)
     else if (strncmp(line, "@DRUM=", 6) == 0) {                            // drum groove play/stop
         if (strcmp(line + 6, "stop") == 0) drumStop();
-        else drumStart(atoi(line + 6));   // @DRUM=<groove index>
+        else drumStart(atoi(line + 6));   // @DRUM=<groove index> (legacy flat menu)
     }
+    else if (strncmp(line, "@DRUMF=", 7) == 0)    drumStartFile(line + 7);  // @DRUMF=<filename> (browser, via catalog.tsv)
     else if (strncmp(line, "@DRUMKIT=", 9) == 0)   setDrumKit(atoi(line + 9));    // GM kit ("instrument")
-    else if (strncmp(line, "@DRUMSPEED=", 11) == 0) setDrumSpeed(atoi(line + 11)); // 25..200 %
+    else if (strncmp(line, "@DRUMSPEED=", 11) == 0) setDrumSpeed(atoi(line + 11)); // drum fine-trim %
     else if (strncmp(line, "@DRUMVOL=", 9) == 0)    setDrumVol(atoi(line + 9));    // 0..150 %
+    else if (strncmp(line, "@BPM=", 5) == 0)        setMasterBpm(atoi(line + 5));  // master tempo (song+drum)
+    else if (strncmp(line, "@DRUMSYNCHRO=", 13) == 0) { g_drumSynchro = (atoi(line + 13) != 0);   // start-on-first-note
+                                 Serial.printf("[drum] synchro start %s\n", g_drumSynchro ? "ON (play a note to start)" : "off (start on Play)"); }
     else if (strncmp(line, "@HPF=", 5) == 0)      setDacHpfMode(atoi(line + 5));
     else if (strncmp(line, "@LOOP=", 6) == 0)   { g_loop = (atoi(line + 6) != 0);
                                  Serial.printf("[song] loop %s\n", g_loop ? "ON" : "off"); }
@@ -970,7 +1155,14 @@ void setup() {
     g_drumPlayer.setChannelMask((uint16_t)(1u << 9));   // MIDI channel 10 (index 9)
     g_drumPlayer.setProgramChangeEnabled(false);
     g_drumPlayer.setLooping(true);
+    // The song player must NEVER panic ch10 on stop/restart, or it cuts a looping
+    // groove for a beat when you press Play/Stop on a song. (Drums are the groove's.)
+    g_player.setPanicMask(tdsp::MidiFilePlayer::kMaskNoDrums);
     synthBegin();
+    // Capture the engine's drum capability NOW (synthBegin set the song mask to
+    // kMaskAll on drum-capable engines). drumEngineOk() reads this, so we're free to
+    // toggle g_player's live channel mask later to mute a song's drums under a groove.
+    g_engineHasDrums = (g_player.channelMask() == tdsp::MidiFilePlayer::kMaskAll);
     applyMidiMode(false);   // start in normal MIDI (after synthBegin, so the engine exists)
 
     Serial.println("running -- cmds: t=DACtone a=BT+SPDIF mix  s=SPDIF-only  m=BT-only");

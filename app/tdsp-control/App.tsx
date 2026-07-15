@@ -52,6 +52,8 @@ export default function App() {
     setDrumKit,
     setDrumSpeed,
     setDrumVol,
+    setBpm,
+    setDrumSynchro,
     setPressure,
     setModWheel,
     setLfoMode,
@@ -77,6 +79,8 @@ export default function App() {
   const [drumKit, setDrumKitState] = useState(0);
   const [drumSpeed, setDrumSpeedState] = useState(100);
   const [drumVol, setDrumVolState] = useState(100);
+  const [bpm, setBpmState] = useState(120);          // master tempo (song + drum)
+  const [drumSynchro, setDrumSynchroState] = useState(false);
   // Expression routing bitmasks (1=volume 2=brightness 4=vibrato 8=tremolo).
   const [pressMask, setPressMask] = useState(3);   // pressure: default vol+bright
   const [modMask, setModMask] = useState(4);       // mod wheel: default vibrato (no volume bit)
@@ -218,7 +222,17 @@ export default function App() {
         drumVol={drumVol}
         onPreviewDrumVol={setDrumVolState}
         onCommitDrumVol={setDrumVol}
+        bpm={bpm}
+        onPreviewBpm={setBpmState}
+        onCommitBpm={setBpm}
+        drumSynchro={drumSynchro}
+        onToggleSynchro={() => {
+          const next = !drumSynchro;
+          setDrumSynchroState(next);
+          setDrumSynchro(next);
+        }}
         isGM={drumsOk}
+        kitsOk={isGM}
         pressMask={pressMask}
         onTogglePressBit={onTogglePressBit}
         modMask={modMask}
@@ -291,7 +305,13 @@ function SettingsModal({
   drumVol,
   onPreviewDrumVol,
   onCommitDrumVol,
+  bpm,
+  onPreviewBpm,
+  onCommitBpm,
+  drumSynchro,
+  onToggleSynchro,
   isGM,
+  kitsOk,
   pressMask,
   onTogglePressBit,
   modMask,
@@ -343,7 +363,13 @@ function SettingsModal({
   drumVol: number;
   onPreviewDrumVol: (pct: number) => void;
   onCommitDrumVol: (pct: number) => void;
+  bpm: number;
+  onPreviewBpm: (bpm: number) => void;
+  onCommitBpm: (bpm: number) => void;
+  drumSynchro: boolean;
+  onToggleSynchro: () => void;
   isGM: boolean;
+  kitsOk: boolean;
   pressMask: number;
   onTogglePressBit: (bit: number) => void;
   modMask: number;
@@ -536,6 +562,22 @@ function SettingsModal({
                 </Text>
               )}
 
+              <StepSlider
+                label="Tempo"
+                unit=" bpm"
+                value={bpm}
+                min={60}
+                max={200}
+                step={5}
+                onPreview={onPreviewBpm}
+                onCommit={onCommitBpm}
+              />
+              <Text style={styles.dim}>One tempo for the song AND the drums — they lock together and move as you drag.</Text>
+              <SecondaryButton
+                label={drumSynchro ? '☑  Synchro start — begin on your first note' : '☐  Synchro start — begin on Play'}
+                onPress={onToggleSynchro}
+              />
+
               <Text style={styles.sectionLabel}>Groove</Text>
               {drums.length === 0 ? (
                 <Text style={styles.dim}>
@@ -557,8 +599,17 @@ function SettingsModal({
               <SecondaryButton label="↻  Refresh Grooves (after adding via USB)" onPress={onRefreshCatalog} />
 
               <Text style={styles.sectionLabel}>Instrument (kit)</Text>
-              <Dropdown label="Kit" options={drumKits} value={drumKit} onSelect={onSelectDrumKit} />
-              <Stepper count={drumKits.length} value={drumKit} onStep={onSelectDrumKit} />
+              {kitsOk ? (
+                <>
+                  <Dropdown label="Kit" options={drumKits} value={drumKit} onSelect={onSelectDrumKit} />
+                  <Stepper count={drumKits.length} value={drumKit} onStep={onSelectDrumKit} />
+                </>
+              ) : (
+                <Text style={styles.dim}>
+                  {synth.name} has one fixed rhythm set — GM drum kits (Standard/Room/Power/…) apply only on
+                  the SF2/TSF soundfont engines.
+                </Text>
+              )}
 
               <StepSlider
                 label="Speed"

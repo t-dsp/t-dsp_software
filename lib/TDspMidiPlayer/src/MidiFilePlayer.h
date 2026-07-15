@@ -92,15 +92,29 @@ public:
         playing_ = true;
     }
 
+    // Which channels this player panics on stop() (bit i => MIDI channel i+1).
+    // Default = all. The song player sets this to spare channel 10 so stopping /
+    // restarting a song never cuts a separately-looping drum groove on ch10.
+    void setPanicMask(uint16_t m) { panicMask_ = m; }
+
     // Stop and release every held note (sink panic). Safe to call when idle.
     void stop() {
         bool was = playing_;
         playing_ = false;
         ev_ = nullptr; count_ = 0; idx_ = 0;
-        if (was && sink_) sink_->onAllNotesOff(0);   // 0 = panic all channels
+        if (was && sink_) {
+            if (panicMask_ == 0xFFFF) sink_->onAllNotesOff(0);   // 0 = panic all channels
+            else for (uint8_t ch = 1; ch <= 16; ++ch)
+                if (panicMask_ & (uint16_t)(1u << (ch - 1))) sink_->onAllNotesOff(ch);
+        }
     }
 
     bool isPlaying() const { return playing_; }
+
+    // One-shot "the loop just restarted" flag (for a looping player). Returns true
+    // ONCE after each wrap back to the top, so a caller can align another event
+    // (e.g. start a song on the groove's downbeat). Auto-clears on read.
+    bool consumeLooped() { bool v = tookLoop_; tookLoop_ = false; return v; }
 
     // Progress 0..count (event index reached). Handy for a UI/heartbeat.
     uint32_t eventIndex() const { return idx_; }
@@ -120,7 +134,10 @@ public:
             if (++idx_ >= count_) {                    // reached the end
                 if (loop_ && base_ && baseCount_) {    // seamless restart from the top
                     ev_ = base_; count_ = baseCount_; idx_ = 0;
-                    wait_ = ev_[0].deltaMs; acc_ = 0.0f;   // resync at the loop point
+                    wait_ = ev_[0].deltaMs;            // CARRY acc_ (don't zero) so the loop
+                                                       // keeps exact time — zeroing dropped the
+                                                       // remainder each bar and slowly drifted.
+                    tookLoop_ = true;                  // signal the downbeat (consumeLooped)
                     break;                             // one pass per tick (runaway-safe)
                 }
                 playing_ = false;
@@ -192,9 +209,11 @@ private:
     float                speed_     = 1.0f;            // tempo multiplier
     float                velScale_  = 1.0f;            // note-on velocity multiplier
     bool                 loop_      = false;           // restart at end
+    bool                 tookLoop_  = false;           // set on each loop wrap (consumeLooped)
     bool                 playing_   = false;
     bool                 pcEnabled_ = true;
     float                pbDefault_ = 2.0f;              // fallback bend range (no RPN in file)
+    uint16_t             panicMask_ = 0xFFFF;            // 0xFFFF = panic all; else per-channel bits (setPanicMask)
     float                pbRange_[16] = {2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2};  // per-channel, RPN-settable
     uint8_t              rpnMsb_[16] = {0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F};
     uint8_t              rpnLsb_[16] = {0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F};

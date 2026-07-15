@@ -25,14 +25,24 @@ dmp      (network)
     channel-10 MIDI) from https://github.com/gvellut/dmp_midi releases,
     normalize every file to channel 10, and stage a curated genre spread.
 
+gmd      (network)
+    Fetch Google Magenta's Groove MIDI Dataset (1,150 human-performed grooves,
+    CC-BY 4.0) from the magentadata bucket. These are expressive multi-bar
+    performances already on channel 10; the fetcher forces channel 10 (idempotent),
+    makes each file SEAMLESSLY LOOPABLE (appends a silent barline marker at the
+    next bar boundary after the last note — same trick as the sample writer), and
+    curates a round-robin spread across the ~18 playing styles (prefers `beat`
+    takes over `fill`s and 4/4 over odd meters).
+
 all
-    sample + dmp.
+    sample + dmp + gmd.
 
 Usage
 -----
     python tools/fetch_drums.py sample
     python tools/fetch_drums.py sample --assets     # (re)write repo assets/drums
     python tools/fetch_drums.py dmp --limit 48
+    python tools/fetch_drums.py gmd --limit 64
     python tools/fetch_drums.py all --push          # stage + copy to the card
 
 By default the script writes to a staging directory (default
@@ -45,8 +55,10 @@ Licensing
 ---------
 The generated `sample` grooves are original and public-domain (see
 assets/drums/CREDITS.md). The `dmp` pack is MIT-licensed; its LICENSE +
-attribution are written next to the fetched files. Keep those files with the
-grooves if you redistribute them.
+attribution are written next to the fetched files. The `gmd` pack is CC-BY 4.0
+(Google LLC / Magenta); an ATTRIBUTION.gmd file is written next to the fetched
+files. Keep those license/attribution files with the grooves if you redistribute
+them.
 """
 
 from __future__ import annotations
@@ -72,6 +84,75 @@ COWBELL, TAMB, SHAKER = 56, 54, 82
 
 PPQN = 480                                # ticks per quarter note in the output
 GM_DRUM_CHANNEL = 9                       # 0-based channel index (MIDI ch 10)
+
+
+# --- Groove manifest (/drums/catalog.tsv) ------------------------------------
+# The mix-kit firmware browses grooves along two axes (Genre, Pack). Rather than
+# have the firmware guess a groove's genre/pack from its filename, each fetch mode
+# records what it KNOWS here; write_manifest() emits one authoritative TSV whose
+# line order defines each groove's global index:
+#     <filename>\t<pack>\t<genre>\t<bpm>\t<display>
+_MANIFEST: dict[str, dict] = {}       # filename -> {pack, genre, bpm, display}
+
+
+def _record(filename: str, pack: str, genre: str, bpm: str, display: str) -> None:
+    _MANIFEST[filename] = {"pack": pack, "genre": genre or "misc",
+                           "bpm": str(bpm or ""), "display": display}
+
+
+def _genre_from_name(base: str) -> str:
+    """Fuzzy genre for a stray/legacy .mid: the alpha word after any leading index.
+
+    "01 Rock Straight" -> "rock", "Disco 2" -> "disco", "gmd funk 95bpm" -> "funk".
+    """
+    stem = base[:-4] if base.lower().endswith(".mid") else base
+    toks = stem.replace("_", " ").split()
+    if toks and toks[0].isdigit():          # leading "01 " index
+        toks = toks[1:]
+    if toks and toks[0].lower() == "gmd":    # our gmd prefix
+        toks = toks[1:]
+    for t in toks:
+        w = "".join(c for c in t if c.isalpha() or c == "-")
+        if w:
+            return w.lower()
+    return "misc"
+
+
+def write_manifest(out_drums: str) -> None:
+    """Write /drums/catalog.tsv for EVERY *.mid in out_drums (this run + prior modes).
+
+    Classification precedence per file: this run's authoritative record > a row
+    already in catalog.tsv (so running modes separately keeps prior packs' labels)
+    > fuzzy (pack=misc). Lines are sorted by (pack, genre, display) so the
+    global-index order is deterministic.
+    """
+    prior: dict[str, dict] = {}
+    cat = os.path.join(out_drums, "catalog.tsv")
+    if os.path.exists(cat):
+        with open(cat, encoding="utf-8") as f:
+            for ln in f:
+                if ln.startswith("#") or "\t" not in ln:
+                    continue
+                c = ln.rstrip("\n").split("\t")
+                if len(c) >= 5:
+                    prior[c[0]] = {"pack": c[1], "genre": c[2], "bpm": c[3], "display": c[4]}
+
+    rows = []
+    for fn in sorted(os.listdir(out_drums)):
+        if not fn.lower().endswith(".mid"):
+            continue
+        meta = _MANIFEST.get(fn) or prior.get(fn)
+        if meta is None:
+            meta = {"pack": "misc", "genre": _genre_from_name(fn),
+                    "bpm": "", "display": fn[:-4]}
+        rows.append((meta["pack"], meta["genre"], meta["display"], fn, meta["bpm"]))
+    rows.sort(key=lambda r: (r[0], r[1], r[2].lower()))
+    path = os.path.join(out_drums, "catalog.tsv")
+    with open(path, "w", encoding="utf-8", newline="\n") as f:
+        f.write("# filename\tpack\tgenre\tbpm\tdisplay\n")
+        for pack, genre, display, fn, bpm in rows:
+            f.write(f"{fn}\t{pack}\t{genre}\t{bpm}\t{display}\n")
+    print(f"[manifest] {len(rows)} grooves -> {path}")
 
 
 # --- Minimal Standard MIDI File (type 0) writer ------------------------------
@@ -233,6 +314,7 @@ def write_sample(out_drums: str) -> int:
         path = os.path.join(out_drums, name + ".mid")
         with open(path, "wb") as f:
             f.write(data)
+        _record(name + ".mid", "samples", _genre_from_name(name), "", name)
         print(f"  + {name}.mid ({len(data)} B)")
         n += 1
     return n
@@ -368,6 +450,7 @@ def fetch_dmp(out_drums: str, limit: int) -> int:
         base = os.path.basename(name)
         with open(os.path.join(out_drums, base), "wb") as f:
             f.write(norm)
+        _record(base, "dmp", _genre_from_name(base), "", base[:-4])
         n += 1
     # Ship the MIT license text alongside the pack.
     try:
@@ -377,6 +460,243 @@ def fetch_dmp(out_drums: str, limit: int) -> int:
     except Exception:                          # noqa: BLE001
         pass
     print(f"[dmp] staged {n} grooves (MIT) into {out_drums}")
+    return n
+
+
+# --- gmd pack (Groove MIDI Dataset, CC-BY 4.0) -------------------------------
+GMD_ZIP_URL = ("https://storage.googleapis.com/magentadata/datasets/groove/"
+               "groove-v1.0.0-midionly.zip")
+
+GMD_ATTRIBUTION = """\
+Groove MIDI Dataset (GMD)
+Copyright 2019 Google LLC.
+Licensed under the Creative Commons Attribution 4.0 International License
+(CC BY 4.0): https://creativecommons.org/licenses/by/4.0/
+Source: https://magenta.tensorflow.org/datasets/groove
+
+The .mid grooves in this folder derived from GMD have been normalized to General
+MIDI channel 10 and made seamlessly loopable (a silent barline marker appended at
+the bar boundary after the last note). Attribution to Google LLC / Magenta is
+required if you redistribute them.
+"""
+
+
+def _read_vlq(buf: bytes, i: int) -> tuple[int, int]:
+    """Read a variable-length quantity at buf[i]; return (value, next_index)."""
+    val = 0
+    while True:
+        b = buf[i]
+        i += 1
+        val = (val << 7) | (b & 0x7F)
+        if not (b & 0x80):
+            return val, i
+
+
+def _parse_smf(mid: bytes):
+    """Flatten any type-0/1 SMF into (division, (num, den), [(abs_tick, event)]).
+
+    Every track is merged onto one absolute-tick timeline (GM playback ignores
+    track boundaries). Running status is expanded so each returned event carries
+    its own status byte. End-of-Track metas are dropped (re-added on render).
+    Returns None on anything we don't confidently understand.
+    """
+    if mid[:4] != b"MThd" or len(mid) < 14:
+        return None
+    ntrks = struct.unpack(">H", mid[10:12])[0]
+    division = struct.unpack(">H", mid[12:14])[0]
+    if division & 0x8000:                      # SMPTE timing — not tick-based; skip
+        return None
+    timesig = (4, 4)
+    events: list[tuple[int, bytes]] = []
+    i = 14
+    for _ in range(ntrks):
+        if mid[i:i + 4] != b"MTrk":
+            return None
+        clen = struct.unpack(">I", mid[i + 4:i + 8])[0]
+        j = i + 8
+        end = j + clen
+        if end > len(mid):
+            return None
+        abstick = 0
+        running = 0
+        while j < end:
+            dt, j = _read_vlq(mid, j)
+            abstick += dt
+            if j >= end:
+                break
+            b = mid[j]
+            if b == 0xFF:                      # meta event
+                mtype = mid[j + 1]
+                mlen, k = _read_vlq(mid, j + 2)
+                if mtype == 0x58 and mlen >= 2:      # time signature
+                    timesig = (mid[k], 1 << mid[k + 1])
+                if mtype != 0x2F:                    # keep everything but EoT
+                    events.append((abstick, mid[j:k + mlen]))
+                j = k + mlen
+                running = 0
+            elif b in (0xF0, 0xF7):            # sysex
+                slen, k = _read_vlq(mid, j + 1)
+                events.append((abstick, mid[j:k + slen]))
+                j = k + slen
+                running = 0
+            else:                              # channel-voice message
+                if b & 0x80:
+                    status = b
+                    running = b
+                    k = j + 1
+                else:
+                    status = running
+                    k = j
+                nd = 1 if (status & 0xF0) in (0xC0, 0xD0) else 2
+                events.append((abstick, bytes([status]) + mid[k:k + nd]))
+                j = k + nd
+        i = end
+    return division, timesig, events
+
+
+def _loopify_gmd(mid: bytes, window_bars: int = 2) -> bytes | None:
+    """Extract a short, seamlessly-loopable channel-10 groove from a GMD take.
+
+    GMD takes are whole ~100-bar performances — far too long/heavy for the mix-kit
+    (MAX_DRUM_EVENTS=4096, "a bar or two"). We slice a `window_bars`-bar window past
+    any count-in, keep only the drum hits (channel-voice CC/PC on ch10 would fight the
+    firmware's kit selection), re-key to channel 10, preserve the take's tempo, and
+    append a silent barline marker so the slice loops on an exact bar boundary. Each
+    hit gets a short synthesized note-off (drums are one-shots — original offs carry no
+    musical info). window_bars <= 0 keeps the WHOLE take (may exceed the firmware cap).
+    """
+    parsed = _parse_smf(mid)
+    if not parsed:
+        return None
+    division, (num, den), events = parsed
+    bar = int(round(division * 4 * num / den))          # ticks per bar
+    if bar <= 0 or not events:
+        return None
+
+    # GMD is click-locked (constant tempo): carry the take's first tempo meta.
+    tempo = next((ev[3:6] for _, ev in events
+                  if ev[0] == 0xFF and len(ev) >= 6 and ev[1] == 0x51), None)
+
+    hits = [(t, ev[1] & 0x7F, ev[2] & 0x7F)             # (tick, note, vel)
+            for t, ev in events
+            if (ev[0] & 0xF0) == 0x90 and ev[2] > 0]
+    if not hits:
+        return None
+    first_note, last_note = hits[0][0], hits[-1][0]
+    total_bars = last_note // bar + 1
+
+    if window_bars > 0 and window_bars < total_bars:
+        # Start one bar past the first hit's bar to skip a count-in, clamped so the
+        # window stays inside the take. `beat`-type takes are steady throughout, so
+        # any interior window is representative.
+        start_bar = first_note // bar + (1 if total_bars > window_bars + 1 else 0)
+        start_bar = max(0, min(start_bar, total_bars - window_bars))
+        w0 = start_bar * bar
+        loop_end = window_bars * bar
+        sel = [(t - w0, n, v) for (t, n, v) in hits if w0 <= t < w0 + loop_end]
+    else:
+        loop_end = total_bars * bar
+        sel = [(t, n, v) for (t, n, v) in hits]
+    if not sel:
+        return None
+
+    off = max(1, bar // 16)                              # short one-shot tail
+    evlist: list[tuple[int, bytes]] = []
+    for tick, note, vel in sel:
+        evlist.append((tick, bytes([0x90 | GM_DRUM_CHANNEL, note, vel])))
+        evlist.append((min(tick + off, loop_end), bytes([0x80 | GM_DRUM_CHANNEL, note, 0])))
+    evlist.append((loop_end, bytes([0x80 | GM_DRUM_CHANNEL, 0, 0])))  # silent barline marker
+
+    def rank(ev: bytes) -> int:
+        return 0 if (ev[0] & 0xF0) == 0x80 else 1
+
+    evlist.sort(key=lambda e: (e[0], rank(e[1])))
+    body = bytearray()
+    if tempo:
+        body += _vlq(0) + bytes([0xFF, 0x51, 0x03]) + tempo
+    prev = 0
+    for tick, ev in evlist:
+        body += _vlq(tick - prev) + ev
+        prev = tick
+    body += _vlq(0) + bytes([0xFF, 0x2F, 0x00])
+    track = b"MTrk" + struct.pack(">I", len(body)) + bytes(body)
+    header = b"MThd" + struct.pack(">IHHH", 6, 0, 1, division)
+    return header + track
+
+
+def _gmd_meta(path: str):
+    """Parse a GMD filename `<id>_<style>_<bpm>_<type>_<timesig>.mid` -> dict."""
+    base = os.path.basename(path)
+    if not base.lower().endswith(".mid"):
+        return None
+    parts = base[:-4].split("_")
+    if len(parts) < 5:
+        return None
+    tid, bpm, typ, timesig = parts[0], parts[-3], parts[-2], parts[-1]
+    style = "-".join(parts[1:-3])
+    if not bpm.isdigit():
+        return None
+    return {"id": tid, "style": style, "bpm": bpm, "type": typ, "timesig": timesig}
+
+
+def fetch_gmd(out_drums: str, limit: int, window_bars: int = 2) -> int:
+    print(f"[gmd] downloading Groove MIDI Dataset (midi-only, ~4 MB) …")
+    try:
+        blob = _http_get(GMD_ZIP_URL)
+    except Exception as e:                     # noqa: BLE001
+        print(f"[gmd] download failed ({e}).")
+        print(f"      Get it manually from {GMD_ZIP_URL}")
+        print(f"      and unzip the .mid files into: {out_drums}")
+        return 0
+
+    zf = zipfile.ZipFile(io.BytesIO(blob))
+    cand = []
+    for name in zf.namelist():
+        meta = _gmd_meta(name)
+        if meta:
+            cand.append((name, meta))
+    # Prefer full grooves in common time, then group by style for a round-robin
+    # spread so a small --limit still samples the whole stylistic range.
+    def pref(m: dict) -> tuple:
+        return (0 if m["type"] == "beat" else 1,
+                0 if m["timesig"] == "4-4" else 1)
+
+    by_style: dict[str, list] = {}
+    for name, meta in sorted(cand, key=lambda c: (pref(c[1]), c[1]["style"], c[0])):
+        by_style.setdefault(meta["style"], []).append((name, meta))
+
+    pools = list(by_style.values())
+    picks: list[tuple] = []
+    while pools and (not limit or len(picks) < limit):
+        pools = [p for p in pools if p]
+        for p in pools:
+            picks.append(p.pop(0))
+            if limit and len(picks) >= limit:
+                break
+
+    os.makedirs(out_drums, exist_ok=True)
+    seen: set[str] = set()
+    n = 0
+    for name, meta in picks:
+        loop = _loopify_gmd(zf.read(name), window_bars)
+        if not loop:
+            continue
+        tag = "" if meta["type"] == "beat" else f" {meta['type']}"
+        base = f"gmd {meta['style']} {meta['bpm']}bpm{tag}"
+        out_name = base
+        if out_name in seen:                   # disambiguate same style+bpm
+            out_name = f"{base} ({meta['id']})"
+        seen.add(out_name)
+        with open(os.path.join(out_drums, out_name + ".mid"), "wb") as f:
+            f.write(loop)
+        # Collapse the granular GMD style to its family for the Genre axis
+        # ("funk-groove1" -> "funk", "afrocuban-bembe" -> "afrocuban"); the full
+        # style stays in the display name.
+        _record(out_name + ".mid", "gmd", meta["style"].split("-")[0], meta["bpm"], out_name)
+        n += 1
+    with open(os.path.join(out_drums, "ATTRIBUTION.gmd"), "w", encoding="utf-8") as f:
+        f.write(GMD_ATTRIBUTION)
+    print(f"[gmd] staged {n} loopable grooves (CC-BY 4.0) into {out_drums}")
     return n
 
 
@@ -402,11 +722,14 @@ def main() -> int:
         repo_root, "projects", "spike_esp32_bt_spdif_mix_kit_f32", "assets", "drums")
 
     ap = argparse.ArgumentParser(description="Assemble MIDI drum grooves for T-DSP.")
-    ap.add_argument("mode", nargs="?", default="sample", choices=["sample", "dmp", "all"])
+    ap.add_argument("mode", nargs="?", default="sample",
+                    choices=["sample", "dmp", "gmd", "all"])
     ap.add_argument("--out", default="c:/tmp/t-dsp-drums",
                     help="staging dir; grooves land in <out>/drums")
     ap.add_argument("--limit", type=int, default=48,
-                    help="max grooves to curate from the dmp pack")
+                    help="max grooves to curate from the dmp/gmd packs (0 = no cap)")
+    ap.add_argument("--bars", type=int, default=2,
+                    help="gmd: loop-window length in bars (0 = keep the whole take)")
     ap.add_argument("--assets", action="store_true",
                     help="write the sample set into the repo assets/drums instead of --out")
     ap.add_argument("--push", action="store_true", help="copy the staging dir to the card")
@@ -427,7 +750,11 @@ def main() -> int:
             f.write(SAMPLE_CREDITS)
     if args.mode in ("dmp", "all"):
         total += fetch_dmp(out_drums, args.limit)
+    if args.mode in ("gmd", "all"):
+        total += fetch_gmd(out_drums, args.limit, args.bars)
 
+    if total or os.path.isdir(out_drums):
+        write_manifest(out_drums)          # /drums/catalog.tsv drives the firmware browser
     print(f"\nDone: {total} groove(s) in {out_drums}")
     if args.push and not args.assets:
         push(out_drums)

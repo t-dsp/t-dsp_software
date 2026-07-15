@@ -14,7 +14,9 @@ namespace smf {
 // Load /path off the SD card and parse it into out[0..maxOut). Returns the
 // event count, or -1 on error (open/size/read/parse failure). Runs from the
 // main loop only (heap alloc + SD I/O; never the audio ISR).
-static int loadSmfFile(const char *path, MidiFileEvent *out, int maxOut) {
+// `outBpm` (optional) receives the file's initial tempo in BPM — used to lock a
+// drum groove to a playing song. Left untouched on failure.
+static int loadSmfFile(const char *path, MidiFileEvent *out, int maxOut, float *outBpm = nullptr) {
     File f = SD.open(path, FILE_READ);
     if (!f) return -1;
     size_t len = f.size();
@@ -24,6 +26,7 @@ static int loadSmfFile(const char *path, MidiFileEvent *out, int maxOut) {
     size_t got = f.read(buf, len);
     f.close();
     int n = (got == len) ? parseSmf(buf, len, out, maxOut) : -1;
+    if (n > 0 && outBpm) *outBpm = initialBpm(buf, len);
     free(buf);
     return n;
 }

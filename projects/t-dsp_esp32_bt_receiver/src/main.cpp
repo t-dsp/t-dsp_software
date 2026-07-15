@@ -70,6 +70,12 @@ static constexpr char BT_DEVICE_NAME[] = "T-DSP";
 // Drum grooves catalog (READ+NOTIFY): the '|'-delimited groove names the Teensy
 // scans off /drums (@DRUMS=), same chunked-burst contract as songs/instruments.
 #define TDSP_DRUMS_UUID "7a9c0007-4a6e-4b7d-8f1a-2d3c4e5f6a70"
+// Generic file transfer (READ+NOTIFY): the Teensy streams any SD file as base64
+// frames (@FB/@FD/@FE/@FERR) plus the manifest registry (@MANIFESTS). We forward
+// each line VERBATIM as one notification (each @FD fits a ~512 MTU) — NO reassembly
+// on the ESP32; the app reassembles the file. See CATALOG_TRANSPORT.md. This ONE
+// char is the transport for drums (catalog.tsv) and every future catalog type.
+#define TDSP_FILE_UUID  "7a9c0008-4a6e-4b7d-8f1a-2d3c4e5f6a70"
 
 // Command opcodes: the first byte of a write to the command characteristic.
 enum : uint8_t {
@@ -98,6 +104,10 @@ enum : uint8_t {
   CMD_SET_DRUM_KIT = 0x32,  // + 1 byte: GM drum-kit index ("instrument") (@DRUMKIT=<i>)
   CMD_SET_DRUM_SPEED=0x33,  // + 1 byte: groove speed 25..200 (%) (@DRUMSPEED=<pct>)
   CMD_SET_DRUM_VOL = 0x34,  // + 1 byte: drum level 0..150 (%) (@DRUMVOL=<pct>)
+  CMD_SET_BPM      = 0x35,  // + 1 byte: master tempo 40..240 bpm — song+drum (@BPM=<n>)
+  CMD_SET_DRUM_SYNCHRO=0x36,// + 1 byte: 0/1 synchro start (groove begins on first note) (@DRUMSYNCHRO=<0|1>)
+  CMD_READ_FILE    = 0x40,  // + N bytes: SD path string; Teensy streams it back on the FILE char (@READ=<path>)
+  CMD_PLAY_DRUM_FILE=0x41,  // + N bytes: groove filename; plays /drums/<name> (@DRUMF=<filename>)
 };
 
 BluetoothA2DPSink a2dp_sink;
@@ -144,6 +154,8 @@ static void relayDrumStop()           { Serial.printf("@DRUM=stop\n"); }
 static void relayDrumKit(uint8_t idx) { Serial.printf("@DRUMKIT=%u\n", idx); }
 static void relayDrumSpeed(uint8_t p) { Serial.printf("@DRUMSPEED=%u\n", p); }
 static void relayDrumVol(uint8_t p)   { Serial.printf("@DRUMVOL=%u\n", p); }
+static void relayBpm(uint8_t b)       { Serial.printf("@BPM=%u\n", b); }        // master tempo (song+drum)
+static void relayDrumSynchro(uint8_t s){ Serial.printf("@DRUMSYNCHRO=%u\n", s ? 1 : 0); }
 
 // ---- Paired-source list (multi-device switch) -----------------------------
 static BLECharacteristic *g_srcChar = nullptr;
@@ -152,6 +164,21 @@ static BLECharacteristic *g_srcChar = nullptr;
 static BLECharacteristic *g_songsChar = nullptr;
 static BLECharacteristic *g_instrChar = nullptr;
 static BLECharacteristic *g_drumsChar = nullptr;
+static BLECharacteristic *g_fileChar  = nullptr;   // generic file-transfer frames (pass-through)
+
+// Ask the Teensy to stream an SD file / play a groove by name. Variable-length
+// string args (path / filename) — the generic catalog transport (CATALOG_TRANSPORT.md).
+static void relayReadFile(const char *path)  { Serial.printf("@READ=%s\n", path); }
+static void relayDrumFile(const char *fname) { Serial.printf("@DRUMF=%s\n", fname); }
+
+// Forward ONE Teensy line verbatim to the app as a single notification. Used for the
+// file-transfer stream: the Teensy already chunked each @FD to fit one MTU, so there
+// is nothing to reassemble here — just relay + pace so the BLE stack doesn't drop it.
+static void notifyRaw(BLECharacteristic *ch, const char *line) {
+  if (!ch) return;
+  ch->setValue((uint8_t *)line, strlen(line));
+  if (g_bleClientConnected) { ch->notify(); delay(12); }
+}
 
 // Store a '|'-delimited name list into a catalog characteristic and notify.
 // A BLE characteristic value caps at 512 B, so a long list (e.g. Dexed's full
@@ -182,6 +209,11 @@ static void handleTeensyLine(const char *line) {
   if      (strncmp(line, "@SONGS=", 7) == 0) { setCatalog(g_songsChar, line + 7); Serial.println("[cat] songs updated"); }
   else if (strncmp(line, "@INSTR=", 7) == 0) { setCatalog(g_instrChar, line + 7); Serial.println("[cat] instruments updated"); }
   else if (strncmp(line, "@DRUMS=", 7) == 0) { setCatalog(g_drumsChar, line + 7); Serial.println("[cat] drums updated"); }
+  // Generic file transport: the manifest registry + file-read frames go straight to
+  // the FILE characteristic, one line per notification (each already fits one MTU).
+  else if (strncmp(line, "@MANIFESTS=", 11) == 0) { notifyRaw(g_fileChar, line); }
+  else if (strncmp(line, "@FB=", 4) == 0 || strncmp(line, "@FD=", 4) == 0 ||
+           strncmp(line, "@FE=", 4) == 0 || strncmp(line, "@FERR=", 6) == 0) { notifyRaw(g_fileChar, line); }
 }
 
 // Ask the Teensy to (re)send its catalog over UART.
@@ -480,6 +512,18 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
         Serial.println("[ble] cmd: STOP DRUM");
         relayDrumStop();         // -> Teensy: @DRUM=stop
         break;
+      case CMD_READ_FILE: {
+        std::string path(v.begin() + 1, v.end());   // opcode byte + path string
+        Serial.printf("[ble] cmd: READ FILE %s\n", path.c_str());
+        relayReadFile(path.c_str());   // -> Teensy: @READ=<path>; frames come back on FILE char
+        break;
+      }
+      case CMD_PLAY_DRUM_FILE: {
+        std::string fname(v.begin() + 1, v.end());
+        Serial.printf("[ble] cmd: PLAY DRUM FILE %s\n", fname.c_str());
+        relayDrumFile(fname.c_str());  // -> Teensy: @DRUMF=<filename>
+        break;
+      }
       case CMD_SET_DRUM_KIT:
         if (v.size() >= 2) {
           Serial.printf("[ble] cmd: SET DRUM KIT %u\n", (uint8_t)v[1]);
@@ -496,6 +540,18 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
         if (v.size() >= 2) {
           Serial.printf("[ble] cmd: SET DRUM VOL %u%%\n", (uint8_t)v[1]);
           relayDrumVol((uint8_t)v[1]);   // -> Teensy: @DRUMVOL=<pct>
+        }
+        break;
+      case CMD_SET_BPM:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET BPM %u\n", (uint8_t)v[1]);
+          relayBpm((uint8_t)v[1]);        // -> Teensy: @BPM=<n>
+        }
+        break;
+      case CMD_SET_DRUM_SYNCHRO:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET DRUM SYNCHRO %u\n", (uint8_t)v[1]);
+          relayDrumSynchro((uint8_t)v[1]); // -> Teensy: @DRUMSYNCHRO=<0|1>
         }
         break;
       default:
@@ -547,6 +603,11 @@ static void setupBle() {
       TDSP_DRUMS_UUID,
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
   g_drumsChar->addDescriptor(new BLE2902());
+  // Generic file-transfer stream (@FB/@FD/@FE/@FERR + @MANIFESTS), forwarded verbatim.
+  g_fileChar = svc->createCharacteristic(
+      TDSP_FILE_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  g_fileChar->addDescriptor(new BLE2902());
 
   svc->start();
 
