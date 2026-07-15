@@ -107,7 +107,11 @@ AudioConnection_F32 cpoutR(dxpLimit, 0, outR, 3);
 // Onset-capture buffer lives in DMAMEM (RAM2), NOT as a class member — a 32 KB array
 // in RAM1 leaves almost no stack, and float printf from the audio path then overflows
 // it (hard fault). Must match ClipProbe_F32::kCapN.
+#ifdef TDSP_LEAN_RAM
+DMAMEM static float g_dxpCapBuf[64];    // @PROOF onset-capture stubbed on lean-RAM builds (frees ~32 KB OCRAM); loudness metering below is unaffected
+#else
 DMAMEM static float g_dxpCapBuf[8192];
+#endif
 
 // Also implements tdsp::ILoudnessMeter so the backend-agnostic runGainSweep() can drive
 // it through the shared interface (reset/resetRms/rms/peak below), identical to the lean
@@ -173,7 +177,7 @@ public:
 
     // --- Onset capture: record kCapN samples of the synth sum starting when armed,
     // so the PC can FFT it (aliasing) and inspect note-onset (zero-crossing / step).
-    static const int kCapN = 8192;           // ~171 ms @ 48 kHz
+    static const int kCapN = (int)(sizeof(g_dxpCapBuf) / sizeof(g_dxpCapBuf[0]));   // follows the buffer (tiny on lean-RAM)
     void         armCapture(void)  { __disable_irq(); m_capIdx = 0; m_arm = true; __enable_irq(); }
     bool         captureDone(void) const { return !m_arm; }
     int          captureCount(void) const { return m_capIdx; }

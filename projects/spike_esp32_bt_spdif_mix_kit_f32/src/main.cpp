@@ -165,10 +165,14 @@ AudioConnection_F32 c_pkOut  (outL,       0, peakOut,   0);
 // DMAMEM buffer, and dumps them over USB serial for tools/capture_analyze.py (FFT /
 // spectral-centroid "brightness" / RMS / WAV / plot). It taps the output BUS, not any
 // engine, so it works on every build now and in the future — a permanent dev instrument.
+#ifdef TDSP_LEAN_RAM
+DMAMEM static float g_capBuf[64];       // @CAP capture stubbed on lean-RAM builds (frees ~64 KB OCRAM for the SD-song heap)
+#else
 DMAMEM static float g_capBuf[16384];
+#endif
 class OutCaptureProbe_F32 : public AudioStream_F32 {
 public:
-    static const int kCapN = 16384;                     // ~371 ms @ 44.1 kHz
+    static const int kCapN = (int)(sizeof(g_capBuf) / sizeof(g_capBuf[0]));   // follows the buffer (tiny on lean-RAM)
     OutCaptureProbe_F32(void) : AudioStream_F32(1, m_inq) {}
     void update(void) override {
         audio_block_f32_t *b = receiveReadOnly_f32(0);
@@ -239,15 +243,29 @@ static bool g_sdReady = false;
   #include "DrumVoice.h"    // OPLL 5-sound rhythm; ~9 KB, no PSRAM
 #endif
 
+#include "CatalogDb.h"   // on-demand /tdsp/ catalog database (@REINDEX); client-triggered
+// Parallel drum-voice label for the catalog header (a melodic synth + a dedicated drum engine).
+#if defined(TDSP_DRUM_VOICE)
+  static const char *kDrumEngineName = "OPLL";
+#elif defined(TDSP_DRUM_TSF)
+  static const char *kDrumEngineName = "TSF";
+#else
+  static const char *kDrumEngineName = "";   // GM engines render their own ch10 drums
+#endif
+
 #ifdef TDSP_SYNTH_DEXED_POOL
 // Analog-loopback capture probe: taps tdmIn slot 0 = ADC ch1 = the re-digitized OUT1.
 // A dedicated capture-only class (not ClipProbe_F32) so its 32 KB buffer can live in
 // DMAMEM (RAM2) instead of RAM1 — a second full ClipProbe overflows RAM1.
+#ifdef TDSP_LEAN_RAM
+DMAMEM static float g_adcCapBuf[64];    // ADC-loopback capture stubbed on lean-RAM builds (frees ~32 KB OCRAM)
+#else
 DMAMEM static float g_adcCapBuf[8192];
+#endif
 DMAMEM static float g_adcSnap[256];
 class AdcCaptureProbe_F32 : public AudioStream_F32 {
 public:
-    static const int kCapN = 8192;
+    static const int kCapN = (int)(sizeof(g_adcCapBuf) / sizeof(g_adcCapBuf[0]));
     static const int kPre = 128, kPost = 128, kSnapN = kPre + kPost;
     AdcCaptureProbe_F32(void) : AudioStream_F32(1, inputQueueArray) {}
     void update(void) override {
@@ -695,6 +713,41 @@ static const DrumKit kDrumKits[] = {
 };
 static const int kNumDrumKits = sizeof(kDrumKits) / sizeof(kDrumKits[0]);
 
+// Catalog DB (CatalogDb.h) bundled-list hook: the engine's compile-time voice names +
+// the GM drum-kit table live here, so the indexer calls back into main.cpp to emit
+// /tdsp/instruments.ndjson + /tdsp/drumkits.ndjson alongside the SD-scanned sources.
+static void catdbWriteBundled() {
+    SD.remove("/tdsp/instruments.ndjson");
+    File o = SD.open("/tdsp/instruments.ndjson", FILE_WRITE);
+    if (o) {
+        if (!synthIsGM())   // GM engines stream no names (client renders GM 0..127 itself)
+            for (int i = 0; i < synthNumInstruments(); ++i) {
+                o.print("{\"i\":"); o.print(i); o.print(",\"name\":");
+                tdsp::catdb::jsonStr(o, synthInstrumentName(i)); o.print("}\n");
+            }
+        o.close();
+    }
+    SD.remove("/tdsp/drumkits.ndjson");
+    File k = SD.open("/tdsp/drumkits.ndjson", FILE_WRITE);
+    if (k) {
+        for (int i = 0; i < kNumDrumKits; ++i) {
+            k.print("{\"name\":"); tdsp::catdb::jsonStr(k, kDrumKits[i].name);
+            k.print(",\"prog\":"); k.print(kDrumKits[i].prog); k.print("}\n");
+        }
+        k.close();
+    }
+    // songs.ndjson — from the g_songs PLAY registry so row i == the @SONG=<i> index.
+    SD.remove("/tdsp/songs.ndjson");
+    File so = SD.open("/tdsp/songs.ndjson", FILE_WRITE);
+    if (so) {
+        for (int i = 0; i < g_numSongs; ++i) {
+            so.print("{\"i\":"); so.print(i); so.print(",\"name\":");
+            tdsp::catdb::jsonStr(so, g_songs[i].name); so.print("}\n");
+        }
+        so.close();
+    }
+}
+
 // Scan /drums for *.mid (created if missing). Each groove appears in the Drums
 // picker; drop a .mid on the card and Refresh to add one with no rebuild.
 static void buildDrumList() {
@@ -1040,6 +1093,7 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         else songStart(atoi(line + 6));   // @SONG=<song index>
     }
     else if (strcmp(line, "@GETCAT") == 0)        refreshCatalog(reply);   // re-scan SD + send catalog
+    else if (strcmp(line, "@REINDEX") == 0)       { tdsp::catdb::buildCatalog(synthName(), drumEngineOk(), kDrumEngineName, catdbWriteBundled, millis()); reply.println("@REINDEXED"); }  // rebuild /tdsp/*.ndjson DB (upsert)
     else if (strncmp(line, "@READ=", 6) == 0)     streamFile(reply, line + 6);  // generic file fetch (catalog transport)
     else if (strncmp(line, "@DRUM=", 6) == 0) {                            // drum groove play/stop
         if (strcmp(line + 6, "stop") == 0) drumStop();
