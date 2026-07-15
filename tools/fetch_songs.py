@@ -39,8 +39,17 @@ tmom   (network)
 giant  (network)
     ByteDance GiantMIDI-Piano (~10k solo-piano transcriptions of classical works,
     CC-BY 4.0, filenames "Surname, Firstname, Title.mid"). Sounds excellent even
-    on a single voice. The full set is distribution-gated on the upstream repo, so
-    if the download URL is unreachable we print manual-download instructions.
+    on a single voice. The full set is distribution-gated on the upstream repo and
+    the old release asset now 404s, so this usually prints manual-download hints —
+    prefer `pianohf` for a directly-downloadable classical-piano set.
+
+piano  (network, best for classical piano)
+    Solo-piano classical from the ASAP dataset (CPJKU/asap-dataset on GitHub):
+    16 composers with a real spread (Beethoven, Chopin, Bach, Liszt, Schubert,
+    Haydn, Mozart, Ravel, Rachmaninoff, Brahms, …). We take the quantized
+    "midi_score.mid" per piece (clean tempo map, single-voice-friendly, gives the
+    drum player a real BPM) and round-robin across composers. CC BY-NC-SA 4.0.
+    Override the repo with --url "<owner>/<repo>".
 
 all
     lakh + tmom + giant, splitting --limit evenly across the three.
@@ -51,6 +60,7 @@ Usage
     python tools/fetch_songs.py lakh --limit 30
     python tools/fetch_songs.py tmom --limit 30
     python tools/fetch_songs.py giant --limit 24
+    python tools/fetch_songs.py piano --limit 30     # classical solo piano (ASAP)
     python tools/fetch_songs.py all --push          # stage + copy to the card
 
 By default the script writes to a staging directory (default c:/tmp/t-dsp-songs)
@@ -87,6 +97,17 @@ TMOM_URL = "https://archive.org/download/themagicofmidiv1/The_Magic_of_MIDI.tar"
 # have the link from bytedance/GiantMIDI-Piano.
 GIANT_URL = ("https://github.com/bytedance/GiantMIDI-Piano/releases/download/"
              "v1.2/midis_for_evaluation.zip")
+# piano: solo-piano classical from the ASAP dataset (CPJKU/asap-dataset on GitHub).
+# 16 composers with a real spread (Beethoven, Chopin, Bach, Liszt, Schubert, Haydn,
+# Mozart, Ravel, Rachmaninoff, Brahms, …). We take the ONE "midi_score.mid" per piece
+# (the quantized, score-derived take — clean tempo map, plays great on a single voice
+# and gives the drum player a real BPM), NOT the expressive human performances. GitHub
+# serves bots fine (piano-midi.de itself 418s scripts) and its git-tree API lets us
+# curate a per-composer round-robin. Override the repo with --url "<owner>/<repo>".
+PIANO_REPO = "CPJKU/asap-dataset"
+PIANO_BRANCH = "main"
+PIANO_TREE = "https://api.github.com/repos/{repo}/git/trees/{branch}?recursive=1"
+PIANO_RAW = "https://raw.githubusercontent.com/{repo}/{branch}/{path}"
 
 MAX_EVENTS = 24000          # mirror the firmware cap (loadSmfFile refuses more)
 MIN_NOTES = 120             # skip near-empty / fragment files
@@ -408,6 +429,66 @@ def fetch_giant(out_songs: str, limit: int, url: str, seen: set[str]) -> int:
     return n
 
 
+# --- piano: ASAP classical solo-piano (CC BY-NC-SA 4.0) ----------------------
+PIANO_LICENSE = """\
+Classical solo-piano MIDI from the ASAP dataset (aligned scores & performances).
+Foscarin, Peter, Widmer et al., CPJKU. Licensed CC BY-NC-SA 4.0
+(https://creativecommons.org/licenses/by-nc-sa/4.0/): non-commercial, keep the
+attribution and share-alike. Source: https://github.com/CPJKU/asap-dataset
+These are the quantized "midi_score" takes (one per piece). Personal/demo use.
+"""
+
+
+def _piano_disp(path: str) -> str:
+    """'Beethoven/Piano_Sonatas/1-1/midi_score.mid' -> 'Beethoven - Piano Sonatas 1-1'."""
+    parts = path.split("/")
+    composer = parts[0]
+    piece = " ".join(parts[1:-1]).replace("_", " ")   # drop the midi_score.mid leaf
+    return f"{composer} - {piece}".strip(" -")
+
+
+def fetch_piano(out_songs: str, limit: int, repo: str, seen: set[str]) -> int:
+    """Curate solo-piano classical from ASAP: one 'midi_score.mid' per piece, grouped
+    by composer and round-robined so a small --limit samples widely (Bach .. Ravel)
+    instead of 30 Beethoven sonatas."""
+    if "/" not in repo:                          # allow a bare mode with the default repo
+        repo = PIANO_REPO
+    try:
+        req = urllib.request.Request(PIANO_TREE.format(repo=repo, branch=PIANO_BRANCH),
+                                     headers={"User-Agent": "t-dsp-fetch-songs"})
+        with urllib.request.urlopen(req, timeout=60) as r:
+            import json
+            tree = json.load(r).get("tree", [])
+    except Exception as e:                        # noqa: BLE001
+        print(f"[piano] could not list {repo} ({e}).")
+        return 0
+    # one clean score MIDI per piece
+    paths = [t["path"] for t in tree
+             if os.path.basename(t["path"]).lower() in ("midi_score.mid", "midi_score.midi")]
+    by_composer: dict[str, list] = {}
+    for p in paths:
+        by_composer.setdefault(p.split("/")[0], []).append(p)
+    groups = [ms for _, ms in sorted(by_composer.items())]
+    print(f"[piano] {len(paths)} pieces, {len(by_composer)} composers in {repo}")
+    n = 0
+    for path in _round_robin(groups, limit * 3):   # overshoot; some get filtered
+        if limit and n >= limit:
+            break
+        try:
+            fr = urllib.request.Request(PIANO_RAW.format(repo=repo, branch=PIANO_BRANCH, path=path),
+                                        headers={"User-Agent": "t-dsp-fetch-songs"})
+            with urllib.request.urlopen(fr, timeout=60) as resp:
+                data = resp.read()
+        except Exception:                          # noqa: BLE001
+            continue
+        if _write(out_songs, _piano_disp(path), data, seen):
+            n += 1
+    with open(os.path.join(out_songs, "LICENSE.piano"), "w", encoding="utf-8") as f:
+        f.write(PIANO_LICENSE)
+    print(f"[piano] staged {n} classical piano songs (CC BY-NC-SA) into {out_songs}")
+    return n
+
+
 # --- push (reuse the shared pusher) ------------------------------------------
 def push(out_songs: str) -> None:
     ps1 = os.path.join(os.path.dirname(__file__), "push_to_teensy.ps1")
@@ -425,7 +506,7 @@ def push(out_songs: str) -> None:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Assemble a curated MIDI song library for T-DSP.")
     ap.add_argument("mode", nargs="?", default="lakh",
-                    choices=["lakh", "tmom", "giant", "all"])
+                    choices=["lakh", "tmom", "giant", "piano", "all"])
     ap.add_argument("--out", default="c:/tmp/t-dsp-songs",
                     help="staging dir; songs land in <out>/songs")
     ap.add_argument("--limit", type=int, default=30,
@@ -454,6 +535,8 @@ def main() -> int:
         total += fetch_tmom(out_songs, args.limit, args.url or TMOM_URL, seen)
     elif args.mode == "giant":
         total += fetch_giant(out_songs, args.limit, args.url or GIANT_URL, seen)
+    elif args.mode == "piano":
+        total += fetch_piano(out_songs, args.limit, args.url or PIANO_REPO, seen)
 
     print(f"\nDone: {total} song(s) in {out_songs}")
     if total > 48:
