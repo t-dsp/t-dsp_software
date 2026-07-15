@@ -31,6 +31,7 @@
 #include <MidiRouter.h>    // MPE-aware fan-out: bend->semitones, CC74->timbre, pressure->onPressure
 #include <SD.h>
 #include <MTP_Teensy.h>   // expose the SD card to the host over USB (Serial+MTP)
+#include <TDspSdXfer.h>   // host->SD file push over USB CDC (@WB), fast, no reflash
 #include "async_input.h"
 #include "input_i2s2_16bit.h"
 // OpenAudio F32: the mix bus, int16->F32 converts, F32-native async S/PDIF input,
@@ -954,6 +955,13 @@ static const char kB64[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 static uint8_t g_xferId = 0;
 
+// Host->device file WRITE receiver — the push complement of streamFile/@READ.
+// A host (push_file_serial.ps1 / Web Serial) sends @WB then a raw binary payload
+// that lands straight on the SD over USB CDC: ~5 MB/s, no MTP, no reflash. Wired
+// USB-only (the ESP32/BLE relay is 115200 + can't carry a raw byte stream). See
+// lib/TDspSdXfer.
+static tdsp::SdWriteReceiver g_sdWrite(SD);
+
 static void streamFile(Print& out, const char* path) {
     const uint8_t id = ++g_xferId;
     File f = SD.open(path);
@@ -1095,6 +1103,16 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     else if (strcmp(line, "@GETCAT") == 0)        refreshCatalog(reply);   // re-scan SD + send catalog
     else if (strcmp(line, "@REINDEX") == 0)       { tdsp::catdb::buildCatalog(synthName(), drumEngineOk(), kDrumEngineName, catdbWriteBundled, millis()); reply.println("@REINDEXED"); }  // rebuild /tdsp/*.ndjson DB (upsert)
     else if (strncmp(line, "@READ=", 6) == 0)     streamFile(reply, line + 6);  // generic file fetch (catalog transport)
+    else if (strncmp(line, "@WB=", 4) == 0) {                                    // host->SD file write; raw payload follows. USB CDC only.
+        if (&reply != &Serial) reply.println("@WERR=0\x1fusb only");
+        else g_sdWrite.begin(line + 4, reply);
+    }
+    else if (strncmp(line, "@CRC=", 5) == 0) {                                   // checksum an SD file (round-trip verify for @WB)
+        uint32_t crc = 0, bytes = 0;
+        if (tdsp::SdWriteReceiver::fileCrc32(SD, line + 5, crc, bytes))
+            reply.printf("@CRCR=%s\x1f%08lx\x1f%lu\n", line + 5, (unsigned long)crc, (unsigned long)bytes);
+        else reply.printf("@CRCERR=%s\n", line + 5);
+    }
     else if (strncmp(line, "@DRUM=", 6) == 0) {                            // drum groove play/stop
         if (strcmp(line + 6, "stop") == 0) drumStop();
         else drumStart(atoi(line + 6));   // @DRUM=<groove index> (legacy flat menu)
@@ -1965,6 +1983,7 @@ void loop() {
     g_drumPlayer.tick();   // loops internally (setLooping), so no external re-arm needed
     g_arpFilter.tick(micros());   // drain the arp's gate-off queue (note steps fire on onClock)
     songLoopTick();   // auto-restart the song if loop mode is on and it just ended
+    g_sdWrite.tick(Serial, millis());   // abort a stalled @WB transfer (watchdog)
 
     // USB CDC input serves two roles: '@'-prefixed control LINES (the same protocol
     // the ESP32 relays from BLE — lets a Web Serial browser page drive the device with
@@ -1974,6 +1993,9 @@ void loop() {
     static size_t usbN = 0;
     static bool usbInCmd = false;
     while (Serial.available()) {
+        // While an @WB write is in flight, incoming bytes are the raw payload —
+        // route them straight to the SD before the line assembler sees them.
+        if (g_sdWrite.receiving()) { g_sdWrite.pump(Serial, Serial); if (g_sdWrite.receiving()) break; else continue; }
         int c = Serial.read();
         if (usbInCmd) {
             if (c == '\n' || usbN >= sizeof(usbLine) - 1) {
