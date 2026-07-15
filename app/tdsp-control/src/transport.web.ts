@@ -2,9 +2,12 @@
 // Speaks the @-line protocol directly to the Teensy USB CDC port. This IS the new
 // control.html. Chromium-only; requires a secure context (localhost / https).
 
-import type { Transport, LineHandler } from './transport';
+import { parseDxls } from './transport';
+import type { Transport, LineHandler, DirPage } from './transport';
 
 interface FilePending { path: string; parts: Record<number, string>; resolve: (t: string) => void; reject: (e: any) => void; timer: any; }
+interface DirPending { path: string; resolve: (d: DirPage) => void; reject: (e: any) => void; timer: any; }
+interface VoicesPending { rel: string; resolve: (v: string[]) => void; reject: (e: any) => void; timer: any; }
 
 export class WebSerialTransport implements Transport {
   readonly name = 'USB' as const;
@@ -14,6 +17,8 @@ export class WebSerialTransport implements Transport {
   private buf = '';
   private handlers = new Set<LineHandler>();
   private file: FilePending | null = null;
+  private dir: DirPending | null = null;
+  private voices: VoicesPending | null = null;
   private enc = new TextEncoder();
   private dec = new TextDecoder();
 
@@ -39,6 +44,8 @@ export class WebSerialTransport implements Transport {
 
   async disconnect(): Promise<void> {
     if (this.file) { clearTimeout(this.file.timer); this.file.reject('disconnected'); this.file = null; }  // don't leave a read "in progress"
+    if (this.dir) { clearTimeout(this.dir.timer); this.dir.reject('disconnected'); this.dir = null; }
+    if (this.voices) { clearTimeout(this.voices.timer); this.voices.reject('disconnected'); this.voices = null; }
     try { await this.reader?.cancel(); this.reader?.releaseLock(); } catch {}
     try { await this.writer?.close(); this.writer?.releaseLock(); } catch {}
     try { await this.port?.close(); } catch {}
@@ -92,6 +99,16 @@ export class WebSerialTransport implements Transport {
       return;
     }
     if (line.startsWith('@FERR=')) { const f = this.file; if (f) { clearTimeout(f.timer); this.file = null; f.reject(line.slice(6)); } return; }
+    // Lazy /dexed browse replies. Match the echoed path so a stale reply for a folder
+    // we've navigated away from is ignored (the newer request has its own pending slot).
+    if (line.startsWith('@DXLS=')) {
+      const d = this.dir; if (d) { const dp = parseDxls(line.slice(6)); if (dp.path === d.path) { clearTimeout(d.timer); this.dir = null; d.resolve(dp); } }
+      return;
+    }
+    if (line.startsWith('@DXVL=')) {
+      const v = this.voices; if (v) { const p = line.slice(6).split('|'); const rc = p.shift(); if (rc === v.rel) { clearTimeout(v.timer); this.voices = null; v.resolve(p); } }
+      return;
+    }
     // everything else -> subscribers (heartbeats, BT status, etc.)
     this.handlers.forEach(h => h(line));
   }
@@ -103,6 +120,26 @@ export class WebSerialTransport implements Transport {
       this.file = f;
       this.armFileTimer(f);   // idle watchdog; re-armed on every @FB/@FD frame
       this.send('@READ=' + path);
+    });
+  }
+
+  browseDir(path: string, page = 0): Promise<DirPage> {
+    return new Promise((resolve, reject) => {
+      if (this.dir) { clearTimeout(this.dir.timer); this.dir.reject('superseded'); }
+      const d: DirPending = { path, resolve, reject, timer: null };
+      this.dir = d;
+      d.timer = setTimeout(() => { if (this.dir === d) { this.dir = null; reject('timeout'); } }, 8000);
+      this.send('@DXLS=' + path + (page ? '\t' + page : ''));
+    });
+  }
+
+  cartVoices(cartRel: string): Promise<string[]> {
+    return new Promise((resolve, reject) => {
+      if (this.voices) { clearTimeout(this.voices.timer); this.voices.reject('superseded'); }
+      const v: VoicesPending = { rel: cartRel, resolve, reject, timer: null };
+      this.voices = v;
+      v.timer = setTimeout(() => { if (this.voices === v) { this.voices = null; reject('timeout'); } }, 8000);
+      this.send('@DXVL=' + cartRel);
     });
   }
 

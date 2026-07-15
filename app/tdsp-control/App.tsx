@@ -10,21 +10,10 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { View, Text, Pressable, ScrollView, FlatList, TextInput, Switch, StyleSheet, ActivityIndicator, Platform, Alert, useWindowDimensions } from 'react-native';
 import Slider from '@react-native-community/slider';
 import { createTransport } from './src/transportFactory';
-import { Catalog, EMPTY_CATALOG, loadCatalog, cartRel, Cart } from './src/catalog';
-import type { Transport } from './src/transport';
+import { Catalog, EMPTY_CATALOG, loadCatalog } from './src/catalog';
+import type { Transport, DirPage } from './src/transport';
 
-// One level of the /dexed folder tree: subfolders + carts sitting directly at `path`.
-function dexedLevel(dexed: Cart[], path: string) {
-  const prefix = path ? path + '/' : '';
-  const folders = new Set<string>();
-  const carts: Cart[] = [];
-  for (const c of dexed) {
-    const f = c.folder || '';
-    if (f === path) { carts.push(c); continue; }
-    if (f.startsWith(prefix)) { const seg = f.slice(prefix.length).split('/')[0]; if (seg) folders.add(seg); }
-  }
-  return { folders: [...folders].sort((a, b) => a.localeCompare(b)), carts: carts.sort((a, b) => a.name.localeCompare(b.name)) };
-}
+const EMPTY_DIR: DirPage = { path: '', page: 0, npages: 1, folders: [], carts: [] };
 const grooveFile = (g: { path: string; name: string }) => g.path.split('/').pop() || (g.name + '.mid');   // @DRUMF wants filename WITH .mid
 
 const C = { bg: '#0d1117', card: '#161b22', card2: '#0e131a', border: '#30363d', text: '#e6edf3', muted: '#8b949e', accent: '#3fb950', sel: 'rgba(31,111,235,0.28)', chip: '#21262d' };
@@ -113,8 +102,11 @@ export default function App() {
   const [songBpm, setSongBpm] = useState(120);            // tempo of the last song that played
   const [selVoice, setSelVoice] = useState('');
   const [selVoiceName, setSelVoiceName] = useState('');   // last-picked instrument name (shown on the card, persists across browsing)
-  const [cart, setCart] = useState<Cart | null>(null);
+  const [cart, setCart] = useState<{ rel: string; name: string } | null>(null);
   const [vpath, setVpath] = useState('');                 // dexed folder-browser current path ('' = root)
+  const [level, setLevel] = useState<DirPage>(EMPTY_DIR); // current /dexed folder listing (lazy @DXLS)
+  const [cartVoices, setCartVoices] = useState<string[]>([]); // open cart's 32 voice names (lazy @DXVL)
+  const [libBusy, setLibBusy] = useState(false);          // a browse/voices fetch is in flight
   const [q, setQ] = useState({ voice: '', cart: '', groove: '' });
   const [busy, setBusy] = useState(false);
 
@@ -131,7 +123,7 @@ export default function App() {
     if (j.song) setPlayer(p => ({ ...p, playing: !!j.song.playing, song: j.song.i | 0 }));
     if (j.drums) setDrums(d => ({ ...d, kit: j.drums.kit | 0, playing: j.drums.playing ? d.playing : null }));
     if (j.voice) {
-      if (j.voice.cart) { setSelVoice('c/dexed/' + j.voice.cart + ':' + (j.voice.cv | 0)); setSelVoiceName(j.voice.name || ''); }
+      if (j.voice.cart) { setSelVoice('c' + j.voice.cart + ':' + (j.voice.cv | 0)); setSelVoiceName(j.voice.name || ''); }
       else if (j.voice.i != null && j.voice.i < 320) { setSelVoice('b' + (j.voice.i | 0)); setSelVoiceName(j.voice.name || ''); }
     }
   }
@@ -167,21 +159,41 @@ export default function App() {
   }
   async function reindex() { setBusy(true); try { await tp.reindex(); await load(); } finally { setBusy(false); } }
 
-  const dexedVoices = useMemo(() => cat.dexed.reduce((n, c) => n + (c.voices?.length || 0), 0), [cat.dexed]);
-  const carts = useMemo(() => { const t = q.cart.toLowerCase(); return cat.dexed.filter(c => !t || (c.name + ' ' + (c.folder || '')).toLowerCase().includes(t)).slice(0, 500); }, [cat.dexed, q.cart]);
   const grooves = useMemo(() => { const t = q.groove.toLowerCase(); return cat.grooves.filter(g => !t || g.name.toLowerCase().includes(t)).slice(0, 500); }, [cat.grooves, q.groove]);
-  const level = useMemo(() => dexedLevel(cat.dexed, vpath), [cat.dexed, vpath]);
+
+  // Lazy /dexed browse: fetch the current folder level via @DXLS whenever the path changes
+  // (skip the synthetic '@bundled' view). A superseded reply is ignored via the `alive` gate.
+  useEffect(() => {
+    if (!loaded || vpath === '@bundled') { setLevel(EMPTY_DIR); return; }
+    let alive = true;
+    setLibBusy(true);
+    tp.browseDir(vpath).then(d => { if (alive) setLevel(d); })
+      .catch(() => { if (alive) setLevel({ ...EMPTY_DIR, path: vpath }); })
+      .finally(() => { if (alive) setLibBusy(false); });
+    return () => { alive = false; };
+  }, [vpath, loaded]);
+
+  // Fetch an open cart's 32 voice names via @DXVL.
+  useEffect(() => {
+    if (!cart) { setCartVoices([]); return; }
+    let alive = true;
+    setLibBusy(true);
+    tp.cartVoices(cart.rel).then(v => { if (alive) setCartVoices(v); })
+      .catch(() => { if (alive) setCartVoices([]); })
+      .finally(() => { if (alive) setLibBusy(false); });
+    return () => { alive = false; };
+  }, [cart]);
 
   // The voices currently listed in Synth/Voices (a cart's voices, or the bundled set).
   const voiceRef = useRef<FlatList<VItem>>(null);
   const browseRef = useRef<ScrollView>(null);              // the folder-browse list
   const pickerY = useRef<Record<string, number>>({});      // saved scroll offset per list, so we can restore on return
   const voiceData: VItem[] = useMemo(() =>
-    cart ? cart.voices.map((vn, i) => ({ key: 'c' + cart.path + ':' + i, label: (i + 1) + '. ' + vn, i }))
+    cart ? cartVoices.map((vn, i) => ({ key: 'c' + cart.rel + ':' + i, label: (i + 1) + '. ' + vn, i }))
       : vpath === '@bundled' ? cat.instruments.map(v => ({ key: 'b' + v.i, label: v.name, i: v.i }))
-        : [], [cart, vpath, cat.instruments]);
-  const listId = voiceData.length ? (cart ? 'c' + cart.path : '@bundled') : 'br:' + vpath;   // identity of the currently-shown picker list
-  const pickVoice = (it: VItem) => { setSelVoice(it.key); setSelVoiceName(it.label.replace(/^\d+\.\s*/, '')); if (it.key[0] === 'c' && cart) tp.dxPick(cartRel(cart), it.i); else if (it.key[0] === 'b') tp.dxVoice(it.i); };
+        : [], [cart, cartVoices, vpath, cat.instruments]);
+  const listId = voiceData.length ? (cart ? 'c' + cart.rel : '@bundled') : 'br:' + vpath;   // identity of the currently-shown picker list
+  const pickVoice = (it: VItem) => { setSelVoice(it.key); setSelVoiceName(it.label.replace(/^\d+\.\s*/, '')); if (it.key[0] === 'c' && cart) tp.dxPick(cart.rel, it.i); else if (it.key[0] === 'b') tp.dxVoice(it.i); };
   const stepVoice = (dir: number) => {
     // In a visible list (a cart's voices or the bundled set), step within it so the
     // selection stays scrolled into view.
@@ -191,29 +203,14 @@ export default function App() {
       if (voiceData[ni]) pickVoice(voiceData[ni]);
       return;
     }
-    // Browsing folders (no list open): still advance to the next/prev instrument. Bundled
-    // set steps within cat.instruments; the /dexed library steps voice-by-voice, crossing
-    // cart boundaries, so Next never dead-ends at a cart's edge.
-    if (selVoice[0] === 'b') {
+    // No list open (browsing folders): step within the bundled set. Crossing /dexed cart
+    // boundaries isn't possible now that the library is browsed lazily (not held in RAM),
+    // so to step through SD voices, open a cart first.
+    if (selVoice[0] !== 'c' && cat.instruments.length) {
       const idx = cat.instruments.findIndex(v => 'b' + v.i === selVoice);
       const ni = Math.max(0, Math.min(cat.instruments.length - 1, (idx < 0 ? 0 : idx) + dir));
       const v = cat.instruments[ni]; if (v) { setSelVoice('b' + v.i); setSelVoiceName(v.name); tp.dxVoice(v.i); }
-      return;
     }
-    if (!cat.dexed.length) return;
-    let ci = 0, vi = -1;   // default: just before the very first voice, so Next → first
-    if (selVoice[0] === 'c') {
-      const cut = selVoice.lastIndexOf(':');
-      const p = selVoice.slice(1, cut); vi = parseInt(selVoice.slice(cut + 1), 10);
-      const found = cat.dexed.findIndex(c => c.path === p); if (found >= 0) ci = found;
-    }
-    vi += dir;
-    let c = cat.dexed[ci];
-    if (vi < 0) { ci = Math.max(0, ci - 1); c = cat.dexed[ci]; vi = c ? c.voices.length - 1 : 0; }
-    else if (c && vi >= c.voices.length) { ci = Math.min(cat.dexed.length - 1, ci + 1); c = cat.dexed[ci]; vi = 0; }
-    if (!c || !c.voices.length) return;
-    vi = Math.max(0, Math.min(c.voices.length - 1, vi));
-    setSelVoice('c' + c.path + ':' + vi); setSelVoiceName(c.voices[vi]); tp.dxPick(cartRel(c), vi);
   };
   useEffect(() => {   // keep the selected voice in view (on pick + on list change)
     const idx = voiceData.findIndex(d => d.key === selVoice);
@@ -260,7 +257,7 @@ export default function App() {
   // The card/page subtitle: the currently-loaded instrument if one is picked, else a
   // summary of where the browser is (folder name or catalog counts).
   const synthValue = selVoiceName
-    || (vpath === '@bundled' ? 'Bundled' : vpath ? (vpath.split('/').pop() || '') : (cat.dexed.length ? cat.dexed.length + ' carts' : cat.instruments.length + ' voices'));
+    || (vpath === '@bundled' ? 'Bundled' : vpath ? (vpath.split('/').pop() || '') : (cat.instruments.length ? cat.instruments.length + ' voices + SD library' : 'Library'));
 
   // Synth/Voices navigation: breadcrumb trail + an up-one-level control. `cart` selected
   // ⇒ showing that cart's voices; `vpath` = the /dexed folder path ('@bundled' = bundled set).
@@ -285,8 +282,7 @@ export default function App() {
           {!loaded && <Text style={s.muted}>{connected ? 'Loading catalog…' : 'Connect to load the catalog.'}</Text>}
           {loaded && (
             <View style={s.statGrid}>
-              <Stat label="Instruments" n={cat.instruments.length} />
-              <Stat label="Dexed carts" n={cat.dexed.length} sub={dexedVoices ? dexedVoices + ' voices' : undefined} />
+              <Stat label="Instruments" n={cat.instruments.length} sub="+ SD library" />
               <Stat label="Grooves" n={cat.grooves.length} />
               <Stat label="Songs" n={cat.songs.length} />
               <Stat label="Soundfonts" n={cat.soundfonts.length} />
@@ -371,12 +367,16 @@ export default function App() {
               onScrollToIndexFailed={() => {}} scrollEventThrottle={32}
               onScroll={e => { pickerY.current[listId] = e.nativeEvent.contentOffset.y; }}
               renderItem={({ item }) => <ListBtn label={item.label} sel={selVoice === item.key} onPress={() => pickVoice(item)} />} />
+          ) : libBusy ? (
+            <View style={{ padding: 20, alignItems: 'center' }}><ActivityIndicator color={C.accent} /><Text style={[s.muted, { marginTop: 8 }]}>Loading…</Text></View>
+          ) : cart ? (
+            <Text style={s.muted}>Couldn't read this cart's voices.</Text>
           ) : (
             <ScrollView ref={browseRef} style={s.picker} nestedScrollEnabled scrollEventThrottle={32}
               onScroll={e => { pickerY.current[listId] = e.nativeEvent.contentOffset.y; }}>
               {vpath === '' && <ListBtn label={'★ Bundled voices (' + cat.instruments.length + ')'} onPress={() => setVpath('@bundled')} />}
               {level.folders.map(f => <ListBtn key={'f' + f} label={'📁 ' + f} onPress={() => setVpath(vpath ? vpath + '/' + f : f)} />)}
-              {level.carts.map(c => <ListBtn key={c.path} label={'🎛 ' + c.name} onPress={() => setCart(c)} />)}
+              {level.carts.map(c => <ListBtn key={c.rel} label={'🎛 ' + c.name} onPress={() => setCart({ rel: c.rel, name: c.name })} />)}
               {level.folders.length === 0 && level.carts.length === 0 && vpath !== '' && <Text style={s.muted}>(empty folder)</Text>}
             </ScrollView>
           )}

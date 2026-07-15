@@ -20,10 +20,12 @@
 
 import { PermissionsAndroid, Platform } from 'react-native';
 import { BleManager, Device, State, Subscription } from 'react-native-ble-plx';
-import type { Transport, LineHandler } from './transport';
+import { parseDxls } from './transport';
+import type { Transport, LineHandler, DirPage } from './transport';
 import { CMD, TDSP_SVC_UUID, TDSP_CMD_UUID, TDSP_STAT_UUID, TDSP_FILE_UUID } from './tdspBle';
 
 const FUS = '\x1f';   // field separator inside @FD/@FE frames (matches the firmware)
+const RS = '\x1e';    // record separator for chunked browse replies (matches ESP32 setCatalog)
 
 // --- base64 (react-native-ble-plx characteristic values are base64) ----------
 const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -66,6 +68,8 @@ async function ensurePermissions(): Promise<boolean> {
 }
 
 interface FilePending { resolve: (t: string) => void; reject: (e: any) => void; timer: any; }
+interface DirPending { path: string; resolve: (d: DirPage) => void; reject: (e: any) => void; timer: any; }
+interface VoicesPending { rel: string; resolve: (v: string[]) => void; reject: (e: any) => void; timer: any; }
 
 export class BleTransport implements Transport {
   readonly name = 'BLE' as const;
@@ -77,6 +81,11 @@ export class BleTransport implements Transport {
   private fileAsm: { id?: string; chunks: (string | undefined)[] } | null = null;
   private filePending: FilePending | null = null;
   private reindexDone: (() => void) | null = null;
+  // Lazy /dexed browse: @DXLS/@DXVL replies arrive chunk-framed on the FILE char (a folder
+  // page can exceed one MTU), reassembled here then matched to the pending request.
+  private browseAsm: { count: number; chunks: (string | undefined)[] } | null = null;
+  private dirPending: DirPending | null = null;
+  private voicesPending: VoicesPending | null = null;
 
   isConnected() { return !!this.device; }
 
@@ -107,7 +116,9 @@ export class BleTransport implements Transport {
     this.subs.forEach(s => { try { s.remove(); } catch {} });
     this.subs = [];
     if (this.filePending) { clearTimeout(this.filePending.timer); this.filePending.reject('disconnected'); this.filePending = null; }
-    this.fileAsm = null;
+    if (this.dirPending) { clearTimeout(this.dirPending.timer); this.dirPending.reject(new Error('disconnected')); this.dirPending = null; }
+    if (this.voicesPending) { clearTimeout(this.voicesPending.timer); this.voicesPending.reject(new Error('disconnected')); this.voicesPending = null; }
+    this.fileAsm = null; this.browseAsm = null;
     if (this.reindexDone) { const r = this.reindexDone; this.reindexDone = null; r(); }
     this.device = null;
   }
@@ -143,8 +154,38 @@ export class BleTransport implements Transport {
     p.timer = setTimeout(() => { if (this.filePending === p) { this.filePending = null; this.fileAsm = null; p.reject(new Error('timeout')); } }, 15000);
   }
 
+  // Resolve a fully-reassembled @DXLS/@DXVL reply against its pending request.
+  private dispatchBrowse(line: string) {
+    if (line.startsWith('@DXLS=')) {
+      const d = this.dirPending; if (!d) return;
+      const dp = parseDxls(line.slice(6));
+      if (dp.path === d.path) { clearTimeout(d.timer); this.dirPending = null; d.resolve(dp); }
+    } else if (line.startsWith('@DXVL=')) {
+      const v = this.voicesPending; if (!v) return;
+      const p = line.slice(6).split('|'); const rc = p.shift();
+      if (rc === v.rel) { clearTimeout(v.timer); this.voicesPending = null; v.resolve(p); }
+    }
+  }
+
   // ---- @READ file transport (frames arrive on the FILE characteristic) --------
   private onFileLine(line: string) {
+    // Chunked browse reply ("<seq>\x1e<count>\x1e<payload>"): reassemble, then dispatch. The
+    // digit prefix is unambiguous vs the '@'-prefixed file frames sharing this characteristic.
+    const r1 = line.indexOf(RS);
+    if (r1 > 0 && /^\d+$/.test(line.slice(0, r1))) {
+      const r2 = line.indexOf(RS, r1 + 1);
+      if (r2 > r1) {
+        const seq = parseInt(line.slice(0, r1), 10);
+        const count = parseInt(line.slice(r1 + 1, r2), 10);
+        const payload = line.slice(r2 + 1);
+        if (!this.browseAsm || this.browseAsm.count !== count) this.browseAsm = { count, chunks: [] };
+        this.browseAsm.chunks[seq] = payload;
+        let full = '', ok = true;
+        for (let i = 0; i < count; i++) { if (this.browseAsm.chunks[i] == null) { ok = false; break; } full += this.browseAsm.chunks[i]; }
+        if (ok) { this.browseAsm = null; this.dispatchBrowse(full); }
+        return;
+      }
+    }
     if (line.startsWith('@REINDEXED')) { const r = this.reindexDone; this.reindexDone = null; r?.(); return; }
     if (line.startsWith('@FB=')) { this.fileAsm = { id: line.slice(4).split(FUS)[0], chunks: [] }; if (this.filePending) this.armFileTimer(this.filePending); return; }
     if (line.startsWith('@FD=')) { const f = line.slice(4).split(FUS); const a = this.fileAsm; if (a && f[0] === a.id) a.chunks[parseInt(f[1], 10)] = f[2]; if (this.filePending) this.armFileTimer(this.filePending); return; }
@@ -171,6 +212,28 @@ export class BleTransport implements Transport {
       this.fileAsm = { id: undefined, chunks: [] };
       this.armFileTimer(p);   // idle watchdog; re-armed on every @FB/@FD frame
       this.relay('@READ=' + path).catch(e => { clearTimeout(p.timer); this.filePending = null; reject(e); });
+    });
+  }
+
+  browseDir(path: string, page = 0): Promise<DirPage> {
+    return new Promise((resolve, reject) => {
+      if (!this.device) { reject(new Error('not connected')); return; }
+      if (this.dirPending) { clearTimeout(this.dirPending.timer); this.dirPending.reject(new Error('superseded')); }
+      const d: DirPending = { path, resolve, reject, timer: null };
+      this.dirPending = d; this.browseAsm = null;
+      d.timer = setTimeout(() => { if (this.dirPending === d) { this.dirPending = null; reject(new Error('timeout')); } }, 12000);
+      this.relay('@DXLS=' + path + (page ? '\t' + page : '')).catch(e => { clearTimeout(d.timer); this.dirPending = null; reject(e); });
+    });
+  }
+
+  cartVoices(cartRel: string): Promise<string[]> {
+    return new Promise((resolve, reject) => {
+      if (!this.device) { reject(new Error('not connected')); return; }
+      if (this.voicesPending) { clearTimeout(this.voicesPending.timer); this.voicesPending.reject(new Error('superseded')); }
+      const v: VoicesPending = { rel: cartRel, resolve, reject, timer: null };
+      this.voicesPending = v; this.browseAsm = null;
+      v.timer = setTimeout(() => { if (this.voicesPending === v) { this.voicesPending = null; reject(new Error('timeout')); } }, 12000);
+      this.relay('@DXVL=' + cartRel).catch(e => { clearTimeout(v.timer); this.voicesPending = null; reject(e); });
     });
   }
 

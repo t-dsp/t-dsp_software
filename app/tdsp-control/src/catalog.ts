@@ -66,7 +66,11 @@ export async function loadCatalog(t: Transport): Promise<Catalog> {
   // The transport allows ONE @READ in flight at a time, so fetch sequentially (Promise.all
   // would make 5 of 6 reads reject with "read in progress" and come back empty).
   const instruments = await readOrEmpty(t, '/tdsp/instruments.ndjson');
-  const dexed = await readOrEmpty(t, '/tdsp/dexed.ndjson');
+  // NOTE: /dexed is NOT bulk-loaded. With 11k carts x 32 inline voice names the NDJSON is
+  // ~6 MB — too big to @READ on every connect (it timed out and the library came back empty).
+  // The SD library is browsed LIVE instead, folder-by-folder, via transport.browseDir()/
+  // cartVoices() (@DXLS/@DXVL). `dexed` stays [] in the catalog.
+  const dexed: Cart[] = [];
   const grooves = await readOrEmpty(t, '/tdsp/grooves.ndjson');
   const songs = await readOrEmpty(t, '/tdsp/songs.ndjson');
   const soundfonts = await readOrEmpty(t, '/tdsp/soundfonts.ndjson');
