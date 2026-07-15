@@ -65,12 +65,20 @@ export class WebSerialTransport implements Transport {
 
   onLine(cb: LineHandler): () => void { this.handlers.add(cb); return () => this.handlers.delete(cb); }
 
+  // (Re)arm the read watchdog. It's an IDLE timeout: as long as frames keep arriving we
+  // keep waiting, so a big file (e.g. a 3,700-cart /dexed) that streams for a while — or
+  // trickles over the paced BLE relay — completes instead of being cut off mid-transfer.
+  private armFileTimer(f: FilePending) {
+    clearTimeout(f.timer);
+    f.timer = setTimeout(() => { if (this.file === f) { this.file = null; f.reject('timeout'); } }, 15000);
+  }
+
   private onDeviceLine(line: string) {
     // @READ frame transport
-    if (line.startsWith('@FB=')) { if (this.file) this.file.parts = {}; return; }
+    if (line.startsWith('@FB=')) { if (this.file) { this.file.parts = {}; this.armFileTimer(this.file); } return; }
     if (line.startsWith('@FD=')) {
       const p = line.slice(4).split('\x1f');
-      if (this.file && p.length === 3) this.file.parts[+p[1]] = p[2];
+      if (this.file && p.length === 3) { this.file.parts[+p[1]] = p[2]; this.armFileTimer(this.file); }
       return;
     }
     if (line.startsWith('@FE=')) {
@@ -91,7 +99,9 @@ export class WebSerialTransport implements Transport {
   readFile(path: string): Promise<string> {
     return new Promise((resolve, reject) => {
       if (this.file) { reject('a file read is in progress'); return; }
-      this.file = { path, parts: {}, resolve, reject, timer: setTimeout(() => { if (this.file?.path === path) { this.file = null; reject('timeout'); } }, 15000) };
+      const f: FilePending = { path, parts: {}, resolve, reject, timer: null };
+      this.file = f;
+      this.armFileTimer(f);   // idle watchdog; re-armed on every @FB/@FD frame
       this.send('@READ=' + path);
     });
   }
@@ -105,6 +115,8 @@ export class WebSerialTransport implements Transport {
       this.send('@REINDEX');
     });
   }
+
+  requestState() { this.send('@STATE'); }
 
   // ---- actions (@-lines) ----
   masterVolume(pct: number) { this.send('@VOL=' + Math.max(0, Math.min(100, Math.round(pct)))); }

@@ -32,6 +32,11 @@ tdsp::MidiSink       *g_synthSink = &g_dexedSink;
 // regroups the flat list into per-bank sections by splitting on ": ".
 static const int kNumBundled = tdsp::dexed::kNumBanks * tdsp::dexed::kVoicesPerBank;  // 320
 static int g_synthInstrument = 0;
+// Current /dexed cart voice (@DXPICK); empty rel = a bundled/flat voice is current. Read
+// by main.cpp's @STATE so the app can restore which cart voice is loaded on reconnect.
+static char g_curCartRel[160]  = {0};
+static int  g_curCartVoice     = -1;
+static char g_curCartName[tdsp::dexed::kVoiceNameBufBytes] = {0};
 
 static const char *synthName()        { return "Dexed"; }
 static const char *synthDescription() { return "6-op FM (DX7) synth. Bundled voices + any /dexed/*.syx carts on the SD card."; }
@@ -78,6 +83,7 @@ static void synthSetInstrument(int idx) {
     }
     if (ok) {
         g_synthInstrument = idx;
+        g_curCartRel[0] = 0; g_curCartVoice = -1;   // a flat/bundled voice is now current
         Serial.printf("[synth] instrument %d = %s\n", idx, synthInstrumentName(idx));
     }
 }
@@ -91,6 +97,9 @@ static const char *synthPickCartVoice(const char *relCart, int voice) {
     int n = tdsp::dexed::sdCartVoiceNames(relCart, names);
     const char *nm = (n == tdsp::dexed::kVoicesPerBank && voice >= 0 &&
                       voice < tdsp::dexed::kVoicesPerBank) ? names[voice] : "";
+    snprintf(g_curCartRel, sizeof(g_curCartRel), "%s", relCart);   // remember for @STATE
+    g_curCartVoice = voice;
+    snprintf(g_curCartName, sizeof(g_curCartName), "%s", nm);
     Serial.printf("[synth] pick %s v%d = %s\n", relCart, voice, nm);
     return nm;
 }

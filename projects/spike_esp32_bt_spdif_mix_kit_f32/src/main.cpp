@@ -1202,6 +1202,28 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         g_arpFilter.setLatch(atoi(line + 10) != 0);
         reply.printf("@ARPLATCH=%d\n", g_arpFilter.latch() ? 1 : 0);
     }
+    // Full current-state snapshot (one JSON line) so the app can hydrate every card on
+    // connect instead of assuming defaults. Reports what the device actually knows —
+    // i.e. what's ACTIVE, not a UI "selection" the firmware never sees.
+    else if (strcmp(line, "@STATE") == 0) {
+        int volPct = (g_dvol <= -127.0f) ? 0 : (int)((g_dvol + 60.0f) / 0.60f + 0.5f);
+        if (volPct < 0) volPct = 0; if (volPct > 100) volPct = 100;
+        reply.printf("@STATE={\"vol\":%d,\"bpm\":%d,\"loop\":%d,", volPct, (int)(g_masterBpm + 0.5f), g_loop ? 1 : 0);
+        reply.printf("\"arp\":{\"on\":%d,\"pat\":%d,\"rate\":%d,\"oct\":%d,\"latch\":%d},",
+                     g_arpFilter.enabled() ? 1 : 0, (int)g_arpFilter.pattern(), (int)g_arpFilter.rate(),
+                     g_arpFilter.octaveRange(), g_arpFilter.latch() ? 1 : 0);
+        reply.printf("\"song\":{\"playing\":%d,\"i\":%d},", g_player.isPlaying() ? 1 : 0, g_songSel);
+        reply.printf("\"drums\":{\"kit\":%d,\"playing\":%d},", g_drumKit, g_drumPlayer.isPlaying() ? 1 : 0);
+        reply.print("\"voice\":{");
+#if defined(TDSP_SYNTH_DEXED) || defined(TDSP_SYNTH_DEXED_POOL)
+        if (g_curCartRel[0]) {   // last pick was a /dexed cart voice (@DXPICK)
+            reply.print("\"cart\":"); tdsp::catdb::jsonStr(reply, g_curCartRel);
+            reply.printf(",\"cv\":%d,\"name\":", g_curCartVoice); tdsp::catdb::jsonStr(reply, g_curCartName);
+        } else
+#endif
+        { reply.printf("\"i\":%d,\"name\":", synthInstrument()); tdsp::catdb::jsonStr(reply, synthInstrumentName(synthInstrument())); }
+        reply.print("}}\n");
+    }
     else return false;
     return true;
 }

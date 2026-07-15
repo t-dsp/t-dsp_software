@@ -197,6 +197,8 @@ export class BleTransport implements Transport {
     return this.write(b);
   }
 
+  requestState() { this.relay('@STATE'); }
+
   // ---- actions (identical @-lines to transport.web.ts, over the relay) --------
   masterVolume(pct: number) { this.byte(CMD.SET_VOLUME, Math.max(0, Math.min(100, Math.round(pct)))); }   // opcode: ESP32 caches for status
   masterBpm(bpm: number) { this.relay('@BPM=' + Math.max(20, Math.min(300, Math.round(bpm)))); }

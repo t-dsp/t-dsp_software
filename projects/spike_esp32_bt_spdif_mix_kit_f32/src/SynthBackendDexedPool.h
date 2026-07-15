@@ -233,6 +233,12 @@ tdsp::MidiSink  *g_synthSink = &g_poolSink;
 // so the huge open DX7 patch libraries work with the polyphonic/MPE pool too.
 static const int kNumBundled = tdsp::dexed::kNumBanks * tdsp::dexed::kVoicesPerBank;  // 320
 static int g_synthInstrument = 0;
+// Current /dexed cart voice (set by @DXPICK; g_synthInstrument's flat index doesn't cover
+// the lazy paged-browser carts). Empty rel = a bundled/flat voice is current instead.
+// Read by main.cpp's @STATE so the app can restore exactly which cart voice is loaded.
+static char g_curCartRel[160]  = {0};
+static int  g_curCartVoice     = -1;
+static char g_curCartName[tdsp::dexed::kVoiceNameBufBytes] = {0};
 
 static const char *synthName()        { return "Dexed MPE"; }
 static const char *synthDescription() { return "6-op FM (DX7), 8-engine pool: per-note bend/pressure in MPE mode, 16-voice poly in normal MIDI. Bundled + /dexed/*.syx carts."; }
@@ -284,6 +290,7 @@ FLASHMEM static void synthSetInstrument(int idx) {
     // @LFOMODE; defaults: mod wheel -> vibrato, pressure -> volume + brightness, force LFO.
     g_poolSink.applyExprConfig();
     g_synthInstrument = idx;
+    g_curCartRel[0] = 0; g_curCartVoice = -1;   // a flat/bundled voice is now current (not a @DXPICK cart)
     // ReplayGain per-voice trim only covers the bundled set (baked table). SD carts ship
     // at unity until you sweep them.
     float trim = (idx < kNumBundled) ? dexedVoiceTrim(idx) : 1.0f;
@@ -308,6 +315,10 @@ FLASHMEM static const char *synthPickCartVoice(const char *relCart, int voice) {
     int n = tdsp::dexed::sdCartVoiceNames(relCart, names);
     const char *nm = (n == tdsp::dexed::kVoicesPerBank && voice >= 0 &&
                       voice < tdsp::dexed::kVoicesPerBank) ? names[voice] : "";
+    // Remember it so @STATE can report the exact cart voice back to the app on reconnect.
+    snprintf(g_curCartRel, sizeof(g_curCartRel), "%s", relCart);
+    g_curCartVoice = voice;
+    snprintf(g_curCartName, sizeof(g_curCartName), "%s", nm);
     Serial.printf("[synth] pick %s v%d = %s\n", relCart, voice, nm);
     return nm;
 }

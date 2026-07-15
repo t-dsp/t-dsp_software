@@ -25,6 +25,10 @@ export interface Transport {
   // Rebuild the on-device catalog DB (/tdsp/*.ndjson).
   reindex(): Promise<void>;
 
+  // Ask the device for its current settings (@STATE). The reply arrives as an
+  // "@STATE={…}" line via onLine(), which the UI parses to hydrate every card on connect.
+  requestState(): void;
+
   // ---- actions (map to @-lines on web, to BLE opcodes on native) ----
   masterVolume(pct: number): void;                    // header master volume (@VOL=, 0..100)
   masterBpm(bpm: number): void;                       // master tempo (@BPM=) — song + drums lock to it
