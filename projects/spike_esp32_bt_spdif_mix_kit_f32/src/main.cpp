@@ -997,6 +997,18 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         if (strcmp(line + 6, "stop") == 0) songStop();
         else songStart(atoi(line + 6));   // @SONG=<song index>
     }
+    else if (strcmp(line, "@SDDIAG") == 0) {        // why won't the SD mount? card vs filesystem
+        bool ok = SD.begin(BUILTIN_SDCARD);
+        uint8_t ft  = SD.sdfs.fatType();
+        uint8_t err = SD.sdfs.card() ? SD.sdfs.card()->errorCode() : 0xFF;
+        uint64_t secs = SD.sdfs.card() ? SD.sdfs.card()->sectorCount() : 0;
+        reply.printf("[sddiag] begin=%d fatType=%u (0=none/exFAT-or-unformatted,16/32=FATxx,64=exFAT) "
+                     "cardErr=0x%02X sectors=%llu (~%lu MB)\n",
+                     ok, ft, err, (unsigned long long)secs, (unsigned long)(secs / 2048));
+        if (ok) reply.println("[sddiag] -> MOUNTED. (If boot said no-card, it was a hot-insert timing issue.)");
+        else if (err == 0 && secs > 0) reply.println("[sddiag] -> CARD DETECTED but filesystem UNREADABLE => reformat FAT32 (it's exFAT/other).");
+        else reply.println("[sddiag] -> CARD NOT DETECTED (err/no-response) => reseat / contacts / try another card.");
+    }
     else if (strcmp(line, "@GETCAT") == 0)        refreshCatalog(reply);   // re-scan SD + send catalog
     else if (strncmp(line, "@READ=", 6) == 0)     streamFile(reply, line + 6);  // generic file fetch (catalog transport)
     else if (strncmp(line, "@DRUM=", 6) == 0) {                            // drum groove play/stop
@@ -1125,7 +1137,10 @@ void setup() {
     // SD card (Teensy 4.1 built-in slot): scan /songs/*.mid so songs can be added
     // by copying files to the card. Falls back to the built-in songs if no card.
 #if TDSP_HAS_SDCARD
-    g_sdReady = SD.begin(BUILTIN_SDCARD);
+    // Retry SD.begin a few times: a card can need a moment after power-up, so a single
+    // attempt at boot often reports "no card" for a perfectly good card (it then mounts
+    // on the next @GETCAT/Refresh). Looping here mounts it at boot instead.
+    for (int i = 0; i < 10 && !g_sdReady; ++i) { g_sdReady = SD.begin(BUILTIN_SDCARD); if (!g_sdReady) delay(40); }
     Serial.printf("[sd] card %s\n", g_sdReady ? "ready" : "not present");
     // MTP: present the SD to the host over USB so songs can be dropped into /songs
     // without pulling the card. Serial (debug + ESP32 flash bridge) is unaffected.
