@@ -36,7 +36,30 @@ Options: `--drum-bank N` (which bank in the drum font holds the kit; default 128
 `--dest-bank N` (bank to place it at in the output; default 128), `--keep-base-drums`
 (keep the base's kits too, e.g. add the new kit at a different `--dest-bank`).
 
-## Step 1 — get a drum-only SF2 (manual; sites block scripted download)
+## Step 0 — the automated path: `fetch_drum_fonts.py`
+
+`fetch_drum_fonts.py` downloads a curated, license-checked set from **verified** sources
+(archive.org direct URLs + Google-Drive), verifies each is a real SF2, stages them, can merge
+them onto a base, and copies the result to the SD card:
+
+```
+python tools/sf2/fetch_drum_fonts.py            # fetch the default small/clean set + list
+python tools/sf2/fetch_drum_fonts.py fetch --all               # add the 256 MB Perfect Drums
+python tools/sf2/fetch_drum_fonts.py merge --base tools/sf2/fonts/gm_tim.sf2
+python tools/sf2/fetch_drum_fonts.py to-sd --watch             # wait for card, copy raw kits
+python tools/sf2/fetch_drum_fonts.py to-sd --drive E: --activate ns_kit   # + set live font
+```
+
+Curated fonts (all probed live): **phattkit** (0.8 MB smoke-test, PD-marked, bank 0),
+**ns_kit** (Natural Studio acoustic, ~22 MB, PD-marked), **perfect_drums** /
+**perfect_drums_v2** (WTFPL — cleanest license — but 256 MB, needs heavy downsampling).
+Staged binaries land in `tools/sf2/drum_fonts/` (git-ignored). `--activate` places a merged
+font at the live `/sf2/gm_tsf.sf2` (backing up the existing one). Prefer WTFPL/CC0 for anything
+you ship; PD-marked archive.org fonts are free-release but confirm terms before commercial use.
+
+The manual path below is the fallback for a font not in the registry.
+
+## Step 1 (manual fallback) — get a drum-only SF2
 
 Browse the top-rated percussion fonts and pick one, then download by hand:
 <https://www.musical-artifacts.com/artifacts?formats=sf2&order=top_rated&tags=percussion>
