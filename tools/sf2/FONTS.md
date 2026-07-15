@@ -75,3 +75,10 @@ native rate (see the script header for the correctness notes).
 
 > Not a downsample lever, but the ceiling-raiser: **more PSRAM.** A 32–64 MB custom core
 > module is the path to full-rate GeneralUser (or a bigger font like a trimmed FluidR3) in TSF.
+
+## Better drums
+
+The bank-128 kit inside these fonts is the weak link for the live-groove feature. To graft a
+dedicated drum-only SoundFont's kit onto any base here (melodic stays, drums upgrade, one file for
+the card, no reflash), see **`DRUM_FONTS.md`** and `merge_drum_sf2.py`. Merge first, then run
+`build_gu_fonts.py` on the result to re-fit the PSRAM budget.
