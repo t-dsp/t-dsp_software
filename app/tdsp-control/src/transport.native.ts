@@ -21,6 +21,7 @@ export class BleTransport implements Transport {
   async readFile(_path: string): Promise<string> { throw new Error(TODO); }
   async reindex() { throw new Error(TODO); }
   masterVolume(_p: number) {}
+  masterBpm(_b: number) {}
   dxVoice(_i: number) {}
   dxPick(_c: string, _v: number) {}
   drumKit(_i: number) {}
@@ -28,6 +29,7 @@ export class BleTransport implements Transport {
   stopDrums() {}
   playSong(_i: number) {}
   stopSong() {}
+  songLoop(_o: boolean) {}
   arpOn(_o: boolean) {}
   arpPattern(_i: number) {}
   arpRate(_i: number) {}

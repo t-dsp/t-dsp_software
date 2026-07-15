@@ -108,6 +108,7 @@ export class WebSerialTransport implements Transport {
 
   // ---- actions (@-lines) ----
   masterVolume(pct: number) { this.send('@VOL=' + Math.max(0, Math.min(100, Math.round(pct)))); }
+  masterBpm(bpm: number) { this.send('@BPM=' + Math.max(20, Math.min(300, Math.round(bpm)))); }
   dxVoice(i: number) { this.send('@DXVOICE=' + i); }
   dxPick(cartRel: string, voice: number) { this.send('@DXPICK=' + cartRel + '\t' + voice); }
   drumKit(i: number) { this.send('@DRUMKIT=' + i); }
@@ -115,6 +116,7 @@ export class WebSerialTransport implements Transport {
   stopDrums() { this.send('D'); }
   playSong(i: number) { this.send('@SONG=' + i); }
   stopSong() { this.send('@SONG=stop'); }
+  songLoop(on: boolean) { this.send('@LOOP=' + (on ? 1 : 0)); }
   arpOn(on: boolean) { this.send('@ARPON=' + (on ? 1 : 0)); }
   arpPattern(i: number) { this.send('@ARPPAT=' + i); }
   arpRate(i: number) { this.send('@ARPRATE=' + i); }

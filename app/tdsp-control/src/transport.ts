@@ -27,6 +27,7 @@ export interface Transport {
 
   // ---- actions (map to @-lines on web, to BLE opcodes on native) ----
   masterVolume(pct: number): void;                    // header master volume (@VOL=, 0..100)
+  masterBpm(bpm: number): void;                       // master tempo (@BPM=) — song + drums lock to it
   dxVoice(index: number): void;                       // select a bundled voice
   dxPick(cartRel: string, voice: number): void;       // load /dexed cart voice
   drumKit(index: number): void;
@@ -34,6 +35,7 @@ export interface Transport {
   stopDrums(): void;
   playSong(index: number): void;
   stopSong(): void;
+  songLoop(on: boolean): void;                        // loop the current song (@LOOP=)
   arpOn(on: boolean): void;
   arpPattern(i: number): void;
   arpRate(i: number): void;

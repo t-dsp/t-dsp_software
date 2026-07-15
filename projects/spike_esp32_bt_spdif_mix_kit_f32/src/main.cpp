@@ -1304,7 +1304,7 @@ void setup() {
     // Omni so every song channel (and live MIDI on any channel) reaches the one
     // patch; the player's default mask still skips channel 10 (drums), matching
     // a single melodic engine. synthBegin() sets gain + loads the default patch.
-    g_player.setSink(g_synthSink);
+    g_player.setSink(&g_arpFilter);   // song notes go through the arp too (bypassed when arp off = normal playback)
     // Dedicated drum-groove player: channel 10 only, loops, and ignores the file's
     // program changes (we own the kit via @DRUMKIT). Feeds the same GM sink so a
     // groove backs whatever the melodic voice/keyboard plays.
