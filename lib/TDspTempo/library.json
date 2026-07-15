@@ -1,0 +1,13 @@
+{
+  "name": "TDspTempo",
+  "version": "0.1.0",
+  "description": "Master-clock tempo authority + transport. One Conductor owns the BPM and a tdsp::Clock; song/drum players, arps, LFOs follow via ITempoFollower so the whole kit shares one tempo and downbeat. Built on TDspClock (swap the tick source without touching the follower layer).",
+  "keywords": ["midi", "clock", "tempo", "transport", "arpeggiator", "t-dsp"],
+  "frameworks": "arduino",
+  "platforms": "teensy",
+  "dependencies": {
+    "TDspClock": "*",
+    "TDspMidi": "*",
+    "TDspMidiPlayer": "*"
+  }
+}
