@@ -16,7 +16,67 @@ import {
   Text,
   View,
 } from 'react-native';
-import { CMD, ConnState, SynthInfo, TdspSource, useTdsp } from './src/tdspBle';
+import { CMD, ConnState, DrumGroove, SynthInfo, TdspSource, useTdsp } from './src/tdspBle';
+
+// Two-axis (Genre / Pack) groove browser over the device's /drums/catalog.tsv
+// manifest. All filtering/paging is client-side; playing sends the groove FILENAME
+// (onPlayDrumFile), so the full 1000+ library browses without the firmware's 48-slot
+// flat-list cap. Each axis has an "All" bank so every groove is reachable either way.
+function DrumBrowser({
+  manifest,
+  onPlay,
+  onStop,
+}: {
+  manifest: DrumGroove[];
+  onPlay: (filename: string) => void;
+  onStop: () => void;
+}) {
+  const [byPack, setByPack] = useState(false);
+  const [bankIdx, setBankIdx] = useState(0);
+  const [rowIdx, setRowIdx] = useState(0);
+  const sortKey: 'genre' | 'pack' = byPack ? 'pack' : 'genre';
+  const banks = ['All', ...Array.from(new Set(manifest.map((r) => r[sortKey]).filter(Boolean))).sort()];
+  const bankSafe = Math.min(bankIdx, banks.length - 1);
+  const bank = banks[bankSafe] ?? 'All';
+  const rows = (bank === 'All' ? manifest : manifest.filter((r) => r[sortKey] === bank))
+    .slice()
+    .sort((a, b) => a.display.localeCompare(b.display));
+  const rowSafe = Math.min(rowIdx, Math.max(0, rows.length - 1));
+  const options = rows.map((r) => (r.bpm ? `${r.display}  ·  ${r.bpm} bpm` : r.display));
+  const current = rows[rowSafe];
+  const playRow = (i: number) => {
+    setRowIdx(i);
+    const r = rows[i];
+    if (r) onPlay(r.filename);
+  };
+  return (
+    <>
+      <Dropdown
+        label="Sort"
+        options={['By Genre', 'By Pack']}
+        value={byPack ? 1 : 0}
+        onSelect={(i) => { setByPack(i === 1); setBankIdx(0); setRowIdx(0); }}
+      />
+      <Dropdown
+        label="Bank"
+        options={banks}
+        value={bankSafe}
+        onSelect={(i) => { setBankIdx(i); setRowIdx(0); }}
+      />
+      <Dropdown label="Groove" options={options.length ? options : ['—']} value={rowSafe} onSelect={playRow} />
+      <Stepper count={rows.length} value={rowSafe} onStep={playRow} />
+      <Text style={styles.dim}>
+        {rows.length} groove{rows.length === 1 ? '' : 's'} in “{bank}”
+      </Text>
+      <View style={{ height: 8 }} />
+      <PrimaryButton
+        label={`▶  Play ${current?.display ?? 'Groove'}`}
+        onPress={() => current && onPlay(current.filename)}
+      />
+      <SecondaryButton label="Stop" onPress={onStop} />
+    </>
+  );
+}
 
 export default function App() {
   const {
@@ -29,6 +89,7 @@ export default function App() {
     songs,
     instruments,
     drums,
+    drumManifest,
     drumKits,
     isGM,
     drumsOk,
@@ -48,6 +109,7 @@ export default function App() {
     setReplayGain,
     setLoop,
     playDrum,
+    playDrumFile,
     stopDrum,
     setDrumKit,
     setDrumSpeed,
@@ -203,6 +265,8 @@ export default function App() {
         loop={loop}
         onToggleLoop={onToggleLoop}
         drums={drums}
+        drumManifest={drumManifest}
+        onPlayDrumFile={playDrumFile}
         drumKits={drumKits}
         drumGroove={drumGroove}
         onSelectDrum={setDrumGroove}
@@ -292,6 +356,8 @@ function SettingsModal({
   loop,
   onToggleLoop,
   drums,
+  drumManifest,
+  onPlayDrumFile,
   drumKits,
   drumGroove,
   onSelectDrum,
@@ -350,6 +416,8 @@ function SettingsModal({
   loop: boolean;
   onToggleLoop: () => void;
   drums: string[];
+  drumManifest: DrumGroove[];
+  onPlayDrumFile: (filename: string) => void;
   drumKits: string[];
   drumGroove: number;
   onSelectDrum: (index: number) => void;
@@ -579,12 +647,16 @@ function SettingsModal({
               />
 
               <Text style={styles.sectionLabel}>Groove</Text>
-              {drums.length === 0 ? (
+              {drumManifest.length > 0 ? (
+                // Rich manifest available → the two-axis Genre/Pack browser.
+                <DrumBrowser manifest={drumManifest} onPlay={onPlayDrumFile} onStop={onStopDrum} />
+              ) : drums.length === 0 ? (
                 <Text style={styles.dim}>
                   No grooves on the SD card yet. Add them with tools/fetch_drums.py (they land in /drums),
                   then tap “Refresh” below.
                 </Text>
               ) : (
+                // Fallback: older firmware without the manifest → flat groove list.
                 <>
                   <Dropdown label="Groove" options={drums} value={drumGroove} onSelect={onSelectDrum} />
                   <Stepper count={drums.length} value={drumGroove} onStep={onSelectDrum} />

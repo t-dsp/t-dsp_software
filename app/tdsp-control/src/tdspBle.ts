@@ -23,6 +23,11 @@ export const TDSP_SONGS_UUID = '7a9c0005-4a6e-4b7d-8f1a-2d3c4e5f6a70';
 export const TDSP_INSTR_UUID = '7a9c0006-4a6e-4b7d-8f1a-2d3c4e5f6a70';
 // Drum grooves catalog — same chunked-burst contract as songs/instruments.
 export const TDSP_DRUMS_UUID = '7a9c0007-4a6e-4b7d-8f1a-2d3c4e5f6a70';
+// Generic file transfer (NOTIFY): the firmware streams any SD file as base64 frames
+// (@FB/@FD/@FE/@FERR) plus the manifest registry (@MANIFESTS), one line per notify.
+// This ONE characteristic is the transport for drums (catalog.tsv) and every future
+// catalog type — the app reassembles + parses. See CATALOG_TRANSPORT.md.
+export const TDSP_FILE_UUID = '7a9c0008-4a6e-4b7d-8f1a-2d3c4e5f6a70';
 
 // Command opcodes — must match the firmware enum.
 export const CMD = {
@@ -53,6 +58,8 @@ export const CMD = {
   SET_DRUM_VOL: 0x34, // + 1 byte: drum level 0..150 (%)
   SET_BPM: 0x35, // + 1 byte: master tempo 40..240 bpm (drives song + drum together)
   SET_DRUM_SYNCHRO: 0x36, // + 1 byte: 0/1 synchro start (groove begins on first note)
+  READ_FILE: 0x40, // + N bytes: SD path string; firmware streams it back on the FILE char
+  PLAY_DRUM_FILE: 0x41, // + N bytes: groove filename; plays /drums/<name> (@DRUMF=<filename>)
 } as const;
 
 // GM drum kits — the "instrument" for the Drums menu. The index is sent via
@@ -61,6 +68,22 @@ export const CMD = {
 export const DRUM_KITS = [
   'Standard', 'Room', 'Power', 'Electronic', 'TR-808', 'Jazz', 'Brush', 'Orchestra', 'SFX',
 ] as const;
+
+// One groove row from the device's /drums/catalog.tsv manifest (fetched via the
+// generic file transport). The two browse axes are the `genre` and `pack` columns;
+// `display` is shown, `filename` is what we play (PLAY_DRUM_FILE). See CATALOG_TRANSPORT.md.
+export type DrumGroove = { filename: string; pack: string; genre: string; bpm: string; display: string };
+
+function parseDrumCatalog(text: string): DrumGroove[] {
+  const rows: DrumGroove[] = [];
+  for (const ln of text.split('\n')) {
+    if (!ln || ln[0] === '#') continue;
+    const c = ln.split('\t');
+    if (c.length < 5) continue;
+    rows.push({ filename: c[0], pack: c[1], genre: c[2], bpm: c[3], display: c[4] });
+  }
+  return rows;
+}
 
 // TAC5212 DAC highpass filter modes — byte sent via SET_HPF. Maps to the
 // tac5212::DacHpf enum on the Teensy (0=Programmable/all-pass = off).
@@ -270,6 +293,10 @@ export function useTdsp() {
   const songsSubRef = useRef<Subscription | null>(null);
   const instrSubRef = useRef<Subscription | null>(null);
   const drumsSubRef = useRef<Subscription | null>(null);
+  const fileSubRef = useRef<Subscription | null>(null);
+  // Generic file transfer: assembling frames + the single in-flight read's promise.
+  const fileAsmRef = useRef<{ id?: string; chunks: (string | undefined)[] } | null>(null);
+  const filePendingRef = useRef<{ resolve: (t: string) => void; reject: (e: Error) => void } | null>(null);
 
   const [state, setState] = useState<ConnState>('idle');
   const [status, setStatus] = useState<TdspStatus | null>(null);
@@ -283,6 +310,7 @@ export function useTdsp() {
   const [catSynth, setCatSynth] = useState<SynthInfo | null>(null); // engine the firmware was built with
   const [catIsGM, setCatIsGM] = useState(false); // engine streams 128 GM program names
   const [catDrumsOk, setCatDrumsOk] = useState(false); // engine renders channel-10 drums (incl. OPLL)
+  const [catDrumManifest, setCatDrumManifest] = useState<DrumGroove[]>([]); // parsed /drums/catalog.tsv
 
   // Coalescing volume writer: rapid slider drags collapse to the latest value so
   // we never flood the BLE link; a write always converges to the final position.
@@ -301,6 +329,8 @@ export function useTdsp() {
       srcSubRef.current?.remove();
       songsSubRef.current?.remove();
       instrSubRef.current?.remove();
+      drumsSubRef.current?.remove();
+      fileSubRef.current?.remove();
       deviceRef.current?.cancelConnection().catch(() => {});
       mgr.destroy();
     };
@@ -317,6 +347,8 @@ export function useTdsp() {
     instrSubRef.current = null;
     drumsSubRef.current?.remove();
     drumsSubRef.current = null;
+    fileSubRef.current?.remove();
+    fileSubRef.current = null;
     try {
       await deviceRef.current?.cancelConnection();
     } catch {}
@@ -446,6 +478,85 @@ export function useTdsp() {
     } catch {}
   }, [feedCatalog, applySongsStr, applyInstrStr, applyDrumsStr]);
 
+  // ---- Generic file transfer (@READ -> @FB/@FD/@FE frames) -------------------
+  const FUS = '\x1f'; // field separator inside file/manifest frames
+  // Write a command whose payload is a string (path / filename), ASCII bytes after
+  // the opcode. Used for READ_FILE and PLAY_DRUM_FILE.
+  const writeStrCmd = useCallback(async (opcode: number, str: string) => {
+    const device = deviceRef.current;
+    if (!device) return;
+    const bytes = [opcode & 0xff];
+    for (let i = 0; i < str.length; i++) bytes.push(str.charCodeAt(i) & 0xff);
+    try {
+      await device.writeCharacteristicWithResponseForService(TDSP_SVC_UUID, TDSP_CMD_UUID, bytesToBase64(bytes));
+    } catch {}
+  }, []);
+
+  // Fetch an SD file over BLE. Sends READ_FILE; the FILE-char notifications carry the
+  // base64 frames that handleFileLine reassembles and resolves here. One in-flight read.
+  const readFile = useCallback(
+    (path: string) =>
+      new Promise<string>((resolve, reject) => {
+        if (!deviceRef.current) { reject(new Error('not connected')); return; }
+        if (filePendingRef.current) { reject(new Error('a file read is already in progress')); return; }
+        filePendingRef.current = { resolve, reject };
+        fileAsmRef.current = { id: undefined, chunks: [] };
+        writeStrCmd(CMD.READ_FILE, path).catch((e) => {
+          filePendingRef.current = null;
+          reject(e instanceof Error ? e : new Error(String(e)));
+        });
+      }),
+    [writeStrCmd]
+  );
+
+  // The device advertises which source each role should browse (@MANIFESTS). For the
+  // drums role we @READ its catalog.tsv, parse it, and hand the app a rich groove list.
+  const onManifests = useCallback(
+    (payload: string) => {
+      const reg: Record<string, string> = {};
+      payload.split('|').forEach((e) => { const [role, src] = e.split(FUS); if (role) reg[role] = src || ''; });
+      const src = reg.drums || 'none';
+      if (src.startsWith('file:')) {
+        readFile(src.slice(5))
+          .then((text) => setCatDrumManifest(parseDrumCatalog(text)))
+          .catch(() => {}); // leave the legacy @DRUMS list in place on failure
+      }
+    },
+    [readFile]
+  );
+
+  // Dispatch one line arriving on the FILE characteristic.
+  const handleFileLine = useCallback(
+    (line: string) => {
+      if (line.startsWith('@MANIFESTS=')) { onManifests(line.slice(11)); return; }
+      if (line.startsWith('@FB=')) {
+        const f = line.slice(4).split(FUS);
+        fileAsmRef.current = { id: f[0], chunks: [] };
+      } else if (line.startsWith('@FD=')) {
+        const f = line.slice(4).split(FUS);
+        const a = fileAsmRef.current;
+        if (a && f[0] === a.id) a.chunks[parseInt(f[1], 10)] = f[2];
+      } else if (line.startsWith('@FE=')) {
+        const f = line.slice(4).split(FUS);
+        const a = fileAsmRef.current;
+        const p = filePendingRef.current;
+        filePendingRef.current = null;
+        if (a && p) {
+          const count = parseInt(f[1], 10);
+          let b64 = '';
+          let ok = true;
+          for (let i = 0; i < count; i++) { if (a.chunks[i] == null) { ok = false; break; } b64 += a.chunks[i]; }
+          if (ok) p.resolve(base64ToString(b64)); else p.reject(new Error('missing file chunk'));
+        }
+      } else if (line.startsWith('@FERR=')) {
+        const p = filePendingRef.current;
+        filePendingRef.current = null;
+        if (p) p.reject(new Error(line.slice(6)));
+      }
+    },
+    [onManifests]
+  );
+
   const subscribeStatus = useCallback(async (device: Device) => {
     // Bigger MTU so the status JSON fits one notification and the sources list
     // fits one READ (Android; iOS negotiates/long-reads on its own).
@@ -504,6 +615,15 @@ export function useTdsp() {
         if (!err) feedCatalog(drumsAsmRef, ch?.value, applyDrumsStr);
       }
     );
+    // Generic file transport: manifest registry (@MANIFESTS) + file-read frames
+    // (@FB/@FD/@FE/@FERR) arrive here one line per notification. Drives the drum browser.
+    fileSubRef.current = device.monitorCharacteristicForService(
+      TDSP_SVC_UUID,
+      TDSP_FILE_UUID,
+      (err, ch) => {
+        if (!err && ch?.value) handleFileLine(base64ToString(ch.value));
+      }
+    );
     // Force a fresh catalog burst now that our notify subscriptions are live: the
     // ESP32's on-connect send can fire before we've subscribed, so its chunks
     // would be lost. Re-request, then retry once if a chunk went missing (an
@@ -555,6 +675,8 @@ export function useTdsp() {
           instrSubRef.current = null;
           drumsSubRef.current?.remove();
           drumsSubRef.current = null;
+          fileSubRef.current?.remove();
+          fileSubRef.current = null;
           deviceRef.current = null;
           volInitedRef.current = false;
           setStatus(null);
@@ -682,6 +804,9 @@ export function useTdsp() {
     (pct: number) => writeByteCmd(CMD.SET_DRUM_VOL, Math.max(0, Math.min(150, Math.round(pct)))),
     [writeByteCmd]
   );
+  // Play a groove by filename (from the catalog.tsv manifest) — decoupled from the
+  // firmware's SD-scan order, so the full library browses/plays without a 48-slot cap.
+  const playDrumFile = useCallback((filename: string) => writeStrCmd(CMD.PLAY_DRUM_FILE, filename), [writeStrCmd]);
   // Master tempo (BPM) — one knob for the song AND the drum groove; they lock together.
   const setBpm = useCallback(
     (bpm: number) => writeByteCmd(CMD.SET_BPM, Math.max(40, Math.min(240, Math.round(bpm)))),
@@ -791,6 +916,9 @@ export function useTdsp() {
     instruments: catInstruments.length ? catInstruments : (DX_INSTRUMENTS as unknown as string[]),
     // Drum grooves scanned off the SD /drums folder (empty until the device reports some).
     drums: catDrums,
+    // Rich groove manifest (catalog.tsv) fetched via the file transport — drives the
+    // genre/pack browser. Empty on older firmware (falls back to the flat `drums` list).
+    drumManifest: catDrumManifest,
     drumKits: DRUM_KITS as unknown as string[],
     isGM: catIsGM,
     drumsOk: catDrumsOk,
@@ -812,6 +940,8 @@ export function useTdsp() {
     setReplayGain,
     setLoop,
     playDrum,
+    playDrumFile,
+    readFile,
     stopDrum,
     setDrumKit,
     setDrumSpeed,
