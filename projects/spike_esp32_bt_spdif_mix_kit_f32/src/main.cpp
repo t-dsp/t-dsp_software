@@ -224,6 +224,14 @@ static bool g_sdReady = false;
   #include "SynthBackendDexed.h"
 #endif
 
+// Optional dedicated GM-drum engine (channel 10) for a MELODIC backend: a second,
+// drum-only TSF on the free mix slot 2 so drum grooves can play under Dexed/Plaits/etc.
+// Needs PSRAM for the resident font. See DrumTsf.h. (No effect on GM backends, which
+// already render ch10 drums themselves.)
+#ifdef TDSP_DRUM_TSF
+  #include "DrumTsf.h"
+#endif
+
 #ifdef TDSP_SYNTH_DEXED_POOL
 // Analog-loopback capture probe: taps tdmIn slot 0 = ADC ch1 = the re-digitized OUT1.
 // A dedicated capture-only class (not ClipProbe_F32) so its 32 KB buffer can live in
@@ -426,7 +434,11 @@ FLASHMEM static void setupCodec() {
 static void setMix(float bt, float tone, float spdif) {
     outL.gain(0, bt);    outR.gain(0, bt);
     outL.gain(1, tone);  outR.gain(1, tone);
+#ifndef TDSP_DRUM_TSF
     outL.gain(2, spdif); outR.gain(2, spdif);
+#else
+    (void)spdif;   // slot 2 is the drum-TSF bus in this build (drumTsfBegin owns its gain)
+#endif
 }
 
 // --- Non-blocking song sequencer --------------------------------------------
@@ -715,7 +727,13 @@ static void muteSongDrums(bool mute) {
                                  : tdsp::MidiFilePlayer::kMaskAll);
 }
 
-static void drumApplyKit() { g_synthSink->onProgramChange(10, kDrumKits[g_drumKit].prog); }
+static void drumApplyKit() {
+#ifdef TDSP_DRUM_TSF
+    g_drumTsfSink.onProgramChange(10, kDrumKits[g_drumKit].prog);   // kit lives on the dedicated drum TSF
+#else
+    g_synthSink->onProgramChange(10, kDrumKits[g_drumKit].prog);
+#endif
+}
 
 FLASHMEM // Load + start a groove by its full SD path. Shared by the legacy numeric index
 // (flat menu / serial keys) and the browser's play-by-filename (@DRUMF=), which the
@@ -1250,6 +1268,15 @@ void setup() {
     // kMaskAll on drum-capable engines). drumEngineOk() reads this, so we're free to
     // toggle g_player's live channel mask later to mute a song's drums under a groove.
     g_engineHasDrums = (g_player.channelMask() == tdsp::MidiFilePlayer::kMaskAll);
+#ifdef TDSP_DRUM_TSF
+    // Melodic engine + dedicated GM-drum TSF: bring up the drum engine, route the groove
+    // player's channel 10 to it (instead of the melodic sink), and mark drums available
+    // regardless of the melodic engine's own no-drum song mask.
+    if (drumTsfBegin()) {
+        g_drumPlayer.setSink(&g_drumTsfSink);
+        g_engineHasDrums = true;
+    }
+#endif
     applyMidiMode(false);   // start in normal MIDI (after synthBegin, so the engine exists)
 
     Serial.println("running -- cmds: t=DACtone a=BT+SPDIF mix  s=SPDIF-only  m=BT-only");
