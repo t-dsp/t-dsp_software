@@ -115,8 +115,12 @@ AudioConnection_F32 c_toneL  (testTone,   0, outL, 1);
 AudioConnection_F32 c_toneR  (testTone,   0, outR, 1);
 AudioConnection_F32 c_spL    (spdifIn,    0, outL, 2);
 AudioConnection_F32 c_spR    (spdifIn,    1, outR, 2);
+#ifndef TDSP_DRUM_VOICE
 AudioConnection_F32 c_outL   (outL,       0, tdmOut, 0);
 AudioConnection_F32 c_outR   (outR,       0, tdmOut, 1);
+#endif
+// With TDSP_DRUM_VOICE, DrumVoice.h reroutes outL/outR through a final mixer that also
+// sums the parallel drum voice, then to tdmOut (see the include after the backend).
 AudioConnection_F32 c_pkBt   (btToF32L,   0, peakBt,    0);
 AudioConnection_F32 c_pkSp   (spdifIn,    0, peakSpdif, 0);
 AudioConnection_F32 c_pkOut  (outL,       0, peakOut,   0);
@@ -185,6 +189,12 @@ static bool g_sdReady = false;
 #else
   #include "SynthBackendDexed.h"
 #endif
+
+// Optional PARALLEL drum voice (a dedicated OPLL rhythm engine) so a NON-GM melodic
+// synth above still gets a drum backing. Declares g_drumVoiceSink + a final mixer that
+// sums it into the DAC. No-op unless -D TDSP_DRUM_VOICE. Must come AFTER the backend
+// (needs outL/outR, tdmOut) and the OpllSink type. See DrumVoice.h.
+#include "DrumVoice.h"
 
 #ifdef TDSP_SYNTH_DEXED_POOL
 // Analog-loopback capture probe: taps tdmIn slot 0 = ADC ch1 = the re-digitized OUT1.
@@ -664,7 +674,13 @@ static void buildDrumList() {
 // song-player mask to kMaskAll in synthBegin() (TSF/SF2/OPL3/OPLL); melodic-only
 // engines leave kMaskNoDrums. This is the right signal — NOT synthIsGM(), which is
 // about streaming 128 GM program NAMES (OPLL reports false yet still plays drums).
-static bool drumEngineOk() { return g_engineHasDrums; }
+static bool drumEngineOk() {
+#ifdef TDSP_DRUM_VOICE
+    return true;                    // dedicated parallel drum voice always renders ch10
+#else
+    return g_engineHasDrums;        // otherwise only GM engines (TSF/SF2/OPL3/OPLL) do
+#endif
+}
 
 // While a groove is the drums, mute the SONG's own channel-10 track so a song with
 // its own drums (most full .mid) doesn't fight the groove — the groove IS the beat.
@@ -1151,7 +1167,11 @@ void setup() {
     // Dedicated drum-groove player: channel 10 only, loops, and ignores the file's
     // program changes (we own the kit via @DRUMKIT). Feeds the same GM sink so a
     // groove backs whatever the melodic voice/keyboard plays.
-    g_drumPlayer.setSink(g_synthSink);
+#ifdef TDSP_DRUM_VOICE
+    g_drumPlayer.setSink(&g_drumVoiceSink);             // groove -> dedicated parallel drum voice
+#else
+    g_drumPlayer.setSink(g_synthSink);                  // groove -> the (GM) melodic engine's ch10
+#endif
     g_drumPlayer.setChannelMask((uint16_t)(1u << 9));   // MIDI channel 10 (index 9)
     g_drumPlayer.setProgramChangeEnabled(false);
     g_drumPlayer.setLooping(true);
@@ -1163,6 +1183,9 @@ void setup() {
     // kMaskAll on drum-capable engines). drumEngineOk() reads this, so we're free to
     // toggle g_player's live channel mask later to mute a song's drums under a groove.
     g_engineHasDrums = (g_player.channelMask() == tdsp::MidiFilePlayer::kMaskAll);
+#ifdef TDSP_DRUM_VOICE
+    drumVoiceBegin();       // bring up the parallel OPLL rhythm voice (fed by g_drumPlayer)
+#endif
     applyMidiMode(false);   // start in normal MIDI (after synthBegin, so the engine exists)
 
     Serial.println("running -- cmds: t=DACtone a=BT+SPDIF mix  s=SPDIF-only  m=BT-only");
