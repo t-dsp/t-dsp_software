@@ -20,7 +20,7 @@
 
 import { PermissionsAndroid, Platform } from 'react-native';
 import { BleManager, Device, State, Subscription } from 'react-native-ble-plx';
-import { parseDxls } from './transport';
+import { parseDxls } from './dxls';
 import type { Transport, LineHandler, DirPage } from './transport';
 import { CMD, TDSP_SVC_UUID, TDSP_CMD_UUID, TDSP_STAT_UUID, TDSP_FILE_UUID } from './tdspBle';
 

@@ -2,7 +2,7 @@
 // Speaks the @-line protocol directly to the Teensy USB CDC port. This IS the new
 // control.html. Chromium-only; requires a secure context (localhost / https).
 
-import { parseDxls } from './transport';
+import { parseDxls } from './dxls';
 import type { Transport, LineHandler, DirPage } from './transport';
 
 interface FilePending { path: string; parts: Record<number, string>; resolve: (t: string) => void; reject: (e: any) => void; timer: any; }
@@ -62,7 +62,9 @@ export class WebSerialTransport implements Transport {
         while ((i = this.buf.indexOf('\n')) >= 0) {
           const line = this.buf.slice(0, i).replace(/\r$/, '');
           this.buf = this.buf.slice(i + 1);
-          if (line) this.onDeviceLine(line);
+          // Guard per line: a handler throw must not tear down the whole read loop
+          // (a single bad frame shouldn't kill the connection).
+          if (line) { try { this.onDeviceLine(line); } catch (e) { console.warn('[tdsp] line handler error:', e); } }
         }
       }
     } catch (e) { console.warn('[tdsp] read loop ended:', e); }   // disconnect, or a dead/stale port
@@ -81,7 +83,6 @@ export class WebSerialTransport implements Transport {
   }
 
   private onDeviceLine(line: string) {
-    if (line.indexOf('DXLS') >= 0 || line.indexOf('DXVL') >= 0) console.log('[tdsp] rx:', JSON.stringify(line.slice(0, 80)), 'dirPending=', JSON.stringify(this.dir?.path), 'voicesPending=', JSON.stringify(this.voices?.rel));
     // @READ frame transport
     if (line.startsWith('@FB=')) { if (this.file) { this.file.parts = {}; this.armFileTimer(this.file); } return; }
     if (line.startsWith('@FD=')) {
@@ -130,9 +131,7 @@ export class WebSerialTransport implements Transport {
       const d: DirPending = { path, resolve, reject, timer: null };
       this.dir = d;
       d.timer = setTimeout(() => { if (this.dir === d) { this.dir = null; reject('timeout'); } }, 8000);
-      const cmd = '@DXLS=' + path + (page ? '\t' + page : '');
-      console.log('[tdsp] tx:', JSON.stringify(cmd), 'writer=', !!this.writer);
-      this.send(cmd);
+      this.send('@DXLS=' + path + (page ? '\t' + page : ''));
     });
   }
 

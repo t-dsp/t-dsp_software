@@ -21,26 +21,10 @@ export interface DirPage {
   carts: { name: string; rel: string }[];    // carts sitting directly at this level
 }
 
-// Parse a @DXLS reply body: "<rel>\t<page>\t<npages>|D<dir>|F<cart>..." -> DirPage.
-// Shared by both transports (Web Serial delivers it as one line; BLE reassembles chunks
-// first). Cart `rel` is built from the echoed folder path + the raw filename (with .syx,
-// which @DXVL/@DXPICK need); `name` strips .syx for display.
-export function parseDxls(payload: string): DirPage {
-  const bar = payload.indexOf('|');
-  const head = (bar >= 0 ? payload.slice(0, bar) : payload).split('\t');
-  const path = head[0] || '';
-  const page = +head[1] || 0;
-  const npages = +head[2] || 1;
-  const folders: string[] = [];
-  const carts: { name: string; rel: string }[] = [];
-  const items = bar >= 0 ? payload.slice(bar + 1).split('|').filter(s => s.length) : [];
-  for (const s of items) {
-    const nm = s.slice(1);
-    if (s[0] === 'D') folders.push(nm);
-    else carts.push({ name: nm.replace(/\.syx$/i, ''), rel: path ? path + '/' + nm : nm });
-  }
-  return { path, page, npages, folders, carts };
-}
+// parseDxls (the @DXLS reply parser) lives in ./dxls, NOT here: this module has
+// platform siblings (transport.web.ts / transport.native.ts), so a runtime value
+// imported from './transport' inside a platform file resolves back to that file, not
+// this one. Types below are erased at compile time, so importing them is safe.
 
 export interface Transport {
   readonly name: 'USB' | 'BLE';
