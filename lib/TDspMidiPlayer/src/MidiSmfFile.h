@@ -22,31 +22,22 @@ static int loadSmfFile(const char *path, MidiFileEvent *out, int maxOut, float *
     size_t len = f.size();
     if (len < 14 || len > 512UL * 1024) { f.close(); return -1; }   // sanity cap 512 KB
 
-    // Read the whole file into RAM for parseSmf() (it needs random access across
-    // tracks). PREFER reusing the caller's `out` buffer as the read scratch: it's
-    // idle until parse's final emit, and parseSmf() only READS the file bytes in
-    // its early passes — by the time it WRITES `out` the bytes are spent, so the
-    // aliasing is safe. This avoids a second large heap block: on a no-PSRAM board
-    // the file malloc + parseSmf's event scratch together exhausted the OCRAM heap
-    // and every /songs load failed (the tiny /drums files still fit). initialBpm()
-    // must run BEFORE parseSmf() overwrites the bytes. Fall back to malloc for a
-    // file too big for `out` (e.g. a small drum buffer) so no caller regresses.
-    const size_t cap = (size_t)maxOut * sizeof(MidiFileEvent);
-    bool owned = false;
-    uint8_t *buf;
-    if (len <= cap) {
-        buf = (uint8_t *)out;                       // reuse output buffer — no heap
-    } else {
-        buf = (uint8_t *)malloc(len);               // file bigger than out: heap it
-        if (!buf) { f.close(); return -1; }
-        owned = true;
-    }
+    // Read the whole file into a heap buffer for parseSmf() (it needs random access
+    // across tracks). This MUST be a separate buffer from `out`: parseSmf() now
+    // streams a k-way merge that writes into out[] as it reads the file bytes, so
+    // aliasing the two would corrupt not-yet-read tracks. That's affordable now
+    // precisely because the parser no longer allocates its own big event scratch —
+    // the old ~121 KB TickEv block was what forced the out-buffer aliasing hack and
+    // still overflowed the ~80 KB OCRAM heap on no-PSRAM boards. A typical song file
+    // (tens of KB) fits the heap easily; a file too big to malloc returns -1 cleanly.
+    uint8_t *buf = (uint8_t *)malloc(len);
+    if (!buf) { f.close(); return -1; }
     size_t got = f.read(buf, len);
     f.close();
-    if (got != len) { if (owned) free(buf); return -1; }
-    if (outBpm) *outBpm = initialBpm(buf, len);     // before parse reuses the bytes
+    if (got != len) { free(buf); return -1; }
+    if (outBpm) *outBpm = initialBpm(buf, len);
     int n = parseSmf(buf, len, out, maxOut);
-    if (owned) free(buf);
+    free(buf);
     return n;
 }
 
