@@ -228,8 +228,15 @@ static bool g_sdReady = false;
 // drum-only TSF on the free mix slot 2 so drum grooves can play under Dexed/Plaits/etc.
 // Needs PSRAM for the resident font. See DrumTsf.h. (No effect on GM backends, which
 // already render ch10 drums themselves.)
+// The two parallel drum voices both own mix slot 2 — exactly one at a time.
+#if defined(TDSP_DRUM_TSF) && defined(TDSP_DRUM_VOICE)
+  #error "TDSP_DRUM_TSF (TinySoundFont) and TDSP_DRUM_VOICE (OPLL) are mutually exclusive — pick one drum voice."
+#endif
 #ifdef TDSP_DRUM_TSF
-  #include "DrumTsf.h"
+  #include "DrumTsf.h"      // sampled full GM kit; needs PSRAM (resident font)
+#endif
+#ifdef TDSP_DRUM_VOICE
+  #include "DrumVoice.h"    // OPLL 5-sound rhythm; ~9 KB, no PSRAM
 #endif
 
 #ifdef TDSP_SYNTH_DEXED_POOL
@@ -434,10 +441,10 @@ FLASHMEM static void setupCodec() {
 static void setMix(float bt, float tone, float spdif) {
     outL.gain(0, bt);    outR.gain(0, bt);
     outL.gain(1, tone);  outR.gain(1, tone);
-#ifndef TDSP_DRUM_TSF
+#if !defined(TDSP_DRUM_TSF) && !defined(TDSP_DRUM_VOICE)
     outL.gain(2, spdif); outR.gain(2, spdif);
 #else
-    (void)spdif;   // slot 2 is the drum-TSF bus in this build (drumTsfBegin owns its gain)
+    (void)spdif;   // slot 2 is the drum voice's bus in this build (drum*Begin owns its gain)
 #endif
 }
 
@@ -728,8 +735,10 @@ static void muteSongDrums(bool mute) {
 }
 
 static void drumApplyKit() {
-#ifdef TDSP_DRUM_TSF
+#if defined(TDSP_DRUM_TSF)
     g_drumTsfSink.onProgramChange(10, kDrumKits[g_drumKit].prog);   // kit lives on the dedicated drum TSF
+#elif defined(TDSP_DRUM_VOICE)
+    g_drumVoiceSink.onProgramChange(10, kDrumKits[g_drumKit].prog); // OPLL rhythm ignores it, but stays consistent
 #else
     g_synthSink->onProgramChange(10, kDrumKits[g_drumKit].prog);
 #endif
@@ -1274,6 +1283,13 @@ void setup() {
     // regardless of the melodic engine's own no-drum song mask.
     if (drumTsfBegin()) {
         g_drumPlayer.setSink(&g_drumTsfSink);
+        g_engineHasDrums = true;
+    }
+#endif
+#ifdef TDSP_DRUM_VOICE
+    // Same idea with the OPLL rhythm voice (no PSRAM): route ch10 to it + mark drums OK.
+    if (drumVoiceBegin()) {
+        g_drumPlayer.setSink(&g_drumVoiceSink);
         g_engineHasDrums = true;
     }
 #endif
