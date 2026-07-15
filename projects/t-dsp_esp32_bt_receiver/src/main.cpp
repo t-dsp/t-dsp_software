@@ -232,6 +232,11 @@ static void handleTeensyLine(const char *line) {
   // @REINDEXED marks the end of a catalog rebuild — relay it so the app's reindex()
   // (which sent @REINDEX via CMD_RELAY_LINE) knows the /tdsp DB is ready to re-read.
   else if (strncmp(line, "@REINDEXED", 10) == 0) { notifyRaw(g_fileChar, line); }
+  // Lazy /dexed browse replies (the SD library is too big to ship in the catalog): a folder
+  // page (@DXLS) or a cart's 32 voice names (@DXVL) can exceed one 512 B MTU, so stream them
+  // chunk-framed on the FILE char — the app reassembles (digit-prefixed frames, distinct from
+  // the '@'-prefixed file frames). @DXPICKED is a fire-and-forget ack the app doesn't read.
+  else if (strncmp(line, "@DXLS=", 6) == 0 || strncmp(line, "@DXVL=", 6) == 0) { setCatalog(g_fileChar, line); }
 }
 
 // Ask the Teensy to (re)send its catalog over UART.

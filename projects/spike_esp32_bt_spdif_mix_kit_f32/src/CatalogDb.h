@@ -115,7 +115,7 @@ static bool readStoredSig(const char *key, Sig &out) {
 
 // ---- dexed walk: one line per cart, voice names inline ---------------------
 #ifdef TDSP_CATDB_DEXED
-static void walkDexed(Print &out, const char *absDir, const char *relDir, int depth, uint32_t &nCarts) {
+[[maybe_unused]] static void walkDexed(Print &out, const char *absDir, const char *relDir, int depth, uint32_t &nCarts) {
     if (depth > kMaxDepth) return;
     File d = SD.open(absDir);
     if (!d || !d.isDirectory()) { if (d) d.close(); return; }
@@ -228,12 +228,13 @@ static bool buildCatalog(const char *engineName, bool hasDrums, const char *drum
     File sig = SD.open("/tdsp/.sig.tmp", FILE_WRITE);
     if (!sig) { Serial.println("[catdb] .sig open FAILED"); return false; }
 
-#ifdef TDSP_CATDB_DEXED
-    long dexed = buildSource("dexed", "/tdsp/dexed.ndjson", "/dexed", ".syx", sig,
-        [](Print &o) -> long { uint32_t n = 0; if (SD.exists("/dexed")) walkDexed(o, "/dexed", "", 0, n); return (long)n; });
-#else
-    long dexed = -1;   // no DX7 carts on a non-Dexed engine
-#endif
+    // The /dexed cart library is browsed LIVE via @DXLS/@DXVL (lazy, paged, no RAM), never
+    // bulk-shipped in the catalog: at ~11k carts the inline-voice-name NDJSON is ~6 MB — too
+    // big for a client to @READ on every connect (it timed out and the library came back
+    // empty). Drop any stale dexed.ndjson so clients don't fetch it; the manifest below then
+    // reports it absent. (walkDexed is kept, unused, so this can be re-enabled if ever needed.)
+    long dexed = -1;
+    SD.remove("/tdsp/dexed.ndjson");
     long grooves = buildSource("grooves", "/tdsp/grooves.ndjson", "/drums", ".mid", sig,
         [](Print &o) -> long { return (long)flatScan(o, "/drums", ".mid", "groove", false); });
     // songs.ndjson is written by the bundled hook from the firmware's g_songs play registry
