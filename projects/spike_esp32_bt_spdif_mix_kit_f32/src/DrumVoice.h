@@ -29,6 +29,10 @@ AudioConnection_F32   c_dv_drumL(g_drumVoiceToF32, 0, g_finalL, 1);
 AudioConnection_F32   c_dv_drumR(g_drumVoiceToF32, 0, g_finalR, 1);
 AudioConnection_F32   c_dv_outL(g_finalL, 0, tdmOut, 0);
 AudioConnection_F32   c_dv_outR(g_finalR, 0, tdmOut, 1);
+// Move the output peak meter + @CAP probe onto the FINAL bus so they reflect the true
+// DAC signal (main mix + drum voice) — otherwise the heartbeat/CAP would miss the drums.
+AudioConnection_F32   c_dv_pk (g_finalL, 0, peakOut,  0);
+AudioConnection_F32   c_dv_cap(g_finalL, 0, g_outCap, 0);
 OpllSink              g_drumVoiceSink(&g_drumOpll);  // g_drumPlayer feeds this (ch10 only)
 
 static void drumVoiceBegin() {

@@ -123,7 +123,9 @@ AudioConnection_F32 c_outR   (outR,       0, tdmOut, 1);
 // sums the parallel drum voice, then to tdmOut (see the include after the backend).
 AudioConnection_F32 c_pkBt   (btToF32L,   0, peakBt,    0);
 AudioConnection_F32 c_pkSp   (spdifIn,    0, peakSpdif, 0);
-AudioConnection_F32 c_pkOut  (outL,       0, peakOut,   0);
+#ifndef TDSP_DRUM_VOICE
+AudioConnection_F32 c_pkOut  (outL,       0, peakOut,   0);   // tap the final bus
+#endif  // (TDSP_DRUM_VOICE: DrumVoice.h taps g_finalL so peakOut/CAP include the drums)
 
 // --- Development output capture (build-agnostic) -----------------------------
 // A capture-only probe on the FINAL digital output (same tap as peakOut / the DAC).
@@ -155,7 +157,9 @@ private:
     volatile int  m_idx = 0;
 };
 OutCaptureProbe_F32 g_outCap;
+#ifndef TDSP_DRUM_VOICE
 AudioConnection_F32 c_capOut(outL, 0, g_outCap, 0);
+#endif
 
 // SD-card ready flag — declared before the synth backend so the ymfm backend
 // can load its /ymfm/*.opm instrument banks in synthBegin() (set by SD.begin()
