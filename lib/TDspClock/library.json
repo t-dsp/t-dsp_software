@@ -1,0 +1,11 @@
+{
+  "name": "TDspClock",
+  "version": "0.1.0",
+  "description": "Shared musical-time reference: a 24-PPQN clock with Internal (free-running BPM) and External (MIDI 0xF8) sources, beat/bar phase, edge latches, and an internal-tick fan-out hook. ClockSink bridges a MidiRouter's real-time messages into the Clock. The timebase primitive under TDspTempo.",
+  "keywords": ["midi", "clock", "tempo", "ppqn", "t-dsp"],
+  "frameworks": "arduino",
+  "platforms": "teensy",
+  "dependencies": {
+    "TDspMidi": "*"
+  }
+}

@@ -50,6 +50,18 @@
 // this file is engine-specific.
 #include <MidiFilePlayer.h>
 #include <MidiSmfFile.h>          // runtime SD .mid parser -> MidiFileEvent[]
+// Master clock system (lib/TDspTempo): one Conductor owns the BPM + transport;
+// the song + drum players follow it via PlayerFollower adapters so a single
+// tempo knob retimes both and they share a downbeat. Its 24-PPQN tick is fanned
+// through the router (ready for an arp/onClock consumer). ClockSink is the
+// external-MIDI-clock seam. See lib/TDspTempo/README.md.
+#include <TDspTempo.h>
+#include <ClockSink.h>
+// Arpeggiator (lib/TDspArp): a MidiSink between the router and the synth. In
+// bypass it forwards verbatim; active, it steps held notes on the router's
+// 24-PPQN onClock() — which the Conductor's tick hook drives at the master BPM,
+// so arp rates lock to the same tempo as the drums + song. See project_arp.
+#include <TDspArp.h>
 
 extern "C" uint8_t external_psram_size;   // MB of soldered PSRAM (Teensy core startup)
 
@@ -108,6 +120,17 @@ tdsp::MidiFilePlayer   g_drumPlayer;         // dedicated LOOPING drum-groove pl
 USBHost                g_usbHost;
 MIDIDevice             g_usbMidi(g_usbHost);
 tdsp::MidiRouter       g_router;
+
+// Master clock: THE tempo authority. The song + drum players follow it via
+// PlayerFollower adapters (applyTempos() below is the single tempo write path).
+// Its internal 24-PPQN tick fans through the router so an arp / onClock() sink
+// is a drop-in. g_clockSink lets external MIDI clock (0xF8) slave the kit once
+// real-time handlers + Clock::External are enabled. See lib/TDspTempo/README.md.
+tdsp::Conductor        g_conductor;
+tdsp::PlayerFollower   g_songFollow{g_player};      // g_player / g_drumPlayer are
+tdsp::PlayerFollower   g_drumFollow{g_drumPlayer};  // declared above (lines ~92-93)
+tdsp::ClockSink        g_clockSink{&g_conductor.clock()};
+tdsp::ArpFilter        g_arpFilter;                 // live MIDI -> arp -> synth (bypass by default)
 static bool            g_mpeMode = false;    // false = normal MIDI (bend +-2, ch10 drums), true = MPE
 
 AudioMixer4_F32        outL, outR;           // F32 mix: 0=BT, 1=local tone, 2=S/PDIF-in, 3=synth
@@ -542,10 +565,15 @@ static uint32_t      g_drumArmedN    = 0;
 
 // Retime both players to the master BPM (call after changing BPM / native tempos).
 // g_drumSpeedPct is a fine trim on the drum only (default 100 = exactly master BPM).
+// This is the SINGLE tempo write path: feed the followers their native tempos,
+// then let the Conductor push the master BPM out to both (and to any future
+// follower — arp, LFO). The Conductor also keeps its Clock at the master BPM so
+// a tick consumer stays locked to the same grid.
 static void applyTempos() {
-    g_player.setTempoScale(g_songBpm > 1.0f ? g_masterBpm / g_songBpm : 1.0f);
-    float drumScale = (g_drumFileBpm > 1.0f ? g_masterBpm / g_drumFileBpm : 1.0f);
-    g_drumPlayer.setTempoScale(drumScale * (g_drumSpeedPct / 100.0f));
+    g_songFollow.setNativeBpm(g_songBpm);
+    g_drumFollow.setNativeBpm(g_drumFileBpm);
+    g_drumFollow.setTrim((float)g_drumSpeedPct);
+    g_conductor.setBpm(g_masterBpm);
 }
 
 FLASHMEM static void songStart(int idx) {
@@ -714,6 +742,7 @@ static void drumStartPath(const char* path, const char* disp) {
     g_drumArmed = false;
     muteSongDrums(true);                                        // groove is the drums now
     g_drumPlayer.play(g_drumBuf, (uint32_t)got);               // immediate: beat 1 = now
+    g_conductor.start();                                        // zero the master clock to this downbeat
     Serial.printf("[drum] %s (%d ev, %.1f bpm) kit=%s @ master %.0f bpm vol=%d%%\n",
                   disp, got, (double)g_drumFileBpm, kDrumKits[g_drumKit].name, (double)g_masterBpm, g_drumVolPct);
 }
@@ -905,6 +934,7 @@ static void midiNoteOn  (byte ch, byte note, byte vel) {
     if (g_drumArmed && vel > 0) {
         muteSongDrums(true);
         g_drumPlayer.play(g_drumBuf, g_drumArmedN);
+        g_conductor.start();                        // downbeat is this note
         g_drumArmed = false;
         Serial.println("[drum] SYNCHRO start (first note)");
     }
@@ -1072,6 +1102,36 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         }
         reply.println("[cap] end");
     }
+    // --- Arpeggiator (lib/TDspArp) — steps at the master BPM via the Conductor ---
+    else if (strncmp(line, "@ARPON=", 7) == 0) {           // on (arpeggiate live notes) / off (bypass)
+        g_arpFilter.setEnabled(atoi(line + 7) != 0);
+        reply.printf("@ARPON=%d\n", g_arpFilter.enabled() ? 1 : 0);
+        Serial.printf("[arp] %s\n", g_arpFilter.enabled() ? "ON" : "bypass");
+    }
+    else if (strncmp(line, "@ARPPAT=", 8) == 0) {          // pattern 0..23 (Up/Down/UpDown/.../Euclidean)
+        g_arpFilter.setPattern((tdsp::ArpFilter::Pattern)atoi(line + 8));
+        reply.printf("@ARPPAT=%d\n", (int)g_arpFilter.pattern());
+    }
+    else if (strncmp(line, "@ARPRATE=", 9) == 0) {         // rate 0..14 (1/1 .. 1/32t) — relative to master BPM
+        g_arpFilter.setRate((tdsp::ArpFilter::Rate)atoi(line + 9));
+        reply.printf("@ARPRATE=%d\n", (int)g_arpFilter.rate());
+    }
+    else if (strncmp(line, "@ARPGATE=", 9) == 0) {         // gate length %, 5..150
+        g_arpFilter.setGate(atoi(line + 9) / 100.0f);
+        reply.printf("@ARPGATE=%d\n", (int)(g_arpFilter.gate() * 100.0f + 0.5f));
+    }
+    else if (strncmp(line, "@ARPSWING=", 10) == 0) {       // swing 50..85 (%), 50 = straight
+        g_arpFilter.setSwing(atoi(line + 10) / 100.0f);
+        reply.printf("@ARPSWING=%d\n", (int)(g_arpFilter.swing() * 100.0f + 0.5f));
+    }
+    else if (strncmp(line, "@ARPOCT=", 8) == 0) {          // octave range 1..4
+        g_arpFilter.setOctaveRange((uint8_t)atoi(line + 8));
+        reply.printf("@ARPOCT=%d\n", g_arpFilter.octaveRange());
+    }
+    else if (strncmp(line, "@ARPLATCH=", 10) == 0) {       // latch: keep arpeggiating after keys release
+        g_arpFilter.setLatch(atoi(line + 10) != 0);
+        reply.printf("@ARPLATCH=%d\n", g_arpFilter.latch() ? 1 : 0);
+    }
     else return false;
     return true;
 }
@@ -1156,7 +1216,16 @@ void setup() {
     g_usbMidi.setHandleControlChange(midiCC);
     g_usbMidi.setHandlePitchChange(midiPitch);
     g_usbMidi.setHandleAfterTouchChannel(midiPressure);   // channel pressure = MPE Z-axis
-    g_router.addSink(g_synthSink);                        // live MIDI -> current synth
+
+    // Live MIDI -> arp -> synth. The arp is a router sink; in bypass (default) it
+    // forwards every event verbatim to its downstream synth sink, so behaviour is
+    // identical until @ARPON=1. It steps on the router's onClock() (fed by the
+    // Conductor's 24-PPQN tick hook), so its rate divisions lock to the master BPM.
+    // The song + drum players call g_synthSink DIRECTLY (below), bypassing the arp,
+    // so only LIVE keyboard/app notes are arpeggiated — never the backing groove.
+    g_arpFilter.setClock(&g_conductor.clock());
+    g_arpFilter.addDownstream(g_synthSink);
+    g_router.addSink(&g_arpFilter);
 
     // Route the song player into the build-selected synth via its shared sink.
     // Omni so every song channel (and live MIDI on any channel) reaches the one
@@ -1173,6 +1242,20 @@ void setup() {
     // The song player must NEVER panic ch10 on stop/restart, or it cuts a looping
     // groove for a beat when you press Play/Stop on a song. (Drums are the groove's.)
     g_player.setPanicMask(tdsp::MidiFilePlayer::kMaskNoDrums);
+
+    // --- Master clock wiring --------------------------------------------------
+    // Register the song + drum players as tempo followers so the one BPM knob
+    // (applyTempos) retimes both. Internal source = free-running at the master
+    // BPM (no external gear assumed). The internal 24-PPQN tick is fanned through
+    // the router so an arp / onClock() sink drops in with no extra wiring. The
+    // ClockSink on the router is the external-MIDI-clock seam: it's dormant until
+    // real-time (0xF8/Start/Stop) handlers are added and the source is switched
+    // to Clock::External (see lib/TDspTempo/README.md §6).
+    g_conductor.begin(g_masterBpm);
+    g_conductor.addFollower(&g_songFollow);
+    g_conductor.addFollower(&g_drumFollow);
+    g_router.addSink(&g_clockSink);
+    g_conductor.setTickHook(+[](void*){ g_router.handleClock(); }, nullptr);
     synthBegin();
     // Capture the engine's drum capability NOW (synthBegin set the song mask to
     // kMaskAll on drum-capable engines). drumEngineOk() reads this, so we're free to
@@ -1757,12 +1840,19 @@ void loop() {
     MTP.loop();   // service USB file transfers to/from the SD (host drag-and-drop)
 #endif
 
+    // Advance the master clock BEFORE draining MIDI. In Internal mode it emits
+    // catch-up 24-PPQN ticks (fanned to onClock() consumers via the tick hook)
+    // and fires bar-edge callbacks to followers; in External mode this is the
+    // stall watchdog. Cheap when nothing's due.
+    g_conductor.update(micros());
+
     // Live MIDI: drain DIN + USB-host controllers, then advance the (non-blocking) song.
     while (MIDI.read()) { /* handlers fire per message */ }
     g_usbHost.Task();
     while (g_usbMidi.read()) { /* USB-host MIDI handlers fire per message */ }
     g_player.tick();
     g_drumPlayer.tick();   // loops internally (setLooping), so no external re-arm needed
+    g_arpFilter.tick(micros());   // drain the arp's gate-off queue (note steps fire on onClock)
     songLoopTick();   // auto-restart the song if loop mode is on and it just ended
 
     // USB CDC input serves two roles: '@'-prefixed control LINES (the same protocol
