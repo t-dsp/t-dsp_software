@@ -15,6 +15,7 @@
 #include <synth_dexed.h>
 #include "DexedSink.h"
 #include "DexedVoiceBank.h"
+#include "DexedSdBank.h"   // /dexed/*.syx carts off the SD card (thousands of DX7 voices)
 
 AudioSynthDexed       g_dexed(16, AUDIO_SAMPLE_RATE_EXACT);   // 16-voice 6-op FM (int16 out)
 AudioConvert_I16toF32 g_synthToF32;                           // int16 -> F32 bridge
@@ -24,48 +25,76 @@ AudioConnection_F32   c_synthR   (g_synthToF32, 0, outR, 3);
 DexedSink             g_dexedSink(&g_dexed);
 tdsp::MidiSink       *g_synthSink = &g_dexedSink;
 
-// Expose ALL bundled DX7 voices, browsable by bank: a global instrument index
-// (sent by the app as @DXVOICE=<i>) maps to (bank, voice) across the 10 banks x
-// 32 voices in dexed_banks_data.h — index = bank * kVoicesPerBank + voice, 320
-// total. Names are streamed as "<bankName>: <voiceName>" so the app/control page
-// can group the flat list back into per-bank sections by splitting on ": ".
-static const int kNumInstruments = tdsp::dexed::kNumBanks * tdsp::dexed::kVoicesPerBank;  // 320
+// Instrument index space is FLAT: [0 .. 320)   = the bundled PROGMEM voices
+// (10 banks x 32, dexed_banks_data.h), then [320 .. 320 + 32*numSdBanks) = any
+// /dexed/*.syx carts scanned off the SD card. The app sends a global index as
+// @DXVOICE=<i>; names stream as "<bankName>: <voiceName>" so the control page
+// regroups the flat list into per-bank sections by splitting on ": ".
+static const int kNumBundled = tdsp::dexed::kNumBanks * tdsp::dexed::kVoicesPerBank;  // 320
 static int g_synthInstrument = 0;
 
 static const char *synthName()        { return "Dexed"; }
-static const char *synthDescription() { return "6-op FM (DX7) synth, played by the MIDI IN port and the songs below."; }
+static const char *synthDescription() { return "6-op FM (DX7) synth. Bundled voices + any /dexed/*.syx carts on the SD card."; }
 static bool        synthIsGM()         { return false; }  // full DX7 voice set -> names streamed to the app
 static void        synthSetMpeMode(bool /*mpe*/) {}       // MPE not wired for this backend (router still bends)
-static int         synthNumInstruments()        { return kNumInstruments; }
+static int         synthNumInstruments()        { return kNumBundled + tdsp::dexed::numSdVoices(); }
 static int         synthInstrument()            { return g_synthInstrument; }
 
 // "<bankName>: <voiceName>" for global index i. Returns a pointer to a shared
 // static buffer — valid only until the next call, which is fine for the catalog
 // stream (each name is printed before the next is fetched) and for logging.
 static const char *synthInstrumentName(int i) {
-    static char buf[32];
-    int bank  = i / tdsp::dexed::kVoicesPerBank;
-    int voice = i % tdsp::dexed::kVoicesPerBank;
+    static char buf[40];
     char vname[tdsp::dexed::kVoiceNameBufBytes];
-    if (!tdsp::dexed::copyVoiceName(bank, voice, vname, sizeof(vname))) vname[0] = 0;
-    snprintf(buf, sizeof(buf), "%s: %s", tdsp::dexed::bankName(bank), vname);
+    if (i < kNumBundled) {
+        int bank  = i / tdsp::dexed::kVoicesPerBank;
+        int voice = i % tdsp::dexed::kVoicesPerBank;
+        if (!tdsp::dexed::copyVoiceName(bank, voice, vname, sizeof(vname))) vname[0] = 0;
+        snprintf(buf, sizeof(buf), "%s: %s", tdsp::dexed::bankName(bank), vname);
+    } else {
+        int s     = i - kNumBundled;
+        int bank  = s / tdsp::dexed::kVoicesPerBank;
+        int voice = s % tdsp::dexed::kVoicesPerBank;
+        if (!tdsp::dexed::copySdVoiceName(bank, voice, vname, sizeof(vname))) vname[0] = 0;
+        snprintf(buf, sizeof(buf), "%s: %s", tdsp::dexed::sdBankName(bank), vname);
+    }
     return buf;
 }
 
 // Load a voice by global index (runs from loop/handlers, never the audio ISR).
 static void synthSetInstrument(int idx) {
+    const int total = kNumBundled + tdsp::dexed::numSdVoices();
     if (idx < 0) idx = 0;
-    if (idx >= kNumInstruments) idx = kNumInstruments - 1;
-    int bank  = idx / tdsp::dexed::kVoicesPerBank;
-    int voice = idx % tdsp::dexed::kVoicesPerBank;
+    if (idx >= total) idx = total - 1;
     g_dexed.panic();
-    if (tdsp::dexed::loadVoice(g_dexed, bank, voice)) {
+    bool ok;
+    if (idx < kNumBundled) {
+        ok = tdsp::dexed::loadVoice(g_dexed, idx / tdsp::dexed::kVoicesPerBank,
+                                             idx % tdsp::dexed::kVoicesPerBank);
+    } else {
+        int s = idx - kNumBundled;
+        ok = tdsp::dexed::loadSdVoice(g_dexed, s / tdsp::dexed::kVoicesPerBank,
+                                               s % tdsp::dexed::kVoicesPerBank);
+    }
+    if (ok) {
         g_synthInstrument = idx;
-        Serial.printf("[synth] instrument %d = %s (bank %d voice %d)\n", idx, synthInstrumentName(idx), bank, voice);
+        Serial.printf("[synth] instrument %d = %s\n", idx, synthInstrumentName(idx));
     }
 }
 
 static void synthBegin() {
+    // Scan /dexed/*.syx off the SD card (bundled voices always present; SD adds
+    // thousands more). g_sdReady is set by SD.begin() in setup(), before this.
+    // Create the folder if missing so it appears on the USB (MTP) mount as a
+    // drop target — same convention as /ymfm and /songs.
+    int sdBanks = 0;
+    if (g_sdReady) {
+        if (!SD.exists("/dexed")) SD.mkdir("/dexed");
+        sdBanks = tdsp::dexed::scanSdBanks();
+    }
+    Serial.printf("[synth] Dexed: %d bundled + %d SD voices (%d /dexed carts)\n",
+                  kNumBundled, tdsp::dexed::numSdVoices(), sdBanks);
+
     // Dexed renders in float then saturates at the float->q15 rail; pull the
     // internal gain below unity so punchy notes don't flat-top (the 0.62 mixer
     // make-up in setup restores the level in the F32 domain).

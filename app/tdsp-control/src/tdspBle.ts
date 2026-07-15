@@ -21,6 +21,8 @@ export const TDSP_SRC_UUID = '7a9c0004-4a6e-4b7d-8f1a-2d3c4e5f6a70';
 // its Dexed pickers dynamically (no app update when songs/instruments change).
 export const TDSP_SONGS_UUID = '7a9c0005-4a6e-4b7d-8f1a-2d3c4e5f6a70';
 export const TDSP_INSTR_UUID = '7a9c0006-4a6e-4b7d-8f1a-2d3c4e5f6a70';
+// Drum grooves catalog — same chunked-burst contract as songs/instruments.
+export const TDSP_DRUMS_UUID = '7a9c0007-4a6e-4b7d-8f1a-2d3c4e5f6a70';
 
 // Command opcodes — must match the firmware enum.
 export const CMD = {
@@ -44,7 +46,19 @@ export const CMD = {
   SET_LFOMODE: 0x29, // + 1 byte: 0 respect patch LFO / 1 force LFO on any patch
   SET_TIMBRE: 0x2a, // + 1 byte: CC74 timbre (MPE Y) routing bitmask (2=bright 4=vib 8=trem)
   SET_REPLAYGAIN: 0x2b, // + 1 byte: 0 = off, 1 = on — ReplayGain loudness normalization
+  PLAY_DRUM: 0x30, // + 1 byte: drum groove index (loops until stopped)
+  STOP_DRUM: 0x31, // stop the drum groove
+  SET_DRUM_KIT: 0x32, // + 1 byte: GM drum-kit index (into DRUM_KITS)
+  SET_DRUM_SPEED: 0x33, // + 1 byte: groove speed 25..200 (%)
+  SET_DRUM_VOL: 0x34, // + 1 byte: drum level 0..150 (%)
 } as const;
+
+// GM drum kits — the "instrument" for the Drums menu. The index is sent via
+// SET_DRUM_KIT; the firmware maps it to a channel-10 program change. MUST match
+// kDrumKits[] in the mix-kit firmware.
+export const DRUM_KITS = [
+  'Standard', 'Room', 'Power', 'Electronic', 'TR-808', 'Jazz', 'Brush', 'Orchestra', 'SFX',
+] as const;
 
 // TAC5212 DAC highpass filter modes — byte sent via SET_HPF. Maps to the
 // tac5212::DacHpf enum on the Teensy (0=Programmable/all-pass = off).
@@ -253,6 +267,7 @@ export function useTdsp() {
   const srcSubRef = useRef<Subscription | null>(null);
   const songsSubRef = useRef<Subscription | null>(null);
   const instrSubRef = useRef<Subscription | null>(null);
+  const drumsSubRef = useRef<Subscription | null>(null);
 
   const [state, setState] = useState<ConnState>('idle');
   const [status, setStatus] = useState<TdspStatus | null>(null);
@@ -261,6 +276,7 @@ export function useTdsp() {
   const [volume, setVolumeState] = useState(50); // slider position 0..100
   const [sources, setSources] = useState<TdspSource[]>([]); // paired phones
   const [catSongs, setCatSongs] = useState<string[]>([]); // songs fetched from device
+  const [catDrums, setCatDrums] = useState<string[]>([]); // drum grooves fetched from device
   const [catInstruments, setCatInstruments] = useState<string[]>([]); // instruments fetched
   const [catSynth, setCatSynth] = useState<SynthInfo | null>(null); // engine the firmware was built with
 
@@ -295,6 +311,8 @@ export function useTdsp() {
     songsSubRef.current = null;
     instrSubRef.current?.remove();
     instrSubRef.current = null;
+    drumsSubRef.current?.remove();
+    drumsSubRef.current = null;
     try {
       await deviceRef.current?.cancelConnection();
     } catch {}
@@ -326,10 +344,17 @@ export function useTdsp() {
   type CatAsm = { count: number; parts: (string | undefined)[]; got: number };
   const songsAsmRef = useRef<CatAsm | null>(null);
   const instrAsmRef = useRef<CatAsm | null>(null);
+  const drumsAsmRef = useRef<CatAsm | null>(null);
 
   const applySongsStr = useCallback((full: string) => {
     const list = full.split('|').filter((x) => x.length > 0);
     if (list.length) setCatSongs(list);
+  }, []);
+
+  // Drum grooves — the device may report an EMPTY list (no /drums on the card),
+  // so unlike songs we apply even when empty to clear a stale list.
+  const applyDrumsStr = useCallback((full: string) => {
+    setCatDrums(full.split('|').filter((x) => x.length > 0));
   }, []);
 
   const applyInstrStr = useCallback((full: string) => {
@@ -403,7 +428,11 @@ export function useTdsp() {
       const c = await device.readCharacteristicForService(TDSP_SVC_UUID, TDSP_INSTR_UUID);
       feedCatalog(instrAsmRef, c.value, applyInstrStr);
     } catch {}
-  }, [feedCatalog, applySongsStr, applyInstrStr]);
+    try {
+      const c = await device.readCharacteristicForService(TDSP_SVC_UUID, TDSP_DRUMS_UUID);
+      feedCatalog(drumsAsmRef, c.value, applyDrumsStr);
+    } catch {}
+  }, [feedCatalog, applySongsStr, applyInstrStr, applyDrumsStr]);
 
   const subscribeStatus = useCallback(async (device: Device) => {
     // Bigger MTU so the status JSON fits one notification and the sources list
@@ -456,6 +485,13 @@ export function useTdsp() {
         if (!err) feedCatalog(instrAsmRef, ch?.value, applyInstrStr);
       }
     );
+    drumsSubRef.current = device.monitorCharacteristicForService(
+      TDSP_SVC_UUID,
+      TDSP_DRUMS_UUID,
+      (err, ch) => {
+        if (!err) feedCatalog(drumsAsmRef, ch?.value, applyDrumsStr);
+      }
+    );
     // Force a fresh catalog burst now that our notify subscriptions are live: the
     // ESP32's on-connect send can fire before we've subscribed, so its chunks
     // would be lost. Re-request, then retry once if a chunk went missing (an
@@ -470,9 +506,9 @@ export function useTdsp() {
         .catch(() => {});
     await kickCatalog();
     setTimeout(() => {
-      if (songsAsmRef.current || instrAsmRef.current) kickCatalog();
+      if (songsAsmRef.current || instrAsmRef.current || drumsAsmRef.current) kickCatalog();
     }, 2500);
-  }, [readSources, readCatalog, feedCatalog, applySongsStr, applyInstrStr]);
+  }, [readSources, readCatalog, feedCatalog, applySongsStr, applyInstrStr, applyDrumsStr]);
 
   const scanAndConnect = useCallback(async () => {
     const mgr = managerRef.current;
@@ -505,6 +541,8 @@ export function useTdsp() {
           songsSubRef.current = null;
           instrSubRef.current?.remove();
           instrSubRef.current = null;
+          drumsSubRef.current?.remove();
+          drumsSubRef.current = null;
           deviceRef.current = null;
           volInitedRef.current = false;
           setStatus(null);
@@ -616,6 +654,23 @@ export function useTdsp() {
     (on: boolean) => writeByteCmd(CMD.SET_LOOP, on ? 1 : 0),
     [writeByteCmd]
   );
+  // --- Drums: a looping channel-10 groove under the live synth (GM engines) ----
+  const playDrum = useCallback((index: number = 0) => writeByteCmd(CMD.PLAY_DRUM, index), [writeByteCmd]);
+  const stopDrum = useCallback(() => sendCommand(CMD.STOP_DRUM), [sendCommand]);
+  const setDrumKit = useCallback(
+    (index: number) => writeByteCmd(CMD.SET_DRUM_KIT, index),
+    [writeByteCmd]
+  );
+  // Groove speed 25..200 (%) and drum level 0..150 (%), clamped to the byte payload.
+  const setDrumSpeed = useCallback(
+    (pct: number) => writeByteCmd(CMD.SET_DRUM_SPEED, Math.max(25, Math.min(200, Math.round(pct)))),
+    [writeByteCmd]
+  );
+  const setDrumVol = useCallback(
+    (pct: number) => writeByteCmd(CMD.SET_DRUM_VOL, Math.max(0, Math.min(150, Math.round(pct)))),
+    [writeByteCmd]
+  );
+
   // MPE pressure routing bitmask: 1=volume 2=brightness 4=vibrato 8=tremolo (combine).
   const setPressure = useCallback(
     (mask: number) => writeByteCmd(CMD.SET_PRESSURE, mask & 0xff),
@@ -712,6 +767,9 @@ export function useTdsp() {
     // if the firmware is older / hasn't reported yet.
     songs: catSongs.length ? catSongs : (DX_SONGS as unknown as string[]),
     instruments: catInstruments.length ? catInstruments : (DX_INSTRUMENTS as unknown as string[]),
+    // Drum grooves scanned off the SD /drums folder (empty until the device reports some).
+    drums: catDrums,
+    drumKits: DRUM_KITS as unknown as string[],
     // Synth engine the connected firmware was built with (Dexed / ymfm OPM / …),
     // reported by the device; falls back to Dexed for firmware without the header.
     synth: catSynth ?? DEFAULT_SYNTH,
@@ -729,6 +787,11 @@ export function useTdsp() {
     setMidiMode,
     setReplayGain,
     setLoop,
+    playDrum,
+    stopDrum,
+    setDrumKit,
+    setDrumSpeed,
+    setDrumVol,
     setPressure,
     setModWheel,
     setLfoMode,

@@ -67,6 +67,9 @@ static constexpr char BT_DEVICE_NAME[] = "T-DSP";
 // just count=1. The app forces a fresh burst (CMD_REFRESH_CAT) after subscribing.
 #define TDSP_SONGS_UUID "7a9c0005-4a6e-4b7d-8f1a-2d3c4e5f6a70"
 #define TDSP_INSTR_UUID "7a9c0006-4a6e-4b7d-8f1a-2d3c4e5f6a70"
+// Drum grooves catalog (READ+NOTIFY): the '|'-delimited groove names the Teensy
+// scans off /drums (@DRUMS=), same chunked-burst contract as songs/instruments.
+#define TDSP_DRUMS_UUID "7a9c0007-4a6e-4b7d-8f1a-2d3c4e5f6a70"
 
 // Command opcodes: the first byte of a write to the command characteristic.
 enum : uint8_t {
@@ -90,6 +93,11 @@ enum : uint8_t {
   CMD_SET_LFOMODE  = 0x29,  // 2nd byte = 0 respect patch LFO / 1 force LFO on any patch
   CMD_SET_TIMBRE   = 0x2A,  // 2nd byte = CC74 timbre (MPE Y) routing bitmask (2=bright 4=vib 8=trem)
   CMD_SET_REPLAYGAIN=0x2B,  // 2nd byte = 0 off / 1 on; ReplayGain loudness normalization, relayed to Teensy
+  CMD_PLAY_DRUM    = 0x30,  // + 1 byte: drum groove index; loops until stopped (relayed as @DRUM=<i>)
+  CMD_STOP_DRUM    = 0x31,  // stop the drum groove (@DRUM=stop)
+  CMD_SET_DRUM_KIT = 0x32,  // + 1 byte: GM drum-kit index ("instrument") (@DRUMKIT=<i>)
+  CMD_SET_DRUM_SPEED=0x33,  // + 1 byte: groove speed 25..200 (%) (@DRUMSPEED=<pct>)
+  CMD_SET_DRUM_VOL = 0x34,  // + 1 byte: drum level 0..150 (%) (@DRUMVOL=<pct>)
 };
 
 BluetoothA2DPSink a2dp_sink;
@@ -128,6 +136,14 @@ static void relayPressure(uint8_t m)  { Serial.printf("@PRESSURE=%u\n", m); }
 static void relayModWheel(uint8_t m)  { Serial.printf("@MODWHEEL=%u\n", m); }
 static void relayLfoMode(uint8_t f)   { Serial.printf("@LFOMODE=%u\n", f ? 1 : 0); }
 static void relayTimbre(uint8_t m)    { Serial.printf("@TIMBRE=%u\n", m); }
+// Drum-groove controls: play/stop a looping channel-10 groove and set its GM kit,
+// speed and level. The Teensy owns playback (dedicated looping player) + the SD
+// groove list; these just frame the text commands over UART.
+static void relayDrum(uint8_t idx)    { Serial.printf("@DRUM=%u\n", idx); }
+static void relayDrumStop()           { Serial.printf("@DRUM=stop\n"); }
+static void relayDrumKit(uint8_t idx) { Serial.printf("@DRUMKIT=%u\n", idx); }
+static void relayDrumSpeed(uint8_t p) { Serial.printf("@DRUMSPEED=%u\n", p); }
+static void relayDrumVol(uint8_t p)   { Serial.printf("@DRUMVOL=%u\n", p); }
 
 // ---- Paired-source list (multi-device switch) -----------------------------
 static BLECharacteristic *g_srcChar = nullptr;
@@ -135,6 +151,7 @@ static BLECharacteristic *g_srcChar = nullptr;
 // ---- Device catalog (Dexed songs + instruments, streamed from the Teensy) --
 static BLECharacteristic *g_songsChar = nullptr;
 static BLECharacteristic *g_instrChar = nullptr;
+static BLECharacteristic *g_drumsChar = nullptr;
 
 // Store a '|'-delimited name list into a catalog characteristic and notify.
 // A BLE characteristic value caps at 512 B, so a long list (e.g. Dexed's full
@@ -164,6 +181,7 @@ static void setCatalog(BLECharacteristic *ch, const char *list) {
 static void handleTeensyLine(const char *line) {
   if      (strncmp(line, "@SONGS=", 7) == 0) { setCatalog(g_songsChar, line + 7); Serial.println("[cat] songs updated"); }
   else if (strncmp(line, "@INSTR=", 7) == 0) { setCatalog(g_instrChar, line + 7); Serial.println("[cat] instruments updated"); }
+  else if (strncmp(line, "@DRUMS=", 7) == 0) { setCatalog(g_drumsChar, line + 7); Serial.println("[cat] drums updated"); }
 }
 
 // Ask the Teensy to (re)send its catalog over UART.
@@ -452,6 +470,34 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
           relayTimbre(v[1]);     // -> Teensy: @TIMBRE=<mask>
         }
         break;
+      case CMD_PLAY_DRUM: {
+        uint8_t groove = (v.size() >= 2) ? (uint8_t)v[1] : 0;
+        Serial.printf("[ble] cmd: PLAY DRUM %u\n", groove);
+        relayDrum(groove);       // -> Teensy: @DRUM=<index>
+        break;
+      }
+      case CMD_STOP_DRUM:
+        Serial.println("[ble] cmd: STOP DRUM");
+        relayDrumStop();         // -> Teensy: @DRUM=stop
+        break;
+      case CMD_SET_DRUM_KIT:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET DRUM KIT %u\n", (uint8_t)v[1]);
+          relayDrumKit((uint8_t)v[1]);   // -> Teensy: @DRUMKIT=<index>
+        }
+        break;
+      case CMD_SET_DRUM_SPEED:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET DRUM SPEED %u%%\n", (uint8_t)v[1]);
+          relayDrumSpeed((uint8_t)v[1]); // -> Teensy: @DRUMSPEED=<pct>
+        }
+        break;
+      case CMD_SET_DRUM_VOL:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET DRUM VOL %u%%\n", (uint8_t)v[1]);
+          relayDrumVol((uint8_t)v[1]);   // -> Teensy: @DRUMVOL=<pct>
+        }
+        break;
       default:
         Serial.printf("[ble] cmd: unknown opcode 0x%02X\n", op);
         break;
@@ -497,6 +543,10 @@ static void setupBle() {
       TDSP_INSTR_UUID,
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
   g_instrChar->addDescriptor(new BLE2902());
+  g_drumsChar = svc->createCharacteristic(
+      TDSP_DRUMS_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  g_drumsChar->addDescriptor(new BLE2902());
 
   svc->start();
 

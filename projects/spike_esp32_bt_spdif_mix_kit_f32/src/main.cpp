@@ -90,6 +90,7 @@ AudioSynthWaveformSine spdifTone;                                // int16 tone -
 // declared by the build-selected backend header, included after the mixers.
 AudioSynthWaveformSine_F32 testTone;         // local DAC self-test source (F32)
 tdsp::MidiFilePlayer   g_player;             // non-blocking, synth-agnostic song player
+tdsp::MidiFilePlayer   g_drumPlayer;         // dedicated LOOPING drum-groove player (channel 10)
 
 // Live MIDI: a USB-host controller (LinnStrument etc.) + the DIN MIDI IN both feed
 // one MPE-aware router that normalizes bend/timbre/pressure into the synth sink.
@@ -549,6 +550,102 @@ static void songLoopTick() {
     g_songWasPlaying = now;
 }
 
+// --- Drum grooves (channel-10 GM percussion) --------------------------------
+// A groove is a short, LOOPABLE, channel-10-only .mid on the SD card under
+// /drums. A dedicated looping player (g_drumPlayer) streams it into the SAME
+// synth sink the melodic voice uses, so a drum backing runs UNDER whatever you
+// play live. It only makes sound on a General-MIDI engine (TSF/SF2/OPL3/OPLL) —
+// a melodic-only engine (Dexed/Plaits/…) has no drum map, so drums are gated on
+// synthIsGM() to avoid ch10 notes ringing out as random melodic pitches.
+// Populate /drums with tools/fetch_drums.py (see assets/drums for the samples).
+struct DrumRef { char name[48]; char path[96]; };
+static DrumRef g_drums[48];
+static int     g_numDrums = 0;
+static const int MAX_DRUM_EVENTS = 4096;                    // grooves are tiny (a bar or two)
+DMAMEM static tdsp::MidiFileEvent g_drumBuf[MAX_DRUM_EVENTS];
+
+// GM drum kits — the "instrument" the Drums menu picks. Selecting one sends a
+// program change on channel 10; GM engines (TSF/SF2) switch kit, others ignore.
+struct DrumKit { const char *name; uint8_t prog; };
+static const DrumKit kDrumKits[] = {
+    {"Standard", 0}, {"Room", 8}, {"Power", 16}, {"Electronic", 24}, {"TR-808", 25},
+    {"Jazz", 32}, {"Brush", 40}, {"Orchestra", 48}, {"SFX", 56},
+};
+static const int kNumDrumKits = sizeof(kDrumKits) / sizeof(kDrumKits[0]);
+
+static int g_drumSel      = 0;      // selected / currently-playing groove index
+static int g_drumKit      = 0;      // index into kDrumKits ("instrument")
+static int g_drumSpeedPct = 100;    // playback speed 25..200 (%)
+static int g_drumVolPct   = 100;    // drum level 0..150 (% of file velocity)
+
+// Scan /drums for *.mid (created if missing). Each groove appears in the Drums
+// picker; drop a .mid on the card and Refresh to add one with no rebuild.
+static void buildDrumList() {
+    g_numDrums = 0;
+    if (!g_sdReady) return;
+    if (!SD.exists("/drums")) SD.mkdir("/drums");
+    File d = SD.open("/drums");
+    if (!d || !d.isDirectory()) { if (d) d.close(); return; }
+    const int cap = (int)(sizeof(g_drums) / sizeof(g_drums[0]));
+    for (File f = d.openNextFile(); f && g_numDrums < cap; f = d.openNextFile()) {
+        const char *nm = f.name();
+        if (!f.isDirectory() && nm && endsWithMid(nm)) {
+            DrumRef &r = g_drums[g_numDrums++];
+            snprintf(r.path, sizeof(r.path), "/drums/%s", nm);
+            size_t copy = strlen(nm) - 4;                   // display name = filename minus ".mid"
+            if (copy > sizeof(r.name) - 1) copy = sizeof(r.name) - 1;
+            memcpy(r.name, nm, copy); r.name[copy] = 0;
+        }
+        f.close();
+    }
+    d.close();
+    Serial.printf("[sd] drums: %d grooves\n", g_numDrums);
+}
+
+static void drumApplyKit() { g_synthSink->onProgramChange(10, kDrumKits[g_drumKit].prog); }
+
+static void drumStart(int idx) {
+    if (!synthIsGM()) { Serial.printf("[drum] %s is not a GM engine — drums need TSF/SF2/OPL3/OPLL\n", synthName()); return; }
+    if (g_numDrums == 0) { Serial.println("[drum] no grooves on SD (/drums) — run tools/fetch_drums.py"); return; }
+    if (idx < 0) idx = 0;
+    if (idx >= g_numDrums) idx = g_numDrums - 1;
+    g_drumSel = idx;
+    int got = tdsp::smf::loadSmfFile(g_drums[idx].path, g_drumBuf, MAX_DRUM_EVENTS);
+    if (got <= 0) { Serial.printf("[drum] load FAILED: %s\n", g_drums[idx].path); return; }
+    drumApplyKit();
+    g_drumPlayer.setTempoScale(g_drumSpeedPct / 100.0f);
+    g_drumPlayer.setVelocityScale(g_drumVolPct / 100.0f);
+    g_drumPlayer.play(g_drumBuf, (uint32_t)got);            // g_drumPlayer loops (set in setup)
+    Serial.printf("[drum] %s (%d ev) kit=%s speed=%d%% vol=%d%%\n",
+                  g_drums[idx].name, got, kDrumKits[g_drumKit].name, g_drumSpeedPct, g_drumVolPct);
+}
+static void drumStop() {
+    if (!g_drumPlayer.isPlaying()) return;
+    g_drumPlayer.stop();                                    // releases the groove's ch10 notes
+    Serial.println("[drum] stopped");
+}
+static void setDrumKit(int i) {
+    if (i < 0) i = 0;
+    if (i >= kNumDrumKits) i = kNumDrumKits - 1;
+    g_drumKit = i;
+    if (synthIsGM()) drumApplyKit();
+    Serial.printf("[drum] kit -> %s (prog %u)\n", kDrumKits[i].name, kDrumKits[i].prog);
+}
+static void setDrumSpeed(int pct) {
+    if (pct < 25) pct = 25;
+    if (pct > 200) pct = 200;
+    g_drumSpeedPct = pct;
+    g_drumPlayer.setTempoScale(pct / 100.0f);
+    Serial.printf("[drum] speed -> %d%%\n", pct);
+}
+static void setDrumVol(int pct) {
+    if (pct < 0) pct = 0;
+    if (pct > 150) pct = 150;
+    g_drumVolPct = pct;
+    g_drumPlayer.setVelocityScale(pct / 100.0f);
+    Serial.printf("[drum] vol -> %d%%\n", pct);
+}
+
 // Stream the device catalog (song + instrument names, '|'-delimited) to the ESP32
 // over the UART link. The ESP32 serves it on BLE so the app renders its pickers
 // from whatever the device reports — adding a song/instrument is then a firmware
@@ -579,7 +676,13 @@ static void sendCatalog(Print& out) {
         for (int i = 0; i < synthNumInstruments(); ++i) { out.print('|'); out.print(synthInstrumentName(i)); }
     }
     out.print('\n');
-    Serial.printf("[cat] catalog sent (synth=%s)\n", synthName());
+    // Drum grooves scanned off /drums — same '|'-delimited contract as @SONGS. The
+    // Drums menu's kit list is a fixed GM set (hardcoded in the clients); the
+    // firmware just maps @DRUMKIT=<index> to a channel-10 program change.
+    out.print("@DRUMS=");
+    for (int i = 0; i < g_numDrums; ++i) { if (i) out.print('|'); out.print(g_drums[i].name); }
+    out.print('\n');
+    Serial.printf("[cat] catalog sent (synth=%s, %d drums)\n", synthName(), g_numDrums);
 }
 
 // Refresh = re-scan the SD card (picking up songs just added over USB / a reader)
@@ -590,6 +693,7 @@ static void refreshCatalog(Print& out) {
     if (!g_sdReady) { g_sdReady = SD.begin(BUILTIN_SDCARD); Serial.printf("[sd] retry: %s\n", g_sdReady ? "ready" : "no card"); }
 #endif
     buildSongList();
+    buildDrumList();
     sendCatalog(out);
 }
 
@@ -648,6 +752,13 @@ static bool handleControlLine(const char* line, Print& reply) {
         else songStart(atoi(line + 6));   // @SONG=<song index>
     }
     else if (strcmp(line, "@GETCAT") == 0)        refreshCatalog(reply);   // re-scan SD + send catalog
+    else if (strncmp(line, "@DRUM=", 6) == 0) {                            // drum groove play/stop
+        if (strcmp(line + 6, "stop") == 0) drumStop();
+        else drumStart(atoi(line + 6));   // @DRUM=<groove index>
+    }
+    else if (strncmp(line, "@DRUMKIT=", 9) == 0)   setDrumKit(atoi(line + 9));    // GM kit ("instrument")
+    else if (strncmp(line, "@DRUMSPEED=", 11) == 0) setDrumSpeed(atoi(line + 11)); // 25..200 %
+    else if (strncmp(line, "@DRUMVOL=", 9) == 0)    setDrumVol(atoi(line + 9));    // 0..150 %
     else if (strncmp(line, "@HPF=", 5) == 0)      setDacHpfMode(atoi(line + 5));
     else if (strncmp(line, "@LOOP=", 6) == 0)   { g_loop = (atoi(line + 6) != 0);
                                  Serial.printf("[song] loop %s\n", g_loop ? "ON" : "off"); }
@@ -771,6 +882,7 @@ void setup() {
     if (g_sdReady) MTP.addFilesystem(SD, "T-DSP Songs");
 #endif
     buildSongList();
+    buildDrumList();   // scan /drums for loopable channel-10 grooves
 
     // Two pools now: the int16 pool feeds Dexed, the BT resampler, the optical-out
     // tone, and the input side of the convert blocks; the F32 pool feeds the mix
@@ -805,12 +917,20 @@ void setup() {
     // patch; the player's default mask still skips channel 10 (drums), matching
     // a single melodic engine. synthBegin() sets gain + loads the default patch.
     g_player.setSink(g_synthSink);
+    // Dedicated drum-groove player: channel 10 only, loops, and ignores the file's
+    // program changes (we own the kit via @DRUMKIT). Feeds the same GM sink so a
+    // groove backs whatever the melodic voice/keyboard plays.
+    g_drumPlayer.setSink(g_synthSink);
+    g_drumPlayer.setChannelMask((uint16_t)(1u << 9));   // MIDI channel 10 (index 9)
+    g_drumPlayer.setProgramChangeEnabled(false);
+    g_drumPlayer.setLooping(true);
     synthBegin();
     applyMidiMode(false);   // start in normal MIDI (after synthBegin, so the engine exists)
 
     Serial.println("running -- cmds: t=DACtone a=BT+SPDIF mix  s=SPDIF-only  m=BT-only");
     Serial.println("                 x=toggle SPDIF tone  +/-=vol  d=dump  i=re-init codec");
     Serial.println("                 W=play/stop song  S=next song  V=next instrument   MIDI-IN pin0");
+    Serial.println("                 D=play/stop drums  C=next groove (GM engines only)");
     Serial.println("      ESP32/kit:  r=reset  g=flash mode  @BOOTAPP@=exit flash  U=Teensy prog");
     Serial.println("                 P=ESP32 pairing mode  F=ESP32 forget bond + pair");
 
@@ -1389,6 +1509,7 @@ void loop() {
     g_usbHost.Task();
     while (g_usbMidi.read()) { /* USB-host MIDI handlers fire per message */ }
     g_player.tick();
+    g_drumPlayer.tick();   // loops internally (setLooping), so no external re-arm needed
     songLoopTick();   // auto-restart the song if loop mode is on and it just ended
 
     // USB CDC input serves two roles: '@'-prefixed control LINES (the same protocol
@@ -1440,6 +1561,10 @@ void loop() {
             else if (c == 'W') { if (g_player.isPlaying()) songStop(); else songStart(g_songSel); }  // play/stop
             else if (c == 'S') { if (g_numSongs) g_songSel = (g_songSel + 1) % g_numSongs;  // pick song
                                  Serial.printf("[song] selected: %s\n", g_songs[g_songSel].name); }
+            else if (c == 'D') { if (g_drumPlayer.isPlaying()) drumStop(); else drumStart(g_drumSel); }  // drums play/stop
+            else if (c == 'C') { if (g_numDrums) g_drumSel = (g_drumSel + 1) % g_numDrums;   // Cycle groove
+                                 Serial.printf("[drum] selected: %s\n", g_drums[g_drumSel].name);
+                                 if (g_drumPlayer.isPlaying()) drumStart(g_drumSel); }
             else if (c == 'V') { synthSetInstrument((synthInstrument() + 1) % synthNumInstruments());
                                  if (g_mpeMode) synthSetMpeMode(true); }   // re-sync ch10 (MPE member)
             else if (c == 'M') { Serial.printf("[mem] external PSRAM: %u MB\n", external_psram_size); }

@@ -43,6 +43,33 @@ public:
     // fixed-timbre backend that should ignore the file's instrument choices.
     void setProgramChangeEnabled(bool en) { pcEnabled_ = en; }
 
+    // Loop the stream: when the last event is reached, restart from the top
+    // instead of stopping (default off). Used by the drum-groove player so a
+    // one-bar pattern plays as a continuous backing under a live synth. The
+    // restart is seamless (no all-notes-off) — drum one-shots simply retrigger.
+    void setLooping(bool en) { loop_ = en; }
+    bool isLooping() const { return loop_; }
+
+    // Playback speed multiplier (default 1.0). >1 = faster, <1 = slower. The
+    // file's timing is scaled in real time, so a groove keeps its feel while you
+    // dial the tempo. Clamped to a sane musical range.
+    void setTempoScale(float s) {
+        if (s < 0.10f) s = 0.10f;
+        if (s > 4.00f) s = 4.00f;
+        speed_ = s;
+    }
+    float tempoScale() const { return speed_; }
+
+    // Scale every emitted note-on velocity (default 1.0) — a level control for
+    // this player's contribution without touching the shared synth/bus gain.
+    // 0 => effectively silent (velocity floors to 0). Clamped 0..2.
+    void setVelocityScale(float v) {
+        if (v < 0.0f) v = 0.0f;
+        if (v > 2.0f) v = 2.0f;
+        velScale_ = v;
+    }
+    float velocityScale() const { return velScale_; }
+
     // Default pitch-bend range in semitones, used to convert the file's 14-bit bend
     // into the MidiSink's float-semitone convention (default 2). A song can override
     // it PER CHANNEL via RPN 0,0 (CC 101=0, 100=0, 6=semitones) — many do (e.g. ±12);
@@ -57,7 +84,8 @@ public:
         stop();                       // release anything currently held
         if (!ev || count == 0) return;
         ev_ = ev; count_ = count; idx_ = 0;
-        wait_ = ev_[0].deltaMs; clock_ = 0;
+        base_ = ev; baseCount_ = count;         // kept for seamless loop restart
+        wait_ = ev_[0].deltaMs; clock_ = 0; acc_ = 0.0f;
         for (int c = 0; c < 16; c++) {          // reset per-channel bend range + RPN state
             pbRange_[c] = pbDefault_; rpnMsb_[c] = rpnLsb_[c] = 0x7F;
         }
@@ -78,13 +106,23 @@ public:
     uint32_t eventIndex() const { return idx_; }
     uint32_t eventCount() const { return count_; }
 
-    // Advance the song by elapsed real time. Call every loop().
+    // Advance the song by elapsed real time. Call every loop(). Elapsed ms are
+    // scaled by speed_ into an accumulator (fractional, so slow/fast tempos don't
+    // drift), matching the original behaviour exactly at speed 1.0.
     void tick() {
         if (!playing_ || !sink_) return;
-        while (playing_ && clock_ >= wait_) {
-            clock_ -= wait_;
+        uint32_t real = clock_;                       // real ms since the last tick
+        clock_ = 0;
+        acc_ += (float)real * speed_;                 // advance in "song time"
+        while (playing_ && acc_ >= (float)wait_) {
+            acc_ -= (float)wait_;
             dispatch(ev_[idx_]);
-            if (++idx_ >= count_) {                   // reached the end
+            if (++idx_ >= count_) {                    // reached the end
+                if (loop_ && base_ && baseCount_) {    // seamless restart from the top
+                    ev_ = base_; count_ = baseCount_; idx_ = 0;
+                    wait_ = ev_[0].deltaMs; acc_ = 0.0f;   // resync at the loop point
+                    break;                             // one pass per tick (runaway-safe)
+                }
                 playing_ = false;
                 sink_->onAllNotesOff(0);
                 ev_ = nullptr;
@@ -100,7 +138,15 @@ private:
         if (!(chMask_ & (uint16_t)(1u << e.channel))) return;   // channel filtered
         const uint8_t ch = (uint8_t)(e.channel + 1);            // MidiSink is 1-based
         switch (e.kind) {
-            case kNoteOn:        sink_->onNoteOn(ch, e.data1, e.data2); break;
+            case kNoteOn: {
+                uint8_t vel = e.data2;
+                if (velScale_ != 1.0f) {               // per-player level trim
+                    int s = (int)((float)vel * velScale_ + 0.5f);
+                    vel = (uint8_t)(s < 0 ? 0 : (s > 127 ? 127 : s));
+                }
+                sink_->onNoteOn(ch, e.data1, vel);
+                break;
+            }
             case kNoteOff:       sink_->onNoteOff(ch, e.data1, e.data2); break;
             case kProgramChange: if (pcEnabled_) sink_->onProgramChange(ch, e.data1); break;
             case kControlChange: dispatchCC(ch, e.data1, e.data2); break;
@@ -136,10 +182,16 @@ private:
 
     MidiSink            *sink_      = nullptr;
     const MidiFileEvent *ev_        = nullptr;
+    const MidiFileEvent *base_      = nullptr;         // original stream (for looping)
     uint32_t             count_     = 0;
+    uint32_t             baseCount_ = 0;
     uint32_t             idx_       = 0;
     uint32_t             wait_      = 0;
     elapsedMillis        clock_;
+    float                acc_       = 0.0f;            // accumulated song-time ms
+    float                speed_     = 1.0f;            // tempo multiplier
+    float                velScale_  = 1.0f;            // note-on velocity multiplier
+    bool                 loop_      = false;           // restart at end
     bool                 playing_   = false;
     bool                 pcEnabled_ = true;
     float                pbDefault_ = 2.0f;              // fallback bend range (no RPN in file)

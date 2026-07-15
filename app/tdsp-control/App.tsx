@@ -28,6 +28,8 @@ export default function App() {
     sources,
     songs,
     instruments,
+    drums,
+    drumKits,
     synth,
     scanAndConnect,
     disconnect,
@@ -43,6 +45,11 @@ export default function App() {
     setMidiMode,
     setReplayGain,
     setLoop,
+    playDrum,
+    stopDrum,
+    setDrumKit,
+    setDrumSpeed,
+    setDrumVol,
     setPressure,
     setModWheel,
     setLfoMode,
@@ -63,6 +70,11 @@ export default function App() {
   const [rg, setRg] = useState(true);
   // Loop the current song (local UI state; sent to the device on change).
   const [loop, setLoopState] = useState(false);
+  // Drums — local UI state (no firmware readback). Groove/kit indices + speed/level %.
+  const [drumGroove, setDrumGroove] = useState(0);
+  const [drumKit, setDrumKitState] = useState(0);
+  const [drumSpeed, setDrumSpeedState] = useState(100);
+  const [drumVol, setDrumVolState] = useState(100);
   // Expression routing bitmasks (1=volume 2=brightness 4=vibrato 8=tremolo).
   const [pressMask, setPressMask] = useState(3);   // pressure: default vol+bright
   const [modMask, setModMask] = useState(4);       // mod wheel: default vibrato (no volume bit)
@@ -184,6 +196,31 @@ export default function App() {
         onStopSong={stopSong}
         loop={loop}
         onToggleLoop={onToggleLoop}
+        drums={drums}
+        drumKits={drumKits}
+        drumGroove={drumGroove}
+        onSelectDrum={setDrumGroove}
+        onPlayDrum={(i) => {
+          setDrumGroove(i);
+          playDrum(i);
+        }}
+        onStopDrum={stopDrum}
+        drumKit={drumKit}
+        onSelectDrumKit={(i) => {
+          setDrumKitState(i);
+          setDrumKit(i);
+        }}
+        drumSpeed={drumSpeed}
+        onChangeDrumSpeed={(v) => {
+          setDrumSpeedState(v);
+          setDrumSpeed(v);
+        }}
+        drumVol={drumVol}
+        onChangeDrumVol={(v) => {
+          setDrumVolState(v);
+          setDrumVol(v);
+        }}
+        isGM={/\b(TSF|SF2|OPL3|OPLL)\b/i.test(synth.name)}
         pressMask={pressMask}
         onTogglePressBit={onTogglePressBit}
         modMask={modMask}

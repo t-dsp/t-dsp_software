@@ -1,0 +1,3 @@
+# Transient flash hand-off flag written by an agent / flashing script; watched by
+# control.html to release the USB serial port so `pio run -t upload` can run.
+release.flag
