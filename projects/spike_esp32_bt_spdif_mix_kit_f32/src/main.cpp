@@ -431,7 +431,7 @@ static bool songNameExists(const char *name) {   // case-insensitive, for de-dup
 }
 // Scan one directory for *.mid and append each (deduped by display name). `dir`
 // is "/songs" or "/" (the card root, so files dropped at the top level also work).
-static void scanSongDir(const char *dir) {
+FLASHMEM static void scanSongDir(const char *dir) {
     File d = SD.open(dir);
     if (!d || !d.isDirectory()) { if (d) d.close(); return; }
     const int cap = (int)(sizeof(g_songs) / sizeof(g_songs[0]));
@@ -454,7 +454,7 @@ static void scanSongDir(const char *dir) {
     }
     d.close();
 }
-static void buildSongList() {
+FLASHMEM static void buildSongList() {
     const int cap = (int)(sizeof(g_songs)/sizeof(g_songs[0]));
     g_numSongs = 0;
     // Built-in MIDI/MPE test sequences FIRST, so they head the picker as "01 .. 08".
@@ -602,10 +602,16 @@ static void buildDrumList() {
     Serial.printf("[sd] drums: %d grooves\n", g_numDrums);
 }
 
+// Does the active engine render channel-10 drums? Drum-capable backends set the
+// song-player mask to kMaskAll in synthBegin() (TSF/SF2/OPL3/OPLL); melodic-only
+// engines leave kMaskNoDrums. This is the right signal — NOT synthIsGM(), which is
+// about streaming 128 GM program NAMES (OPLL reports false yet still plays drums).
+static bool drumEngineOk() { return g_player.channelMask() == tdsp::MidiFilePlayer::kMaskAll; }
+
 static void drumApplyKit() { g_synthSink->onProgramChange(10, kDrumKits[g_drumKit].prog); }
 
 static void drumStart(int idx) {
-    if (!synthIsGM()) { Serial.printf("[drum] %s is not a GM engine — drums need TSF/SF2/OPL3/OPLL\n", synthName()); return; }
+    if (!drumEngineOk()) { Serial.printf("[drum] %s has no channel-10 drum map — use TSF/SF2/OPL3/OPLL\n", synthName()); return; }
     if (g_numDrums == 0) { Serial.println("[drum] no grooves on SD (/drums) — run tools/fetch_drums.py"); return; }
     if (idx < 0) idx = 0;
     if (idx >= g_numDrums) idx = g_numDrums - 1;
@@ -628,7 +634,7 @@ static void setDrumKit(int i) {
     if (i < 0) i = 0;
     if (i >= kNumDrumKits) i = kNumDrumKits - 1;
     g_drumKit = i;
-    if (synthIsGM()) drumApplyKit();
+    if (drumEngineOk()) drumApplyKit();
     Serial.printf("[drum] kit -> %s (prog %u)\n", kDrumKits[i].name, kDrumKits[i].prog);
 }
 static void setDrumSpeed(int pct) {
@@ -650,7 +656,7 @@ static void setDrumVol(int pct) {
 // over the UART link. The ESP32 serves it on BLE so the app renders its pickers
 // from whatever the device reports — adding a song/instrument is then a firmware
 // change only, no app update. Sent when the ESP32 asks (@GETCAT, on BLE connect).
-static void sendCatalog(Print& out) {
+FLASHMEM static void sendCatalog(Print& out) {
     out.print("@SONGS=");
     for (int i = 0; i < g_numSongs; ++i) { if (i) out.print('|'); out.print(g_songs[i].name); }
     out.print('\n');
@@ -672,7 +678,12 @@ static void sendCatalog(Print& out) {
         // BLE characteristic (512 B cap) — so we just flag "GM" (a 3rd \t-field on the
         // header) and the app renders the standard GM 0..127 names itself.
         out.print("\tGM");
-    } else {
+    }
+    // Drum-capability flag (\t-field on the header, findable regardless of position):
+    // lets the clients show the Drums menu as active vs "silent on this engine". This is
+    // drumEngineOk() (ch10 render), NOT synthIsGM() — OPLL is not-GM yet plays drums.
+    if (drumEngineOk()) out.print("\tDRUMS");
+    if (!synthIsGM()) {
         for (int i = 0; i < synthNumInstruments(); ++i) { out.print('|'); out.print(synthInstrumentName(i)); }
     }
     out.print('\n');
@@ -740,13 +751,48 @@ static void runMpeCheck(void);                // measure every instrument under 
 static void runAxisProof(int axis);           // MPE axis proof ported to TSF (validates CC#74->cutoff)
 #endif
 
-static bool handleControlLine(const char* line, Print& reply) {
+FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     if      (strncmp(line, "@VOL=", 5) == 0)      setMasterVolumePct(atoi(line + 5));
 #ifdef TDSP_HAS_REPLAYGAIN
     else if (strncmp(line, "@GAIN=", 6) == 0)     runGainSweep(atoi(line + 6));   // resume sweep from index
 #endif
     else if (strncmp(line, "@DXVOICE=", 9) == 0) { synthSetInstrument(atoi(line + 9));
                                  if (g_mpeMode) synthSetMpeMode(true); }   // re-sync ch10 (MPE member)
+#if defined(TDSP_SYNTH_DEXED) || defined(TDSP_SYNTH_DEXED_POOL)
+    // --- Paged /dexed subfolder library browser (folder -> cart -> voice) -----
+    // Lazy: each command does one on-demand SD read, so the whole ~3,700-cart
+    // library is reachable without holding names in RAM. Relative to /dexed.
+    else if (strncmp(line, "@DXLS=", 6) == 0) {          // @DXLS=<rel>[\t<page>]
+        char rel[160]; strncpy(rel, line + 6, sizeof(rel) - 1); rel[sizeof(rel) - 1] = 0;
+        int page = 0;
+        char *tab = strchr(rel, '\t');
+        if (tab) { *tab = 0; page = atoi(tab + 1); }
+        constexpr int kPage = 32;
+        tdsp::dexed::SdDirEntry ents[kPage];
+        int total = 0;
+        int n = tdsp::dexed::sdListDir(rel, page, kPage, ents, &total);
+        int npages = (total + kPage - 1) / kPage; if (npages < 1) npages = 1;
+        reply.printf("@DXLS=%s\t%d\t%d", rel, page, npages);   // path, page, npages
+        for (int i = 0; i < n; ++i) reply.printf("|%c%s", ents[i].isDir ? 'D' : 'F', ents[i].name);
+        reply.print('\n');
+    }
+    else if (strncmp(line, "@DXVL=", 6) == 0) {          // @DXVL=<relCart> -> 32 voice names
+        const char *rc = line + 6;
+        static char names[tdsp::dexed::kVoicesPerBank][tdsp::dexed::kVoiceNameBufBytes];
+        int n = tdsp::dexed::sdCartVoiceNames(rc, names);
+        reply.printf("@DXVL=%s", rc);
+        for (int i = 0; i < n; ++i) reply.printf("|%s", names[i]);
+        reply.print('\n');
+    }
+    else if (strncmp(line, "@DXPICK=", 8) == 0) {        // @DXPICK=<relCart>\t<voice>
+        char buf[160]; strncpy(buf, line + 8, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+        int voice = 0;
+        char *tab = strrchr(buf, '\t');
+        if (tab) { *tab = 0; voice = atoi(tab + 1); }
+        const char *nm = synthPickCartVoice(buf, voice);
+        reply.printf("@DXPICKED=%s\t%d\t%s\n", buf, voice, nm ? nm : "?");
+    }
+#endif
     else if (strncmp(line, "@SONG=", 6) == 0) {
         if (strcmp(line + 6, "stop") == 0) songStop();
         else songStart(atoi(line + 6));   // @SONG=<song index>
@@ -1259,7 +1305,7 @@ FLASHMEM static void runMpeSweep(int startIdx) {
     if (g_dvol < -20.0f) { g_dvol = -10.0f; if (g_codecOk) applyVol(); }
     if (startIdx < 0) startIdx = 0;
     Serial.printf("[mpesweep] MPE demo (bend/timbre/pressure) on each instrument from %d; send any key to stop\n", startIdx);
-    for (int i = startIdx; i < kNumInstruments; i++) {
+    for (int i = startIdx; i < synthNumInstruments(); i++) {
         if (Serial.available()) { Serial.read(); Serial.printf("[mpesweep] stopped at %d (resume: @MPESWEEP=%d)\n", i, i); break; }
         synthSetInstrument(i);
         Serial.printf("[mpesweep] %3d = %s\n", i, synthInstrumentName(i)); Serial.flush();
@@ -1284,7 +1330,7 @@ FLASHMEM static void runMpeCheck(void) {
     if (g_dvol < -20.0f) { g_dvol = -12.0f; if (g_codecOk) applyVol(); }
     Serial.println("[mpecheck] every instrument w/ MPE expression; flags SILENT / CLIP. Any key stops.");
     int silent = 0, clip = 0;
-    for (int i = 0; i < kNumInstruments; i++) {
+    for (int i = 0; i < synthNumInstruments(); i++) {
         if (Serial.available()) { Serial.read(); Serial.printf("[mpecheck] stopped at %d\n", i); break; }
         synthSetInstrument(i);
         delay(40);                                        // let each engine's panic-release settle so
@@ -1306,7 +1352,7 @@ FLASHMEM static void runMpeCheck(void) {
     g_synthSink->onAllNotesOff(0);
     g_poolSink.setPressureMask(sp); g_poolSink.setTimbreMask(st); g_poolSink.setModMask(sm);
     applyMidiMode(wasMpe);
-    Serial.printf("[mpecheck] DONE: %d silent, %d clipping (of %d)\n", silent, clip, kNumInstruments);
+    Serial.printf("[mpecheck] DONE: %d silent, %d clipping (of %d)\n", silent, clip, synthNumInstruments());
 }
 
 // Slot scan ('Y'): play a loud note and report the peak on EACH of the 8 TDM input

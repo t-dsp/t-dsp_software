@@ -82,6 +82,19 @@ static void synthSetInstrument(int idx) {
     }
 }
 
+// Load an arbitrary /dexed subfolder cart voice directly (the paged-browser
+// @DXPICK path). Returns the voice's display name (or nullptr on failure).
+static const char *synthPickCartVoice(const char *relCart, int voice) {
+    static char names[tdsp::dexed::kVoicesPerBank][tdsp::dexed::kVoiceNameBufBytes];
+    g_dexed.panic();
+    if (!tdsp::dexed::sdLoadCartVoice(g_dexed, relCart, voice)) return nullptr;
+    int n = tdsp::dexed::sdCartVoiceNames(relCart, names);
+    const char *nm = (n == tdsp::dexed::kVoicesPerBank && voice >= 0 &&
+                      voice < tdsp::dexed::kVoicesPerBank) ? names[voice] : "";
+    Serial.printf("[synth] pick %s v%d = %s\n", relCart, voice, nm);
+    return nm;
+}
+
 static void synthBegin() {
     // Scan /dexed/*.syx off the SD card (bundled voices always present; SD adds
     // thousands more). g_sdReady is set by SD.begin() in setup(), before this.

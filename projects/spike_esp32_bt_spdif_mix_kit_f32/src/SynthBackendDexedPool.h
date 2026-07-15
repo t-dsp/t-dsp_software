@@ -19,6 +19,7 @@
 #include <AudioEffectCompressor2_F32.h>
 #include "DexedPoolSink.h"
 #include "DexedVoiceBank.h"
+#include "DexedSdBank.h"         // /dexed/*.syx carts off the SD card (thousands of DX7 voices)
 #include "DexedVoiceGains.h"
 #include "ReplayGain.h"          // shared ILoudnessMeter interface (Tier-1 sweep)
 
@@ -223,57 +224,99 @@ AudioSynthDexed *g_pool[kPoolN] = { &dxp0, &dxp1, &dxp2, &dxp3, &dxp4, &dxp5, &d
 DexedPoolSink    g_poolSink(g_pool, kPoolN, kPoolVpe);
 tdsp::MidiSink  *g_synthSink = &g_poolSink;
 
-// Full DX7 voice set, browsable by bank — identical to SynthBackendDexed.h (index =
-// bank * kVoicesPerBank + voice, streamed as "<bankName>: <voiceName>").
-static const int kNumInstruments = tdsp::dexed::kNumBanks * tdsp::dexed::kVoicesPerBank;  // 320
+// Flat voice index: [0..320) bundled PROGMEM voices, then [320..320+32*sdBanks)
+// = /dexed/*.syx carts off the SD card — identical scheme to SynthBackendDexed.h,
+// so the huge open DX7 patch libraries work with the polyphonic/MPE pool too.
+static const int kNumBundled = tdsp::dexed::kNumBanks * tdsp::dexed::kVoicesPerBank;  // 320
 static int g_synthInstrument = 0;
 
 static const char *synthName()        { return "Dexed MPE"; }
-static const char *synthDescription() { return "6-op FM (DX7), 8-engine pool: per-note bend/pressure in MPE mode, 16-voice poly in normal MIDI."; }
+static const char *synthDescription() { return "6-op FM (DX7), 8-engine pool: per-note bend/pressure in MPE mode, 16-voice poly in normal MIDI. Bundled + /dexed/*.syx carts."; }
 static bool        synthIsGM()         { return false; }
 static void        synthSetMpeMode(bool mpe) { g_poolSink.setMpeMode(mpe); }
-static int         synthNumInstruments()     { return kNumInstruments; }
+static int         synthNumInstruments()     { return kNumBundled + tdsp::dexed::numSdVoices(); }
 static int         synthInstrument()         { return g_synthInstrument; }
 
-static const char *synthInstrumentName(int i) {
+FLASHMEM static const char *synthInstrumentName(int i) {
     static char buf[40];
-    int bank  = i / tdsp::dexed::kVoicesPerBank;
-    int voice = i % tdsp::dexed::kVoicesPerBank;
     char vname[tdsp::dexed::kVoiceNameBufBytes];
-    if (!tdsp::dexed::copyVoiceName(bank, voice, vname, sizeof(vname))) vname[0] = 0;
-    // [V]/[T] tag = patch's LFO natively does vibrato/tremolo (matters most in RESPECT LFO
-    // mode, where only these patches wobble; informational in FORCE mode).
-    uint8_t tags = tdsp::dexed::voiceLfoTags(bank, voice);
-    const char *tag = (tags == 3) ? " [V][T]" : (tags & 1) ? " [V]" : (tags & 2) ? " [T]" : "";
-    snprintf(buf, sizeof(buf), "%s: %s%s", tdsp::dexed::bankName(bank), vname, tag);
+    if (i < kNumBundled) {
+        int bank  = i / tdsp::dexed::kVoicesPerBank;
+        int voice = i % tdsp::dexed::kVoicesPerBank;
+        if (!tdsp::dexed::copyVoiceName(bank, voice, vname, sizeof(vname))) vname[0] = 0;
+        // [V]/[T] tag = patch's LFO natively does vibrato/tremolo.
+        uint8_t tags = tdsp::dexed::voiceLfoTags(bank, voice);
+        const char *tag = (tags == 3) ? " [V][T]" : (tags & 1) ? " [V]" : (tags & 2) ? " [T]" : "";
+        snprintf(buf, sizeof(buf), "%s: %s%s", tdsp::dexed::bankName(bank), vname, tag);
+    } else {
+        int s     = i - kNumBundled;
+        int bank  = s / tdsp::dexed::kVoicesPerBank;
+        int voice = s % tdsp::dexed::kVoicesPerBank;
+        if (!tdsp::dexed::copySdVoiceName(bank, voice, vname, sizeof(vname))) vname[0] = 0;
+        snprintf(buf, sizeof(buf), "%s: %s", tdsp::dexed::sdBankName(bank), vname);
+    }
     return buf;
 }
 
 // Load a voice into EVERY engine so any engine can play the current sound (runs from
 // loop/handlers, never the audio ISR).
-static void synthSetInstrument(int idx) {
+FLASHMEM static void synthSetInstrument(int idx) {
+    const int total = kNumBundled + tdsp::dexed::numSdVoices();
     if (idx < 0) idx = 0;
-    if (idx >= kNumInstruments) idx = kNumInstruments - 1;
-    int bank  = idx / tdsp::dexed::kVoicesPerBank;
-    int voice = idx % tdsp::dexed::kVoicesPerBank;
+    if (idx >= total) idx = total - 1;
     for (int i = 0; i < kPoolN; ++i) {
         g_pool[i]->panic();
-        tdsp::dexed::loadVoice(*g_pool[i], bank, voice);
+        if (idx < kNumBundled) {
+            tdsp::dexed::loadVoice(*g_pool[i], idx / tdsp::dexed::kVoicesPerBank,
+                                               idx % tdsp::dexed::kVoicesPerBank);
+        } else {
+            int s = idx - kNumBundled;
+            tdsp::dexed::loadSdVoice(*g_pool[i], s / tdsp::dexed::kVoicesPerBank,
+                                                 s % tdsp::dexed::kVoicesPerBank);
+        }
     }
     // Re-apply the expression routing (mod-wheel + aftertouch targets / LFO) after loading
     // — loadVoice resets controller + LFO state. Configured via @MODWHEEL / @PRESSURE /
     // @LFOMODE; defaults: mod wheel -> vibrato, pressure -> volume + brightness, force LFO.
     g_poolSink.applyExprConfig();
     g_synthInstrument = idx;
-    // ReplayGain-style per-voice loudness trim (baked table in DexedVoiceGains.h). One
-    // bus gain for the whole pool is correct: the pool is single-timbre (one voice at a
-    // time). 1.0 = unity until the 'N' sweep has been run and its output baked in.
-    dxpTrim.setGain(tdsp::auditionTrim(dexedVoiceTrim(idx)));
-    Serial.printf("[synth] pool instrument %d = %s (bank %d voice %d) trim=%.3f\n",
-                  idx, synthInstrumentName(idx), bank, voice, (double)dexedVoiceTrim(idx));
+    // ReplayGain per-voice trim only covers the bundled set (baked table). SD carts ship
+    // at unity until you sweep them.
+    float trim = (idx < kNumBundled) ? dexedVoiceTrim(idx) : 1.0f;
+    dxpTrim.setGain(tdsp::auditionTrim(trim));
+    Serial.printf("[synth] pool instrument %d = %s (trim=%.3f)\n",
+                  idx, synthInstrumentName(idx), (double)trim);
 }
 
-static void synthBegin() {
+// Load an arbitrary /dexed subfolder cart voice directly (the paged-browser
+// @DXPICK path). Loads into every pool engine so any can play it; returns the
+// voice's display name (or nullptr on failure).
+FLASHMEM static const char *synthPickCartVoice(const char *relCart, int voice) {
+    static char names[tdsp::dexed::kVoicesPerBank][tdsp::dexed::kVoiceNameBufBytes];
+    bool ok = true;
+    for (int i = 0; i < kPoolN; ++i) {
+        g_pool[i]->panic();
+        if (!tdsp::dexed::sdLoadCartVoice(*g_pool[i], relCart, voice)) ok = false;
+    }
+    if (!ok) return nullptr;
+    g_poolSink.applyExprConfig();
+    dxpTrim.setGain(tdsp::auditionTrim(1.0f));   // SD carts ship at unity trim
+    int n = tdsp::dexed::sdCartVoiceNames(relCart, names);
+    const char *nm = (n == tdsp::dexed::kVoicesPerBank && voice >= 0 &&
+                      voice < tdsp::dexed::kVoicesPerBank) ? names[voice] : "";
+    Serial.printf("[synth] pick %s v%d = %s\n", relCart, voice, nm);
+    return nm;
+}
+
+FLASHMEM static void synthBegin() {
+    // Scan /dexed/*.syx off the SD card (bundled voices always present; SD adds
+    // thousands more). Create the folder if missing so it's a visible USB drop target.
+    if (g_sdReady) {
+        if (!SD.exists("/dexed")) SD.mkdir("/dexed");
+        int sdBanks = tdsp::dexed::scanSdBanks();
+        Serial.printf("[synth] Dexed pool: %d bundled + %d SD voices (%d /dexed carts)\n",
+                      kNumBundled, tdsp::dexed::numSdVoices(), sdBanks);
+    }
     for (int i = 0; i < kPoolN; ++i) {
         g_pool[i]->setGain(0.8f);       // below unity so punchy notes don't flat-top (see single backend)
         g_pool[i]->setPitchbendRange(2);

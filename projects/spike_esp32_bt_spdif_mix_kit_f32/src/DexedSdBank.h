@@ -45,5 +45,30 @@ bool copySdVoiceName(int bank, int voice, char *out, int outLen);
 // Does NOT panic held notes — caller should engine.panic() first.
 bool loadSdVoice(AudioSynthDexed &engine, int bank, int voice);
 
+// --- Lazy directory browser (for the full /dexed subfolder library) ----------
+// Unlike the capped/name-cached flat scan above, these hold NOTHING in RAM: each
+// call does one on-demand SD directory (or file) read, so the browser scales to
+// the whole ~3,700-cart library organized in subfolders. All paths are relative
+// to /dexed (rel == "" or nullptr means the /dexed root). Runs from loop/handlers.
+struct SdDirEntry {
+    char name[64];
+    bool isDir;
+};
+
+// List the entries of /dexed/<rel>: subfolders and 32-voice carts (4104/4096-byte
+// .syx only; other files/sizes are skipped). Fills out[0..pageSize) for page
+// `page` (0-based) in directory order; sets *total to the full accepted-entry
+// count. Returns the number filled. NB: counts the whole directory each call
+// (fine for typical folders; a folder with thousands of files is slower).
+int sdListDir(const char *rel, int page, int pageSize, SdDirEntry *out, int *total);
+
+// Read the 32 voice names from the cart at /dexed/<relCart>. Returns 32, or 0 on
+// a missing/invalid cart.
+int sdCartVoiceNames(const char *relCart, char names[kVoicesPerBank][kVoiceNameBufBytes]);
+
+// Load voice `voice` (0..31) from the cart at /dexed/<relCart> into `engine`.
+// Runs from loop/handlers (never the ISR); caller should engine.panic() first.
+bool sdLoadCartVoice(AudioSynthDexed &engine, const char *relCart, int voice);
+
 } // namespace dexed
 } // namespace tdsp

@@ -30,6 +30,7 @@
   button { padding: 9px 14px; background: #2f6feb; color: #fff; border: none;
            border-radius: 6px; cursor: pointer; }
   button.ghost { background: #262a33; }
+  button.step { flex: 0 0 44px; padding: 8px 0; font-size: 18px; font-weight: 700; }
   button:disabled { opacity: .4; cursor: default; }
   .seg { display: flex; border: 1px solid #333844; border-radius: 6px; overflow: hidden; }
   .seg button { border-radius: 0; background: #14161a; color: #b8bec9; }
@@ -39,6 +40,12 @@
             padding: 10px; height: 150px; overflow: auto; font-size: 12px;
             color: #8b93a1; margin: 0; white-space: pre-wrap; }
   .note { color: #8b93a1; font-size: 12px; }
+  .lib-row { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #23262e;
+             display: flex; gap: 8px; align-items: center; }
+  .lib-row:last-child { border-bottom: none; }
+  .lib-row:hover { background: #23262e; }
+  .lib-row .ic { flex: 0 0 18px; text-align: center; color: #8b93a1; }
+  .lib-row.vsel { background: #2f6feb; color: #fff; }
 </style>
 </head>
 <body>
@@ -86,16 +93,32 @@
     <div class="row">
       <select id="drum" disabled></select>
     </div>
-    <div class="row" style="margin-top:10px">
+    <div class="row" style="margin-top:8px">
+      <button id="drum-prev" class="ghost" disabled>◀ Prev</button>
+      <button id="drum-next" class="ghost" disabled>Next ▶</button>
+    </div>
+    <div class="row" style="margin-top:8px">
       <button id="drum-play" disabled>Play</button>
       <button id="drum-stop" class="ghost" disabled>Stop</button>
     </div>
     <label style="margin-top:12px">Instrument (kit)</label>
     <select id="drum-kit" disabled></select>
+    <div class="row" style="margin-top:8px">
+      <button id="drum-kit-prev" class="ghost" disabled>◀ Prev</button>
+      <button id="drum-kit-next" class="ghost" disabled>Next ▶</button>
+    </div>
     <label style="margin-top:12px">Speed <span id="drum-speed-val" style="color:#8b93a1">100%</span></label>
-    <input type="range" id="drum-speed" min="25" max="200" value="100" disabled>
+    <div class="row">
+      <button id="drum-speed-dn" class="ghost step" disabled>−</button>
+      <input type="range" id="drum-speed" min="25" max="200" step="5" value="100" style="flex:6" disabled>
+      <button id="drum-speed-up" class="ghost step" disabled>+</button>
+    </div>
     <label style="margin-top:8px">Volume <span id="drum-vol-val" style="color:#8b93a1">100%</span></label>
-    <input type="range" id="drum-vol" min="0" max="150" value="100" disabled>
+    <div class="row">
+      <button id="drum-vol-dn" class="ghost step" disabled>−</button>
+      <input type="range" id="drum-vol" min="0" max="150" step="5" value="100" style="flex:6" disabled>
+      <button id="drum-vol-up" class="ghost step" disabled>+</button>
+    </div>
     <p class="note" id="drum-note">A looping groove plays under whatever you perform live. Needs a General-MIDI
       engine (TSF/SF2/OPL3/OPLL) — silent on Dexed/Plaits/Rings/VA. Add grooves with tools/fetch_drums.py.</p>
   </div>
@@ -108,6 +131,25 @@
       <button id="instr-prev" class="ghost" disabled>◀ Prev</button>
       <button id="instr-next" class="ghost" disabled>Next ▶</button>
     </div>
+  </div>
+
+  <div class="card">
+    <h2>SD Patch Library</h2>
+    <div class="row" style="margin-bottom:8px; gap:8px">
+      <button id="lib-back" class="ghost step" disabled title="Up a level">↑</button>
+      <span id="lib-path" class="note" style="flex:1; align-self:center; overflow:hidden;
+            text-overflow:ellipsis; white-space:nowrap">/dexed</span>
+      <button id="lib-refresh" class="ghost" disabled>Reload</button>
+    </div>
+    <div id="lib-list" style="max-height:300px; overflow:auto; border:1px solid #333844;
+         border-radius:6px"></div>
+    <div class="row" style="margin-top:8px">
+      <button id="lib-pprev" class="ghost" disabled>◀ Page</button>
+      <span id="lib-pinfo" class="note" style="flex:1; align-self:center; text-align:center"></span>
+      <button id="lib-pnext" class="ghost" disabled>Page ▶</button>
+    </div>
+    <p class="note">Browse the DX7 cartridge library on the SD card (thousands of voices):
+      folders → carts → voices. Tapping a voice loads it into the Dexed pool. Dexed builds only.</p>
   </div>
 
   <div class="card">
@@ -213,6 +255,7 @@ async function openPort(p) {
   readLoop();
   await send('@GETCAT');             // pull song + instrument catalog
   await send('@RG');                 // sync the ReplayGain toggle to the device state
+  libReset();                        // load the SD patch-library root (/dexed)
 }
 
 $('connect').onclick = async () => {
@@ -275,7 +318,9 @@ function setConnected(on) {
   $('dot').classList.toggle('on', on);
   $('connect').textContent = on ? 'Disconnect' : 'Connect';
   ['vol','song','play','stop','refresh','instr','instr-search','instr-prev','instr-next','hpf','loop',
-   'drum','drum-play','drum-stop','drum-kit','drum-speed','drum-vol'].forEach(id => $(id).disabled = !on);
+   'drum','drum-prev','drum-next','drum-play','drum-stop','drum-kit','drum-kit-prev','drum-kit-next',
+   'drum-speed','drum-vol','drum-speed-dn','drum-speed-up','drum-vol-dn','drum-vol-up',
+   'lib-back','lib-refresh','lib-pprev','lib-pnext'].forEach(id => $(id).disabled = !on);
   if (on && !$('drum-kit').options.length) {   // populate the fixed GM kit list once
     $('drum-kit').innerHTML = DRUM_KITS.map((n, i) => `<option value="${i}">${n}</option>`).join('');
   }
@@ -318,6 +363,10 @@ function handleLine(line) {
   if (line.startsWith('@SONGS=')) { fillSongs(line.slice(7)); }
   else if (line.startsWith('@DRUMS=')) { fillDrums(line.slice(7)); }
   else if (line.startsWith('@INSTR=')) { fillInstr(line.slice(7)); }
+  else if (line.startsWith('@DXLS=')) { fillLibDir(line.slice(6)); }
+  else if (line.startsWith('@DXVL=')) { fillLibVoices(line.slice(6)); }
+  else if (line.startsWith('@DXPICKED=')) { const p = line.slice(10).split('\t');
+           log('loaded ' + (p[2] || '?') + '  (' + (p[0] || '') + ' v' + (p[1] || '') + ')'); }
   else if (line.startsWith('@RG=')) { setRgUI(line.slice(4).trim() === '1'); }
   else if (line) { log(line); }   // debug / heartbeat — just echo
 }
@@ -345,9 +394,15 @@ function fillInstr(payload) {
   if (payload.charCodeAt(0) === 0x1F) payload = payload.slice(1);
   const parts = payload.split('|');
   const header = parts.shift().split('\t');
-  const [name, desc, gmFlag] = header;
+  const name = header[0], desc = header[1];
+  const isGM = header.includes('GM');       // streams standard GM program names
+  const drumsOk = header.includes('DRUMS'); // renders channel-10 drums (incl. non-GM OPLL)
   $('synth').textContent = name + (desc ? ' — ' + desc : '');
-  const names = gmFlag === 'GM' ? GM_NAMES : parts;
+  // Drums note reflects the engine's real capability (drumsOk), not GM-ness.
+  $('drum-note').textContent = drumsOk
+    ? 'A looping groove plays under whatever you perform live. OPLL renders 5 rhythm sounds; SF2/TSF/OPL3 play every drum.'
+    : '⚠ ' + name + ' has no channel-10 drum map — grooves are silent. Flash an OPLL / OPL3 / SF2 / TSF build.';
+  const names = isGM ? GM_NAMES : parts;
   // Group by bank when names arrive as "<bank>: <voice>" (Dexed's full 320-voice
   // set); otherwise a flat list. The <option> value is always the global
   // instrument index the device expects in @DXVOICE=.
@@ -393,6 +448,84 @@ function renderInstr(filter) {
 
 function escapeHtml(s) { return s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
 
+// ---- SD patch library browser (lazy folder -> cart -> voice) ----
+// Paths are relative to /dexed. `libCart` non-null => showing that cart's voices;
+// otherwise showing the folder listing for `libPath`.
+let libPath = '';        // current folder rel path ('' = /dexed root)
+let libPage = 0, libNPages = 1;
+let libEntries = [];     // [{ isDir, name }] for the current folder page
+let libCart = null;      // rel path of the open cart, or null
+let libVoices = [];      // that cart's 32 voice names
+
+function libLoad() { send('@DXLS=' + libPath + (libPage ? '\t' + libPage : '')); }
+function libReset() { libPath = ''; libPage = 0; libCart = null; libEntries = []; libVoices = []; libLoad(); }
+
+// @DXLS reply body: <rel>\t<page>\t<npages>|D<dir>|F<cart>...
+function fillLibDir(payload) {
+  const bar = payload.indexOf('|');
+  const head = (bar >= 0 ? payload.slice(0, bar) : payload).split('\t');
+  const rel = head[0] || '';
+  if (rel !== libPath) return;                         // stale reply for a folder we've left
+  libPage = +head[1] || 0;
+  libNPages = +head[2] || 1;
+  libCart = null;
+  const items = bar >= 0 ? payload.slice(bar + 1).split('|').filter(s => s.length) : [];
+  libEntries = items.map(s => ({ isDir: s[0] === 'D', name: s.slice(1) }));
+  renderLib();
+}
+
+// @DXVL reply body: <relCart>|v0|...|v31
+function fillLibVoices(payload) {
+  const parts = payload.split('|');
+  const rc = parts.shift();
+  if (rc !== libCart) return;
+  libVoices = parts;
+  renderLib();
+}
+
+function renderLib() {
+  const list = $('lib-list');
+  const here = '/dexed' + (libPath ? '/' + libPath : '');
+  $('lib-path').textContent = libCart ? here + ' ▸ ' + libCart.split('/').pop() : here;
+  let html;
+  if (libCart) {
+    html = libVoices.map((n, i) =>
+      `<div class="lib-row" data-v="${i}"><span class="ic">♪</span><span>${i}: ${escapeHtml(n)}</span></div>`).join('');
+    $('lib-pinfo').textContent = libVoices.length + ' voices';
+    $('lib-pprev').disabled = $('lib-pnext').disabled = true;
+  } else {
+    html = libEntries.map((e, i) =>
+      `<div class="lib-row" data-i="${i}"><span class="ic">${e.isDir ? '📁' : '🎛'}</span><span>${escapeHtml(e.name)}</span></div>`).join('')
+      || '<div class="note" style="padding:12px">(empty — no folders or carts here)</div>';
+    $('lib-pinfo').textContent = libNPages > 1 ? `page ${libPage + 1} / ${libNPages}` : '';
+    $('lib-pprev').disabled = libPage <= 0;
+    $('lib-pnext').disabled = libPage >= libNPages - 1;
+  }
+  list.innerHTML = html;
+  list.querySelectorAll('.lib-row').forEach(row => {
+    row.onclick = () => {
+      if (libCart) {                                   // pick a voice
+        send('@DXPICK=' + libCart + '\t' + row.dataset.v);
+        list.querySelectorAll('.lib-row').forEach(r => r.classList.remove('vsel'));
+        row.classList.add('vsel');
+      } else {
+        const e = libEntries[+row.dataset.i];
+        const rel = libPath ? libPath + '/' + e.name : e.name;
+        if (e.isDir) { libPath = rel; libPage = 0; libLoad(); }   // descend
+        else { libCart = rel; send('@DXVL=' + rel); }             // open cart
+      }
+    };
+  });
+}
+
+$('lib-back').onclick = () => {
+  if (libCart) { libCart = null; renderLib(); }        // voices -> back to this folder's carts
+  else if (libPath) { const p = libPath.split('/'); p.pop(); libPath = p.join('/'); libPage = 0; libLoad(); }
+};
+$('lib-refresh').onclick = () => libLoad();
+$('lib-pprev').onclick = () => { if (libPage > 0) { libPage--; libLoad(); } };
+$('lib-pnext').onclick = () => { if (libPage < libNPages - 1) { libPage++; libLoad(); } };
+
 // ---- UI -> device ----
 $('vol').oninput = e => { $('vol-val').textContent = e.target.value + '%'; };
 $('vol').onchange = e => send('@VOL=' + e.target.value);
@@ -403,10 +536,36 @@ $('loop').onchange = e => send('@LOOP=' + (e.target.checked ? 1 : 0));
 $('drum-play').onclick = () => send('@DRUM=' + $('drum').value);
 $('drum-stop').onclick = () => send('@DRUM=stop');
 $('drum-kit').onchange = e => send('@DRUMKIT=' + e.target.value);
-$('drum-speed').oninput = e => { $('drum-speed-val').textContent = e.target.value + '%'; };
-$('drum-speed').onchange = e => send('@DRUMSPEED=' + e.target.value);
-$('drum-vol').oninput = e => { $('drum-vol-val').textContent = e.target.value + '%'; };
-$('drum-vol').onchange = e => send('@DRUMVOL=' + e.target.value);
+// Prev/Next step a <select> and fire `cb` with the new index. `wrap` cycles at ends.
+function stepSelect(id, delta, cb) {
+  const s = $(id), n = s.options.length;
+  if (!n) return;
+  s.selectedIndex = (s.selectedIndex + delta + n) % n;
+  cb(s.value);
+}
+// Groove prev/next switches the groove LIVE (plays the newly-selected one).
+$('drum-prev').onclick = () => stepSelect('drum', -1, v => send('@DRUM=' + v));
+$('drum-next').onclick = () => stepSelect('drum', 1, v => send('@DRUM=' + v));
+$('drum-kit-prev').onclick = () => stepSelect('drum-kit', -1, v => send('@DRUMKIT=' + v));
+$('drum-kit-next').onclick = () => stepSelect('drum-kit', 1, v => send('@DRUMKIT=' + v));
+// Speed / volume: slider + tap −/+ buttons. `nudge` steps the range input by its
+// own `step` (5), clamps, updates the label, and sends the value.
+function bindStepSlider(rangeId, valId, cmd, step) {
+  const r = $(rangeId), lab = $(valId);
+  const show = () => { lab.textContent = r.value + '%'; };
+  const emit = () => send(cmd + '=' + r.value);
+  r.oninput = show;
+  r.onchange = emit;
+  const nudge = d => {
+    const v = Math.max(+r.min, Math.min(+r.max, +r.value + d));
+    if (v === +r.value) return;
+    r.value = v; show(); emit();
+  };
+  $(rangeId + '-dn').onclick = () => nudge(-step);
+  $(rangeId + '-up').onclick = () => nudge(step);
+}
+bindStepSlider('drum-speed', 'drum-speed-val', '@DRUMSPEED', 5);
+bindStepSlider('drum-vol', 'drum-vol-val', '@DRUMVOL', 5);
 function bitmaskOf(sel) {
   let mask = 0;
   document.querySelectorAll(sel).forEach(x => { if (x.checked) mask |= +x.dataset.bit; });

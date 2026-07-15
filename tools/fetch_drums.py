@@ -98,13 +98,26 @@ class SmfTrack:
         # Drums are one-shots; a short note-off keeps the file valid + tidy.
         self._events.append((tick + dur, bytes([0x80 | ch, note & 0x7F, 0])))
 
-    def render(self, bpm: float = 120.0) -> bytes:
+    def render(self, bpm: float = 120.0, loop_ticks: int | None = None) -> bytes:
+        # loop_ticks defaults to one 4/4 bar (BAR is defined after this class, so we
+        # compute it from PPQN here rather than as a default-arg expression).
+        if loop_ticks is None:
+            loop_ticks = PPQN * 4
         # Track chunk: tempo meta first, then time-sorted events, then End-of-Track.
         # Note-offs must sort before note-ons at the same tick (retrigger safety).
         def rank(ev: bytes) -> int:
             return 0 if (ev[0] & 0xF0) == 0x80 else 1
 
-        evs = sorted(self._events, key=lambda e: (e[0], rank(e[1])))
+        # SEAMLESS LOOP: the firmware loops this file back-to-back, and the SMF parser
+        # only keeps time up to the LAST note — trailing silence to the barline is lost,
+        # so beat 1 of the next pass comes in early. Fix it here: clamp every event into
+        # [0, loop_ticks] (drum tails past the barline are one-shots — safe to clamp) and
+        # append a SILENT barline marker (a note-off on note 0, unmapped in GM percussion)
+        # exactly at loop_ticks. That marker becomes the last event, so its lead-in wait
+        # fills the bar and the loop period is exactly one bar.
+        events = [(min(tick, loop_ticks), ev) for (tick, ev) in self._events]
+        events.append((loop_ticks, bytes([0x80 | GM_DRUM_CHANNEL, 0, 0])))
+        evs = sorted(events, key=lambda e: (e[0], rank(e[1])))
         body = bytearray()
         # tempo meta at tick 0
         usec = int(round(60_000_000 / bpm))
@@ -368,15 +381,17 @@ def fetch_dmp(out_drums: str, limit: int) -> int:
 
 
 # --- push (reuse the sample pusher) ------------------------------------------
-def push(out_root: str) -> None:
+def push(out_drums: str) -> None:
+    # push_to_teensy.ps1 lands the source folder under the card root using its
+    # TOP-LEVEL name — so we pass <out>/drums (leaf "drums") to land as /drums.
     ps1 = os.path.join(os.path.dirname(__file__), "push_to_teensy.ps1")
     if not os.path.exists(ps1):
-        print(f"[push] {ps1} not found; copy {out_root} to the card manually.")
+        print(f"[push] {ps1} not found; copy {out_drums} to the card as /drums manually.")
         return
     print("[push] invoking push_to_teensy.ps1 …")
     subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ps1,
-         "-Source", out_root],
+         "-SourcePath", out_drums],
         check=False,
     )
 
@@ -415,7 +430,7 @@ def main() -> int:
 
     print(f"\nDone: {total} groove(s) in {out_drums}")
     if args.push and not args.assets:
-        push(out_root)
+        push(out_drums)
     elif not args.assets:
         print(f"Drag {out_drums} onto the SD card as /drums (or run with --push).")
     return 0

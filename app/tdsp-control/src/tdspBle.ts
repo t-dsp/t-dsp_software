@@ -279,6 +279,8 @@ export function useTdsp() {
   const [catDrums, setCatDrums] = useState<string[]>([]); // drum grooves fetched from device
   const [catInstruments, setCatInstruments] = useState<string[]>([]); // instruments fetched
   const [catSynth, setCatSynth] = useState<SynthInfo | null>(null); // engine the firmware was built with
+  const [catIsGM, setCatIsGM] = useState(false); // engine streams 128 GM program names
+  const [catDrumsOk, setCatDrumsOk] = useState(false); // engine renders channel-10 drums (incl. OPLL)
 
   // Coalescing volume writer: rapid slider drags collapse to the latest value so
   // we never flood the BLE link; a write always converges to the final position.
@@ -322,6 +324,8 @@ export function useTdsp() {
     setStatus(null);
     setSources([]);
     setCatSynth(null); // next device re-reports its own engine
+    setCatIsGM(false);
+    setCatDrumsOk(false);
   }, []);
 
   // Read the full sources list (ATT read-blob returns the whole JSON value).
@@ -365,13 +369,19 @@ export function useTdsp() {
     // General-MIDI engine sends NO names and we render GM_INSTRUMENTS locally.
     const parts = full.split('|').filter((x) => x.length > 0);
     let isGM = false;
+    let drumsOk = false;
     if (parts.length && parts[0].startsWith('\x1f')) {
       const fields = parts.shift()!.slice(1).split('\t');
       const name = (fields[0] ?? '').trim();
       const description = (fields[1] ?? '').trim();
-      if ((fields[2] ?? '').trim() === 'GM') isGM = true;
+      // GM = streams 128 standard program names; DRUMS = renders channel-10 drums.
+      // These are independent: OPLL is NOT GM (15 timbres) yet DOES play drums.
+      isGM = fields.some((f) => f.trim() === 'GM');
+      drumsOk = fields.some((f) => f.trim() === 'DRUMS');
       if (name) setCatSynth({ name, description: description || DEFAULT_SYNTH.description });
     }
+    setCatIsGM(isGM);
+    setCatDrumsOk(drumsOk); // drives the Drums menu's "audible on this engine?" hint
     if (isGM) setCatInstruments(GM_INSTRUMENTS as unknown as string[]);
     else if (parts.length) setCatInstruments(parts);
   }, []);
@@ -770,6 +780,8 @@ export function useTdsp() {
     // Drum grooves scanned off the SD /drums folder (empty until the device reports some).
     drums: catDrums,
     drumKits: DRUM_KITS as unknown as string[],
+    isGM: catIsGM,
+    drumsOk: catDrumsOk,
     // Synth engine the connected firmware was built with (Dexed / ymfm OPM / …),
     // reported by the device; falls back to Dexed for firmware without the header.
     synth: catSynth ?? DEFAULT_SYNTH,

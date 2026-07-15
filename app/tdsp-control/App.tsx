@@ -30,6 +30,8 @@ export default function App() {
     instruments,
     drums,
     drumKits,
+    isGM,
+    drumsOk,
     synth,
     scanAndConnect,
     disconnect,
@@ -211,16 +213,12 @@ export default function App() {
           setDrumKit(i);
         }}
         drumSpeed={drumSpeed}
-        onChangeDrumSpeed={(v) => {
-          setDrumSpeedState(v);
-          setDrumSpeed(v);
-        }}
+        onPreviewDrumSpeed={setDrumSpeedState}
+        onCommitDrumSpeed={setDrumSpeed}
         drumVol={drumVol}
-        onChangeDrumVol={(v) => {
-          setDrumVolState(v);
-          setDrumVol(v);
-        }}
-        isGM={/\b(TSF|SF2|OPL3|OPLL)\b/i.test(synth.name)}
+        onPreviewDrumVol={setDrumVolState}
+        onCommitDrumVol={setDrumVol}
+        isGM={drumsOk}
         pressMask={pressMask}
         onTogglePressBit={onTogglePressBit}
         modMask={modMask}
@@ -257,7 +255,7 @@ export default function App() {
   );
 }
 
-type SettingsPane = 'menu' | 'bluetooth' | 'midi' | 'tac5212';
+type SettingsPane = 'menu' | 'bluetooth' | 'midi' | 'drums' | 'tac5212';
 
 // TAC5212 DAC highpass cutoffs — dropdown index maps to filter mode (index + 1),
 // i.e. 0→1 Hz (mode 1), 1→12 Hz (mode 2), 2→96 Hz (mode 3). Mode 0 = off.
@@ -279,6 +277,21 @@ function SettingsModal({
   onStopSong,
   loop,
   onToggleLoop,
+  drums,
+  drumKits,
+  drumGroove,
+  onSelectDrum,
+  onPlayDrum,
+  onStopDrum,
+  drumKit,
+  onSelectDrumKit,
+  drumSpeed,
+  onPreviewDrumSpeed,
+  onCommitDrumSpeed,
+  drumVol,
+  onPreviewDrumVol,
+  onCommitDrumVol,
+  isGM,
   pressMask,
   onTogglePressBit,
   modMask,
@@ -316,6 +329,21 @@ function SettingsModal({
   onStopSong: () => void;
   loop: boolean;
   onToggleLoop: () => void;
+  drums: string[];
+  drumKits: string[];
+  drumGroove: number;
+  onSelectDrum: (index: number) => void;
+  onPlayDrum: (index: number) => void;
+  onStopDrum: () => void;
+  drumKit: number;
+  onSelectDrumKit: (index: number) => void;
+  drumSpeed: number;
+  onPreviewDrumSpeed: (pct: number) => void;
+  onCommitDrumSpeed: (pct: number) => void;
+  drumVol: number;
+  onPreviewDrumVol: (pct: number) => void;
+  onCommitDrumVol: (pct: number) => void;
+  isGM: boolean;
   pressMask: number;
   onTogglePressBit: (bit: number) => void;
   modMask: number;
@@ -346,7 +374,11 @@ function SettingsModal({
     onClose();
   };
   const title =
-    pane === 'bluetooth' ? 'Bluetooth' : pane === 'midi' ? 'MIDI' : pane === 'tac5212' ? 'TAC5212' : 'Settings';
+    pane === 'bluetooth' ? 'Bluetooth'
+      : pane === 'midi' ? 'MIDI'
+        : pane === 'drums' ? 'Drums'
+          : pane === 'tac5212' ? 'TAC5212'
+            : 'Settings';
 
   return (
     <Modal visible={visible} animationType="slide" onRequestClose={close}>
@@ -370,6 +402,11 @@ function SettingsModal({
             <>
               <MenuRow label="Bluetooth" detail="Pairing & paired sources" onPress={() => setPane('bluetooth')} />
               <MenuRow label="MIDI" detail={`${synth.name} synth`} onPress={() => setPane('midi')} />
+              <MenuRow
+                label="Drums"
+                detail={drums.length ? `${drums.length} grooves` : 'Add grooves via USB'}
+                onPress={() => setPane('drums')}
+              />
               <MenuRow label="TAC5212" detail="Codec highpass filter" onPress={() => setPane('tac5212')} />
             </>
           )}
@@ -487,6 +524,63 @@ function SettingsModal({
             </>
           )}
 
+          {pane === 'drums' && (
+            <>
+              <Text style={styles.dim}>
+                A looping drum groove plays under whatever you perform live on the keyboard, through the
+                current engine. OPLL renders 5 rhythm sounds; SF2/TSF/OPL3 play every drum.
+              </Text>
+              {!isGM && (
+                <Text style={styles.pairingHint}>
+                  ⚠ {synth.name} has no channel-10 drum map — grooves stay silent. Flash an OPLL / OPL3 / SF2 / TSF build.
+                </Text>
+              )}
+
+              <Text style={styles.sectionLabel}>Groove</Text>
+              {drums.length === 0 ? (
+                <Text style={styles.dim}>
+                  No grooves on the SD card yet. Add them with tools/fetch_drums.py (they land in /drums),
+                  then tap “Refresh” below.
+                </Text>
+              ) : (
+                <>
+                  <Dropdown label="Groove" options={drums} value={drumGroove} onSelect={onSelectDrum} />
+                  <Stepper count={drums.length} value={drumGroove} onStep={onSelectDrum} />
+                  <View style={{ height: 8 }} />
+                  <PrimaryButton
+                    label={`▶  Play ${drums[drumGroove] ?? 'Groove'}`}
+                    onPress={() => onPlayDrum(drumGroove)}
+                  />
+                  <SecondaryButton label="Stop" onPress={onStopDrum} />
+                </>
+              )}
+              <SecondaryButton label="↻  Refresh Grooves (after adding via USB)" onPress={onRefreshCatalog} />
+
+              <Text style={styles.sectionLabel}>Instrument (kit)</Text>
+              <Dropdown label="Kit" options={drumKits} value={drumKit} onSelect={onSelectDrumKit} />
+              <Stepper count={drumKits.length} value={drumKit} onStep={onSelectDrumKit} />
+
+              <StepSlider
+                label="Speed"
+                value={drumSpeed}
+                min={25}
+                max={200}
+                step={5}
+                onPreview={onPreviewDrumSpeed}
+                onCommit={onCommitDrumSpeed}
+              />
+              <StepSlider
+                label="Volume"
+                value={drumVol}
+                min={0}
+                max={150}
+                step={5}
+                onPreview={onPreviewDrumVol}
+                onCommit={onCommitDrumVol}
+              />
+            </>
+          )}
+
           {pane === 'tac5212' && (
             <>
               <Text style={styles.sectionLabel}>Highpass Filter</Text>
@@ -589,6 +683,72 @@ function Stepper({ count, value, onStep }: { count: number; value: number; onSte
         <Text style={styles.stepBtnText}>›</Text>
       </Pressable>
     </View>
+  );
+}
+
+// A slider with tap −/+ buttons on either side that nudge by `step` and commit
+// immediately. onPreview updates the on-screen value live (drag or tap); onCommit
+// sends to the device (slide-release or a tap). Used for drum speed / volume.
+function StepSlider({
+  label,
+  unit = '%',
+  value,
+  min,
+  max,
+  step,
+  onPreview,
+  onCommit,
+}: {
+  label: string;
+  unit?: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onPreview: (v: number) => void;
+  onCommit: (v: number) => void;
+}) {
+  const bump = (delta: number) => {
+    const v = Math.max(min, Math.min(max, value + delta));
+    if (v === value) return;
+    onPreview(v);
+    onCommit(v);
+  };
+  return (
+    <>
+      <Text style={styles.sectionLabel}>
+        {label} — {value}
+        {unit}
+      </Text>
+      <View style={styles.adjustRow}>
+        <Pressable
+          onPress={() => bump(-step)}
+          style={({ pressed }) => [styles.adjBtn, value <= min && styles.btnDisabled, pressed && styles.btnPressed]}
+          disabled={value <= min}
+        >
+          <Text style={styles.adjBtnText}>−</Text>
+        </Pressable>
+        <Slider
+          style={styles.adjSlider}
+          minimumValue={min}
+          maximumValue={max}
+          step={step}
+          value={value}
+          onValueChange={onPreview}
+          onSlidingComplete={onCommit}
+          minimumTrackTintColor="#238636"
+          maximumTrackTintColor="#30363d"
+          thumbTintColor="#3fb950"
+        />
+        <Pressable
+          onPress={() => bump(step)}
+          style={({ pressed }) => [styles.adjBtn, value >= max && styles.btnDisabled, pressed && styles.btnPressed]}
+          disabled={value >= max}
+        >
+          <Text style={styles.adjBtnText}>+</Text>
+        </Pressable>
+      </View>
+    </>
   );
 }
 
@@ -762,6 +922,10 @@ const styles = StyleSheet.create({
   stepperRow: { flexDirection: 'row', gap: 10, marginTop: 10 },
   stepBtn: { flex: 1, backgroundColor: '#21262d', borderRadius: 12, paddingVertical: 12, alignItems: 'center' },
   stepBtnText: { color: '#e6edf3', fontSize: 22, fontWeight: '700' },
+  adjustRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  adjSlider: { flex: 1, height: 40 },
+  adjBtn: { width: 48, backgroundColor: '#21262d', borderRadius: 12, paddingVertical: 10, alignItems: 'center' },
+  adjBtnText: { color: '#e6edf3', fontSize: 24, fontWeight: '700' },
   sectionLabel: { color: '#8b949e', fontSize: 13, fontWeight: '700', textTransform: 'uppercase', letterSpacing: 1, marginTop: 18, marginBottom: 10 },
   dim: { color: '#6e7681', fontSize: 14, lineHeight: 20 },
   pairingHint: { color: '#3fb950', fontSize: 13, fontWeight: '600', marginBottom: 10 },
