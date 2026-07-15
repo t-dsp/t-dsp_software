@@ -82,7 +82,18 @@ AudioConvert_I16toF32  btToF32L, btToF32R;
 // (B) S/PDIF: F32-native async resampler — no int16 anywhere on this path. The
 // optical-OUT self-test tone stays int16 (separate SPDIF TX peripheral; it does
 // not touch the F32 mix bus). filter[] fits DTCM via the MAX_FILTER_SAMPLES cap.
+//
+// The async resampler's filter[] lives in DTCM (RAM1) and costs ~87 KB. RAM-tight
+// builds (e.g. the 8-engine Dexed pool) drop optical IN with -D TDSP_NO_SPDIF_IN
+// to reclaim it; optical OUT self-test + Bluetooth IN are unaffected.
+#ifdef TDSP_NO_SPDIF_IN
+#define TDSP_SPDIF_IN 0
+#else
+#define TDSP_SPDIF_IN 1
+#endif
+#if TDSP_SPDIF_IN
 AsyncAudioInputSPDIF3_F32 spdifIn(g_audioSettings, 100, 20, 80);  // optical IN, pin 15
+#endif
 AudioOutputSPDIF3      spdifOut;                                  // optical OUT, pin 14
 AudioSynthWaveformSine spdifTone;                                // int16 tone -> optical
 
@@ -113,12 +124,16 @@ AudioConnection_F32 c_btL    (btToF32L,   0, outL, 0);
 AudioConnection_F32 c_btR    (btToF32R,   0, outR, 0);
 AudioConnection_F32 c_toneL  (testTone,   0, outL, 1);
 AudioConnection_F32 c_toneR  (testTone,   0, outR, 1);
+#if TDSP_SPDIF_IN
 AudioConnection_F32 c_spL    (spdifIn,    0, outL, 2);
 AudioConnection_F32 c_spR    (spdifIn,    1, outR, 2);
+#endif
 AudioConnection_F32 c_outL   (outL,       0, tdmOut, 0);
 AudioConnection_F32 c_outR   (outR,       0, tdmOut, 1);
 AudioConnection_F32 c_pkBt   (btToF32L,   0, peakBt,    0);
+#if TDSP_SPDIF_IN
 AudioConnection_F32 c_pkSp   (spdifIn,    0, peakSpdif, 0);
+#endif
 AudioConnection_F32 c_pkOut  (outL,       0, peakOut,   0);
 
 // --- Development output capture (build-agnostic) -----------------------------
@@ -1858,7 +1873,12 @@ void loop() {
                       (unsigned long)(millis() / 1000),
                       g_codecOk ? "OK" : "FAIL", g_codecMsg,
                       AsyncAudioInputSPDIF3::isLocked() ? "LOCKED" : "no-signal",
-                      spdifIn.getInputFrequency(), pbt, psp, po,
+#if TDSP_SPDIF_IN
+                      spdifIn.getInputFrequency(),
+#else
+                      0.0f,   // optical IN compiled out (TDSP_NO_SPDIF_IN)
+#endif
+                      pbt, psp, po,
                       AudioProcessorUsageMax(), AudioMemoryUsageMax());
         AudioProcessorUsageMaxReset();   // make cpuMax a per-second rolling peak
         AudioMemoryUsageMaxReset();
@@ -1877,3 +1897,4 @@ void loop() {
 #endif
     }
 }
+
