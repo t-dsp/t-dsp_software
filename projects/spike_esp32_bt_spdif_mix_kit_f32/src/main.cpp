@@ -82,7 +82,10 @@ AudioConvert_I16toF32  btToF32L, btToF32R;
 // (B) S/PDIF: F32-native async resampler — no int16 anywhere on this path. The
 // optical-OUT self-test tone stays int16 (separate SPDIF TX peripheral; it does
 // not touch the F32 mix bus). filter[] fits DTCM via the MAX_FILTER_SAMPLES cap.
+#ifndef TDSP_NO_SPDIF_IN
 AsyncAudioInputSPDIF3_F32 spdifIn(g_audioSettings, 100, 20, 80);  // optical IN, pin 15
+#endif  // TDSP_NO_SPDIF_IN drops the S/PDIF-in async resampler (~87 KB DTCM) — RAM headroom
+        // for heavy builds (the Dexed pool + drum voice). Optical OUT tone + BT IN unaffected.
 AudioOutputSPDIF3      spdifOut;                                  // optical OUT, pin 14
 AudioSynthWaveformSine spdifTone;                                // int16 tone -> optical
 
@@ -113,8 +116,10 @@ AudioConnection_F32 c_btL    (btToF32L,   0, outL, 0);
 AudioConnection_F32 c_btR    (btToF32R,   0, outR, 0);
 AudioConnection_F32 c_toneL  (testTone,   0, outL, 1);
 AudioConnection_F32 c_toneR  (testTone,   0, outR, 1);
+#ifndef TDSP_NO_SPDIF_IN
 AudioConnection_F32 c_spL    (spdifIn,    0, outL, 2);
 AudioConnection_F32 c_spR    (spdifIn,    1, outR, 2);
+#endif
 #ifndef TDSP_DRUM_VOICE
 AudioConnection_F32 c_outL   (outL,       0, tdmOut, 0);
 AudioConnection_F32 c_outR   (outR,       0, tdmOut, 1);
@@ -122,7 +127,9 @@ AudioConnection_F32 c_outR   (outR,       0, tdmOut, 1);
 // With TDSP_DRUM_VOICE, DrumVoice.h reroutes outL/outR through a final mixer that also
 // sums the parallel drum voice, then to tdmOut (see the include after the backend).
 AudioConnection_F32 c_pkBt   (btToF32L,   0, peakBt,    0);
+#ifndef TDSP_NO_SPDIF_IN
 AudioConnection_F32 c_pkSp   (spdifIn,    0, peakSpdif, 0);
+#endif
 #ifndef TDSP_DRUM_VOICE
 AudioConnection_F32 c_pkOut  (outL,       0, peakOut,   0);   // tap the final bus
 #endif  // (TDSP_DRUM_VOICE: DrumVoice.h taps g_finalL so peakOut/CAP include the drums)
@@ -1893,14 +1900,19 @@ void loop() {
     if (hb >= 1000) {
         hb = 0;
         float pbt = peakBt.available()    ? peakBt.read()    : 0.0f;
-        float psp = peakSpdif.available() ? peakSpdif.read() : 0.0f;
         float po  = peakOut.available()   ? peakOut.read()   : 0.0f;
+#ifndef TDSP_NO_SPDIF_IN
+        float psp = peakSpdif.available() ? peakSpdif.read() : 0.0f;
+        const char *spdifState = AsyncAudioInputSPDIF3::isLocked() ? "LOCKED" : "no-signal";
+        float spdifFreq = spdifIn.getInputFrequency();
+#else
+        float psp = 0.0f; const char *spdifState = "off"; float spdifFreq = 0.0f;
+#endif
         Serial.printf("alive up=%lus  codec=%s(%s)  spdif=%s inFreq=%.0f  "
                       "btPeak=%.3f spdifPeak=%.3f outPeak=%.3f  cpuMax=%.1f%% memMax=%u\n",
                       (unsigned long)(millis() / 1000),
                       g_codecOk ? "OK" : "FAIL", g_codecMsg,
-                      AsyncAudioInputSPDIF3::isLocked() ? "LOCKED" : "no-signal",
-                      spdifIn.getInputFrequency(), pbt, psp, po,
+                      spdifState, spdifFreq, pbt, psp, po,
                       AudioProcessorUsageMax(), AudioMemoryUsageMax());
         AudioProcessorUsageMaxReset();   // make cpuMax a per-second rolling peak
         AudioMemoryUsageMaxReset();
