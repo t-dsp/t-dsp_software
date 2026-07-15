@@ -81,6 +81,7 @@ export class WebSerialTransport implements Transport {
   }
 
   private onDeviceLine(line: string) {
+    if (line.indexOf('DXLS') >= 0 || line.indexOf('DXVL') >= 0) console.log('[tdsp] rx:', JSON.stringify(line.slice(0, 80)), 'dirPending=', JSON.stringify(this.dir?.path), 'voicesPending=', JSON.stringify(this.voices?.rel));
     // @READ frame transport
     if (line.startsWith('@FB=')) { if (this.file) { this.file.parts = {}; this.armFileTimer(this.file); } return; }
     if (line.startsWith('@FD=')) {
@@ -129,7 +130,9 @@ export class WebSerialTransport implements Transport {
       const d: DirPending = { path, resolve, reject, timer: null };
       this.dir = d;
       d.timer = setTimeout(() => { if (this.dir === d) { this.dir = null; reject('timeout'); } }, 8000);
-      this.send('@DXLS=' + path + (page ? '\t' + page : ''));
+      const cmd = '@DXLS=' + path + (page ? '\t' + page : '');
+      console.log('[tdsp] tx:', JSON.stringify(cmd), 'writer=', !!this.writer);
+      this.send(cmd);
     });
   }
 
