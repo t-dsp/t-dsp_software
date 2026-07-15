@@ -58,6 +58,11 @@ export const CMD = {
   SET_DRUM_VOL: 0x34, // + 1 byte: drum level 0..150 (%)
   SET_BPM: 0x35, // + 1 byte: master tempo 40..240 bpm (drives song + drum together)
   SET_DRUM_SYNCHRO: 0x36, // + 1 byte: 0/1 synchro start (groove begins on first note)
+  SET_ARP_ON: 0x37, // + 1 byte: 0/1 — arpeggiator enable (bypass when off)
+  SET_ARP_PATTERN: 0x38, // + 1 byte: pattern index 0..24 (see ARP_PATTERNS)
+  SET_ARP_RATE: 0x39, // + 1 byte: rate index 0..14 (see ARP_RATES)
+  SET_ARP_OCT: 0x3a, // + 1 byte: octave range 1..4
+  SET_ARP_LATCH: 0x3b, // + 1 byte: 0/1 — latch held notes
   READ_FILE: 0x40, // + N bytes: SD path string; firmware streams it back on the FILE char
   PLAY_DRUM_FILE: 0x41, // + N bytes: groove filename; plays /drums/<name> (@DRUMF=<filename>)
 } as const;
@@ -67,6 +72,19 @@ export const CMD = {
 // kDrumKits[] in the mix-kit firmware.
 export const DRUM_KITS = [
   'Standard', 'Room', 'Power', 'Electronic', 'TR-808', 'Jazz', 'Brush', 'Orchestra', 'SFX',
+] as const;
+
+// Arpeggiator pattern + rate labels — the index is what's sent via SET_ARP_PATTERN /
+// SET_ARP_RATE. MUST match the Pattern / Rate enums in lib/TDspArp/src/ArpFilter.h.
+export const ARP_PATTERNS = [
+  'Up', 'Down', 'Up/Down', 'Down/Up', 'Up/Down (incl. ends)', 'Down/Up (incl. ends)',
+  'As Played', 'As Played Rev', 'Random', 'Random Walk', 'Chord', 'Chord + Up', 'Chord Stab',
+  'Converge', 'Diverge', 'Thumb', 'Thumb Up/Down', 'Pinky', 'Pinky Up/Down',
+  'Ascend 3', 'Ascend 4', 'Crab Walk', 'Stair', 'Spiral', 'Euclidean',
+] as const;
+export const ARP_RATES = [
+  '1/1', '1/2.', '1/2', '1/2T', '1/4.', '1/4', '1/4T', '1/8.', '1/8', '1/8T',
+  '1/16.', '1/16', '1/16T', '1/32', '1/32T',
 ] as const;
 
 // One groove row from the device's /drums/catalog.tsv manifest (fetched via the
@@ -801,6 +819,21 @@ export function useTdsp() {
     (pct: number) => writeByteCmd(CMD.SET_DRUM_VOL, Math.max(0, Math.min(150, Math.round(pct)))),
     [writeByteCmd]
   );
+  // Arpeggiator — steps held live notes to the master BPM (see @ARP* in the firmware).
+  const setArpOn = useCallback((on: boolean) => writeByteCmd(CMD.SET_ARP_ON, on ? 1 : 0), [writeByteCmd]);
+  const setArpPattern = useCallback(
+    (idx: number) => writeByteCmd(CMD.SET_ARP_PATTERN, Math.max(0, Math.min(ARP_PATTERNS.length - 1, Math.round(idx)))),
+    [writeByteCmd]
+  );
+  const setArpRate = useCallback(
+    (idx: number) => writeByteCmd(CMD.SET_ARP_RATE, Math.max(0, Math.min(ARP_RATES.length - 1, Math.round(idx)))),
+    [writeByteCmd]
+  );
+  const setArpOct = useCallback(
+    (oct: number) => writeByteCmd(CMD.SET_ARP_OCT, Math.max(1, Math.min(4, Math.round(oct)))),
+    [writeByteCmd]
+  );
+  const setArpLatch = useCallback((on: boolean) => writeByteCmd(CMD.SET_ARP_LATCH, on ? 1 : 0), [writeByteCmd]);
   // Play a groove by filename (from the catalog.tsv manifest) — decoupled from the
   // firmware's SD-scan order, so the full library browses/plays without a 48-slot cap.
   const playDrumFile = useCallback((filename: string) => writeStrCmd(CMD.PLAY_DRUM_FILE, filename), [writeStrCmd]);
@@ -942,6 +975,11 @@ export function useTdsp() {
     stopDrum,
     setDrumKit,
     setDrumVol,
+    setArpOn,
+    setArpPattern,
+    setArpRate,
+    setArpOct,
+    setArpLatch,
     setBpm,
     setDrumSynchro,
     setPressure,

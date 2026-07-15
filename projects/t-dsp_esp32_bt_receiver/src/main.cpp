@@ -106,6 +106,11 @@ enum : uint8_t {
   CMD_SET_DRUM_VOL = 0x34,  // + 1 byte: drum level 0..150 (%) (@DRUMVOL=<pct>)
   CMD_SET_BPM      = 0x35,  // + 1 byte: master tempo 40..240 bpm — song+drum (@BPM=<n>)
   CMD_SET_DRUM_SYNCHRO=0x36,// + 1 byte: 0/1 synchro start (groove begins on first note) (@DRUMSYNCHRO=<0|1>)
+  CMD_SET_ARP_ON   = 0x37,  // + 1 byte: 0/1 arpeggiator enable (@ARPON=<0|1>)
+  CMD_SET_ARP_PATTERN=0x38, // + 1 byte: pattern index 0..24 (@ARPPAT=<n>)
+  CMD_SET_ARP_RATE = 0x39,  // + 1 byte: rate index 0..14 (@ARPRATE=<n>)
+  CMD_SET_ARP_OCT  = 0x3a,  // + 1 byte: octave range 1..4 (@ARPOCT=<n>)
+  CMD_SET_ARP_LATCH= 0x3b,  // + 1 byte: 0/1 latch held notes (@ARPLATCH=<0|1>)
   CMD_READ_FILE    = 0x40,  // + N bytes: SD path string; Teensy streams it back on the FILE char (@READ=<path>)
   CMD_PLAY_DRUM_FILE=0x41,  // + N bytes: groove filename; plays /drums/<name> (@DRUMF=<filename>)
 };
@@ -155,6 +160,11 @@ static void relayDrumKit(uint8_t idx) { Serial.printf("@DRUMKIT=%u\n", idx); }
 static void relayDrumVol(uint8_t p)   { Serial.printf("@DRUMVOL=%u\n", p); }
 static void relayBpm(uint8_t b)       { Serial.printf("@BPM=%u\n", b); }        // master tempo (song+drum)
 static void relayDrumSynchro(uint8_t s){ Serial.printf("@DRUMSYNCHRO=%u\n", s ? 1 : 0); }
+static void relayArpOn(uint8_t s)      { Serial.printf("@ARPON=%u\n", s ? 1 : 0); }
+static void relayArpPattern(uint8_t p) { Serial.printf("@ARPPAT=%u\n", p); }
+static void relayArpRate(uint8_t r)    { Serial.printf("@ARPRATE=%u\n", r); }
+static void relayArpOct(uint8_t o)     { Serial.printf("@ARPOCT=%u\n", o); }
+static void relayArpLatch(uint8_t s)   { Serial.printf("@ARPLATCH=%u\n", s ? 1 : 0); }
 
 // ---- Paired-source list (multi-device switch) -----------------------------
 static BLECharacteristic *g_srcChar = nullptr;
@@ -546,6 +556,21 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
           Serial.printf("[ble] cmd: SET DRUM SYNCHRO %u\n", (uint8_t)v[1]);
           relayDrumSynchro((uint8_t)v[1]); // -> Teensy: @DRUMSYNCHRO=<0|1>
         }
+        break;
+      case CMD_SET_ARP_ON:
+        if (v.size() >= 2) { Serial.printf("[ble] cmd: SET ARP ON %u\n", (uint8_t)v[1]); relayArpOn((uint8_t)v[1]); }
+        break;
+      case CMD_SET_ARP_PATTERN:
+        if (v.size() >= 2) { Serial.printf("[ble] cmd: SET ARP PATTERN %u\n", (uint8_t)v[1]); relayArpPattern((uint8_t)v[1]); }
+        break;
+      case CMD_SET_ARP_RATE:
+        if (v.size() >= 2) { Serial.printf("[ble] cmd: SET ARP RATE %u\n", (uint8_t)v[1]); relayArpRate((uint8_t)v[1]); }
+        break;
+      case CMD_SET_ARP_OCT:
+        if (v.size() >= 2) { Serial.printf("[ble] cmd: SET ARP OCT %u\n", (uint8_t)v[1]); relayArpOct((uint8_t)v[1]); }
+        break;
+      case CMD_SET_ARP_LATCH:
+        if (v.size() >= 2) { Serial.printf("[ble] cmd: SET ARP LATCH %u\n", (uint8_t)v[1]); relayArpLatch((uint8_t)v[1]); }
         break;
       default:
         Serial.printf("[ble] cmd: unknown opcode 0x%02X\n", op);

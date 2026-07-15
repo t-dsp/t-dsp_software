@@ -16,7 +16,7 @@ import {
   Text,
   View,
 } from 'react-native';
-import { CMD, ConnState, DrumGroove, SynthInfo, TdspSource, useTdsp } from './src/tdspBle';
+import { ARP_PATTERNS, ARP_RATES, CMD, ConnState, DrumGroove, SynthInfo, TdspSource, useTdsp } from './src/tdspBle';
 
 // Two-axis (Genre / Pack) groove browser over the device's /drums/catalog.tsv
 // manifest. All filtering/paging is client-side; playing sends the groove FILENAME
@@ -113,6 +113,11 @@ export default function App() {
     stopDrum,
     setDrumKit,
     setDrumVol,
+    setArpOn,
+    setArpPattern,
+    setArpRate,
+    setArpOct,
+    setArpLatch,
     setBpm,
     setDrumSynchro,
     setPressure,
@@ -139,6 +144,12 @@ export default function App() {
   const [drumGroove, setDrumGroove] = useState(0);
   const [drumKit, setDrumKitState] = useState(0);
   const [drumVol, setDrumVolState] = useState(100);
+  // Arpeggiator — local UI state (no firmware readback). Rate default 11 = 1/16 (firmware default).
+  const [arpOn, setArpOnState] = useState(false);
+  const [arpPattern, setArpPatternState] = useState(0);
+  const [arpRate, setArpRateState] = useState(11);
+  const [arpOct, setArpOctState] = useState(1);
+  const [arpLatch, setArpLatchState] = useState(false);
   const [bpm, setBpmState] = useState(120);          // master tempo (song + drum)
   const [drumSynchro, setDrumSynchroState] = useState(false);
   // Expression routing bitmasks (1=volume 2=brightness 4=vibrato 8=tremolo).
@@ -323,12 +334,39 @@ export default function App() {
         onToggleMpe={onToggleMpe}
         rg={rg}
         onToggleRg={onToggleRg}
+        arpOn={arpOn}
+        onToggleArp={() => {
+          const next = !arpOn;
+          setArpOnState(next);
+          setArpOn(next);
+        }}
+        arpPattern={arpPattern}
+        onSelectArpPattern={(i) => {
+          setArpPatternState(i);
+          setArpPattern(i);
+        }}
+        arpRate={arpRate}
+        onSelectArpRate={(i) => {
+          setArpRateState(i);
+          setArpRate(i);
+        }}
+        arpOct={arpOct}
+        onSelectArpOct={(oct) => {
+          setArpOctState(oct);
+          setArpOct(oct);
+        }}
+        arpLatch={arpLatch}
+        onToggleArpLatch={() => {
+          const next = !arpLatch;
+          setArpLatchState(next);
+          setArpLatch(next);
+        }}
       />
     </SafeAreaView>
   );
 }
 
-type SettingsPane = 'menu' | 'bluetooth' | 'midi' | 'drums' | 'tac5212';
+type SettingsPane = 'menu' | 'bluetooth' | 'midi' | 'drums' | 'arp' | 'tac5212';
 
 // TAC5212 DAC highpass cutoffs — dropdown index maps to filter mode (index + 1),
 // i.e. 0→1 Hz (mode 1), 1→12 Hz (mode 2), 2→96 Hz (mode 3). Mode 0 = off.
@@ -368,6 +406,16 @@ function SettingsModal({
   onCommitBpm,
   drumSynchro,
   onToggleSynchro,
+  arpOn,
+  onToggleArp,
+  arpPattern,
+  onSelectArpPattern,
+  arpRate,
+  onSelectArpRate,
+  arpOct,
+  onSelectArpOct,
+  arpLatch,
+  onToggleArpLatch,
   isGM,
   kitsOk,
   pressMask,
@@ -425,6 +473,16 @@ function SettingsModal({
   onCommitBpm: (bpm: number) => void;
   drumSynchro: boolean;
   onToggleSynchro: () => void;
+  arpOn: boolean;
+  onToggleArp: () => void;
+  arpPattern: number;
+  onSelectArpPattern: (idx: number) => void;
+  arpRate: number;
+  onSelectArpRate: (idx: number) => void;
+  arpOct: number;
+  onSelectArpOct: (oct: number) => void;
+  arpLatch: boolean;
+  onToggleArpLatch: () => void;
   isGM: boolean;
   kitsOk: boolean;
   pressMask: number;
@@ -460,7 +518,8 @@ function SettingsModal({
     pane === 'bluetooth' ? 'Bluetooth'
       : pane === 'midi' ? 'MIDI'
         : pane === 'drums' ? 'Drums'
-          : pane === 'tac5212' ? 'TAC5212'
+          : pane === 'arp' ? 'Arpeggiator'
+            : pane === 'tac5212' ? 'TAC5212'
             : 'Settings';
 
   return (
@@ -490,6 +549,7 @@ function SettingsModal({
                 detail={drums.length ? `${drums.length} grooves` : 'Add grooves via USB'}
                 onPress={() => setPane('drums')}
               />
+              <MenuRow label="Arpeggiator" detail="Step held notes to the BPM" onPress={() => setPane('arp')} />
               <MenuRow label="TAC5212" detail="Codec highpass filter" onPress={() => setPane('tac5212')} />
             </>
           )}
@@ -680,6 +740,35 @@ function SettingsModal({
                 step={5}
                 onPreview={onPreviewDrumVol}
                 onCommit={onCommitDrumVol}
+              />
+            </>
+          )}
+
+          {pane === 'arp' && (
+            <>
+              <SecondaryButton
+                label={arpOn ? '☑  Arpeggiator On' : '☐  Arpeggiator Off'}
+                onPress={onToggleArp}
+              />
+              <Text style={styles.dim}>
+                Hold a chord and it repeats in the chosen pattern, locked to the master BPM. Needs live MIDI
+                notes (a keyboard) — it does not arpeggiate the backing song or drum groove.
+              </Text>
+              <Text style={styles.sectionLabel}>Pattern</Text>
+              <Dropdown label="Pattern" options={[...ARP_PATTERNS]} value={arpPattern} onSelect={onSelectArpPattern} />
+              <Text style={styles.sectionLabel}>Rate</Text>
+              <Dropdown label="Rate" options={[...ARP_RATES]} value={arpRate} onSelect={onSelectArpRate} />
+              <Text style={styles.sectionLabel}>Octaves</Text>
+              <Dropdown
+                label="Octaves"
+                options={['1', '2', '3', '4']}
+                value={arpOct - 1}
+                onSelect={(i) => onSelectArpOct(i + 1)}
+              />
+              <View style={{ height: 8 }} />
+              <SecondaryButton
+                label={arpLatch ? '☑  Latch — keep arpeggiating after release' : '☐  Latch'}
+                onPress={onToggleArpLatch}
               />
             </>
           )}
