@@ -64,18 +64,11 @@ static int loadSmfFile(const char *path, MidiFileEvent *out, int maxOut, float *
 #if defined(__IMXRT1062__)
     if (external_psram_size > 0) { buf = (uint8_t *)extmem_malloc(len); ext = (buf != nullptr); }
 #endif
-    if (!buf) {
-        // OCRAM-heap fallback (no PSRAM, or PSRAM full). This heap is SHARED with the
-        // audio engine, and a large whole-file alloc here corrupts audio memory and
-        // hangs the main loop EVEN when "free" heap looks ample — observed on-device: a
-        // 31 KB song hung with 132 KB reportedly free, while 13 KB loaded fine. So a
-        // free-space margin is NOT a sufficient guard; we hard-cap the OCRAM path to a
-        // size proven safe (and still require headroom). Larger songs need PSRAM and
-        // fail here gracefully (-1) instead of hanging.
-        const size_t kOcramSongCap = 16u * 1024u;
-        if (len > kOcramSongCap || ocramHeapFree() < len + 32768u) { f.close(); return -1; }
-        buf = (uint8_t *)malloc(len);
-    }
+    // OCRAM-heap fallback (no PSRAM, or PSRAM full): plain malloc, as it always was.
+    // On no-PSRAM boards this loads full songs fine (malloc returns NULL on genuine OOM
+    // -> graceful -1, no hang). The whole-file-in-OCRAM hang was specific to a board
+    // WITH PSRAM present (the extmem path above avoids it there) — so no size cap here.
+    if (!buf) buf = (uint8_t *)malloc(len);
     if (!buf) { f.close(); return -1; }
     size_t got = f.read(buf, len);
     f.close();
