@@ -382,7 +382,7 @@ static void i2cBusRecover(uint8_t sdaPin = 18, uint8_t sclPin = 19) {
 static bool g_codecOk = false;
 static const char *g_codecMsg = "not run";
 
-static float g_dvol = -20.0f;
+static float g_dvol = TDSP_DEFAULT_MASTER_DB;   // power-on master (board-configurable, default -20 dB)
 static void applyVol() {
     g_codec.out(1).setDvol(g_dvol);
     g_codec.out(2).setDvol(g_dvol);
@@ -600,7 +600,7 @@ static bool g_engineHasDrums = false;// engine renders ch10 (captured once at se
 // (both bars are 4/4 = 4*60000/masterBpm long once retimed, so they line up).
 // NOTE accurate lock needs the song's REAL tempo -> use an SD .mid; the baked
 // built-ins only carry an estimate.
-static float         g_masterBpm     = 120.0f;  // the one tempo knob (40..240)
+static float         g_masterBpm     = TDSP_DEFAULT_BPM;  // the one tempo knob (40..240), board-configurable
 static float         g_songBpm       = 120.0f;  // playing/last song NATIVE tempo
 static float         g_drumFileBpm   = 120.0f;  // selected groove's NATIVE tempo
 static elapsedMillis g_songBarClock;            // ms since the playing song's beat 1
@@ -1319,7 +1319,7 @@ void setup() {
     AudioMemory(80);   // headroom for up to 4 OPM banks (ymfm multitimbral); Dexed uses far less
     AudioMemory_F32(60);
     setMix(1.0f, 0.0f, 1.0f);
-    outL.gain(3, 0.62f);  outR.gain(3, 0.62f);  // synth (slot 3) mix make-up in the
+    outL.gain(3, TDSP_DEFAULT_SYNTH_MAKEUP);  outR.gain(3, TDSP_DEFAULT_SYNTH_MAKEUP);  // synth (slot 3) mix make-up in the
                                                  // F32 domain, where there's real headroom.
     testTone.frequency(440.0f);  testTone.amplitude(0.0f);
     spdifTone.frequency(1000.0f); spdifTone.amplitude(0.25f);
@@ -1400,7 +1400,7 @@ void setup() {
         g_engineHasDrums = true;
     }
 #endif
-    applyMidiMode(false);   // start in normal MIDI (after synthBegin, so the engine exists)
+    applyMidiMode(TDSP_DEFAULT_MPE != 0);   // start mode (board-configurable; default normal MIDI, after synthBegin)
 
     Serial.println("running -- cmds: t=DACtone a=BT+SPDIF mix  s=SPDIF-only  m=BT-only");
     Serial.println("                 x=toggle SPDIF tone  +/-=vol  d=dump  i=re-init codec");

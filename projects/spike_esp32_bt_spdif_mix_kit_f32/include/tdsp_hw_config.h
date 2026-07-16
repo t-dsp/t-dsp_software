@@ -18,6 +18,16 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+// --- Board profile header (optional) ----------------------------------------
+// A build may select a physical-board profile with
+//   -D TDSP_BOARD_HEADER="boards/<name>.h"
+// The header sets only the TDSP_HAS_* / TDSP_ROLE_* / TDSP_DEFAULT_* macros that
+// differ for that board; everything it leaves unset falls through to the #ifndef
+// defaults below. Included FIRST so a board's values win over the defaults.
+#ifdef TDSP_BOARD_HEADER
+  #include TDSP_BOARD_HEADER
+#endif
+
 // --- Board ------------------------------------------------------------------
 // An env may set TDSP_BOARD_TEENSY40 / _TEENSY41 explicitly. If it doesn't,
 // fall back to the Teensy core's own ARDUINO_TEENSY4x macro so the firmware
@@ -133,3 +143,78 @@ static inline int tdspMuxAutoSelectCodec(uint8_t codecAddr) {
   return -1;
 #endif
 }
+
+// ===========================================================================
+// Capability / role / default macro families (board-configurable)
+// ===========================================================================
+// A board profile header (TDSP_BOARD_HEADER, included at the top of this file)
+// may set any of these; whatever it leaves unset falls through to the defaults
+// here. Every default reproduces the CURRENT firmware behaviour, so a build that
+// selects no board header is byte-for-byte unchanged.
+//
+// (TDSP_HAS_SDCARD / _SPDIF / _SPDIF_IN / _I2C_MUX and the mux address/channel
+// are defined above — the original hardware axis. The families below extend that
+// same #ifndef pattern to the rest of the board's identity.)
+
+// --- Hardware capabilities (what the board HAS) -----------------------------
+#ifndef TDSP_HAS_ESP32_BT
+#define TDSP_HAS_ESP32_BT 1          // ESP32 A2DP Bluetooth receiver (Serial7 ctrl + SAI2 audio)
+#endif
+#ifndef TDSP_HAS_DIN_MIDI
+#define TDSP_HAS_DIN_MIDI 1          // 5-pin DIN MIDI IN on Serial1 (pin 0) via the H11L1 opto
+#endif
+#ifndef TDSP_HAS_USB_MIDI_HOST
+#define TDSP_HAS_USB_MIDI_HOST 1     // USB host port: controller (e.g. LinnStrument) MIDI in
+#endif
+#ifndef TDSP_HAS_MIC_PREAMP
+#define TDSP_HAS_MIC_PREAMP 0        // TAC5212 mic preamp path (0 = line-level input)
+#endif
+
+// Physical input / output type (informational now; routing hook later). Enumerated.
+#define TDSP_IN_LINE       0
+#define TDSP_IN_BALANCED   1
+#define TDSP_IN_MIC        2
+#ifndef TDSP_IN_TYPE
+#define TDSP_IN_TYPE TDSP_IN_LINE
+#endif
+#define TDSP_OUT_HEADPHONE 0
+#define TDSP_OUT_LINE      1
+#ifndef TDSP_OUT_TYPE
+#define TDSP_OUT_TYPE TDSP_OUT_HEADPHONE   // firmware drives OUT1/OUT2 as HpDriver today
+#endif
+
+// --- Roles (which SUBSYSTEMS are active; composable / additive) --------------
+// Defaults defined now; main.cpp graph-gating on these is an incremental step
+// (kept off tonight so the working audio graph is untouched).
+#ifndef TDSP_ROLE_SYNTH
+#define TDSP_ROLE_SYNTH 1            // synth engine + live MIDI + arp
+#endif
+#ifndef TDSP_ROLE_SONG_PLAYER
+#define TDSP_ROLE_SONG_PLAYER 1      // baked/SD song player + drum-groove player
+#endif
+#ifndef TDSP_ROLE_BT_RECEIVER
+#define TDSP_ROLE_BT_RECEIVER TDSP_HAS_ESP32_BT   // mix the A2DP stream in
+#endif
+#ifndef TDSP_ROLE_MIXER
+#define TDSP_ROLE_MIXER 1            // F32 mix bus + master vol/HPF (always present today)
+#endif
+
+// --- Power-on defaults (baked; a board header overrides) ---------------------
+#ifndef TDSP_DEFAULT_MASTER_DB
+#define TDSP_DEFAULT_MASTER_DB (-20.0f)   // g_dvol start (TAC5212 OUT1/OUT2 dB)
+#endif
+#ifndef TDSP_DEFAULT_BPM
+#define TDSP_DEFAULT_BPM 120.0f           // master clock start tempo (40..240)
+#endif
+#ifndef TDSP_DEFAULT_HPF_MODE
+#define TDSP_DEFAULT_HPF_MODE 0           // 0=off,1=1Hz,2=12Hz,3=96Hz DAC highpass (not yet applied at boot)
+#endif
+#ifndef TDSP_DEFAULT_MPE
+#define TDSP_DEFAULT_MPE 0                // 0 = start in normal MIDI, 1 = start in MPE
+#endif
+#ifndef TDSP_DEFAULT_ARP
+#define TDSP_DEFAULT_ARP 0               // arp bypassed at boot (not yet applied)
+#endif
+#ifndef TDSP_DEFAULT_SYNTH_MAKEUP
+#define TDSP_DEFAULT_SYNTH_MAKEUP 0.62f  // mix slot-3 synth make-up gain (F32 domain)
+#endif
