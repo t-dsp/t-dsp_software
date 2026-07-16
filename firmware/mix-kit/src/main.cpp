@@ -842,9 +842,13 @@ static void songStop() {
 // stops clear g_songWasPlaying above, so they don't re-trigger.
 static void songLoopTick() {
     bool now = g_player.isPlaying();
-    if (g_songWasPlaying && !now && g_loop) {
-        songStartArg(g_curSongArg); // re-arm the same song (also re-applies its MIDI/MPE mode)
-        now = g_player.isPlaying();
+    if (g_songWasPlaying && !now) {
+        if (g_loop) {
+            songStartArg(g_curSongArg); // re-arm the same song (also re-applies its MIDI/MPE mode)
+            now = g_player.isPlaying();
+        } else {
+            applyMeter();               // natural end (not looping): song gives up the meter -> groove's, else 4/4
+        }
     }
     g_songWasPlaying = now;
 }
