@@ -547,6 +547,54 @@ static void setMix(float bt, float tone, float spdif) {
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// Metronome (opt-in: -D TDSP_METRONOME) — an on-beat click locked to the master
+// clock. It is a pure Clock consumer (reads consumeBeatEdge()/beatInBar()), so it
+// follows @BPM and the playing content's meter automatically and can never drift
+// from the synced players — it IS the audible lock probe for the tick-sync work
+// (planning/tick-sync-playback/PLAN.md §13). Slot-free: it reuses the existing
+// local test-tone oscillator (testTone, mix slot 1), so it costs no extra audio
+// object or mixer slot on any build. v1 clicks the Clock quarter-note beat with a
+// downbeat accent (idiomatic for x/4); compound "in-2" pulses are a phase-2 item.
+#ifdef TDSP_METRONOME
+static bool          g_metroOn   = false;
+static float         g_metroPeak = 0.0f;   // current click's peak amplitude (0 = idle)
+static elapsedMillis g_metroAge;           // ms since the current click fired
+static constexpr float    kMetroGain      = 0.8f;    // mix-slot-1 gain while enabled
+static constexpr float    kMetroAccentAmp = 0.60f;   // beat 1 (downbeat) click level
+static constexpr float    kMetroBeatAmp   = 0.38f;   // other beats
+static constexpr float    kMetroAccentHz  = 1568.0f; // G6 — accent pitch
+static constexpr float    kMetroBeatHz    = 1046.0f; // C6 — normal pitch
+static constexpr float    kMetroDecayMs   = 45.0f;   // percussive click decay
+
+static void metroSetEnabled(bool on) {
+    g_metroOn = on;
+    if (on) {
+        outL.gain(1, kMetroGain); outR.gain(1, kMetroGain);   // open slot 1 for the click
+    } else {
+        g_metroPeak = 0.0f;
+        testTone.amplitude(0.0f);
+        outL.gain(1, 0.0f); outR.gain(1, 0.0f);               // silence slot 1 again
+    }
+}
+
+// Call once per loop() AFTER g_conductor.update() (which fires the beat latch).
+static void metroPoll() {
+    tdsp::Clock &clk = g_conductor.clock();
+    if (clk.consumeBeatEdge() && g_metroOn) {                 // new beat -> strike a click
+        const bool accent = (clk.beatInBar() == 0);           // beat 1 = the downbeat
+        testTone.frequency(accent ? kMetroAccentHz : kMetroBeatHz);
+        g_metroPeak = accent ? kMetroAccentAmp : kMetroBeatAmp;
+        g_metroAge  = 0;
+    }
+    if (g_metroPeak > 0.0f) {                                 // percussive linear decay
+        float a = g_metroPeak * (1.0f - (float)g_metroAge / kMetroDecayMs);
+        if (a <= 0.001f) { a = 0.0f; g_metroPeak = 0.0f; }
+        testTone.amplitude(a);
+    }
+}
+#endif  // TDSP_METRONOME
+
 // --- Non-blocking song sequencer --------------------------------------------
 // Song registry: index (sent by the app as @SONG=<i>) -> a transcoded MIDI
 // stream. Keep in sync with DX_SONGS[] in the app (tdspBle.ts). The player is
@@ -663,6 +711,8 @@ static char g_curSongArg[100] = "";
 static int  g_songBrowse = 0;       // dev-key ('S') browse cursor into songs.ndjson
 static bool g_loop = false;         // when set, a song restarts itself when it ends
 static bool g_songWasPlaying = false;  // edge-detect natural song end (for loop) in loop()
+static bool          g_syncProbe = false;   // @SYNCPROBE: 1 Hz drift probe (PLAN §9)
+static elapsedMillis g_syncProbeClock;      // throttle for the probe print
 
 // Generic app-owned state blob. The app has settings the firmware never interprets or acts
 // on (e.g. the MIDI player's end-of-song mode: shuffle/continue/stop) but which must survive
@@ -683,6 +733,7 @@ static void applyMidiMode(bool mpe);   // defined below; test songs flip mode on
 static int  g_drumSel      = 0;     // selected / currently-playing groove index
 static int  g_drumKit      = 0;     // index into kDrumKits ("instrument")
 static int  g_drumVolPct   = 100;   // drum level 0..150 (% of file velocity)
+static int  g_songVolPct   = 100;   // MIDI-player level 0..150 (% of file velocity), independent of @VOL master
 static bool g_drumSynchro  = false; // SYNCHRO START (PSS-140 style): groove starts on your first note
 static bool g_engineHasDrums = false;// engine renders ch10 (captured once at setup; not the live mask)
 
@@ -715,6 +766,8 @@ static float         g_songBpm       = 120.0f;  // playing/last song NATIVE temp
 static float         g_drumFileBpm   = 120.0f;  // selected groove's NATIVE tempo
 static uint8_t       g_songBpb       = 4;       // playing/last song's beats-per-bar (quarter beats)
 static uint8_t       g_drumBpb       = 4;       // selected groove's beats-per-bar
+static double        g_songLoopBeats = 0.0;     // playing/last song's exact loop length (quarter beats); 0 = unknown
+static double        g_drumLoopBeats = 0.0;     // selected groove's exact loop length (quarter beats); 0 = unknown
 static elapsedMillis g_songBarClock;            // ms since the playing song's beat 1
 static bool          g_drumArmed     = false;   // SYNCHRO: groove loaded, waiting for the first live note
 static uint32_t      g_drumArmedN    = 0;
@@ -741,6 +794,38 @@ static void applyMeter() {
                 : g_drumPlayer.isPlaying() ? g_drumBpb
                                            : 4;
     g_conductor.setBeatsPerBar(bpb);
+}
+
+// Zero the master transport (downbeat = now) ONLY when nothing is already
+// playing — the FIRST player to start defines the grid's zero point; every
+// later player JOINS the running grid in phase (a synced player anchors itself
+// via fmod(now, loopBeats) in setSyncedMode). Never yank the grid out from under
+// an already-locked song/groove/arp. PLAN §5. Call this BEFORE the new player's
+// play()/setSyncedMode(), so the anchor reads the (possibly re-zeroed) clock.
+static void ensureTransportStarted() {
+    if (!g_player.isPlaying() && !g_drumPlayer.isPlaying()) {
+        g_conductor.start();
+        g_arpFilter.resyncToGrid();   // a chord held on the arp re-locks to the new downbeat
+    }
+}
+
+// Lock a LOOPING song to the master beat grid (like the drums + arp) so it wraps
+// drift-free and stays in phase with everything else. Call right AFTER
+// g_player.play(). Only looping songs sync — full / tempo-map songs keep the ms
+// engine (their tempo map needs it; PLAN §7). loopBeats: exact from the SD parse
+// (`parsedLoopBeats`), else derived from the baked stream's total ms at its native
+// tempo and snapped to the eighth-note grid. Leaves the player in ms mode if there
+// is no usable loop length.
+static void songApplySync(double parsedLoopBeats) {
+    g_songLoopBeats = 0.0;
+    if (!g_loop) return;                         // one-shot / full song -> ms engine
+    double lb = parsedLoopBeats;
+    if (lb <= 0.0)                               // baked stream (no PPQN meta): derive from ms
+        lb = tdsp::smf::snapLoopBeatsHalf((double)g_player.totalMs() * (double)g_songBpm / 60000.0);
+    if (lb <= 0.0) return;
+    g_songLoopBeats = lb;
+    g_player.setSyncedMode(&g_conductor.clock(), lb, g_songBpm);
+    Serial.printf("[song] tick-synced: loop=%.2f beats @ %.1f bpm\n", lb, (double)g_songBpm);
 }
 
 // Clean slate before starting ANY song: silence sounding notes + clear latched
@@ -779,7 +864,9 @@ FLASHMEM static bool songStartBuiltin(const char *name) {
                       testsong::kTestSongs[i].mpe ? "MPE" : "MIDI", (unsigned long)testsong::kTestSongs[i].count,
                       (double)g_songBpm);
         g_songBpb = 4;   // baked test sequence: no time-sig meta -> common time
+        if (g_loop) ensureTransportStarted();   // first player zeroes the grid; a song joining a groove locks in phase
         g_player.play(testsong::kTestSongs[i].ev, testsong::kTestSongs[i].count);
+        songApplySync(0.0);   // baked: loopBeats derived from the stream's total ms
         applyMeter();
         g_songBarClock = 0;
         return true;
@@ -796,7 +883,13 @@ FLASHMEM static bool songStartBuiltin(const char *name) {
         snprintf(g_curSongArg,  sizeof g_curSongArg,  "%s", kBuiltinSongs[i].name);
         Serial.printf("[song] %s (%.1f bpm est) -> %s (start)\n", g_curSongName, (double)g_songBpm, synthName());
         g_songBpb = 4;   // baked legacy demo: no time-sig meta -> common time
-        if (n) { applyTempos(); g_player.play(g_buf, n); applyMeter(); g_songBarClock = 0; }
+        if (n) {
+            applyTempos();
+            if (g_loop) ensureTransportStarted();
+            g_player.play(g_buf, n);
+            songApplySync(0.0);   // baked: loopBeats derived from the stream's total ms
+            applyMeter(); g_songBarClock = 0;
+        }
         return true;
     }
     return false;
@@ -806,8 +899,8 @@ FLASHMEM static bool songStartBuiltin(const char *name) {
 FLASHMEM static bool songStartSd(const char *path, const char *disp, const char *arg) {
     songPrep();
     if (g_mpeMode) applyMidiMode(false);
-    g_songBpm = 120.0f; g_songBpb = 4;
-    int got = tdsp::smf::loadSmfFile(path, g_buf, MAX_EVENTS, &g_songBpm, &g_songBpb);   // parse + tempo + time-sig
+    g_songBpm = 120.0f; g_songBpb = 4; double parsedLoopBeats = 0.0;
+    int got = tdsp::smf::loadSmfFile(path, g_buf, MAX_EVENTS, &g_songBpm, &g_songBpb, &parsedLoopBeats);   // + exact loop length
     if (got <= 0) { Serial.printf("[song] SD load FAILED: %s\n", path); return false; }
     snprintf(g_curSongName, sizeof g_curSongName, "%s", disp);
     snprintf(g_curSongArg,  sizeof g_curSongArg,  "%s", arg);
@@ -815,7 +908,9 @@ FLASHMEM static bool songStartSd(const char *path, const char *disp, const char 
                   disp, (unsigned long)got, (double)g_songBpm, (unsigned)g_songBpb,
                   (unsigned)external_psram_size, (unsigned long)(tdsp::smf::ocramHeapFree() / 1024), synthName());
     applyTempos();   // retime the song (and groove) to the master BPM
+    if (g_loop) ensureTransportStarted();       // first player zeroes the grid; else join in phase
     g_player.play(g_buf, (uint32_t)got);
+    songApplySync(parsedLoopBeats);             // lock a looping song to the grid (exact length from the parse)
     applyMeter();    // bar length from the song's time signature (song = meter master)
     g_songBarClock = 0;
     return true;
@@ -1007,8 +1102,8 @@ FLASHMEM // Load + start a groove by its full SD path. Shared by the legacy nume
 // client resolves from catalog.tsv — so playback is decoupled from firmware scan order.
 static void drumStartPath(const char* path, const char* disp, bool rezero = true) {
     if (!drumEngineOk()) { Serial.printf("[drum] %s has no channel-10 drum map — use TSF/SF2/OPL3/OPLL\n", synthName()); return; }
-    g_drumFileBpm = 120.0f; g_drumBpb = 4;
-    int got = tdsp::smf::loadSmfFile(path, g_drumBuf, MAX_DRUM_EVENTS, &g_drumFileBpm, &g_drumBpb);
+    g_drumFileBpm = 120.0f; g_drumBpb = 4; g_drumLoopBeats = 0.0;
+    int got = tdsp::smf::loadSmfFile(path, g_drumBuf, MAX_DRUM_EVENTS, &g_drumFileBpm, &g_drumBpb, &g_drumLoopBeats);
     if (got <= 0) { Serial.printf("[drum] load FAILED: %s\n", path); return; }
     drumApplyKit();
     g_drumPlayer.setVelocityScale(g_drumVolPct / 100.0f);
@@ -1029,14 +1124,22 @@ static void drumStartPath(const char* path, const char* disp, bool rezero = true
     }
     g_drumArmed = false;
     muteSongDrums(true);                                        // groove is the drums now
+    // Zero the master clock to THIS downbeat only if the transport is idle (first
+    // player wins the grid); a groove joining a playing song/groove locks in phase
+    // instead. Under launch-quantize (rezero=false) we're already firing on a bar
+    // edge of the free grid, so never re-zero. Zero BEFORE play()/setSyncedMode so
+    // the synced anchor reads the fresh clock. PLAN §5.
+    if (rezero) ensureTransportStarted();
     g_drumPlayer.play(g_drumBuf, (uint32_t)got);               // immediate: beat 1 = now
-    // Normally the groove downbeat re-zeros the master clock. Under launch-quantize we're
-    // ALREADY firing on a bar edge of the free-running grid, so don't re-zero (that would
-    // shove the grid out from under an already-locked song/arp).
-    if (rezero) g_conductor.start();                            // zero the master clock to this downbeat
+    // Tick-sync the groove to the master clock: drift-free wrap on its EXACT loop
+    // length (fractional beats OK). If the parser couldn't derive a length, fall
+    // back to the free-running ms engine (play() left it in ms mode). PLAN §4.5.
+    if (g_drumLoopBeats > 0.0)
+        g_drumPlayer.setSyncedMode(&g_conductor.clock(), g_drumLoopBeats, g_drumFileBpm);
     applyMeter();                                              // bar length from the groove's time-sig (unless a song owns the meter)
-    Serial.printf("[drum] %s (%d ev, %.1f bpm, %u beats/bar) kit=%s @ master %.0f bpm vol=%d%%\n",
-                  disp, got, (double)g_drumFileBpm, (unsigned)g_drumBpb, kDrumKits[g_drumKit].name, (double)g_masterBpm, g_drumVolPct);
+    Serial.printf("[drum] %s (%d ev, %.1f bpm, %u beats/bar, loop=%.2f beats %s) kit=%s @ master %.0f bpm vol=%d%%\n",
+                  disp, got, (double)g_drumFileBpm, (unsigned)g_drumBpb, g_drumLoopBeats,
+                  g_drumPlayer.isSynced() ? "SYNCED" : "ms", kDrumKits[g_drumKit].name, (double)g_masterBpm, g_drumVolPct);
 }
 static void drumStart(int idx) {   // legacy numeric index (flat menu / serial C/D keys)
     if (g_numDrums == 0) { Serial.println("[drum] no grooves on SD (/drums) — run tools/fetch_drums.py"); return; }
@@ -1103,6 +1206,15 @@ static void setDrumVol(int pct) {
     g_drumVolPct = pct;
     g_drumPlayer.setVelocityScale(pct / 100.0f);
     Serial.printf("[drum] vol -> %d%%\n", pct);
+}
+// MIDI-player level trim, independent of the @VOL master. Scales the song's note-on
+// velocities (0..150 %), mirroring setDrumVol for the dedicated drum player.
+static void setSongVol(int pct) {
+    if (pct < 0) pct = 0;
+    if (pct > 150) pct = 150;
+    g_songVolPct = pct;
+    g_player.setVelocityScale(pct / 100.0f);
+    Serial.printf("[song] vol -> %d%%\n", pct);
 }
 
 // Stream the device catalog (song + instrument names, '|'-delimited) to the ESP32
@@ -1252,8 +1364,11 @@ static void midiNoteOn  (byte ch, byte note, byte vel) {
     // beat 1 — you pick the downbeat by when you play. (vel 0 = note-off, ignore.)
     if (g_drumArmed && vel > 0) {
         muteSongDrums(true);
+        g_conductor.start();                        // this note IS the intentional downbeat: zero here
+        g_arpFilter.resyncToGrid();                 // re-lock a held arp chord to the new downbeat
         g_drumPlayer.play(g_drumBuf, g_drumArmedN);
-        g_conductor.start();                        // downbeat is this note
+        if (g_drumLoopBeats > 0.0)                  // lock the groove to the just-zeroed grid
+            g_drumPlayer.setSyncedMode(&g_conductor.clock(), g_drumLoopBeats, g_drumFileBpm);
         applyMeter();                               // bar length from the groove's time-sig
         g_drumArmed = false;
         Serial.println("[drum] SYNCHRO start (first note)");
@@ -1364,6 +1479,7 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     else if (strncmp(line, "@DRUMF=", 7) == 0)    drumLaunchFile(line + 7); // @DRUMF=<filename> (browser, via catalog.tsv; bar-quantized if @QUANTIZE=1)
     else if (strncmp(line, "@DRUMKIT=", 9) == 0)   setDrumKit(atoi(line + 9));    // GM kit ("instrument")
     else if (strncmp(line, "@DRUMVOL=", 9) == 0)    setDrumVol(atoi(line + 9));    // 0..150 %
+    else if (strncmp(line, "@SONGVOL=", 9) == 0)    setSongVol(atoi(line + 9));    // 0..150 %, MIDI player level (independent of @VOL master)
     else if (strncmp(line, "@BPM=", 5) == 0)        setMasterBpm(atoi(line + 5));  // master tempo (song+drum)
     else if (strncmp(line, "@DRUMSYNCHRO=", 13) == 0) { g_drumSynchro = (atoi(line + 13) != 0);   // start-on-first-note
                                  Serial.printf("[drum] synchro start %s\n", g_drumSynchro ? "ON (play a note to start)" : "off (start on Play)"); }
@@ -1376,6 +1492,18 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     else if (strncmp(line, "@HPF=", 5) == 0)      setDacHpfMode(atoi(line + 5));
     else if (strncmp(line, "@LOOP=", 6) == 0)   { g_loop = (atoi(line + 6) != 0);
                                  Serial.printf("[song] loop %s\n", g_loop ? "ON" : "off"); }
+    else if (strncmp(line, "@SYNCPROBE=", 11) == 0) {   // 1 Hz drift probe: master beat vs each synced player's cursor
+        g_syncProbe = (atoi(line + 11) != 0); g_syncProbeClock = 0;
+        reply.printf("@SYNCPROBE=%d\n", g_syncProbe ? 1 : 0);
+        Serial.printf("[sync] probe %s\n", g_syncProbe ? "ON (1 Hz)" : "off");
+    }
+#ifdef TDSP_METRONOME
+    else if (strncmp(line, "@METRO=", 7) == 0) {   // click on/off; follows master BPM + meter automatically
+        metroSetEnabled(atoi(line + 7) != 0);
+        reply.printf("@METRO=%d\n", g_metroOn ? 1 : 0);
+        Serial.printf("[metro] %s\n", g_metroOn ? "ON" : "off");
+    }
+#endif
     else if (strncmp(line, "@APP=", 5) == 0) {   // store the opaque app-owned state blob (see g_appState)
         strncpy(g_appState, line + 5, sizeof(g_appState) - 1);
         g_appState[sizeof(g_appState) - 1] = 0;
@@ -1553,9 +1681,12 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         reply.printf("\"arp\":{\"on\":%d,\"pat\":%d,\"rate\":%d,\"oct\":%d,\"latch\":%d},",
                      g_arpFilter.enabled() ? 1 : 0, (int)g_arpFilter.pattern(), (int)g_arpFilter.rate(),
                      g_arpFilter.octaveRange(), g_arpFilter.latch() ? 1 : 0);
-        reply.printf("\"song\":{\"playing\":%d,\"p\":%d,\"name\":", g_player.isPlaying() ? 1 : 0, g_player.positionPermille());
+        reply.printf("\"song\":{\"playing\":%d,\"p\":%d,\"sync\":%d,\"name\":", g_player.isPlaying() ? 1 : 0, g_player.positionPermille(), g_player.isSynced() ? 1 : 0);
         tdsp::catdb::jsonStr(reply, g_curSongName); reply.print("},");
-        reply.printf("\"drums\":{\"kit\":%d,\"playing\":%d},", g_drumKit, g_drumPlayer.isPlaying() ? 1 : 0);
+        reply.printf("\"drums\":{\"kit\":%d,\"playing\":%d,\"sync\":%d},", g_drumKit, g_drumPlayer.isPlaying() ? 1 : 0, g_drumPlayer.isSynced() ? 1 : 0);
+#ifdef TDSP_METRONOME
+        reply.printf("\"metro\":%d,", g_metroOn ? 1 : 0);   // metronome on/off (feature build only)
+#endif
         // Master-clock beat/bar so the app can show a downbeat indicator: beat is
         // 1-based (1 == the downbeat), bpb = beats per bar (from the content's time
         // signature), barp = 0..1000 permille through the bar, run = clock running.
@@ -1794,6 +1925,10 @@ void loop() {
     // stall watchdog. Cheap when nothing's due.
     g_conductor.update(micros());
 
+#ifdef TDSP_METRONOME
+    metroPoll();   // strike/decay the on-beat click (consumes the clock's beat latch)
+#endif
+
     // Launch quantize: fire any armed song/groove exactly on a bar edge (flagged by
     // g_launchSched during the update() above), so they land on the shared downbeat. The
     // groove fires with rezero=false so it aligns to the free grid instead of resetting it.
@@ -1815,6 +1950,17 @@ void loop() {
     g_drumPlayer.tick();   // loops internally (setLooping), so no external re-arm needed
     g_arpFilter.tick(micros());   // drain the arp's gate-off queue (note steps fire on onClock)
     songLoopTick();   // auto-restart the song if loop mode is on and it just ended
+
+    // @SYNCPROBE: once/second, print the master beat next to each synced player's
+    // loop-relative cursor. Relative phase must stay CONSTANT for a drift-free lock
+    // (PLAN §9) — watch drum-vs-song over a long run to confirm ~0 drift.
+    if (g_syncProbe && g_syncProbeClock >= 1000) {
+        g_syncProbeClock = 0;
+        Serial.printf("[sync] master=%.4f  drum{sync=%d cur=%.4f loop=%.2f}  song{sync=%d cur=%.4f loop=%.2f}\n",
+                      g_conductor.clock().positionBeats(),
+                      g_drumPlayer.isSynced() ? 1 : 0, g_drumPlayer.syncCursorBeat(), g_drumPlayer.syncLoopBeats(),
+                      g_player.isSynced() ? 1 : 0, g_player.syncCursorBeat(), g_player.syncLoopBeats());
+    }
 
     // Push song-playback position to the app (drives the MIDI Player progress bar).
     // ~2.5x/sec while playing; one "@SONGP=-1" on the falling edge resets the bar and

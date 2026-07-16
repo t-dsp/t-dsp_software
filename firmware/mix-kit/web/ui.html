@@ -45,6 +45,13 @@
   .muted{color:var(--pico-muted-color);font-size:.85rem}
   .mini{padding:.25rem .55rem;font-size:.8rem;width:auto;margin:0}
   input[type=search]{margin:.3rem 0}
+  /* floating volume bar: pinned to the top of a drawer body, just under the sticky header */
+  .volbar{position:sticky;top:3.1rem;z-index:8;display:flex;align-items:center;gap:.5rem;
+          padding:.5rem .9rem;margin:0 -.9rem .6rem;background:var(--pico-background-color);
+          border-bottom:1px solid var(--pico-muted-border-color)}
+  .volbar .lbl{font-size:.78rem;font-weight:600;color:var(--pico-muted-color);flex:0 0 auto}
+  .volbar .val{font-size:.78rem;color:var(--pico-muted-color);flex:0 0 auto;min-width:2.6rem;text-align:right}
+  .volbar input[type=range]{flex:1;margin:0}
 </style>
 </head>
 <body x-data="tdsp()" x-init="init()" x-cloak>
@@ -143,6 +150,11 @@
     <span class="tag" x-show="player.playing" x-text="'playing'"></span>
     <span class="chev" :class="{open:openId==='player'}">›</span></div>
   <div class="body" x-show="openId==='player'">
+    <div class="volbar">
+      <span class="lbl">Volume</span>
+      <input type="range" min="0" max="150" x-model.number="player.vol" @change="send('@SONGVOL='+player.vol)">
+      <span class="val" x-text="player.vol+'%'"></span>
+    </div>
     <p class="muted" x-show="!db.songs.length">No songs indexed.</p>
     <select x-model="sel.song" x-show="db.songs.length">
       <template x-for="(s,i) in db.songs" :key="s.path"><option :value="i" x-text="s.name"></option></template>
@@ -179,6 +191,11 @@
     <span class="tag" x-show="drums.playing" x-text="drums.playing"></span>
     <span class="chev" :class="{open:openId==='drums'}">›</span></div>
   <div class="body" x-show="openId==='drums'">
+    <div class="volbar">
+      <span class="lbl">Volume</span>
+      <input type="range" min="0" max="150" x-model.number="drums.vol" @change="send('@DRUMVOL='+drums.vol)">
+      <span class="val" x-text="drums.vol+'%'"></span>
+    </div>
     <div class="row"><span class="grow muted">Kit</span>
       <select class="mini" x-model.number="drums.kit" @change="send('@DRUMKIT='+drums.kit)">
         <template x-for="(k,i) in db.drumkits" :key="i"><option :value="i" x-text="k.name"></option></template></select></div>
@@ -242,7 +259,7 @@ function makeTransport(onLine){
 function tdsp(){ return {
   connected:false, transportName:'USB', openId:'conn', busy:{reindex:false},
   synth:{name:'',desc:''}, bt:{conn:false,peer:'',vol:50}, codec:{vol:80},
-  arp:{on:false,pat:0,rate:0,oct:1,latch:false}, drums:{kit:0,playing:null}, player:{playing:false},
+  arp:{on:false,pat:0,rate:0,oct:1,latch:false}, drums:{kit:0,playing:null,vol:100}, player:{playing:false,vol:100},
   q:{voice:'',cart:'',groove:''}, sel:{voice:null,song:0}, cart:null,
   db:{loaded:false,engine:'',dexed:[],grooves:[],songs:[],soundfonts:[],instruments:[],drumkits:[]},
   arpPatterns:['Up','Down','Up/Down','Random'], arpRates:['1/4','1/8','1/8T','1/16','1/16T','1/32'],
