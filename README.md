@@ -6,40 +6,60 @@ T-DSP is open-source audio hardware built around the Teensy Audio Library — Te
 
 > Looking for the hardware? See [t-dsp.com](https://www.t-dsp.com) and the KiCad repos linked below.
 
-## Projects
+## The mix-kit firmware
 
-| Project | Description |
-|---------|-------------|
-| [hello-world](projects/hello-world/) | First-time setup guide and a minimal Teensy 4.1 sketch to verify your dev environment, board, and toolchain. **Start here.** |
-| [t-dsp_tac5212_audio_shield_adaptor](projects/t-dsp_tac5212_audio_shield_adaptor/) | Firmware for the TAC5212 Audio Shield Adaptor — Teensy 4.1 carrier for the T-DSP TAC5212 Pro Audio Module. USB Audio class device with stereo DAC playback, PDM mic + line-in capture, host volume tracking, and live monitoring. |
+[`firmware/mix-kit/`](firmware/mix-kit/) is the flagship: **one configurable firmware** that consolidates every synth engine, mixer, and board variant into a single source tree. Instead of a separate firmware per board, you flash the right *capabilities + synth + defaults* to each unit — configurable down to the serial number — so you never run out of Teensy memory carrying features a given board doesn't use.
 
-## Repository Structure
+- **Synth engine** is a build-time choice (memory-exclusive, one per binary): Dexed (DX7 FM), Plaits, OPLL / ymfm FM, Rings, virtual-analog, SF2 / TSF sampled General-MIDI, and more — each a PlatformIO env in [`firmware/mix-kit/platformio.ini`](firmware/mix-kit/platformio.ini).
+- **Board profile** — one reviewable header per physical board ([`firmware/mix-kit/include/boards/`](firmware/mix-kit/include/boards/)) declares that board's capabilities (Bluetooth, S/PDIF, DIN vs USB MIDI, mic preamp, line vs balanced in, headphone vs line out), roles, and power-on defaults (master volume, filters, tempo). Select one with `-D TDSP_BOARD_HEADER="boards/<board>.h"`; anything a header leaves unset falls through to firmware defaults.
+- **Serial-targeted flashing** — [`tools/boards.tsv`](tools/boards.tsv) maps each board's USB serial number to its env + board profile, and `python tools/flash.py --serial <n> --upload` builds and flashes the matching image.
+- **Lean vs dev builds** — developer bench diagnostics (self-tests, capture probes, sweeps) are opt-in; a product build sets `-D TDSP_DIAGNOSTICS=0` to compile them out.
+
+```bash
+cd firmware/mix-kit
+pio run -e teensy41_dexed_pool                       # build a synth env
+python ../../tools/flash.py --list                   # show the serial -> firmware map
+python ../../tools/flash.py --serial 18402920 --upload   # flash the matching board
+```
+
+## Repository layout
 
 ```
 t-dsp_software/
-├── projects/                 ← individual PlatformIO projects per board/product
-│   ├── hello-world/          ← setup guide + sanity check
-│   └── t-dsp_tac5212_audio_shield_adaptor/
-│       ├── src/
-│       └── platformio.ini
-├── lib/                      ← shared libraries (used across projects)
+├── firmware/                 ← promoted, "ready" firmware
+│   └── mix-kit/              ← the flagship configurable firmware
+│       ├── src/                  synth backends, players, control protocol
+│       ├── include/boards/       one profile header per physical board
+│       └── platformio.ini        the synth/env build matrix
+├── projects/                 ← SPIKES: experiments, board bring-up, feature proofs
+│   ├── hello-world/              setup guide + sanity check — start here
+│   └── ...                       per-feature spikes (S/PDIF, ESP32 BT, synth bring-ups…)
+├── app/tdsp-control/         ← Expo control app (BLE / USB Web-Serial UI)
+├── lib/                      ← shared TDsp* libraries (used across projects)
+├── tools/                    ← flash.py, boards.tsv, asset sync, fetchers
 ├── LICENSE                   ← MIT
 └── README.md
 ```
 
-Each project under `projects/` is a self-contained PlatformIO project with its own `platformio.ini`, `src/`, and `README.md`. Shared code lives at the repo root in `lib/` and is referenced via `lib_extra_dirs` in each project's `platformio.ini`.
+**Workflow: spike, then graduate.** `projects/` is the testing ground — prototype a
+feature or bring up a board as a self-contained PlatformIO spike there. Once it's
+proven, fold it into `firmware/mix-kit` behind a build flag and/or board profile.
+Shared code lives at the repo root in `lib/` and is referenced via `lib_extra_dirs`
+in each project's `platformio.ini`.
 
 ## Getting Started
 
-If this is your first time, head to [hello-world](projects/hello-world/) for a complete setup walkthrough — installing PlatformIO, configuring VS Code, and flashing your first Teensy.
+First time here? Head to [hello-world](projects/hello-world/) for a complete setup
+walkthrough — installing PlatformIO, configuring VS Code, and flashing your first
+Teensy.
 
-For experienced PlatformIO users, the workflow is:
+For the mix-kit, the workflow is:
 
 ```bash
-cd projects/<project-name>
-python -m platformio run                    # build
-python -m platformio run --target upload    # upload to Teensy
-python -m platformio device monitor         # serial monitor
+cd firmware/mix-kit
+python -m platformio run -e teensy41_dexed_pool     # build a synth env
+python -m platformio run -e teensy41_dexed_pool -t upload   # or: tools/flash.py --serial <n> --upload
+python -m platformio device monitor                 # serial monitor
 ```
 
 ## T-DSP Hardware Repositories
