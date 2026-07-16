@@ -33,6 +33,13 @@ public:
     void setMpeMode(bool mpe) { panic(); _mpe = mpe; }
     bool mpeMode() const { return _mpe; }
 
+    // Restrict this sink to its first `n` engines. Used to SPLIT a shared engine array
+    // into two independent windows (Voices 2): the main sink shrinks to engines 0..3
+    // while a second sink over &engines[4] drives 4..7. Silences everything first so no
+    // note is left sounding on an engine that just dropped out of the window.
+    void setEngineCount(uint8_t n) { if (n < 1) n = 1; if (n > 16) n = 16; panic(); _n = n; }
+    uint8_t engineCount() const { return _n; }
+
     // --- MidiSink overrides -------------------------------------------------
     void onNoteOn(uint8_t ch, uint8_t note, uint8_t vel) override {
         if (vel == 0) { onNoteOff(ch, note, 0); return; }

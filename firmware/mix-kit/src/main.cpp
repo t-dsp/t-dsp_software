@@ -145,6 +145,25 @@ MIDIDevice             g_usbMidi(g_usbHost);
 #endif
 tdsp::MidiRouter       g_router;
 
+// --- Voices 2 (build-flag gated) ------------------------------------------------
+// Optional second synth voice driven by a SEPARATE MIDI source (the USB-host keyboard),
+// on the top half of the Dexed pool (engines 4..7). Only the pool backend defines the
+// second sink (g_synthSinkB), so this is a pool-only feature; the app hides the card on
+// builds without it (see @STATE "caps"). TDSP_ARP2 adds a second arp on that path.
+#ifndef TDSP_VOICE2
+#define TDSP_VOICE2 0
+#endif
+#ifndef TDSP_ARP2
+#define TDSP_ARP2 0
+#endif
+#if TDSP_VOICE2
+tdsp::MidiRouter       g_kbdRouter;          // USB-host keyboard -> (arp2 ->) g_synthSinkB
+static bool            g_voice2On = false;   // runtime split enable (@VOICE2=1)
+#if TDSP_ARP2
+tdsp::ArpFilter        g_arpFilter2;         // optional arp on the keyboard/Voices-2 path
+#endif
+#endif
+
 // Master clock: THE tempo authority. The song + drum players follow it via
 // PlayerFollower adapters (applyTempos() below is the single tempo write path).
 // Its internal 24-PPQN tick fans through the router so an arp / onClock() sink
@@ -1462,9 +1481,10 @@ static void streamFile(Print& out, const char* path) {
 // sources — their setHandle* signatures match. Compiled only if at least one
 // hardware MIDI input exists (else nothing registers them).
 #if TDSP_HAS_DIN_MIDI || TDSP_HAS_USB_MIDI_HOST
-static void midiNoteOn  (byte ch, byte note, byte vel) {
-    // SYNCHRO START (PSS-140 style): the first live note kicks off an armed groove on
-    // beat 1 — you pick the downbeat by when you play. (vel 0 = note-off, ignore.)
+// SYNCHRO START (PSS-140 style): the first live note kicks off an armed groove on beat 1
+// — you pick the downbeat by when you play. (vel 0 = note-off, ignore.) Shared by the DIN
+// and USB-host note-on callbacks so a keyboard press starts the groove either way.
+static void maybeSynchroStart(byte vel) {
     if (g_drumArmed && vel > 0) {
         muteSongDrums(true);
         g_conductor.start();                        // this note IS the intentional downbeat: zero here
@@ -1476,12 +1496,24 @@ static void midiNoteOn  (byte ch, byte note, byte vel) {
         g_drumArmed = false;
         Serial.println("[drum] SYNCHRO start (first note)");
     }
-    g_router.handleNoteOn(ch, note, vel);
 }
+static void midiNoteOn  (byte ch, byte note, byte vel) { maybeSynchroStart(vel); g_router.handleNoteOn(ch, note, vel); }
 static void midiNoteOff (byte ch, byte note, byte vel) { g_router.handleNoteOff(ch, note, vel); }
 static void midiCC      (byte ch, byte cc,   byte val) { g_router.handleControlChange(ch, cc, val); }
 static void midiPitch   (byte ch, int bend)            { g_router.handlePitchBend(ch, (int16_t)bend); }
 static void midiPressure(byte ch, byte pressure)       { g_router.handleChannelPressure(ch, pressure); }
+
+#if TDSP_VOICE2 && TDSP_HAS_USB_MIDI_HOST
+// USB-host controller callbacks: identical to the DIN ones EXCEPT that when the Voices-2
+// split is on they steer to the keyboard router (g_kbdRouter -> g_synthSinkB) instead of
+// the main path. With the split off they behave exactly like the shared callbacks above.
+static inline tdsp::MidiRouter& usbRouter() { return g_voice2On ? g_kbdRouter : g_router; }
+static void usbNoteOn  (byte ch, byte note, byte vel) { maybeSynchroStart(vel); usbRouter().handleNoteOn(ch, note, vel); }
+static void usbNoteOff (byte ch, byte note, byte vel) { usbRouter().handleNoteOff(ch, note, vel); }
+static void usbCC      (byte ch, byte cc,   byte val) { usbRouter().handleControlChange(ch, cc, val); }
+static void usbPitch   (byte ch, int bend)            { usbRouter().handlePitchBend(ch, (int16_t)bend); }
+static void usbPressure(byte ch, byte pressure)       { usbRouter().handleChannelPressure(ch, pressure); }
+#endif
 #endif  // TDSP_HAS_DIN_MIDI || TDSP_HAS_USB_MIDI_HOST
 
 // Switch the device between normal MIDI and MPE (per-note expression). Sets the
@@ -1514,6 +1546,85 @@ static void runMpeCheck(void);                // measure every instrument under 
 #if defined(TDSP_SYNTH_SF2_TSF) && TDSP_DIAGNOSTICS
 static void runAxisProof(int axis);           // MPE axis proof ported to TSF (validates CC#74->cutoff)
 #endif
+
+// Dispatch one arpeggiator command against a GIVEN ArpFilter, so the same parser drives
+// both the main arp ("@ARP...") and the optional Voices-2 keyboard arp ("@ARP2..."). `P`
+// is the command prefix; the suffix after it (ON=, PAT=, RATE=, ...) selects the action.
+// Returns true if the line was a recognized arp command for this prefix. Reply/echo lines
+// carry the prefix so the app can tell the two arps apart.
+FLASHMEM static bool handleArpLine(const char* line, Print& reply, tdsp::ArpFilter& A, const char* P) {
+    const size_t pl = strlen(P);
+    if (strncmp(line, P, pl) != 0) return false;
+    const char* s = line + pl;
+    if (strncmp(s, "ON=", 3) == 0) {                        // on (arpeggiate live notes) / off (bypass)
+        A.setEnabled(atoi(s + 3) != 0);
+        reply.printf("%sON=%d\n", P, A.enabled() ? 1 : 0);
+        Serial.printf("[%s] %s\n", P + 1, A.enabled() ? "ON" : "bypass");
+    }
+    else if (strcmp(s, "RESTART") == 0) { A.restart(); Serial.printf("[%s] restart\n", P + 1); }  // re-trigger the cycle from step 0
+    else if (strncmp(s, "PAT=", 4) == 0) {                  // pattern 0..25 (Up/.../Euclidean/UserSequence=25)
+        A.setPattern((tdsp::ArpFilter::Pattern)atoi(s + 4));
+        reply.printf("%sPAT=%d\n", P, (int)A.pattern());
+    }
+    else if (strncmp(s, "SEQ=", 4) == 0) {                  // user step-sequence table for PatUserSequence (25)
+        char buf[256]; strncpy(buf, s + 4, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+        A.clearSequence();
+        uint8_t idx = 0;
+        for (char* tok = strtok(buf, " "); tok && idx < tdsp::ArpFilter::kMaxSteps; tok = strtok(nullptr, " ")) {
+            int8_t degree;
+            if (tok[0] == 'r' || tok[0] == 'R')      degree = tdsp::ArpFilter::SeqRest;
+            else if (tok[0] == 'c' || tok[0] == 'C') degree = tdsp::ArpFilter::SeqChord;
+            else                                     degree = (int8_t)atoi(tok);
+            int oct = 0, vel = 0;
+            const char* c1 = strchr(tok, ':');
+            if (c1) { oct = atoi(c1 + 1); const char* c2 = strchr(c1 + 1, ':'); if (c2) vel = atoi(c2 + 1); }
+            A.setSequenceStep(idx++, degree, (int8_t)oct, (uint8_t)vel);
+        }
+        reply.printf("%sSEQ=%d\n", P, A.sequenceLength());
+    }
+    else if (strncmp(s, "RATE=", 5) == 0)  { A.setRate((tdsp::ArpFilter::Rate)atoi(s + 5)); reply.printf("%sRATE=%d\n", P, (int)A.rate()); }
+    else if (strncmp(s, "GATE=", 5) == 0)  { A.setGate(atoi(s + 5) / 100.0f); reply.printf("%sGATE=%d\n", P, (int)(A.gate() * 100.0f + 0.5f)); }
+    else if (strncmp(s, "SWING=", 6) == 0) { A.setSwing(atoi(s + 6) / 100.0f); reply.printf("%sSWING=%d\n", P, (int)(A.swing() * 100.0f + 0.5f)); }
+    else if (strncmp(s, "OCT=", 4) == 0)   { A.setOctaveRange((uint8_t)atoi(s + 4)); reply.printf("%sOCT=%d\n", P, A.octaveRange()); }
+    else if (strncmp(s, "LATCH=", 6) == 0) { A.setLatch(atoi(s + 6) != 0); reply.printf("%sLATCH=%d\n", P, A.latch() ? 1 : 0); }
+    else if (strncmp(s, "PRESET=", 7) == 0) {              // apply a whole preset atomically (one line = all params)
+        char buf[256]; strncpy(buf, s + 7, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+        int applied = 0;
+        for (char* tok = strtok(buf, " "); tok; tok = strtok(nullptr, " ")) {
+            char* eq = strchr(tok, '=');
+            if (!eq) continue;
+            *eq = 0;
+            const char* k = tok;
+            const long v = strtol(eq + 1, nullptr, 10);
+            using AF = tdsp::ArpFilter;
+            if      (!strcmp(k, "pat"))   A.setPattern((AF::Pattern)v);
+            else if (!strcmp(k, "rate"))  A.setRate((AF::Rate)v);
+            else if (!strcmp(k, "gate"))  A.setGate(v / 100.0f);
+            else if (!strcmp(k, "swing")) A.setSwing(v / 100.0f);
+            else if (!strcmp(k, "oct"))   A.setOctaveRange((uint8_t)v);
+            else if (!strcmp(k, "octm"))  A.setOctaveMode((AF::OctaveMode)v);
+            else if (!strcmp(k, "latch")) A.setLatch(v != 0);
+            else if (!strcmp(k, "vel"))   A.setVelMode((AF::VelMode)v);
+            else if (!strcmp(k, "vfix"))  A.setFixedVelocity((uint8_t)v);
+            else if (!strcmp(k, "vacc"))  A.setAccentVelocity((uint8_t)v);
+            else if (!strcmp(k, "mask"))  A.setStepMask((uint32_t)v);
+            else if (!strcmp(k, "len"))   A.setStepLength((uint8_t)v);
+            else if (!strcmp(k, "mpe"))   A.setMpeMode((AF::MpeMode)v);
+            else if (!strcmp(k, "outch")) A.setOutputChannel((uint8_t)v);
+            else if (!strcmp(k, "scb"))   A.setScatterBaseChannel((uint8_t)v);
+            else if (!strcmp(k, "scc"))   A.setScatterCount((uint8_t)v);
+            else if (!strcmp(k, "scale")) A.setScale((AF::Scale)v);
+            else if (!strcmp(k, "scroot"))A.setScaleRoot((uint8_t)v);
+            else if (!strcmp(k, "tr"))    A.setTranspose((int8_t)v);
+            else if (!strcmp(k, "rep"))   A.setRepeat((uint8_t)v);
+            else continue;
+            ++applied;
+        }
+        reply.printf("%sPRESET=%d\n", P, applied);
+    }
+    else return false;
+    return true;
+}
 
 FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     if      (strncmp(line, "@VOL=", 5) == 0)      setMasterVolumePct(atoi(line + 5));
@@ -1694,104 +1805,35 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         }
         reply.println("[cap] end");
     }
-    // --- Arpeggiator (lib/TDspArp) — steps at the master BPM via the Conductor ---
-    else if (strncmp(line, "@ARPON=", 7) == 0) {           // on (arpeggiate live notes) / off (bypass)
-        g_arpFilter.setEnabled(atoi(line + 7) != 0);
-        reply.printf("@ARPON=%d\n", g_arpFilter.enabled() ? 1 : 0);
-        Serial.printf("[arp] %s\n", g_arpFilter.enabled() ? "ON" : "bypass");
+    // --- Arpeggiator (lib/TDspArp) — steps at the master BPM via the Conductor. Parsed by
+    // handleArpLine() so the main arp ("@ARP...") and the optional Voices-2 keyboard arp
+    // ("@ARP2...") share one implementation. Try the longer "@ARP2" prefix FIRST so an
+    // "@ARP2..." line isn't swallowed by the "@ARP" matcher.
+#if TDSP_VOICE2 && TDSP_ARP2
+    else if (handleArpLine(line, reply, g_arpFilter2, "@ARP2")) { /* handled */ }
+#endif
+    else if (handleArpLine(line, reply, g_arpFilter, "@ARP")) { /* handled */ }
+#if TDSP_VOICE2
+    // --- Voices 2: a second Dexed voice on the keyboard half of the pool (engines 4..7) ---
+    else if (strncmp(line, "@VOICE2=", 8) == 0) {          // enable/disable the 4/4 split
+        g_voice2On = (atoi(line + 8) != 0);
+        synthSetVoice2Enabled(g_voice2On);
+        reply.printf("@VOICE2=%d\n", g_voice2On ? 1 : 0);
     }
-    else if (strcmp(line, "@ARPRESTART") == 0) {           // Play press: re-trigger the cycle from step 0 (keeps the held chord)
-        g_arpFilter.restart();
-        Serial.println("[arp] restart");
+    else if (strncmp(line, "@VOICE2VOL=", 11) == 0) {      // Voices-2 level 0..150 %
+        synthSetVoice2Vol(atoi(line + 11));
+        reply.printf("@VOICE2VOL=%d\n", g_voice2VolPct);
     }
-    else if (strncmp(line, "@ARPPAT=", 8) == 0) {          // pattern 0..25 (Up/.../Euclidean/UserSequence=25)
-        g_arpFilter.setPattern((tdsp::ArpFilter::Pattern)atoi(line + 8));
-        reply.printf("@ARPPAT=%d\n", (int)g_arpFilter.pattern());
+    else if (strncmp(line, "@DXVOICE2=", 10) == 0) synthSetInstrument2(atoi(line + 10));   // bundled voice for the keyboard half
+    else if (strncmp(line, "@DXPICK2=", 9) == 0) {         // @DXPICK2=<relCart>\t<voice> for the keyboard half
+        char buf[160]; strncpy(buf, line + 9, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+        int voice = 0;
+        char *tab = strrchr(buf, '\t');
+        if (tab) { *tab = 0; voice = atoi(tab + 1); }
+        const char *nm = synthPickCartVoice2(buf, voice);
+        reply.printf("@DXPICKED2=%s\t%d\t%s\n", buf, voice, nm ? nm : "?");
     }
-    else if (strncmp(line, "@ARPSEQ=", 8) == 0) {          // user step-sequence table for PatUserSequence (25)
-        // Space-separated steps; each step is  degree[:octave[:velocity]]  where
-        // degree is a number (index into the sorted held notes), 'r' (rest) or
-        // 'c' (chord = all held). octave defaults 0, velocity 0 = inherit VelMode.
-        // Empty payload clears the sequence. Example:  @ARPSEQ=0 1 2 3:1 r c:0:110
-        char buf[256];
-        strncpy(buf, line + 8, sizeof(buf) - 1);
-        buf[sizeof(buf) - 1] = 0;
-        g_arpFilter.clearSequence();
-        uint8_t idx = 0;
-        for (char* tok = strtok(buf, " "); tok && idx < tdsp::ArpFilter::kMaxSteps; tok = strtok(nullptr, " ")) {
-            int8_t degree;
-            if (tok[0] == 'r' || tok[0] == 'R')      degree = tdsp::ArpFilter::SeqRest;
-            else if (tok[0] == 'c' || tok[0] == 'C') degree = tdsp::ArpFilter::SeqChord;
-            else                                     degree = (int8_t)atoi(tok);
-            int oct = 0, vel = 0;
-            const char* c1 = strchr(tok, ':');
-            if (c1) { oct = atoi(c1 + 1); const char* c2 = strchr(c1 + 1, ':'); if (c2) vel = atoi(c2 + 1); }
-            g_arpFilter.setSequenceStep(idx++, degree, (int8_t)oct, (uint8_t)vel);
-        }
-        reply.printf("@ARPSEQ=%d\n", g_arpFilter.sequenceLength());
-    }
-    else if (strncmp(line, "@ARPRATE=", 9) == 0) {         // rate 0..14 (1/1 .. 1/32t) — relative to master BPM
-        g_arpFilter.setRate((tdsp::ArpFilter::Rate)atoi(line + 9));
-        reply.printf("@ARPRATE=%d\n", (int)g_arpFilter.rate());
-    }
-    else if (strncmp(line, "@ARPGATE=", 9) == 0) {         // gate length %, 5..150
-        g_arpFilter.setGate(atoi(line + 9) / 100.0f);
-        reply.printf("@ARPGATE=%d\n", (int)(g_arpFilter.gate() * 100.0f + 0.5f));
-    }
-    else if (strncmp(line, "@ARPSWING=", 10) == 0) {       // swing 50..85 (%), 50 = straight
-        g_arpFilter.setSwing(atoi(line + 10) / 100.0f);
-        reply.printf("@ARPSWING=%d\n", (int)(g_arpFilter.swing() * 100.0f + 0.5f));
-    }
-    else if (strncmp(line, "@ARPOCT=", 8) == 0) {          // octave range 1..4
-        g_arpFilter.setOctaveRange((uint8_t)atoi(line + 8));
-        reply.printf("@ARPOCT=%d\n", g_arpFilter.octaveRange());
-    }
-    else if (strncmp(line, "@ARPLATCH=", 10) == 0) {       // latch: keep arpeggiating after keys release
-        g_arpFilter.setLatch(atoi(line + 10) != 0);
-        reply.printf("@ARPLATCH=%d\n", g_arpFilter.latch() ? 1 : 0);
-    }
-    else if (strncmp(line, "@ARPPRESET=", 11) == 0) {      // apply a whole preset atomically (one line = all params)
-        // Space-separated key=value tokens; only the keys present are applied, so callers
-        // can send a subset. Keys: pat rate gate(%) swing(%) oct octm latch vel vfix vacc
-        // mask len mpe outch scb scc scale scroot tr rep. (The step table rides @ARPSEQ.)
-        // e.g. @ARPPRESET=pat=25 rate=8 gate=50 swing=50 oct=1 scale=2 scroot=0 rep=1
-        char buf[256];
-        strncpy(buf, line + 11, sizeof(buf) - 1);
-        buf[sizeof(buf) - 1] = 0;
-        int applied = 0;
-        for (char* tok = strtok(buf, " "); tok; tok = strtok(nullptr, " ")) {
-            char* eq = strchr(tok, '=');
-            if (!eq) continue;
-            *eq = 0;
-            const char* k = tok;
-            const long v = strtol(eq + 1, nullptr, 10);
-            auto &A = g_arpFilter;
-            using AF = tdsp::ArpFilter;
-            if      (!strcmp(k, "pat"))   A.setPattern((AF::Pattern)v);
-            else if (!strcmp(k, "rate"))  A.setRate((AF::Rate)v);
-            else if (!strcmp(k, "gate"))  A.setGate(v / 100.0f);
-            else if (!strcmp(k, "swing")) A.setSwing(v / 100.0f);
-            else if (!strcmp(k, "oct"))   A.setOctaveRange((uint8_t)v);
-            else if (!strcmp(k, "octm"))  A.setOctaveMode((AF::OctaveMode)v);
-            else if (!strcmp(k, "latch")) A.setLatch(v != 0);
-            else if (!strcmp(k, "vel"))   A.setVelMode((AF::VelMode)v);
-            else if (!strcmp(k, "vfix"))  A.setFixedVelocity((uint8_t)v);
-            else if (!strcmp(k, "vacc"))  A.setAccentVelocity((uint8_t)v);
-            else if (!strcmp(k, "mask"))  A.setStepMask((uint32_t)v);
-            else if (!strcmp(k, "len"))   A.setStepLength((uint8_t)v);
-            else if (!strcmp(k, "mpe"))   A.setMpeMode((AF::MpeMode)v);
-            else if (!strcmp(k, "outch")) A.setOutputChannel((uint8_t)v);
-            else if (!strcmp(k, "scb"))   A.setScatterBaseChannel((uint8_t)v);
-            else if (!strcmp(k, "scc"))   A.setScatterCount((uint8_t)v);
-            else if (!strcmp(k, "scale")) A.setScale((AF::Scale)v);
-            else if (!strcmp(k, "scroot"))A.setScaleRoot((uint8_t)v);
-            else if (!strcmp(k, "tr"))    A.setTranspose((int8_t)v);
-            else if (!strcmp(k, "rep"))   A.setRepeat((uint8_t)v);
-            else continue;
-            ++applied;
-        }
-        reply.printf("@ARPPRESET=%d\n", applied);
-    }
+#endif
     // Full current-state snapshot (one JSON line) so the app can hydrate every card on
     // connect instead of assuming defaults. Reports what the device actually knows —
     // i.e. what's ACTIVE, not a UI "selection" the firmware never sees.
@@ -1823,7 +1865,28 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         } else
 #endif
         { reply.printf("\"i\":%d,\"name\":", synthInstrument()); tdsp::catdb::jsonStr(reply, synthInstrumentName(synthInstrument())); }
-        reply.print("}}\n");
+        reply.print("}");   // close "voice"
+#if TDSP_VOICE2
+        // Voices 2: the keyboard-half state (split on/off, level, and its selected voice)
+        // so the app rehydrates the second card on connect.
+        reply.printf(",\"voice2\":{\"on\":%d,\"vol\":%d,", g_voice2On ? 1 : 0, g_voice2VolPct);
+        if (g_curCart2Rel[0]) {
+            reply.print("\"cart\":"); tdsp::catdb::jsonStr(reply, g_curCart2Rel);
+            reply.printf(",\"cv\":%d,\"name\":", g_curCart2Voice); tdsp::catdb::jsonStr(reply, g_curCart2Name);
+        } else {
+            reply.printf("\"i\":%d,\"name\":", g_synthInstrument2); tdsp::catdb::jsonStr(reply, synthInstrumentName(g_synthInstrument2));
+        }
+        reply.print("}");
+#if TDSP_ARP2
+        reply.printf(",\"arp2\":{\"on\":%d,\"pat\":%d,\"rate\":%d,\"oct\":%d,\"latch\":%d}",
+                     g_arpFilter2.enabled() ? 1 : 0, (int)g_arpFilter2.pattern(), (int)g_arpFilter2.rate(),
+                     g_arpFilter2.octaveRange(), g_arpFilter2.latch() ? 1 : 0);
+#endif
+#endif
+        // Build-time capabilities so the app SHOWS the Voices-2 / arp-2 cards only on builds
+        // that have them compiled in (both are pool-only, build-flag gated).
+        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d}", TDSP_VOICE2 ? 1 : 0, (TDSP_VOICE2 && TDSP_ARP2) ? 1 : 0);
+        reply.print("}\n");   // close root object
         reply.printf("@APP=%s\n", g_appState);   // opaque app-owned state, emitted with @STATE so one connect rehydrates both
     }
     else return false;
@@ -1919,13 +1982,23 @@ FLASHMEM void setup() {
     MIDI.setHandleControlChange(midiCC);
 #endif
 #if TDSP_HAS_USB_MIDI_HOST
-    // USB host: a controller (LinnStrument) plugged into the Teensy 4.1 host port.
+    // USB host: a controller (LinnStrument) plugged into the Teensy 4.1 host port. On
+    // Voices-2 builds it uses the split-aware usb* callbacks (steer to the keyboard router
+    // when @VOICE2=1); otherwise the shared DIN callbacks (main path).
     g_usbHost.begin();
+#if TDSP_VOICE2
+    g_usbMidi.setHandleNoteOn(usbNoteOn);
+    g_usbMidi.setHandleNoteOff(usbNoteOff);
+    g_usbMidi.setHandleControlChange(usbCC);
+    g_usbMidi.setHandlePitchChange(usbPitch);
+    g_usbMidi.setHandleAfterTouchChannel(usbPressure);
+#else
     g_usbMidi.setHandleNoteOn(midiNoteOn);
     g_usbMidi.setHandleNoteOff(midiNoteOff);
     g_usbMidi.setHandleControlChange(midiCC);
     g_usbMidi.setHandlePitchChange(midiPitch);
     g_usbMidi.setHandleAfterTouchChannel(midiPressure);   // channel pressure = MPE Z-axis
+#endif
 #endif
 
     // Live MIDI -> arp -> synth. The arp is a router sink; in bypass (default) it
@@ -1937,6 +2010,22 @@ FLASHMEM void setup() {
     g_arpFilter.setClock(&g_conductor.clock());
     g_arpFilter.addDownstream(g_synthSink);
     g_router.addSink(&g_arpFilter);
+
+#if TDSP_VOICE2
+    // Voices 2: the USB-host keyboard's own router -> its own synth sink (engines 4..7),
+    // separate from the main path so the song/arp/drums keep running on voice 1. A plain
+    // keyboard uses a +-2 semitone bend range. With TDSP_ARP2, an independent arp sits in
+    // front of the keyboard sink (bypassed by default, so still a live instrument until
+    // @ARP2ON=1); it steps on the keyboard router's onClock (driven by the same Conductor).
+    for (uint8_t ch = 1; ch <= 16; ch++) g_kbdRouter.setPitchBendRange(ch, 2.0f);
+#if TDSP_ARP2
+    g_arpFilter2.setClock(&g_conductor.clock());
+    g_arpFilter2.addDownstream(g_synthSinkB);
+    g_kbdRouter.addSink(&g_arpFilter2);
+#else
+    g_kbdRouter.addSink(g_synthSinkB);
+#endif
+#endif
 
     // Route the song player into the build-selected synth via its shared sink.
     // Omni so every song channel (and live MIDI on any channel) reaches the one
@@ -1967,7 +2056,12 @@ FLASHMEM void setup() {
     g_conductor.addFollower(&g_drumFollow);
     g_conductor.addFollower(&g_launchSched);   // flags bar edges so loop() can fire quantized launches
     g_router.addSink(&g_clockSink);
-    g_conductor.setTickHook(+[](void*){ g_router.handleClock(); }, nullptr);
+    g_conductor.setTickHook(+[](void*){
+        g_router.handleClock();
+#if TDSP_VOICE2
+        g_kbdRouter.handleClock();   // step the keyboard-path arp (arp2) on the master grid
+#endif
+    }, nullptr);
     synthBegin();
     // Capture the engine's drum capability NOW (synthBegin set the song mask to
     // kMaskAll on drum-capable engines). drumEngineOk() reads this, so we're free to
@@ -2072,6 +2166,9 @@ void loop() {
     g_player.tick();
     g_drumPlayer.tick();   // loops internally (setLooping), so no external re-arm needed
     g_arpFilter.tick(micros());   // drain the arp's gate-off queue (note steps fire on onClock)
+#if TDSP_VOICE2 && TDSP_ARP2
+    g_arpFilter2.tick(micros());  // same for the keyboard-path arp
+#endif
     songLoopTick();   // auto-restart the song if loop mode is on and it just ended
 
     // @SYNCPROBE: once/second, print the master beat next to each synced player's

@@ -92,6 +92,16 @@ export interface Transport {
   arpLatch(on: boolean): void;
   arpSequence(steps: SeqStep[]): void;   // upload the User Sequence step table (@ARPSEQ=)
   arpPreset(params: ArpWireParams): void; // apply a whole preset atomically (@ARPPRESET=)
+  // ---- Voices 2 (build-flag gated; the app shows these only when @STATE caps.voice2) ----
+  voice2Enable(on: boolean): void;                    // split the pool so a USB keyboard gets its own voice (@VOICE2=)
+  voice2Vol(pct: number): void;                       // Voices-2 level (@VOICE2VOL=, 0..150 %)
+  dxVoice2(index: number): void;                      // bundled voice for the keyboard half (@DXVOICE2=)
+  dxPick2(cartRel: string, voice: number): void;      // /dexed cart voice for the keyboard half (@DXPICK2=)
+  arp2On(on: boolean): void;                          // keyboard-path arp on/off (@ARP2ON=) — gated by caps.arp2
+  arp2Pattern(i: number): void;
+  arp2Rate(i: number): void;                          // i = firmware Rate index
+  arp2Octaves(n: number): void;
+  arp2Latch(on: boolean): void;
   espPair(): void;
   espReconnect(): void;      // (re)connect A2DP audio to the last paired source
   espDisconnect(): void;     // drop the current A2DP audio source

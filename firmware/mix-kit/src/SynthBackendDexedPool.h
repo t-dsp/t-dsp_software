@@ -228,6 +228,32 @@ AudioSynthDexed *g_pool[kPoolN] = { &dxp0, &dxp1, &dxp2, &dxp3, &dxp4, &dxp5, &d
 DexedPoolSink    g_poolSink(g_pool, kPoolN, kPoolVpe);
 tdsp::MidiSink  *g_synthSink = &g_poolSink;
 
+#ifndef TDSP_VOICE2
+#define TDSP_VOICE2 0
+#endif
+#if TDSP_VOICE2
+// --- Voices 2: split the 8-engine pool 4/4 so a second DEX voice can be driven by a
+// separate MIDI source (a USB-host keyboard). Engines 0..3 stay on the main path
+// (song player + arp + drums + app); engines 4..7 become an independent sink. A second
+// DexedPoolSink over &g_pool[4] owns the top half; main.cpp routes the keyboard to it
+// (g_synthSinkB) when the split is enabled at runtime (@VOICE2=1). See planning/synth-voices-2.
+static const int kPoolSplitN = kPoolN / 2;   // 4 engines each half
+DexedPoolSink    g_poolSinkB(&g_pool[kPoolSplitN], kPoolSplitN, kPoolVpe);
+tdsp::MidiSink  *g_synthSinkB = &g_poolSinkB;
+static bool      g_voice2Split   = false;    // true = pool is split (main uses engines 0..kPoolSplitN)
+static int       g_voice2VolPct  = 100;      // Voices-2 level, 0..150 % (scales the engines-4..7 mix)
+#endif
+
+// How many engines the MAIN sink currently spans: the whole pool normally, the low half
+// once the Voices-2 split is on (the high half is then the keyboard's).
+static inline int poolMainCount() {
+#if TDSP_VOICE2
+    return g_voice2Split ? kPoolSplitN : kPoolN;
+#else
+    return kPoolN;
+#endif
+}
+
 // Flat voice index: [0..320) bundled PROGMEM voices, then [320..320+32*sdBanks)
 // = /dexed/*.syx carts off the SD card — identical scheme to SynthBackendDexed.h,
 // so the huge open DX7 patch libraries work with the polyphonic/MPE pool too.
@@ -239,6 +265,15 @@ static int g_synthInstrument = 0;
 static char g_curCartRel[160]  = {0};
 static int  g_curCartVoice     = -1;
 static char g_curCartName[tdsp::dexed::kVoiceNameBufBytes] = {0};
+
+#if TDSP_VOICE2
+// Voices-2 selection (engines 4..7), mirrored from the voice-1 fields above so @STATE can
+// report exactly what the keyboard half is playing on reconnect.
+static int  g_synthInstrument2 = 0;
+static char g_curCart2Rel[160] = {0};
+static int  g_curCart2Voice    = -1;
+static char g_curCart2Name[tdsp::dexed::kVoiceNameBufBytes] = {0};
+#endif
 
 static const char *synthName()        { return "Dexed MPE"; }
 static const char *synthDescription() { return "6-op FM (DX7), 8-engine pool: per-note bend/pressure in MPE mode, 16-voice poly in normal MIDI. Bundled + /dexed/*.syx carts."; }
@@ -268,13 +303,14 @@ FLASHMEM static const char *synthInstrumentName(int i) {
     return buf;
 }
 
-// Load a voice into EVERY engine so any engine can play the current sound (runs from
-// loop/handlers, never the audio ISR).
-FLASHMEM static void synthSetInstrument(int idx) {
+// Load a flat/bundled or SD voice into engines [start, start+count) so any engine in
+// that window can play the sound (runs from loop/handlers, never the audio ISR). The
+// range lets the Voices-2 split load a different voice into each half of the pool.
+FLASHMEM static void loadInstrumentRange(int idx, int start, int count) {
     const int total = kNumBundled + tdsp::dexed::numSdVoices();
     if (idx < 0) idx = 0;
     if (idx >= total) idx = total - 1;
-    for (int i = 0; i < kPoolN; ++i) {
+    for (int i = start; i < start + count && i < kPoolN; ++i) {
         g_pool[i]->panic();
         if (idx < kNumBundled) {
             tdsp::dexed::loadVoice(*g_pool[i], idx / tdsp::dexed::kVoicesPerBank,
@@ -285,6 +321,15 @@ FLASHMEM static void synthSetInstrument(int idx) {
                                                  s % tdsp::dexed::kVoicesPerBank);
         }
     }
+}
+
+// Load a voice into the MAIN pool window (all 8 engines normally; engines 0..3 once the
+// Voices-2 split is on, leaving the keyboard's top half untouched).
+FLASHMEM static void synthSetInstrument(int idx) {
+    const int total = kNumBundled + tdsp::dexed::numSdVoices();
+    if (idx < 0) idx = 0;
+    if (idx >= total) idx = total - 1;
+    loadInstrumentRange(idx, 0, poolMainCount());
     // Re-apply the expression routing (mod-wheel + aftertouch targets / LFO) after loading
     // — loadVoice resets controller + LFO state. Configured via @MODWHEEL / @PRESSURE /
     // @LFOMODE; defaults: mod wheel -> vibrato, pressure -> volume + brightness, force LFO.
@@ -299,22 +344,28 @@ FLASHMEM static void synthSetInstrument(int idx) {
                   idx, synthInstrumentName(idx), (double)trim);
 }
 
-// Load an arbitrary /dexed subfolder cart voice directly (the paged-browser
-// @DXPICK path). Loads into every pool engine so any can play it; returns the
-// voice's display name (or nullptr on failure).
-FLASHMEM static const char *synthPickCartVoice(const char *relCart, int voice) {
+// Load an arbitrary /dexed subfolder cart voice into engines [start, start+count).
+// Returns the voice's display name (or nullptr on failure).
+FLASHMEM static const char *pickCartVoiceRange(const char *relCart, int voice, int start, int count) {
     static char names[tdsp::dexed::kVoicesPerBank][tdsp::dexed::kVoiceNameBufBytes];
     bool ok = true;
-    for (int i = 0; i < kPoolN; ++i) {
+    for (int i = start; i < start + count && i < kPoolN; ++i) {
         g_pool[i]->panic();
         if (!tdsp::dexed::sdLoadCartVoice(*g_pool[i], relCart, voice)) ok = false;
     }
     if (!ok) return nullptr;
+    int n = tdsp::dexed::sdCartVoiceNames(relCart, names);
+    return (n == tdsp::dexed::kVoicesPerBank && voice >= 0 &&
+            voice < tdsp::dexed::kVoicesPerBank) ? names[voice] : "";
+}
+
+// Pick a cart voice for the MAIN pool window (the paged-browser @DXPICK path). Loads into
+// every main-window engine so any can play it; returns the display name (nullptr on fail).
+FLASHMEM static const char *synthPickCartVoice(const char *relCart, int voice) {
+    const char *nm = pickCartVoiceRange(relCart, voice, 0, poolMainCount());
+    if (!nm) return nullptr;
     g_poolSink.applyExprConfig();
     dxpTrim.setGain(tdsp::auditionTrim(1.0f));   // SD carts ship at unity trim
-    int n = tdsp::dexed::sdCartVoiceNames(relCart, names);
-    const char *nm = (n == tdsp::dexed::kVoicesPerBank && voice >= 0 &&
-                      voice < tdsp::dexed::kVoicesPerBank) ? names[voice] : "";
     // Remember it so @STATE can report the exact cart voice back to the app on reconnect.
     snprintf(g_curCartRel, sizeof(g_curCartRel), "%s", relCart);
     g_curCartVoice = voice;
@@ -322,6 +373,64 @@ FLASHMEM static const char *synthPickCartVoice(const char *relCart, int voice) {
     Serial.printf("[synth] pick %s v%d = %s\n", relCart, voice, nm);
     return nm;
 }
+
+#if TDSP_VOICE2
+// (Re)apply the Voices-2 level to the engines-4..7 mix. Only scales when the split is on;
+// with the split off the top half is part of the main pool and must stay at unity.
+static void applyVoice2Vol() {
+    float g = g_voice2Split ? (g_voice2VolPct / 100.0f) : 1.0f;
+    for (int i = 0; i < 4; ++i) dxpMixB.gain(i, g);
+}
+
+// Load the Voices-2 instrument into the keyboard half (engines 4..7). Mirrors
+// synthSetInstrument but targets the top window and configures the second sink.
+FLASHMEM static void synthSetInstrument2(int idx) {
+    const int total = kNumBundled + tdsp::dexed::numSdVoices();
+    if (idx < 0) idx = 0;
+    if (idx >= total) idx = total - 1;
+    loadInstrumentRange(idx, kPoolSplitN, kPoolSplitN);
+    g_poolSinkB.applyExprConfig();
+    g_synthInstrument2 = idx;
+    g_curCart2Rel[0] = 0; g_curCart2Voice = -1;
+    applyVoice2Vol();
+    Serial.printf("[synth] VOICE2 instrument %d = %s\n", idx, synthInstrumentName(idx));
+}
+
+FLASHMEM static const char *synthPickCartVoice2(const char *relCart, int voice) {
+    const char *nm = pickCartVoiceRange(relCart, voice, kPoolSplitN, kPoolSplitN);
+    if (!nm) return nullptr;
+    g_poolSinkB.applyExprConfig();
+    snprintf(g_curCart2Rel, sizeof(g_curCart2Rel), "%s", relCart);
+    g_curCart2Voice = voice;
+    snprintf(g_curCart2Name, sizeof(g_curCart2Name), "%s", nm);
+    applyVoice2Vol();
+    Serial.printf("[synth] VOICE2 pick %s v%d = %s\n", relCart, voice, nm);
+    return nm;
+}
+
+static void synthSetVoice2Vol(int pct) {
+    if (pct < 0) pct = 0; if (pct > 150) pct = 150;
+    g_voice2VolPct = pct;
+    applyVoice2Vol();
+}
+
+// Enable/disable the 4/4 split. When enabled the main sink shrinks to engines 0..3 and the
+// keyboard half (4..7) becomes an independent voice; when disabled the pool reunifies to
+// all 8 engines on voice 1. Panics both halves so no note carries across the reshape.
+FLASHMEM static void synthSetVoice2Enabled(bool on) {
+    g_voice2Split = on;
+    g_poolSinkB.panic();
+    g_poolSink.setEngineCount(on ? kPoolSplitN : kPoolN);   // panics the main window
+    if (g_curCartRel[0]) synthPickCartVoice(g_curCartRel, g_curCartVoice);   // reload voice 1 across the new window
+    else                 synthSetInstrument(g_synthInstrument);
+    if (on) {                                               // load voice 2 into the freed top half
+        if (g_curCart2Rel[0]) synthPickCartVoice2(g_curCart2Rel, g_curCart2Voice);
+        else                  synthSetInstrument2(g_synthInstrument2);
+    }
+    applyVoice2Vol();
+    Serial.printf("[synth] Voices 2 split %s\n", on ? "ON (keyboard = engines 4..7)" : "off (unified pool)");
+}
+#endif  // TDSP_VOICE2
 
 FLASHMEM static void synthBegin() {
     // Scan /dexed/*.syx off the SD card (bundled voices always present; SD adds

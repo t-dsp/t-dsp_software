@@ -305,6 +305,16 @@ export class BleTransport implements Transport {
   arpLatch(on: boolean) { this.relay('@ARPLATCH=' + (on ? 1 : 0)); }
   arpSequence(steps: SeqStep[]) { this.relay('@ARPSEQ=' + encodeSequence(steps)); }
   arpPreset(params: ArpWireParams) { this.relay('@ARPPRESET=' + encodeArpParams(params)); }
+  // ---- Voices 2 (identical @-lines over the relay) ----
+  voice2Enable(on: boolean) { this.relay('@VOICE2=' + (on ? 1 : 0)); }
+  voice2Vol(pct: number) { this.relay('@VOICE2VOL=' + Math.max(0, Math.min(150, Math.round(pct)))); }
+  dxVoice2(i: number) { this.relay('@DXVOICE2=' + i); }
+  dxPick2(cartRel: string, voice: number) { this.relay('@DXPICK2=' + cartRel + '\t' + voice); }
+  arp2On(on: boolean) { this.relay('@ARP2ON=' + (on ? 1 : 0)); }
+  arp2Pattern(i: number) { this.relay('@ARP2PAT=' + i); }
+  arp2Rate(i: number) { this.relay('@ARP2RATE=' + i); }
+  arp2Octaves(n: number) { this.relay('@ARP2OCT=' + n); }
+  arp2Latch(on: boolean) { this.relay('@ARP2LATCH=' + (on ? 1 : 0)); }
   // ESP32-LOCAL Bluetooth control (act on the receiver, not the Teensy) → opcodes.
   espPair() { this.cmd(CMD.PAIRING_MODE); }
   espReconnect() { this.cmd(CMD.RECONNECT); }
