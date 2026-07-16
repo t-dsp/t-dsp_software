@@ -122,6 +122,10 @@ void ArpFilter::removeAllDownstream() {
 
 void ArpFilter::onNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
     if (!_enabled) {
+        // Track the key even while bypassed. Then enabling the arp knows exactly which
+        // passthrough notes are sounding and can release them (see setEnabled) instead
+        // of leaving them stuck — and it can immediately arpeggiate whatever is held.
+        addHeld(channel, note, velocity);
         forwardNoteOn(channel, note, velocity);
         return;
     }
@@ -160,6 +164,7 @@ void ArpFilter::onNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
 
 void ArpFilter::onNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) {
     if (!_enabled) {
+        removeHeld(channel, note);   // keep the bypass held-set in sync with the physical keys
         forwardNoteOff(channel, note, velocity);
         return;
     }
@@ -337,8 +342,16 @@ void ArpFilter::setEnabled(bool on) {
         _lastStepTick = 0xFFFFFFFFu;
         _stepIndex = 0;
     } else {
-        // Entering active mode: reset step position so the first held
-        // key kicks off a fresh cycle.
+        // Entering active mode: the keys held right now were passed through while
+        // bypassed and are SOUNDING on the synth. Release those passthrough note-ons —
+        // otherwise they ring forever, because their note-offs are now captured by the
+        // arp instead of forwarded (the "stuck note on arp-on" bug). The held set is
+        // KEPT, so the arp immediately arpeggiates whatever chord is being held. These
+        // are exact per-note offs (not an all-notes-off), so a drum groove or song on
+        // another channel — which never routes through the arp — is untouched.
+        for (uint8_t i = 0; i < _heldCount; ++i)
+            forwardNoteOff(_held[i].channel, _held[i].note, 0);
+        // Reset step position so the first step kicks off a fresh cycle.
         _stepIndex = 0;
         _repeatIndex = 0;
         _octavePassIndex = 0;
