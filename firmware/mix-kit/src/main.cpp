@@ -1012,6 +1012,12 @@ static void drumStartPath(const char* path, const char* disp, bool rezero = true
     if (got <= 0) { Serial.printf("[drum] load FAILED: %s\n", path); return; }
     drumApplyKit();
     g_drumPlayer.setVelocityScale(g_drumVolPct / 100.0f);
+    // A groove starting on its own downbeat with no song running becomes the tempo
+    // source: snap the master to the groove's native BPM so it plays at its authored
+    // feel (a 95-bpm funk groove -> master 95). When joining an already-running grid
+    // (rezero=false, launch-quantize) or under a playing song, the existing tempo owns
+    // it — leave the master alone. The app picks up the new BPM on its next @STATE poll.
+    if (rezero && !g_player.isPlaying() && g_drumFileBpm > 1.0f) g_masterBpm = g_drumFileBpm;
     applyTempos();   // groove plays at the master BPM (x fine trim)
     // SYNCHRO START (PSS-140 style): arm the groove and let the FIRST live note kick
     // it off on beat 1 (you pick the downbeat by when you play). Otherwise start NOW
