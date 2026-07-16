@@ -24,7 +24,8 @@ Three macro families (all defined with defaults in `tdsp_hw_config.h`):
   `TDSP_ROLE_MIXER`. *(Defaults exist; graph-gating on them is incremental — see
   the follow-up note below.)*
 - **Power-on defaults — how it boots.**
-  `TDSP_DEFAULT_MASTER_DB`, `TDSP_DEFAULT_BPM`, `TDSP_DEFAULT_HPF_MODE`,
+  `TDSP_DEFAULT_OUT_DVOL_DB` (codec analog level, fixed) + `TDSP_DEFAULT_APP_VOL_PCT`
+  (digital app master), `TDSP_DEFAULT_BPM`, `TDSP_DEFAULT_HPF_MODE`,
   `TDSP_DEFAULT_MPE`, `TDSP_DEFAULT_ARP`, `TDSP_DEFAULT_SYNTH_MAKEUP`.
 
 ## Build identity = board header × synth env
@@ -43,10 +44,11 @@ Bluetooth and a hotter start level:
 
 ```c
 #pragma once
-#define TDSP_HAS_ESP32_BT   0
-#define TDSP_IN_TYPE         TDSP_IN_BALANCED
-#define TDSP_OUT_TYPE        TDSP_OUT_LINE
-#define TDSP_DEFAULT_MASTER_DB (-6.0f)
+#define TDSP_HAS_ESP32_BT        0
+#define TDSP_IN_TYPE             TDSP_IN_BALANCED
+#define TDSP_OUT_TYPE            TDSP_OUT_LINE      // TAC5212 SeLine driver
+#define TDSP_DEFAULT_OUT_DVOL_DB (0.0f)            // codec analog level (fixed)
+#define TDSP_DEFAULT_APP_VOL_PCT 100               // digital app master start %
 ```
 
 ## Current status / follow-ups

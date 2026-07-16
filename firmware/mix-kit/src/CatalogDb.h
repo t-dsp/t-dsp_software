@@ -211,13 +211,38 @@ static long buildSource(const char *key, const char *outPath, const char *srcDir
     return lines;
 }
 
+// Engine name stored in /tdsp/index.ndjson ("engine":"..."), read into out (set
+// empty if the file/field is absent). Lets setup() detect a firmware engine change
+// across a reflash and auto-rebuild the catalog, so the app isn't stuck showing the
+// previous engine. Returns true if a value was read.
+static bool readStoredEngine(char *out, size_t n) {
+    if (out && n) out[0] = 0;
+    if (!::g_sdReady || !out || n == 0) return false;
+    File f = SD.open("/tdsp/index.ndjson");
+    if (!f) return false;
+    char buf[256];
+    int got = f.read(buf, sizeof(buf) - 1);   // engine is near the front of the one-line manifest
+    f.close();
+    if (got <= 0) return false;
+    buf[got] = 0;
+    const char *key = "\"engine\":\"";
+    const char *p = strstr(buf, key);
+    if (!p) return false;
+    p += strlen(key);
+    size_t i = 0;
+    while (*p && *p != '"' && i + 1 < n) out[i++] = *p++;
+    out[i] = 0;
+    return true;
+}
+
 // ---- top-level build -------------------------------------------------------
-// engineName: synthName() from the caller. buildBundled: optional callback that
-// writes /tdsp/instruments.ndjson + /tdsp/drumkits.ndjson (compile-time lists the
-// caller owns). Returns true on success.
+// engineName: synthName() from the caller. hasBt: does this board have the ESP32
+// Bluetooth-audio receiver (drives the meta "bt" flag -> app hides its BT card when
+// false). buildBundled: optional callback that writes /tdsp/instruments.ndjson +
+// /tdsp/drumkits.ndjson (compile-time lists the caller owns). Returns true on success.
 typedef void (*BundledFn)();
 
-static bool buildCatalog(const char *engineName, bool hasDrums, const char *drumEngine, BundledFn buildBundled, uint32_t nowMs) {
+static bool buildCatalog(const char *engineName, bool hasDrums, const char *drumEngine, bool hasBt, BundledFn buildBundled, uint32_t nowMs) {
     if (!::g_sdReady) { Serial.println("[catdb] no SD -> cannot build"); return false; }
     ensureRoot();
     Serial.println("[catdb] building /tdsp/ catalog...");
@@ -261,6 +286,9 @@ static bool buildCatalog(const char *engineName, bool hasDrums, const char *drum
         ix.print(",\"engine\":"); jsonStr(ix, engineName);
         ix.print(",\"drums\":"); ix.print(hasDrums ? "true" : "false");
         if (drumEngine && drumEngine[0]) { ix.print(",\"drumEngine\":"); jsonStr(ix, drumEngine); }
+        // Bluetooth-audio capability: false on the ESP32-not-populated board so the app
+        // hides its Bluetooth card. Absent (old firmware) -> client assumes present.
+        ix.print(",\"bt\":"); ix.print(hasBt ? "true" : "false");
         ix.print(",\"files\":[");
         const char *fs[] = {"dexed","grooves","songs","soundfonts","samples","instruments","drumkits"};
         for (int i = 0; i < 7; ++i) {

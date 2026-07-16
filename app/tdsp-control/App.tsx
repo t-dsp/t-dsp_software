@@ -427,7 +427,7 @@ export default function App() {
     },
     // BLUETOOTH
     {
-      id: 'bt', title: 'Bluetooth', show: true, status: bt.conn ? 'connected' + (bt.peer ? ': ' + bt.peer : '') : 'off',
+      id: 'bt', title: 'Bluetooth', show: cat.hasBt, status: bt.conn ? 'connected' + (bt.peer ? ': ' + bt.peer : '') : 'off',
       body: (
         <>
           <Text style={s.muted}>{bt.conn ? 'Connected: ' + (bt.peer || 'source') : 'No audio source connected'}</Text>

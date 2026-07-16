@@ -19,6 +19,7 @@ export interface Catalog {
   engine: string;
   hasDrums: boolean;   // does the built engine render ch10 drums? (hides the Drums section when false)
   drumEngine: string;  // parallel drum-voice label (e.g. "OPLL", "TSF"); '' if the synth does its own
+  hasBt: boolean;      // does the board have the ESP32 Bluetooth-audio receiver? (hides the Bluetooth section when false)
   builtMs: number;
   instruments: Instrument[];
   dexed: Cart[];
@@ -29,7 +30,7 @@ export interface Catalog {
 }
 
 export const EMPTY_CATALOG: Catalog = {
-  engine: '', hasDrums: false, drumEngine: '', builtMs: 0, instruments: [], dexed: [], grooves: [], songs: [], soundfonts: [], drumkits: [],
+  engine: '', hasDrums: false, drumEngine: '', hasBt: true, builtMs: 0, instruments: [], dexed: [], grooves: [], songs: [], soundfonts: [], drumkits: [],
 };
 
 function parseNdjson<T = any>(text: string): T[] {
@@ -129,6 +130,7 @@ export async function loadCatalog(t: Transport, onProgress?: (p: LoadProgress) =
     engine: meta.engine || '',
     hasDrums: meta.drums !== false,   // absent (old firmware) -> assume drums; explicit false -> hide
     drumEngine: meta.drumEngine || '',
+    hasBt: meta.bt !== false,         // absent (old firmware) -> assume BT present; explicit false -> hide
     builtMs: meta.built || 0,
     instruments: out.instruments || [], dexed: [],
     grooves: out.grooves || [], songs: out.songs || [], soundfonts: out.soundfonts || [], drumkits: out.drumkits || [],

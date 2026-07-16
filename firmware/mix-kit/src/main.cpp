@@ -1235,7 +1235,7 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         else songStartIndex(atoi(line + 6));   // @SONG=<catalog index> (legacy; resolved via songs.ndjson)
     }
     else if (strcmp(line, "@GETCAT") == 0)        refreshCatalog(reply);   // re-scan SD + send catalog
-    else if (strcmp(line, "@REINDEX") == 0)       { tdsp::catdb::buildCatalog(synthName(), drumEngineOk(), kDrumEngineName, catdbWriteBundled, millis()); reply.println("@REINDEXED"); }  // rebuild /tdsp/*.ndjson DB (upsert)
+    else if (strcmp(line, "@REINDEX") == 0)       { tdsp::catdb::buildCatalog(synthName(), drumEngineOk(), kDrumEngineName, (TDSP_ROLE_BT_RECEIVER != 0), catdbWriteBundled, millis()); reply.println("@REINDEXED"); }  // rebuild /tdsp/*.ndjson DB (upsert)
     else if (strncmp(line, "@READ=", 6) == 0)     streamFile(reply, line + 6);  // generic file fetch (catalog transport)
     else if (strncmp(line, "@WB=", 4) == 0) {                                    // host->SD file write; raw payload follows. USB CDC only.
         if (&reply != &Serial) reply.println("@WERR=0\x1fusb only");
@@ -1537,6 +1537,24 @@ void setup() {
     }
 #endif
     applyMidiMode(TDSP_DEFAULT_MPE != 0);   // start mode (board-configurable; default normal MIDI, after synthBegin)
+
+#if TDSP_HAS_SDCARD
+    // Auto-heal a stale browse catalog. /tdsp/index.ndjson persists on the SD across
+    // flashes, so after reflashing this board to a DIFFERENT synth the app keeps showing
+    // the previous engine until a manual Refresh. If the stored engine no longer matches
+    // the running one (or no catalog exists yet), rebuild it now — engine capability is
+    // finalized above, so drumEngineOk() is valid here. Unchanged engine -> no rebuild.
+    if (g_sdReady) {
+        char stored[64];
+        bool have = tdsp::catdb::readStoredEngine(stored, sizeof stored);
+        if (!have || strcmp(stored, synthName()) != 0) {
+            Serial.printf("[catdb] engine changed (%s -> %s) -> auto-reindex\n",
+                          have ? stored : "(none)", synthName());
+            tdsp::catdb::buildCatalog(synthName(), drumEngineOk(), kDrumEngineName,
+                                      (TDSP_ROLE_BT_RECEIVER != 0), catdbWriteBundled, millis());
+        }
+    }
+#endif
 
     Serial.println("running -- cmds: t=DACtone a=BT+SPDIF mix  s=SPDIF-only  m=BT-only");
     Serial.println("                 x=toggle SPDIF tone  +/-=vol  d=dump  i=re-init codec");

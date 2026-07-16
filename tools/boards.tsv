@@ -7,6 +7,8 @@
 # Get a board's serial:  pio device list   (USB "Serial Number" of the Teensy)
 #
 # serial	env	board_header	notes
-18402920	teensy41_dexed_pool	boards/digital_audio_board.h	local dev board (COM4); runs the Dexed MPE pool stable
-# --- unverified / to fill in ------------------------------------------------
-# 7681380	teensy41_sf2_tsf	boards/digital_audio_board.h	jay-mint PSRAM board; pool env hangs here (power/env issue) — PSRAM engine instead (UNVERIFIED env choice)
+18402920	teensy41_dexed_pool_nobt_drumvoice	boards/digital_audio_board_nobt.h	local dev board (COM4), ESP32 NOT populated; Dexed MPE pool + OPLL drum voice, Bluetooth flagged out (header pins nobt)
+# jay-mint PSRAM board: flashed over SSH from the Windows box (tools/linux-flash-host.md),
+# not by local flash.py serial detection. Builds+flashes clean; has a boot power-contention
+# hang on good firmware (run it off ONE 5V source). See project_jaymint_flash_host memory.
+7681380	teensy41_sf2_tsf_jaymint	boards/jaymint.h	jay-mint PSRAM board (SN 7681380), LINE OUT; TSF GM engine = TSF synth + its own GM drums
