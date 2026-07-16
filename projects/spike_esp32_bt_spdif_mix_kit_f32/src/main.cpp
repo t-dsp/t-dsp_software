@@ -1230,7 +1230,7 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         reply.printf("\"arp\":{\"on\":%d,\"pat\":%d,\"rate\":%d,\"oct\":%d,\"latch\":%d},",
                      g_arpFilter.enabled() ? 1 : 0, (int)g_arpFilter.pattern(), (int)g_arpFilter.rate(),
                      g_arpFilter.octaveRange(), g_arpFilter.latch() ? 1 : 0);
-        reply.printf("\"song\":{\"playing\":%d,\"i\":%d},", g_player.isPlaying() ? 1 : 0, g_songSel);
+        reply.printf("\"song\":{\"playing\":%d,\"i\":%d,\"p\":%d},", g_player.isPlaying() ? 1 : 0, g_songSel, g_player.positionPermille());
         reply.printf("\"drums\":{\"kit\":%d,\"playing\":%d},", g_drumKit, g_drumPlayer.isPlaying() ? 1 : 0);
         reply.print("\"voice\":{");
 #if defined(TDSP_SYNTH_DEXED) || defined(TDSP_SYNTH_DEXED_POOL)
@@ -1983,6 +1983,23 @@ void loop() {
     g_drumPlayer.tick();   // loops internally (setLooping), so no external re-arm needed
     g_arpFilter.tick(micros());   // drain the arp's gate-off queue (note steps fire on onClock)
     songLoopTick();   // auto-restart the song if loop mode is on and it just ended
+
+    // Push song-playback position to the app (drives the MIDI Player progress bar).
+    // ~2.5x/sec while playing; one "@SONGP=-1" on the falling edge resets the bar and
+    // clears the ♪ flag. Runs AFTER songLoopTick() so a loop re-arm keeps us "playing"
+    // (no spurious -1 at the loop seam).
+    {
+        static elapsedMillis songPosClock;
+        static bool          songPosPrev = false;
+        const bool songPosNow = g_player.isPlaying();
+        if (songPosNow) {
+            if (songPosClock >= 400) { songPosClock = 0; Serial.printf("@SONGP=%u\n", g_player.positionPermille()); }
+        } else if (songPosPrev) {
+            Serial.println("@SONGP=-1");
+        }
+        songPosPrev = songPosNow;
+    }
+
     g_sdWrite.tick(Serial, millis());   // abort a stalled @WB transfer (watchdog)
 
     // USB CDC input serves two roles: '@'-prefixed control LINES (the same protocol

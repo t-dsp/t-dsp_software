@@ -20,6 +20,17 @@ const C = { bg: '#0d1117', card: '#161b22', card2: '#0e131a', border: '#30363d',
 const ARP_PAT = ['Up', 'Down', 'Up/Down', 'Random'];
 const ARP_RATE = ['1/4', '1/8', '1/8T', '1/16', '1/16T', '1/32'];
 
+// What the MIDI player does when the current song finishes. The header button cycles
+// through these; default 'stop'. Only 'repeat' uses the firmware's seamless loop
+// (tp.songLoop); 'continue'/'shuffle' advance the song app-side when it ends (@SONGP=-1).
+type EndMode = 'shuffle' | 'repeat' | 'continue' | 'stop';
+const END_MODES: { key: EndMode; icon: string; label: string }[] = [
+  { key: 'shuffle',  icon: '🔀', label: 'Shuffle'    },  // twisted arrows → random next song
+  { key: 'repeat',   icon: '🔁', label: 'Repeat'     },  // spinning arrows → loop this song
+  { key: 'continue', icon: '➡',  label: 'Continue'   },  // arrow → play the next song
+  { key: 'stop',     icon: '◻',  label: 'Stop after' },  // hollow square → stop when it ends (default)
+];
+
 function notify(msg: string) { if (Platform.OS === 'web') (globalThis as any).alert?.(msg); else Alert.alert('T-DSP', msg); }
 
 // The subtitle line under a section title: the live accent value, else a muted status tag.
@@ -27,18 +38,24 @@ const Subtitle = ({ value, status }: { value?: string; status?: string }) =>
   !!value ? <Text style={s.drawerValue} numberOfLines={1}>{value}</Text>
     : !!status ? <Text style={s.tag}>{status}</Text> : null;
 
+// A slim 0..1 progress bar (song playback position). Sits right under the track title.
+const ProgressBar = ({ value }: { value: number }) => (
+  <View style={s.progTrack}><View style={[s.progFill, { width: `${Math.max(0, Math.min(1, value)) * 100}%` }]} /></View>
+);
+
 // Homepage card: the section's title, live value, and header controls. Fixed size so
 // every card matches. Title/value sit on top; controls always sit on their own row at
 // the bottom (a card is far narrower than the window, so they never share the title's
 // line). Controls are nested Pressables → they fire without navigating the card.
-function Card({ title, value, status, actions, onPress, style }:
-  { title: string; value?: string; status?: string; actions?: React.ReactNode; onPress: () => void; style?: any }) {
+function Card({ title, value, status, subtitle, actions, progress, onPress, style }:
+  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onPress: () => void; style?: any }) {
   return (
     <Pressable style={[s.card, style]} onPress={onPress}>
       <View style={s.cardHead}>
         <View style={s.drawerLeft}>
           <Text style={s.drawerTitle} numberOfLines={1}>{title}</Text>
-          <Subtitle value={value} status={status} />
+          {subtitle ?? <Subtitle value={value} status={status} />}
+          {progress != null && <ProgressBar value={progress} />}
         </View>
         <Text style={s.chev}>›</Text>
       </View>
@@ -49,8 +66,8 @@ function Card({ title, value, status, actions, onPress, style }:
 
 // Section page header: a back arrow + the section title/value, with the same controls
 // available (on the right when wide, on their own row when narrow).
-function PageHeader({ title, value, status, actions, onBack }:
-  { title: string; value?: string; status?: string; actions?: React.ReactNode; onBack: () => void }) {
+function PageHeader({ title, value, status, subtitle, actions, progress, onBack }:
+  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onBack: () => void }) {
   const { width } = useWindowDimensions();
   const narrow = width < 640;
   return (
@@ -59,7 +76,8 @@ function PageHeader({ title, value, status, actions, onBack }:
         <Pressable style={s.backBtn} onPress={onBack}><Text style={s.backTxt}>‹</Text></Pressable>
         <View style={s.drawerLeft}>
           <Text style={s.pageTitle}>{title}</Text>
-          <Subtitle value={value} status={status} />
+          {subtitle ?? <Subtitle value={value} status={status} />}
+          {progress != null && <ProgressBar value={progress} />}
         </View>
         {!narrow && !!actions && <View style={s.headActions}>{actions}</View>}
       </View>
@@ -92,6 +110,8 @@ export default function App() {
   const [connecting, setConnecting] = useState(false);
   const [userDisc, setUserDisc] = useState(false);      // user tapped Disconnect App → suppress auto-reconnect
   const connectingRef = useRef(false);                  // synchronous guard so the auto-poll can't double-connect
+  const manualStopRef = useRef(false);                  // set on user Stop so the resulting @SONGP=-1 isn't treated as a natural song end
+  const onSongEndRef = useRef<() => void>(() => {});     // latest "song finished naturally" handler (continue/shuffle); kept in a ref so the @SONGP listener never goes stale
   const [cat, setCat] = useState<Catalog>(EMPTY_CATALOG);
   const [loaded, setLoaded] = useState(false);
   const [route, setRoute] = useState<string>('home');   // 'home' or a section id
@@ -99,12 +119,13 @@ export default function App() {
   const [bt, setBt] = useState({ conn: false, peer: '' });
   const [arp, setArp] = useState({ on: false, pat: 0, rate: 0, oct: 1, latch: false });
   const [drums, setDrums] = useState<{ kit: number; sel: string | null; playing: string | null }>({ kit: 0, sel: null, playing: null });
-  const [player, setPlayer] = useState<{ song: number; playing: boolean; name: string }>({ song: 0, playing: false, name: '' });
-  const [loop, setLoop] = useState(false);
+  const [player, setPlayer] = useState<{ song: number; playing: boolean; name: string; prog: number }>({ song: 0, playing: false, name: '', prog: 0 });
+  const [endMode, setEndMode] = useState<EndMode>('stop');   // what the player does when a song ends
   const [bpm, setBpm] = useState(120);
   const [songBpm, setSongBpm] = useState(120);            // tempo of the last song that played
   const [selVoice, setSelVoice] = useState('');
   const [selVoiceName, setSelVoiceName] = useState('');   // last-picked instrument name (shown on the card, persists across browsing)
+  const [selVoicePath, setSelVoicePath] = useState('');   // full location of the picked instrument (e.g. /dexed/<cart>.syx, or "Bundled") — shown under the name
   const [cart, setCart] = useState<{ rel: string; name: string } | null>(null);
   const [vpath, setVpath] = useState('');                 // dexed folder-browser current path ('' = root)
   const [level, setLevel] = useState<DirPage>(EMPTY_DIR); // current /dexed folder listing (lazy @DXLS)
@@ -122,13 +143,16 @@ export default function App() {
   function hydrate(j: any) {
     if (j.vol != null) setVol(j.vol);
     if (j.bpm != null) setBpm(j.bpm);
-    if (j.loop != null) setLoop(!!j.loop);
+    // The device only tracks a loop on/off flag (it has no notion of continue/shuffle,
+    // which are app-side). loop on ⇒ Repeat; loop off ⇒ keep the app's mode unless it was
+    // Repeat (then fall back to Stop).
+    if (j.loop != null) setEndMode(m => j.loop ? 'repeat' : (m === 'repeat' ? 'stop' : m));
     if (j.arp) setArp({ on: !!j.arp.on, pat: clampIdx(j.arp.pat, ARP_PAT.length), rate: clampIdx(j.arp.rate, ARP_RATE.length), oct: Math.max(1, Math.min(4, j.arp.oct | 0)) || 1, latch: !!j.arp.latch });
-    if (j.song) setPlayer(p => ({ ...p, playing: !!j.song.playing, song: j.song.i | 0 }));
+    if (j.song) setPlayer(p => ({ ...p, playing: !!j.song.playing, song: j.song.i | 0, prog: j.song.p != null ? j.song.p / 1000 : (j.song.playing ? -1 : 0) }));
     if (j.drums) setDrums(d => ({ ...d, kit: j.drums.kit | 0, playing: j.drums.playing ? d.playing : null }));
     if (j.voice) {
-      if (j.voice.cart) { setSelVoice('c' + j.voice.cart + ':' + (j.voice.cv | 0)); setSelVoiceName(j.voice.name || ''); }
-      else if (j.voice.i != null && j.voice.i < 320) { setSelVoice('b' + (j.voice.i | 0)); setSelVoiceName(j.voice.name || ''); }
+      if (j.voice.cart) { setSelVoice('c' + j.voice.cart + ':' + (j.voice.cv | 0)); setSelVoiceName(j.voice.name || ''); setSelVoicePath('/dexed/' + j.voice.cart); }
+      else if (j.voice.i != null && j.voice.i < 320) { setSelVoice('b' + (j.voice.i | 0)); setSelVoiceName(j.voice.name || ''); setSelVoicePath('Bundled'); }
     }
   }
 
@@ -137,6 +161,14 @@ export default function App() {
       try { hydrate(JSON.parse(line.slice(line.indexOf('=') + 1))); } catch {}
     } else if (line.indexOf('"conn"') >= 0 && line.indexOf('"vol"') >= 0) {
       const m = line.match(/\{.*\}/); if (m) { try { const j = JSON.parse(m[0]); setBt({ conn: !!j.conn, peer: j.peer || '' }); if (j.vol != null) setVol(j.vol); } catch {} }
+    } else if (line.startsWith('@SONGP=')) {
+      // Live song-playback position (permille). -1 = playback ended → reset the bar + clear ♪.
+      const v = parseInt(line.slice(7), 10);
+      if (v < 0) {
+        setPlayer(p => ({ ...p, playing: false, prog: 0 }));
+        if (manualStopRef.current) manualStopRef.current = false;   // user hit Stop → don't auto-advance
+        else onSongEndRef.current();                                // natural end → Continue/Shuffle per the end-mode
+      } else setPlayer(p => ({ ...p, playing: true, prog: Math.max(0, Math.min(1, v / 1000)) }));
     } else if (line.startsWith('[song]')) {
       // Follow the song's detected tempo: set master BPM to it (song + drums lock to that).
       const m = line.match(/([\d.]+)\s*bpm/); if (m) { const b = Math.round(parseFloat(m[1])); if (b >= 20 && b <= 300) { setSongBpm(b); setBpm(b); tp.masterBpm(b); } }
@@ -233,7 +265,7 @@ export default function App() {
       : vpath === '@bundled' ? cat.instruments.map(v => ({ key: 'b' + v.i, label: v.name, i: v.i }))
         : [], [cart, cartVoices, vpath, cat.instruments]);
   const listId = voiceData.length ? (cart ? 'c' + cart.rel : '@bundled') : 'br:' + vpath;   // identity of the currently-shown picker list
-  const pickVoice = (it: VItem) => { setSelVoice(it.key); setSelVoiceName(it.label.replace(/^\d+\.\s*/, '')); if (it.key[0] === 'c' && cart) tp.dxPick(cart.rel, it.i); else if (it.key[0] === 'b') tp.dxVoice(it.i); };
+  const pickVoice = (it: VItem) => { setSelVoice(it.key); setSelVoiceName(it.label.replace(/^\d+\.\s*/, '')); if (it.key[0] === 'c' && cart) { setSelVoicePath('/dexed/' + cart.rel); tp.dxPick(cart.rel, it.i); } else if (it.key[0] === 'b') { setSelVoicePath('Bundled'); tp.dxVoice(it.i); } };
   const stepVoice = (dir: number) => {
     // In a visible list (a cart's voices or the bundled set), step within it so the
     // selection stays scrolled into view.
@@ -249,7 +281,7 @@ export default function App() {
     if (selVoice[0] !== 'c' && cat.instruments.length) {
       const idx = cat.instruments.findIndex(v => 'b' + v.i === selVoice);
       const ni = Math.max(0, Math.min(cat.instruments.length - 1, (idx < 0 ? 0 : idx) + dir));
-      const v = cat.instruments[ni]; if (v) { setSelVoice('b' + v.i); setSelVoiceName(v.name); tp.dxVoice(v.i); }
+      const v = cat.instruments[ni]; if (v) { setSelVoice('b' + v.i); setSelVoiceName(v.name); setSelVoicePath('Bundled'); tp.dxVoice(v.i); }
     }
   };
   useEffect(() => {   // keep the selected voice in view (on pick + on list change)
@@ -282,8 +314,21 @@ export default function App() {
   };
   const stepBpm = (delta: number) => { const b = Math.max(20, Math.min(300, Math.round(bpm) + delta)); setBpm(b); tp.masterBpm(b); };
   const stepArpPat = (dir: number) => { const i = (arp.pat + dir + ARP_PAT.length) % ARP_PAT.length; setArp(a => ({ ...a, pat: i })); tp.arpPattern(i); };
-  const playSong = () => { const sg = cat.songs.find(x => x.i === player.song); tp.playSong(player.song); setPlayer(p => ({ ...p, playing: true, name: sg?.name || '' })); };
-  const stopSong = () => { tp.stopSong(); setPlayer(p => ({ ...p, playing: false })); };
+  const playSong = () => { const sg = cat.songs.find(x => x.i === player.song); tp.playSong(player.song); setPlayer(p => ({ ...p, playing: true, name: sg?.name || '', prog: -1 })); };  // -1 until the device reports position
+  const stopSong = () => { manualStopRef.current = true; tp.stopSong(); setPlayer(p => ({ ...p, playing: false, prog: 0 })); };
+  const playSongIdx = (i: number) => { const sg = cat.songs.find(x => x.i === i); tp.playSong(i); setPlayer(p => ({ ...p, song: i, playing: true, name: sg?.name || '', prog: -1 })); };
+  // End-of-song mode. Only 'repeat' arms the firmware's seamless loop; the rest let the song
+  // end (device emits @SONGP=-1) and we advance app-side.
+  const applyEndMode = (m: EndMode) => { setEndMode(m); tp.songLoop(m === 'repeat'); };
+  const cycleEndMode = () => { const i = END_MODES.findIndex(m => m.key === endMode); applyEndMode(END_MODES[(i + 1) % END_MODES.length].key); };
+  // Runs when a song finishes on its own (not a manual Stop). Kept fresh in a ref so the
+  // one-time @SONGP listener always sees the current mode/song/catalog.
+  onSongEndRef.current = () => {
+    if (!cat.songs.length) return;
+    if (endMode === 'continue') { const idx = cat.songs.findIndex(sg => sg.i === player.song); const nx = cat.songs[((idx < 0 ? -1 : idx) + 1) % cat.songs.length]; if (nx) playSongIdx(nx.i); }
+    else if (endMode === 'shuffle') { const r = cat.songs[Math.floor(Math.random() * cat.songs.length)]; if (r) playSongIdx(r.i); }
+    // 'stop' → nothing; 'repeat' → never reaches here (the firmware loops the song)
+  };
   const playGroove = () => { const g = cat.grooves.find(x => x.path === drums.sel); if (g) { tp.playGrooveFile(grooveFile(g)); setDrums(d => ({ ...d, playing: g.name })); } };
   const stopDrums = () => { tp.stopDrums(); setDrums(d => ({ ...d, playing: null })); };
 
@@ -292,12 +337,21 @@ export default function App() {
 
   // ===== the sections: one entry drives both its homepage card and its page. =====
   // `value`/`status` = the subtitle; `actions` = the header controls; `body` = the page.
-  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean };
+  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean };
 
   // The card/page subtitle: the currently-loaded instrument if one is picked, else a
   // summary of where the browser is (folder name or catalog counts).
   const synthValue = selVoiceName
     || (vpath === '@bundled' ? 'Bundled' : vpath ? (vpath.split('/').pop() || '') : (cat.instruments.length ? cat.instruments.length + ' voices + SD library' : 'Library'));
+  // When an instrument is loaded, show its name AND full location (folder/cart path). The
+  // path truncates from the LEFT (ellipsizeMode "head") so the deepest folder + cart stay
+  // visible. No voice picked yet → undefined, so the card falls back to the browse summary.
+  const synthSubtitle = selVoiceName ? (
+    <>
+      <Text style={s.drawerValue} numberOfLines={1}>{selVoiceName}</Text>
+      {!!selVoicePath && <Text style={s.pathLine} numberOfLines={1} ellipsizeMode="head">{selVoicePath}</Text>}
+    </>
+  ) : undefined;
 
   // Synth/Voices navigation: breadcrumb trail + an up-one-level control. `cart` selected
   // ⇒ showing that cart's voices; `vpath` = the /dexed folder path ('@bundled' = bundled set).
@@ -379,7 +433,7 @@ export default function App() {
     },
     // SYNTH / VOICES — folder browser over bundled voices + the whole /dexed library
     {
-      id: 'synth', title: 'Synth / Voices', show: true, value: synthValue, fullHeight: true,
+      id: 'synth', title: 'Synth / Voices', show: true, value: synthValue, subtitle: synthSubtitle, fullHeight: true,
       actions: (<>
         <HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1)} />
         <HdrBtn label="Next ›" stop onPress={() => stepVoice(1)} />
@@ -433,11 +487,13 @@ export default function App() {
     {
       id: 'player', title: 'MIDI Player', show: true,
       value: (player.playing ? '♪ ' : '') + (cat.songs.find(sg => sg.i === player.song)?.name || '—'),
+      progress: player.playing && player.prog >= 0 ? player.prog : undefined,   // bar shows only once the device reports a position
       actions: (<>
         <HdrBtn label="‹" stop onPress={() => stepSong(-1)} />
         <HdrBtn label="›" stop onPress={() => stepSong(1)} />
         <HdrBtn label="▶" onPress={playSong} />
         <HdrBtn label="■" stop onPress={stopSong} />
+        <HdrBtn label={(END_MODES.find(m => m.key === endMode) || END_MODES[3]).icon} stop onPress={cycleEndMode} />
       </>),
       body: (
         <>
@@ -447,8 +503,12 @@ export default function App() {
                 onPress={() => setPlayer(p => ({ ...p, song: sg.i }))} />)}
             </ScrollView>
           )}
-          <Row><Text style={[s.muted, { flex: 1 }]}>Loop</Text>
-            <Switch value={loop} onValueChange={v => { setLoop(v); tp.songLoop(v); }} /></Row>
+          <Row><Text style={[s.muted, { flex: 1 }]}>When finished</Text>
+            {END_MODES.map(m => (
+              <Pressable key={m.key} style={[s.pill, endMode === m.key && s.pillOn]} onPress={() => applyEndMode(m.key)}>
+                <Text style={s.text}>{m.icon}  {m.label}</Text>
+              </Pressable>
+            ))}</Row>
         </>
       ),
     },
@@ -561,7 +621,7 @@ export default function App() {
               <View style={s.home}>
                 {visible.map(sec => (
                   <View key={sec.id} style={[s.cell, { width: `${100 / cols}%` }]}>
-                    <Card title={sec.title} value={sec.value} status={sec.status} actions={sec.actions}
+                    <Card title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions}
                       onPress={() => setRoute(sec.id)} style={s.cardGrid} />
                   </View>
                 ))}
@@ -573,7 +633,7 @@ export default function App() {
           {cur && !cur.fullHeight && (
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 400 }}>
               <View style={s.page}>
-                <PageHeader title={cur.title} value={cur.value} status={cur.status} actions={cur.actions} onBack={() => setRoute('home')} />
+                <PageHeader title={cur.title} value={cur.value} status={cur.status} subtitle={cur.subtitle} progress={cur.progress} actions={cur.actions} onBack={() => setRoute('home')} />
                 <View style={s.pageBody}>{cur.body}</View>
               </View>
             </ScrollView>
@@ -583,7 +643,7 @@ export default function App() {
                   selected folder AND the picker's scroll position persist across nav ===== */}
           {fullPages.map(sec => (
             <View key={sec.id} style={[s.page, { flex: 1 }, route !== sec.id && s.hidden]}>
-              <PageHeader title={sec.title} value={sec.value} status={sec.status} actions={sec.actions} onBack={() => setRoute('home')} />
+              <PageHeader title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions} onBack={() => setRoute('home')} />
               <View style={[s.pageBody, { flex: 1 }]}>{sec.body}</View>
             </View>
           ))}
@@ -615,7 +675,10 @@ const s = StyleSheet.create({
   drawerLeft: { flex: 1, gap: 2 },
   drawerTitle: { color: C.text, fontWeight: '600', fontSize: 15 },
   drawerValue: { color: C.accent, fontSize: 14, fontWeight: '600' },
+  pathLine: { color: C.muted, fontSize: 12, marginTop: 1 },
   tag: { color: C.muted, fontSize: 12, backgroundColor: C.chip, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10, overflow: 'hidden', alignSelf: 'flex-start' },
+  progTrack: { height: 4, borderRadius: 2, backgroundColor: C.chip, marginTop: 6, overflow: 'hidden' },
+  progFill: { height: '100%', borderRadius: 2, backgroundColor: C.accent },
   chev: { color: C.muted, fontSize: 20, marginLeft: 'auto' },
   // section page
   page: { maxWidth: 720, width: '100%', alignSelf: 'center' },

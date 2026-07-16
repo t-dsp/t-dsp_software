@@ -86,6 +86,8 @@ public:
         ev_ = ev; count_ = count; idx_ = 0;
         base_ = ev; baseCount_ = count;         // kept for seamless loop restart
         wait_ = ev_[0].deltaMs; clock_ = 0; acc_ = 0.0f;
+        totalMs_ = 0; for (uint32_t i = 0; i < count; ++i) totalMs_ += ev[i].deltaMs;   // song length (for progress)
+        elapsedMs_ = 0;
         for (int c = 0; c < 16; c++) {          // reset per-channel bend range + RPN state
             pbRange_[c] = pbDefault_; rpnMsb_[c] = rpnLsb_[c] = 0x7F;
         }
@@ -102,6 +104,7 @@ public:
         bool was = playing_;
         playing_ = false;
         ev_ = nullptr; count_ = 0; idx_ = 0;
+        totalMs_ = 0; elapsedMs_ = 0;
         if (was && sink_) {
             if (panicMask_ == 0xFFFF) sink_->onAllNotesOff(0);   // 0 = panic all channels
             else for (uint8_t ch = 1; ch <= 16; ++ch)
@@ -120,6 +123,14 @@ public:
     uint32_t eventIndex() const { return idx_; }
     uint32_t eventCount() const { return count_; }
 
+    // Playback position 0..1000 (permille) by ELAPSED SONG TIME (not event index —
+    // events aren't evenly spaced). Drives the app's MIDI Player progress bar.
+    uint16_t positionPermille() const {
+        if (totalMs_ == 0) return 0;
+        uint32_t e = elapsedMs_ > totalMs_ ? totalMs_ : elapsedMs_;
+        return (uint16_t)(((uint64_t)e * 1000u) / totalMs_);
+    }
+
     // Advance the song by elapsed real time. Call every loop(). Elapsed ms are
     // scaled by speed_ into an accumulator (fractional, so slow/fast tempos don't
     // drift), matching the original behaviour exactly at speed 1.0.
@@ -130,10 +141,12 @@ public:
         acc_ += (float)real * speed_;                 // advance in "song time"
         while (playing_ && acc_ >= (float)wait_) {
             acc_ -= (float)wait_;
+            elapsedMs_ += wait_;                       // advance playback position (for progress)
             dispatch(ev_[idx_]);
             if (++idx_ >= count_) {                    // reached the end
                 if (loop_ && base_ && baseCount_) {    // seamless restart from the top
                     ev_ = base_; count_ = baseCount_; idx_ = 0;
+                    elapsedMs_ = 0;                    // progress bar restarts with the loop
                     wait_ = ev_[0].deltaMs;            // CARRY acc_ (don't zero) so the loop
                                                        // keeps exact time — zeroing dropped the
                                                        // remainder each bar and slowly drifted.
@@ -206,6 +219,8 @@ private:
     uint32_t             wait_      = 0;
     elapsedMillis        clock_;
     float                acc_       = 0.0f;            // accumulated song-time ms
+    uint32_t             totalMs_   = 0;               // total song length in ms (sum of deltas) — for progress
+    uint32_t             elapsedMs_ = 0;               // song-time ms dispatched so far — for progress
     float                speed_     = 1.0f;            // tempo multiplier
     float                velScale_  = 1.0f;            // note-on velocity multiplier
     bool                 loop_      = false;           // restart at end
