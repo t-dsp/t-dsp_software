@@ -1,0 +1,12 @@
+# boards.tsv — maps a physical Teensy (by USB serial number) to the mix-kit
+# firmware it should run: a PlatformIO env (synth engine + RAM tuning) and a
+# board profile header (capabilities/roles/defaults). tools/flash.py reads this,
+# detects the connected board's serial, and flashes the matching firmware.
+#
+# Columns are TAB-separated. Lines starting with '#' are ignored.
+# Get a board's serial:  pio device list   (USB "Serial Number" of the Teensy)
+#
+# serial	env	board_header	notes
+18402920	teensy41_dexed_pool	boards/digital_audio_board.h	local dev board (COM4); runs the Dexed MPE pool stable
+# --- unverified / to fill in ------------------------------------------------
+# 7681380	teensy41_sf2_tsf	boards/digital_audio_board.h	jay-mint PSRAM board; pool env hangs here (power/env issue) — PSRAM engine instead (UNVERIFIED env choice)
