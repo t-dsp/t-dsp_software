@@ -425,9 +425,12 @@ export default function App() {
     applyPreset(ARP_LIBRARY[(ni + ARP_LIBRARY.length) % ARP_LIBRARY.length]);
   };
   const stepArpNav = (dir: number) => (arpMode === 'preset' ? stepPreset(dir) : stepArpPat(dir));
-  // Manual "Reset" — clear a preset's hidden extras (scale, velocity curve, step mask, MPE…)
-  // back to engine defaults while keeping the pattern/rate/octaves/latch the pills show. This
-  // is the escape hatch from "I tweaked a preset and don't know what invisible state remains".
+  // Reset the arp to a PLAIN manual config: clear every hidden extra a preset may have set
+  // (scale, velocity curve, step mask, MPE mode / output channel, transpose, repeat…) back to
+  // engine defaults while keeping the pattern/rate/octaves/latch the pills show. This is why
+  // manual can "stop working" after a preset — an MPE preset routes the arp to scatter channels
+  // and a masked preset mutes steps, and the manual pills can't undo those. One @ARPPRESET line
+  // with default extras restores a clean, audible arp.
   const resetArpManual = () => {
     tp.arpPreset({
       pat: arp.pat, rate: ARP_RATES[arp.rate].fw, gatePct: 50, swingPct: 50,
@@ -437,6 +440,9 @@ export default function App() {
     });
     setArpPresetId('');
   };
+  // Entering Manual mode ALWAYS lands on a clean slate — otherwise a preset's invisible extras
+  // (scatter channel, step mask, scale…) linger and the manual controls appear dead.
+  const enterManualMode = () => { setArpMode('manual'); resetArpManual(); };
   const activePresetName = ARP_LIBRARY.find(p => p.id === arpPresetId)?.name || '';
   const playSong = () => { const sg = cat.songs.find(x => x.name === player.song) || cat.songs[0]; if (!sg) return; tp.songPlay(songArg(sg)); setPlayer(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };  // -1 until the device reports position
   const stopSong = () => { manualStopRef.current = true; tp.stopSong(); setPlayer(p => ({ ...p, playing: false, prog: 0 })); };
@@ -664,7 +670,7 @@ export default function App() {
             <Pressable style={[s.arpTab, arpMode === 'preset' && s.arpTabOn]} onPress={() => setArpMode('preset')}>
               <Text style={[s.arpTabTxt, arpMode === 'preset' && s.arpTabTxtOn]}>Presets</Text>
             </Pressable>
-            <Pressable style={[s.arpTab, arpMode === 'manual' && s.arpTabOn]} onPress={() => setArpMode('manual')}>
+            <Pressable style={[s.arpTab, arpMode === 'manual' && s.arpTabOn]} onPress={enterManualMode}>
               <Text style={[s.arpTabTxt, arpMode === 'manual' && s.arpTabTxtOn]}>Manual</Text>
             </Pressable>
           </View>

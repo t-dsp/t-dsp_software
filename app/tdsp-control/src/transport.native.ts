@@ -284,7 +284,7 @@ export class BleTransport implements Transport {
   dxPick(cartRel: string, voice: number) { this.relay('@DXPICK=' + cartRel + '\t' + voice); }
   drumKit(i: number) { this.relay('@DRUMKIT=' + i); }
   playGrooveFile(name: string) { this.relay('@DRUMF=' + name); }
-  stopDrums() { this.relay('D'); }
+  stopDrums() { this.relay('@DRUM=stop'); }   // unconditional stop (NOT 'D' — that toggles: a double-tap/state-mismatch would restart drums)
   songPlay(arg: string) { this.relay('@SONGF=' + arg); }
   stopSong() { this.relay('@SONG=stop'); }
   songLoop(on: boolean) { this.relay('@LOOP=' + (on ? 1 : 0)); }

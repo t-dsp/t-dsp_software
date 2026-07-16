@@ -174,7 +174,7 @@ export class WebSerialTransport implements Transport {
   dxPick(cartRel: string, voice: number) { this.send('@DXPICK=' + cartRel + '\t' + voice); }
   drumKit(i: number) { this.send('@DRUMKIT=' + i); }
   playGrooveFile(name: string) { this.send('@DRUMF=' + name); }
-  stopDrums() { this.send('D'); }
+  stopDrums() { this.send('@DRUM=stop'); }   // unconditional stop (NOT 'D' — that toggles: a double-tap/state-mismatch would restart drums)
   songPlay(arg: string) { this.send('@SONGF=' + arg); }
   stopSong() { this.send('@SONG=stop'); }
   songLoop(on: boolean) { this.send('@LOOP=' + (on ? 1 : 0)); }
