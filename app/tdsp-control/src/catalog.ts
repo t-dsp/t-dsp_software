@@ -69,14 +69,24 @@ const FETCH: { type: keyof Catalog; path: string; label: string }[] = [
 /** Load the full catalog. Throws if index.ndjson is missing (caller can offer @REINDEX).
  *  onProgress (optional) fires before + after each file so the UI can show a load bar. */
 export async function loadCatalog(t: Transport, onProgress?: (p: LoadProgress) => void): Promise<Catalog> {
-  onProgress?.({ done: 0, total: 0, label: 'Catalog', index: 0, count: FETCH.length, det: false });   // indeterminate until the index arrives
+  // Throttle progress emits. onProgress -> setState -> a full re-render of the app; firing
+  // it on EVERY 360-byte @FD chunk (hundreds per load) floods the main thread and actually
+  // SLOWS the transfer (it stalls). Emit at most ~every 100 ms; `force` for phase changes.
+  let lastEmit = 0;
+  const emit = (p: LoadProgress, force = false) => {
+    if (!onProgress) return;
+    const now = Date.now();
+    if (!force && now - lastEmit < 100) return;
+    lastEmit = now; onProgress(p);
+  };
+  emit({ done: 0, total: 0, label: 'Catalog', index: 0, count: FETCH.length, det: false }, true);   // indeterminate until the index arrives
   // Retry the index read a couple times — the board can be briefly busy right after connect
   // (boot / SD settle), and a single transient failure shouldn't look like "no catalog".
   let ixText = '';
   for (let attempt = 0; ; attempt++) {
     try {
       ixText = await t.readFile('/tdsp/index.ndjson', (recv, tot) =>
-        onProgress?.({ done: recv, total: tot, label: 'Reading index', index: 0, count: FETCH.length, det: tot > 0 }));
+        emit({ done: recv, total: tot, label: 'Reading index', index: 0, count: FETCH.length, det: tot > 0 }));
       break;
     }
     catch (e) { if (attempt >= 2) throw e; await new Promise(r => setTimeout(r, 700)); }
@@ -98,18 +108,18 @@ export async function loadCatalog(t: Transport, onProgress?: (p: LoadProgress) =
   for (let k = 0; k < FETCH.length; k++) {
     const f = FETCH[k];
     const base = done;
-    onProgress?.({ done: base, total, label: f.label, index: k + 1, count: FETCH.length, det });
+    emit({ done: base, total, label: f.label, index: k + 1, count: FETCH.length, det }, true);   // phase change → force
     let txt = '';
     try {
-      // Live intra-file progress: add THIS file's received bytes to the running base so
-      // the bar keeps moving during a big/slow read (e.g. grooves), not just between files.
+      // Live intra-file progress (throttled): add THIS file's received bytes to the running
+      // base so the bar keeps moving during a big/slow read (e.g. grooves), not just between files.
       txt = await t.readFile(f.path, (recv) => {
-        if (det) onProgress?.({ done: Math.min(total, base + recv), total, label: f.label, index: k + 1, count: FETCH.length, det });
+        if (det) emit({ done: Math.min(total, base + recv), total, label: f.label, index: k + 1, count: FETCH.length, det });
       });
     } catch { txt = ''; }
     out[f.type] = parseNdjson(txt);
     done = Math.min(total, base + (det ? (bytesOf[f.type] || 0) : 1));   // advance by the announced size → the bar reaches 100%
-    onProgress?.({ done, total, label: f.label, index: k + 1, count: FETCH.length, det });
+    emit({ done, total, label: f.label, index: k + 1, count: FETCH.length, det }, true);
   }
   // NOTE: /dexed is NOT bulk-loaded. With 11k carts x 32 inline voice names the NDJSON is
   // ~6 MB — too big to @READ on every connect (it timed out and the library came back empty).
