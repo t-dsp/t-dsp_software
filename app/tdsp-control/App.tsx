@@ -205,23 +205,18 @@ export default function App() {
   const userConnect = () => { userDiscRef.current = false; setUserDisc(false); connect(); };
   const userDisconnect = () => { userDiscRef.current = true; setUserDisc(true); disconnect(); };
 
-  // Auto-connect + auto-reconnect (native/BLE only). Web Serial can't auto-open — the browser
-  // requires a user gesture to pick the port — so on web we keep the manual Connect button.
-  // Every 4s: reflect a dropped link into UI state, then (unless the user disconnected on purpose)
-  // scan+connect. This is why you no longer have to tap "Connect": it finds the T-DSP on its own.
+  // Connecting is EXPLICIT: no auto-connect and no auto-reconnect. This poll only reflects
+  // a DROPPED link into the UI (flip to "Not connected") — it never opens a connection. You
+  // tap Connect App to connect, and once disconnected the app stays put until you do.
   useEffect(() => {
-    if (Platform.OS === 'web') return;
+    if (Platform.OS === 'web') return;   // web can't auto-open either (needs a user gesture)
     let cancelled = false;
-    const tick = () => {
+    const id = setInterval(() => {
       if (cancelled) return;
-      const live = tp.isConnected();
-      if (!live) { setConnected(false); setLoaded(false); }         // no-op if already false
-      if (!live && !userDisc && !connectingRef.current) connect(true);
-    };
-    tick();
-    const id = setInterval(tick, 4000);
+      if (!tp.isConnected()) { setConnected(false); setLoaded(false); }   // no-op if already false
+    }, 4000);
     return () => { cancelled = true; clearInterval(id); };
-  }, [userDisc]);
+  }, []);
   // Tick an elapsed-seconds counter while the catalog is loading, so the load screen
   // reads as "working" even if a single @READ stalls (a frozen bar looks broken).
   useEffect(() => {
@@ -631,9 +626,7 @@ export default function App() {
           <Text style={[s.muted, { textAlign: 'center', marginTop: 14 }]}>
             {connecting
               ? (Platform.OS === 'web' ? 'Opening the serial port…' : 'Searching for your T-DSP over Bluetooth…')
-              : Platform.OS === 'web'
-                ? `Connect the app to your T-DSP over ${tp.name} to begin.`
-                : 'Connecting automatically — tap Cancel to stay disconnected.'}
+                : `Connect the app to your T-DSP over ${tp.name} to begin.`}
           </Text>
         </View>
       )}
