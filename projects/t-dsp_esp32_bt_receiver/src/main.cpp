@@ -608,7 +608,7 @@ static void setupBle() {
   BLEServer *server = BLEDevice::createServer();
   server->setCallbacks(new ServerCallbacks());
 
-  BLEService *svc = server->createService(TDSP_SVC_UUID);
+  BLEService *svc = server->createService(BLEUUID(TDSP_SVC_UUID), 30);   // >=21 handles: 7 chars + CCCDs (default 15 drops DRUMS/FILE)
 
   BLECharacteristic *cmd = svc->createCharacteristic(
       TDSP_CMD_UUID,
@@ -666,6 +666,7 @@ static void setupBle() {
 static constexpr int LED_PIN = 2;
 
 void setup() {
+  Serial.setRxBufferSize(16384);   // hold a full @INSTR/@DXLS catalog burst from the Teensy while the loop is busy notifying BLE (default 256 B overflows -> truncated/lost)
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
   Serial.println("T-DSP ESP32: A2DP sink + BLE control, starting...");
