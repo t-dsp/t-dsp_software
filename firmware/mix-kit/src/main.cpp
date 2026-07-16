@@ -511,15 +511,15 @@ static const BuiltinSong kBuiltinSongs[] = {
 };
 static const int kNumBuiltin = sizeof(kBuiltinSongs) / sizeof(kBuiltinSongs[0]);
 
-// Unified runtime song list: built-ins first, then /songs/*.mid off the SD card.
-// SD songs are parsed on play into g_buf. Adding a song = drop a .mid on the
-// card; it appears in the catalog (and the app) with no firmware rebuild.
-// A song source is one of: baked SongEv[] (ev), a baked rich MidiFileEvent[] test
-// sequence (mev, plays directly + flips MPE mode via `mpe`), or an SD .mid file (sd/path).
-struct SongRef { char name[48]; const SongEv *ev; uint32_t count; char path[96]; bool sd;
-                 const tdsp::MidiFileEvent *mev; uint32_t mcount; bool mpe; };
-static SongRef g_songs[48];
-static int     g_numSongs = 0;
+// Songs live on the SD card (/songs/*.mid) plus a handful of baked demo/test
+// sequences in flash. Nothing but the ONE currently-playing song is held in RAM
+// (parsed into g_buf on play) — exactly like the drum grooves. The browsable list is
+// the catalog (/tdsp/songs.ndjson, built by @REINDEX); the app plays a song by NAME
+// via @SONGF (an SD filename, or a built-in's display name). There is NO fixed-size
+// registry and therefore NO song-count cap.
+//   built-in test seq : baked MidiFileEvent[] (mev), flips MPE mode via `mpe`
+//   built-in demo     : baked legacy SongEv[] (ev), tempo estimate
+//   SD song           : /songs/<name>.mid, parsed on play (real tempo)
 // g_sdReady is declared earlier (before the synth backend include).
 
 static const int MAX_EVENTS = 24000;                 // longest playable song (baked or SD)
@@ -529,70 +529,84 @@ static bool endsWithMid(const char *s) {
     size_t n = strlen(s);
     return n > 4 && strcasecmp(s + n - 4, ".mid") == 0;
 }
-static bool songNameExists(const char *name) {   // case-insensitive, for de-dup
-    for (int i = 0; i < g_numSongs; ++i)
-        if (strcasecmp(g_songs[i].name, name) == 0) return true;
-    return false;
+// strip a trailing ".mid" from a filename into `out` (the display name)
+static void songDisp(char *out, size_t n, const char *fname) {
+    size_t c = strlen(fname);
+    if (c > 4 && strcasecmp(fname + c - 4, ".mid") == 0) c -= 4;
+    if (c > n - 1) c = n - 1;
+    memcpy(out, fname, c); out[c] = 0;
 }
-// Scan one directory for *.mid and append each (deduped by display name). `dir`
-// is "/songs" or "/" (the card root, so files dropped at the top level also work).
-FLASHMEM static void scanSongDir(const char *dir) {
+// True if an SD .mid with this display name exists (so a baked built-in defers to the
+// tempo-bearing SD copy). Checked against the card, not a RAM list.
+static bool sdSongExists(const char *disp) {
+    if (!::g_sdReady) return false;
+    char p[128];
+    snprintf(p, sizeof p, "/songs/%s.mid", disp); if (SD.exists(p)) return true;
+    snprintf(p, sizeof p, "/%s.mid", disp);        return SD.exists(p);
+}
+// Extract a JSON string field ("<key>":"<val>") from one songs.ndjson line into `out`.
+// Minimal (handles a leading backslash-escape); song names/filenames carry no exotic
+// escaping in practice. Returns false if the key is absent.
+static bool jsonStrField(const char *line, const char *key, char *out, size_t n) {
+    char pat[24]; snprintf(pat, sizeof pat, "\"%s\":\"", key);
+    const char *s = strstr(line, pat); if (!s) return false;
+    s += strlen(pat);
+    size_t i = 0;
+    while (*s && *s != '"' && i < n - 1) { if (*s == '\\' && s[1]) ++s; out[i++] = *s++; }
+    out[i] = 0; return true;
+}
+// Number of rows in /tdsp/songs.ndjson (one song per line). 0 if no catalog.
+static int songCatalogCount() {
+    File f = SD.open("/tdsp/songs.ndjson"); if (!f) return 0;
+    int n = 0; while (f.available()) if (f.read() == '\n') ++n;
+    f.close(); return n;
+}
+// Read the idx-th song from the catalog: `argOut` = the @SONGF play arg (the `file`
+// field for SD songs, else the `name` for built-ins), `nameOut` = the display name.
+// Either out-pointer may be null. Returns false if out of range / no catalog.
+static bool songByIndex(int idx, char *argOut, size_t argN, char *nameOut, size_t nameN) {
+    File f = SD.open("/tdsp/songs.ndjson"); if (!f) return false;
+    char line[224]; int i = 0; bool ok = false;
+    while (f.available()) {
+        int len = f.readBytesUntil('\n', line, sizeof(line) - 1); line[len] = 0;
+        if (len <= 0) continue;
+        if (i == idx) {
+            char file[128];
+            if (argOut) {
+                if (jsonStrField(line, "file", file, sizeof file)) snprintf(argOut, argN, "%s", file);
+                else { char nm[120]; jsonStrField(line, "name", nm, sizeof nm); snprintf(argOut, argN, "%s", nm); }
+            }
+            if (nameOut) jsonStrField(line, "name", nameOut, nameN);
+            ok = true; break;
+        }
+        ++i;
+    }
+    f.close(); return ok;
+}
+// Write one directory's *.mid rows to songs.ndjson ({name, file}). Used by the catalog
+// builder (catdbWriteBundled) — a direct SD scan, so the catalog is uncapped.
+static void writeSongDir(Print &so, const char *dir) {
     File d = SD.open(dir);
     if (!d || !d.isDirectory()) { if (d) d.close(); return; }
-    const int cap = (int)(sizeof(g_songs) / sizeof(g_songs[0]));
-    for (File f = d.openNextFile(); f && g_numSongs < cap; f = d.openNextFile()) {
+    for (File f = d.openNextFile(); f; f = d.openNextFile()) {
         const char *nm = f.name();
         if (!f.isDirectory() && nm && endsWithMid(nm)) {
-            char disp[48];                                  // display name = filename minus ".mid"
-            size_t copy = strlen(nm) - 4;                   // (endsWithMid guarantees len > 4)
-            if (copy > sizeof(disp) - 1) copy = sizeof(disp) - 1;
-            memcpy(disp, nm, copy); disp[copy] = 0;
-            if (!songNameExists(disp)) {                    // keep the list unique (built-ins win)
-                SongRef &r = g_songs[g_numSongs++];
-                if (strcmp(dir, "/") == 0) snprintf(r.path, sizeof(r.path), "/%s", nm);
-                else                       snprintf(r.path, sizeof(r.path), "%s/%s", dir, nm);
-                strncpy(r.name, disp, sizeof(r.name) - 1); r.name[sizeof(r.name) - 1] = 0;
-                r.ev = nullptr; r.count = 0; r.sd = true; r.mev = nullptr; r.mcount = 0; r.mpe = false;
-            }
+            char disp[64]; songDisp(disp, sizeof disp, nm);
+            so.print("{\"name\":"); tdsp::catdb::jsonStr(so, disp);
+            so.print(",\"file\":"); tdsp::catdb::jsonStr(so, nm); so.print("}\n");
         }
         f.close();
     }
     d.close();
 }
-FLASHMEM static void buildSongList() {
-    const int cap = (int)(sizeof(g_songs)/sizeof(g_songs[0]));
-    g_numSongs = 0;
-    // Built-in MIDI/MPE test sequences FIRST, so they head the picker as "01 .. 08".
-    for (int i = 0; i < testsong::kNumTestSongs && g_numSongs < cap; ++i) {
-        SongRef &r = g_songs[g_numSongs++];
-        strncpy(r.name, testsong::kTestSongs[i].name, sizeof(r.name) - 1); r.name[sizeof(r.name) - 1] = 0;
-        r.ev = nullptr; r.count = 0; r.sd = false; r.path[0] = 0;
-        r.mev = testsong::kTestSongs[i].ev; r.mcount = testsong::kTestSongs[i].count; r.mpe = testsong::kTestSongs[i].mpe;
-    }
-    // SD songs BEFORE the baked built-ins: a real .mid carries its real tempo, so an
-    // SD copy of a built-in (same display name) must WIN — the baked SongEv versions
-    // were transcoded to raw ms and have NO tempo (they can't lock to a drum groove).
-    if (g_sdReady) {
-        if (!SD.exists("/songs")) SD.mkdir("/songs");   // a home to drop songs into
-        scanSongDir("/songs");
-        scanSongDir("/");                               // also accept .mid at the card root
-    }
-    // Baked built-ins LAST — a no-SD fallback only. Skipped when an SD song already
-    // provides that name, so the tempo-bearing SD copy is the one that plays.
-    int nBuiltin = 0;
-    for (int i = 0; i < kNumBuiltin && g_numSongs < cap; ++i) {
-        if (songNameExists(kBuiltinSongs[i].name)) continue;   // SD copy wins
-        SongRef &r = g_songs[g_numSongs++]; nBuiltin++;
-        strncpy(r.name, kBuiltinSongs[i].name, sizeof(r.name) - 1); r.name[sizeof(r.name) - 1] = 0;
-        r.ev = kBuiltinSongs[i].ev; r.count = kBuiltinSongs[i].count; r.sd = false; r.path[0] = 0;
-        r.mev = nullptr; r.mcount = 0; r.mpe = false;
-    }
-    Serial.printf("[sd] songs: %d total (%d test + %d SD + %d baked fallback)\n",
-                  g_numSongs, testsong::kNumTestSongs,
-                  g_numSongs - testsong::kNumTestSongs - nBuiltin, nBuiltin);
-}
 
-static int  g_songSel = 0;          // selected / currently-playing song index
+// Current/last song — a single slot, not a capped array. g_curSongArg is the @SONGF
+// arg (SD filename or built-in name) replayed to re-arm on loop; g_curSongName is the
+// display name for @STATE/logs. Songs live on SD + songs.ndjson; only the one playing
+// song is in RAM (g_buf), like the drum grooves.
+static char g_curSongName[64] = "";
+static char g_curSongArg[100] = "";
+static int  g_songBrowse = 0;       // dev-key ('S') browse cursor into songs.ndjson
 static bool g_loop = false;         // when set, a song restarts itself when it ends
 static bool g_songWasPlaying = false;  // edge-detect natural song end (for loop) in loop()
 
@@ -637,18 +651,11 @@ static void applyTempos() {
     g_conductor.setBpm(g_masterBpm);
 }
 
-FLASHMEM static void songStart(int idx) {
-    if (g_numSongs == 0) return;
-    if (idx < 0) idx = 0;
-    if (idx >= g_numSongs) idx = g_numSongs - 1;
-    g_songSel = idx;
-    SongRef &r = g_songs[idx];
-    // Clean slate for EVERY song, in EVERY mode: silence sounding notes and clear latched
-    // per-engine expression (bend / mod / aftertouch). Without this, a bend left mid-glide
-    // by the previous song carries into this one — and the mode-switch path below only runs
-    // when the mode actually changes, so a MIDI->MIDI start would otherwise never reset.
-    // BUT don't panic channel 10 while a drum groove is looping — an all-channels reset
-    // would cut the drums for a beat when you press Play on a song. Spare ch10 then.
+// Clean slate before starting ANY song: silence sounding notes + clear latched
+// per-engine expression (bend / mod / aftertouch), so a bend left mid-glide by the
+// previous song can't carry over. Spare channel 10 while a drum groove is looping —
+// an all-channels reset would cut the drums for a beat when you press Play.
+static void songPrep() {
     if (g_drumPlayer.isPlaying()) {
         for (uint8_t ch = 1; ch <= 16; ++ch) if (ch != 10) g_synthSink->onAllNotesOff(ch);
     } else {
@@ -660,38 +667,81 @@ FLASHMEM static void songStart(int idx) {
     // it to unity; Tier-2 per-GM-program normalization (in the engine/sink) takes over.
     synthAuditionTrim()->setGain(1.0f);
 #endif
-    // Baked rich-event test sequence: set the device mode (MPE tests need per-note
+}
+
+// Play a baked built-in (test sequence or legacy demo) by display name. Returns true
+// if a built-in matched; false lets the caller fall back to an SD lookup.
+FLASHMEM static bool songStartBuiltin(const char *name) {
+    // Rich MPE/MIDI test sequences: set the device mode (MPE tests need per-note
     // expression) then hand the events straight to the player — no expansion needed.
-    if (r.mev) {
-        applyMidiMode(r.mpe);
+    for (int i = 0; i < testsong::kNumTestSongs; ++i) {
+        if (strcasecmp(name, testsong::kTestSongs[i].name) != 0) continue;
+        songPrep();
+        applyMidiMode(testsong::kTestSongs[i].mpe);
         g_songBpm = 120.0f; applyTempos();                             // baked test seq: no tempo meta
-        Serial.printf("[song] %s -> %s (%s, %lu events, start)\n", r.name, synthName(),
-                      r.mpe ? "MPE" : "MIDI", (unsigned long)r.mcount);
-        g_player.play(r.mev, r.mcount);
+        snprintf(g_curSongName, sizeof g_curSongName, "%s", testsong::kTestSongs[i].name);
+        snprintf(g_curSongArg,  sizeof g_curSongArg,  "%s", testsong::kTestSongs[i].name);
+        Serial.printf("[song] %s -> %s (%s, %lu events, start)\n", g_curSongName, synthName(),
+                      testsong::kTestSongs[i].mpe ? "MPE" : "MIDI", (unsigned long)testsong::kTestSongs[i].count);
+        g_player.play(testsong::kTestSongs[i].ev, testsong::kTestSongs[i].count);
         g_songBarClock = 0;
-        return;
+        return true;
     }
-    // A non-test song is normal MIDI; if a prior MPE test left the device in MPE mode,
-    // return to normal so multi-timbral songs play with their own programs.
+    // Baked legacy demos (SongEv, tempo estimate). A prior MPE test may have left the
+    // device in MPE mode — return to normal MIDI so a multitimbral song plays right.
+    for (int i = 0; i < kNumBuiltin; ++i) {
+        if (strcasecmp(name, kBuiltinSongs[i].name) != 0) continue;
+        songPrep();
+        if (g_mpeMode) applyMidiMode(false);
+        g_songBpm = kBuiltinSongs[i].bpm;
+        uint32_t n = tdsp::expandLegacyNotes(kBuiltinSongs[i].ev, kBuiltinSongs[i].count, g_buf, MAX_EVENTS);
+        snprintf(g_curSongName, sizeof g_curSongName, "%s", kBuiltinSongs[i].name);
+        snprintf(g_curSongArg,  sizeof g_curSongArg,  "%s", kBuiltinSongs[i].name);
+        Serial.printf("[song] %s (%.1f bpm est) -> %s (start)\n", g_curSongName, (double)g_songBpm, synthName());
+        if (n) { applyTempos(); g_player.play(g_buf, n); g_songBarClock = 0; }
+        return true;
+    }
+    return false;
+}
+
+// Play an SD .mid by absolute path (disp = display name, arg = the @SONGF replay arg).
+FLASHMEM static bool songStartSd(const char *path, const char *disp, const char *arg) {
+    songPrep();
     if (g_mpeMode) applyMidiMode(false);
-    uint32_t n = 0;
-    if (r.sd) {
-        g_songBpm = 120.0f;
-        int got = tdsp::smf::loadSmfFile(r.path, g_buf, MAX_EVENTS, &g_songBpm);   // parse + tempo
-        if (got <= 0) { Serial.printf("[song] SD load FAILED: %s\n", r.path); return; }
-        n = (uint32_t)got;
-        Serial.printf("[song] %s (SD, %lu events, %.1f bpm) -> %s (start)\n", r.name, (unsigned long)n, (double)g_songBpm, synthName());
-    } else {
-        g_songBpm = 120.0f;                                            // baked SongEv: tempo estimate
-        for (int i = 0; i < kNumBuiltin; ++i)
-            if (kBuiltinSongs[i].ev == r.ev) { g_songBpm = kBuiltinSongs[i].bpm; break; }
-        n = tdsp::expandLegacyNotes(r.ev, r.count, g_buf, MAX_EVENTS);  // baked SongEv -> events
-        Serial.printf("[song] %s (%.1f bpm est) -> %s (start)\n", r.name, (double)g_songBpm, synthName());
-    }
-    if (n == 0) return;
+    g_songBpm = 120.0f;
+    int got = tdsp::smf::loadSmfFile(path, g_buf, MAX_EVENTS, &g_songBpm);   // parse + tempo
+    if (got <= 0) { Serial.printf("[song] SD load FAILED: %s\n", path); return false; }
+    snprintf(g_curSongName, sizeof g_curSongName, "%s", disp);
+    snprintf(g_curSongArg,  sizeof g_curSongArg,  "%s", arg);
+    Serial.printf("[song] %s (SD, %lu events, %.1f bpm, psram=%uMB ocramFree=%luKB) -> %s (start)\n",
+                  disp, (unsigned long)got, (double)g_songBpm,
+                  (unsigned)external_psram_size, (unsigned long)(tdsp::smf::ocramHeapFree() / 1024), synthName());
     applyTempos();   // retime the song (and groove) to the master BPM
-    g_player.play(g_buf, n);                    // immediate: starts right when you press Play
+    g_player.play(g_buf, (uint32_t)got);
     g_songBarClock = 0;
+    return true;
+}
+
+// Play a song by NAME — the @SONGF primitive (mirrors @DRUMF). `arg` ending in ".mid"
+// is an SD file in /songs (or the card root); otherwise it's a built-in display name.
+// No index, no registry, no cap.
+FLASHMEM static void songStartArg(const char *arg) {
+    if (!arg || !*arg) return;
+    if (endsWithMid(arg)) {
+        char path[128]; char disp[64]; songDisp(disp, sizeof disp, arg);
+        snprintf(path, sizeof path, "/songs/%s", arg);
+        if (!SD.exists(path)) snprintf(path, sizeof path, "/%s", arg);
+        songStartSd(path, disp, arg);
+    } else if (!songStartBuiltin(arg)) {
+        Serial.printf("[song] not found: %s\n", arg);
+    }
+}
+
+// Back-compat: @SONG=<i> plays the i-th catalog row (resolved via songs.ndjson).
+FLASHMEM static void songStartIndex(int idx) {
+    char arg[120];
+    if (songByIndex(idx, arg, sizeof arg, nullptr, 0)) songStartArg(arg);
+    else Serial.printf("[song] index %d out of range\n", idx);
 }
 static void songStop() {
     g_songWasPlaying = false;   // a manual stop must NOT trigger the loop-restart
@@ -711,7 +761,7 @@ static void songStop() {
 static void songLoopTick() {
     bool now = g_player.isPlaying();
     if (g_songWasPlaying && !now && g_loop) {
-        songStart(g_songSel);       // re-arm the same song (also re-applies its MIDI/MPE mode)
+        songStartArg(g_curSongArg); // re-arm the same song (also re-applies its MIDI/MPE mode)
         now = g_player.isPlaying();
     }
     g_songWasPlaying = now;
@@ -763,13 +813,26 @@ static void catdbWriteBundled() {
         }
         k.close();
     }
-    // songs.ndjson — from the g_songs PLAY registry so row i == the @SONG=<i> index.
+    // songs.ndjson — scanned STRAIGHT off the card (+ baked built-ins), not a capped
+    // RAM registry, so there's no song limit. Order: test seqs, then /songs (and card
+    // root) *.mid, then baked demos not shadowed by an SD copy. Each row is {name} plus
+    // either "file" (SD, play via @SONGF=<file>) or "builtin":true (play via @SONGF=<name>).
     SD.remove("/tdsp/songs.ndjson");
     File so = SD.open("/tdsp/songs.ndjson", FILE_WRITE);
     if (so) {
-        for (int i = 0; i < g_numSongs; ++i) {
-            so.print("{\"i\":"); so.print(i); so.print(",\"name\":");
-            tdsp::catdb::jsonStr(so, g_songs[i].name); so.print("}\n");
+        for (int i = 0; i < testsong::kNumTestSongs; ++i) {
+            so.print("{\"name\":"); tdsp::catdb::jsonStr(so, testsong::kTestSongs[i].name);
+            so.print(",\"builtin\":true}\n");
+        }
+        if (::g_sdReady) {
+            if (!SD.exists("/songs")) SD.mkdir("/songs");
+            writeSongDir(so, "/songs");
+            writeSongDir(so, "/");                              // also list .mid at the card root
+        }
+        for (int i = 0; i < kNumBuiltin; ++i) {
+            if (sdSongExists(kBuiltinSongs[i].name)) continue;  // SD copy wins (tempo-bearing)
+            so.print("{\"name\":"); tdsp::catdb::jsonStr(so, kBuiltinSongs[i].name);
+            so.print(",\"builtin\":true}\n");
         }
         so.close();
     }
@@ -901,7 +964,11 @@ static void setDrumVol(int pct) {
 // change only, no app update. Sent when the ESP32 asks (@GETCAT, on BLE connect).
 FLASHMEM static void sendCatalog(Print& out) {
     out.print("@SONGS=");
-    for (int i = 0; i < g_numSongs; ++i) { if (i) out.print('|'); out.print(g_songs[i].name); }
+    { File sf = SD.open("/tdsp/songs.ndjson");                 // names straight from the catalog (no RAM registry)
+      if (sf) { char l[224]; int i = 0;
+        while (sf.available()) { int len = sf.readBytesUntil('\n', l, sizeof(l) - 1); l[len] = 0; if (len <= 0) continue;
+          char nm[120]; if (jsonStrField(l, "name", nm, sizeof nm)) { if (i++) out.print('|'); out.print(nm); } }
+        sf.close(); } }
     out.print('\n');
     // @INSTR carries an optional synth header as its first '|'-field so the app
     // MIDI page labels itself from the engine THIS firmware was built with:
@@ -958,9 +1025,8 @@ static void refreshCatalog(Print& out) {
 #if TDSP_HAS_SDCARD
     if (!g_sdReady) { g_sdReady = SD.begin(BUILTIN_SDCARD); Serial.printf("[sd] retry: %s\n", g_sdReady ? "ready" : "no card"); }
 #endif
-    buildSongList();
     buildDrumList();
-    sendCatalog(out);
+    sendCatalog(out);   // @SONGS streams from the existing songs.ndjson; new SD songs appear after @REINDEX
 }
 
 // --- Generic chunked file read (surface-agnostic catalog transport) ----------
@@ -1122,9 +1188,10 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         reply.printf("@DXPICKED=%s\t%d\t%s\n", buf, voice, nm ? nm : "?");
     }
 #endif
+    else if (strncmp(line, "@SONGF=", 7) == 0)    songStartArg(line + 7);   // @SONGF=<filename|name> (play by name — the app's path)
     else if (strncmp(line, "@SONG=", 6) == 0) {
         if (strcmp(line + 6, "stop") == 0) songStop();
-        else songStart(atoi(line + 6));   // @SONG=<song index>
+        else songStartIndex(atoi(line + 6));   // @SONG=<catalog index> (legacy; resolved via songs.ndjson)
     }
     else if (strcmp(line, "@GETCAT") == 0)        refreshCatalog(reply);   // re-scan SD + send catalog
     else if (strcmp(line, "@REINDEX") == 0)       { tdsp::catdb::buildCatalog(synthName(), drumEngineOk(), kDrumEngineName, catdbWriteBundled, millis()); reply.println("@REINDEXED"); }  // rebuild /tdsp/*.ndjson DB (upsert)
@@ -1258,7 +1325,8 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         reply.printf("\"arp\":{\"on\":%d,\"pat\":%d,\"rate\":%d,\"oct\":%d,\"latch\":%d},",
                      g_arpFilter.enabled() ? 1 : 0, (int)g_arpFilter.pattern(), (int)g_arpFilter.rate(),
                      g_arpFilter.octaveRange(), g_arpFilter.latch() ? 1 : 0);
-        reply.printf("\"song\":{\"playing\":%d,\"i\":%d,\"p\":%d},", g_player.isPlaying() ? 1 : 0, g_songSel, g_player.positionPermille());
+        reply.printf("\"song\":{\"playing\":%d,\"p\":%d,\"name\":", g_player.isPlaying() ? 1 : 0, g_player.positionPermille());
+        tdsp::catdb::jsonStr(reply, g_curSongName); reply.print("},");
         reply.printf("\"drums\":{\"kit\":%d,\"playing\":%d},", g_drumKit, g_drumPlayer.isPlaying() ? 1 : 0);
         reply.print("\"voice\":{");
 #if defined(TDSP_SYNTH_DEXED) || defined(TDSP_SYNTH_DEXED_POOL)
@@ -1328,7 +1396,11 @@ void setup() {
     MTP.begin();
     if (g_sdReady) MTP.addFilesystem(SD, "T-DSP Songs");
 #endif
-    buildSongList();
+    // Songs are catalog-backed (no RAM registry); seed the current-song slot + browse
+    // cursor from songs.ndjson if a catalog exists, so @STATE and the dev keys have a
+    // starting point before the app picks one. New songs appear after @REINDEX.
+    { char nm[64]; if (songByIndex(0, g_curSongArg, sizeof g_curSongArg, nm, sizeof nm)) snprintf(g_curSongName, sizeof g_curSongName, "%s", nm); }
+    Serial.printf("[sd] songs: %d in catalog\n", songCatalogCount());
     buildDrumList();   // scan /drums for loopable channel-10 grooves
 
     // Two pools now: the int16 pool feeds Dexed, the BT resampler, the optical-out
@@ -1533,9 +1605,14 @@ void loop() {
             else if (c == 'i') { Serial.println("[cmd] re-init codec"); setupCodec(); applyVol();
                                  Serial.printf("[cmd] codec=%s (%s), vol %.0f dB\n",
                                                g_codecOk ? "OK" : "FAIL", g_codecMsg, g_dvol); }
-            else if (c == 'W') { if (g_player.isPlaying()) songStop(); else songStart(g_songSel); }  // play/stop
-            else if (c == 'S') { if (g_numSongs) g_songSel = (g_songSel + 1) % g_numSongs;  // pick song
-                                 Serial.printf("[song] selected: %s\n", g_songs[g_songSel].name); }
+            else if (c == 'W') { if (g_player.isPlaying()) songStop();                       // play/stop
+                                 else if (g_curSongArg[0]) songStartArg(g_curSongArg);
+                                 else songStartIndex(0); }
+            else if (c == 'S') { int n = songCatalogCount();                                 // browse to the next song (no play)
+                                 if (n > 0) { g_songBrowse = (g_songBrowse + 1) % n;
+                                   char nm[64]; if (songByIndex(g_songBrowse, g_curSongArg, sizeof g_curSongArg, nm, sizeof nm)) {
+                                     snprintf(g_curSongName, sizeof g_curSongName, "%s", nm);
+                                     Serial.printf("[song] selected: %s\n", g_curSongName); } } }
             else if (c == 'D') { if (g_drumPlayer.isPlaying()) drumStop(); else drumStart(g_drumSel); }  // drums play/stop
             else if (c == 'C') { if (g_numDrums) g_drumSel = (g_drumSel + 1) % g_numDrums;   // Cycle groove
                                  Serial.printf("[drum] selected: %s\n", g_drums[g_drumSel].name);

@@ -8,8 +8,33 @@
 #include <SD.h>
 #include "MidiSmfParser.h"
 
+#if defined(__IMXRT1062__)
+// Teensy 4.1 core: PSRAM (EXTMEM) allocator + the MB detected at boot. Used to keep
+// the whole-file song scratch OUT of the small OCRAM heap the audio engine shares.
+extern "C" uint8_t external_psram_size;
+extern "C" void *extmem_malloc(size_t);
+extern "C" void  extmem_free(void *);
+// OCRAM (RAM2) malloc-heap bounds, for a pre-alloc safety check on no-PSRAM boards.
+extern "C" unsigned long _heap_start;
+extern "C" unsigned long _heap_end;
+extern "C" char *__brkval;
+#endif
+
 namespace tdsp {
 namespace smf {
+
+// Bytes still allocatable from the OCRAM heap (current sbrk break -> heap top). This
+// heap is SHARED with the audio engine, so loading a whole song file into it without
+// margin can clobber audio memory and hang the main loop. 0 off-target (host: plenty).
+static inline size_t ocramHeapFree() {
+#if defined(__IMXRT1062__)
+    char *brk = __brkval ? __brkval : (char *)&_heap_start;
+    char *top = (char *)&_heap_end;
+    return (top > brk) ? (size_t)(top - brk) : 0;
+#else
+    return (size_t)-1;   // host: effectively unlimited
+#endif
+}
 
 // Load /path off the SD card and parse it into out[0..maxOut). Returns the
 // event count, or -1 on error (open/size/read/parse failure). Runs from the
@@ -30,14 +55,40 @@ static int loadSmfFile(const char *path, MidiFileEvent *out, int maxOut, float *
     // the old ~121 KB TickEv block was what forced the out-buffer aliasing hack and
     // still overflowed the ~80 KB OCRAM heap on no-PSRAM boards. A typical song file
     // (tens of KB) fits the heap easily; a file too big to malloc returns -1 cleanly.
-    uint8_t *buf = (uint8_t *)malloc(len);
+    // On a Teensy 4.1 WITH PSRAM, put the whole-file scratch in PSRAM (extmem): the
+    // OCRAM malloc heap is only ~tens of KB and is shared with the audio engine, so a
+    // big song (e.g. a dense 30 KB+ piano piece) either fails or — worse — faults the
+    // main loop against it. PSRAM has megabytes free. Falls back to the OCRAM heap on
+    // no-PSRAM boards and off-target (host) builds.
+    uint8_t *buf = nullptr; bool ext = false; (void)ext;
+#if defined(__IMXRT1062__)
+    if (external_psram_size > 0) { buf = (uint8_t *)extmem_malloc(len); ext = (buf != nullptr); }
+#endif
+    if (!buf) {
+        // OCRAM-heap fallback (no PSRAM, or PSRAM full). This heap is SHARED with the
+        // audio engine, and a large whole-file alloc here corrupts audio memory and
+        // hangs the main loop EVEN when "free" heap looks ample — observed on-device: a
+        // 31 KB song hung with 132 KB reportedly free, while 13 KB loaded fine. So a
+        // free-space margin is NOT a sufficient guard; we hard-cap the OCRAM path to a
+        // size proven safe (and still require headroom). Larger songs need PSRAM and
+        // fail here gracefully (-1) instead of hanging.
+        const size_t kOcramSongCap = 16u * 1024u;
+        if (len > kOcramSongCap || ocramHeapFree() < len + 32768u) { f.close(); return -1; }
+        buf = (uint8_t *)malloc(len);
+    }
     if (!buf) { f.close(); return -1; }
     size_t got = f.read(buf, len);
     f.close();
-    if (got != len) { free(buf); return -1; }
+    auto release = [&](uint8_t *p) {
+#if defined(__IMXRT1062__)
+        if (ext) { extmem_free(p); return; }
+#endif
+        free(p);
+    };
+    if (got != len) { release(buf); return -1; }
     if (outBpm) *outBpm = initialBpm(buf, len);
     int n = parseSmf(buf, len, out, maxOut);
-    free(buf);
+    release(buf);
     return n;
 }
 

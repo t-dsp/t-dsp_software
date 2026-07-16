@@ -266,9 +266,13 @@ static bool buildCatalog(const char *engineName, bool hasDrums, const char *drum
         for (int i = 0; i < 7; ++i) {
             if (i) ix.write(',');
             char p[40]; snprintf(p, sizeof p, "/tdsp/%s.ndjson", fs[i]);
+            // Announce each file's byte size so a client can total "how much data" up
+            // front (index.ndjson is fetched first) and show a real load-progress bar.
+            uint32_t fb = 0; { File pf = SD.open(p); if (pf) { fb = (uint32_t)pf.size(); pf.close(); } }
             ix.print("{\"type\":"); jsonStr(ix, fs[i]);
             ix.print(",\"path\":"); jsonStr(ix, p);
-            ix.print(",\"present\":"); ix.print(SD.exists(p) ? "true" : "false"); ix.print("}");
+            ix.print(",\"present\":"); ix.print(SD.exists(p) ? "true" : "false");
+            ix.print(",\"bytes\":"); ix.print(fb); ix.print("}");
         }
         ix.print("]}\n");
         ix.close();
