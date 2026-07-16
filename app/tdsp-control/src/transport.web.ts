@@ -175,5 +175,6 @@ export class WebSerialTransport implements Transport {
   arpLatch(on: boolean) { this.send('@ARPLATCH=' + (on ? 1 : 0)); }
   espPair() { this.send('P'); }
   espReconnect() { this.send('r'); }
+  espDisconnect() { this.send('X'); }   // Teensy relays 'X' -> ESP32 'x' (A2DP disconnect)
   espForget() { this.send('F'); }
 }

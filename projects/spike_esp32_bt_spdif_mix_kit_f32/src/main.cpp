@@ -2011,6 +2011,7 @@ void loop() {
         if (!kit.handleChar(Serial, c)) {     // g / r / U handled by the kit
             if (c == 'P') { kit.uart().write('p'); Serial.println("[cmd] -> ESP32: ENTER pairing mode"); }
             else if (c == 'F') { kit.uart().write('f'); Serial.println("[cmd] -> ESP32: FORGET bond + pairing mode"); }
+            else if (c == 'X') { kit.uart().write('x'); Serial.println("[cmd] -> ESP32: DISCONNECT A2DP source"); }
             else if (c == 't') { testTone.amplitude(0.4f); setMix(0.0f, 1.0f, 0.0f);
                                  Serial.println("[cmd] local DAC tone 440Hz -> BOTH"); }
             else if (c == 'a') { testTone.amplitude(0.0f); setMix(1.0f, 0.0f, 1.0f);

@@ -69,7 +69,8 @@ export interface Transport {
   arpOctaves(n: number): void;
   arpLatch(on: boolean): void;
   espPair(): void;
-  espReconnect(): void;
+  espReconnect(): void;      // (re)connect A2DP audio to the last paired source
+  espDisconnect(): void;     // drop the current A2DP audio source
   espForget(): void;
 }
 

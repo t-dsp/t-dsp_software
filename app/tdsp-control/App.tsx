@@ -89,6 +89,9 @@ export default function App() {
   const { width } = useWindowDimensions();
   const cols = width < 560 ? 1 : width < 900 ? 2 : 3;   // responsive homepage grid columns
   const [connected, setConnected] = useState(false);
+  const [connecting, setConnecting] = useState(false);
+  const [userDisc, setUserDisc] = useState(false);      // user tapped Disconnect App → suppress auto-reconnect
+  const connectingRef = useRef(false);                  // synchronous guard so the auto-poll can't double-connect
   const [cat, setCat] = useState<Catalog>(EMPTY_CATALOG);
   const [loaded, setLoaded] = useState(false);
   const [route, setRoute] = useState<string>('home');   // 'home' or a section id
@@ -140,15 +143,40 @@ export default function App() {
     }
   }), []);
 
-  async function connect() {
+  async function connect(auto = false) {
+    if (connectingRef.current || tp.isConnected()) return;   // live check (state may be stale) — no double-connect
+    connectingRef.current = true; setConnecting(true);
     try {
       await tp.connect(); setConnected(true);
       await load();
       tp.requestState();   // pull the device's real current settings → hydrate every card (see @STATE handler)
     }
-    catch (e: any) { notify('Connect failed: ' + e + (Platform.OS === 'web' ? '\n\nClose any control.html tab (one page owns the port), then retry.' : '')); }
+    catch (e: any) { if (!auto) notify('Connect failed: ' + e + (Platform.OS === 'web' ? '\n\nClose any control.html tab (one page owns the port), then retry.' : '')); }
+    finally { connectingRef.current = false; setConnecting(false); }
   }
   async function disconnect() { try { await tp.disconnect(); } catch {} setConnected(false); setLoaded(false); setRoute('home'); }
+  // Button handlers wrap connect/disconnect so a *manual* disconnect suppresses auto-reconnect
+  // (else the poll below would immediately reconnect and the Disconnect button would do nothing).
+  const userConnect = () => { setUserDisc(false); connect(); };
+  const userDisconnect = () => { setUserDisc(true); disconnect(); };
+
+  // Auto-connect + auto-reconnect (native/BLE only). Web Serial can't auto-open — the browser
+  // requires a user gesture to pick the port — so on web we keep the manual Connect button.
+  // Every 4s: reflect a dropped link into UI state, then (unless the user disconnected on purpose)
+  // scan+connect. This is why you no longer have to tap "Connect": it finds the T-DSP on its own.
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    let cancelled = false;
+    const tick = () => {
+      if (cancelled) return;
+      const live = tp.isConnected();
+      if (!live) { setConnected(false); setLoaded(false); }         // no-op if already false
+      if (!live && !userDisc && !connectingRef.current) connect(true);
+    };
+    tick();
+    const id = setInterval(tick, 4000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [userDisc]);
   async function load() {
     try { setCat(await loadCatalog(tp)); setLoaded(true); }
     catch (e: any) {
@@ -313,11 +341,16 @@ export default function App() {
       body: (
         <>
           <Text style={s.muted}>{bt.conn ? 'Connected: ' + (bt.peer || 'source') : 'No audio source connected'}</Text>
+          <Pressable style={[s.btn, s.btnWide]} onPress={() => (bt.conn ? tp.espDisconnect() : tp.espReconnect())}>
+            <Text style={s.btnText}>{bt.conn ? 'Disconnect Bluetooth Audio' : 'Connect Bluetooth Audio'}</Text>
+          </Pressable>
           <Row>
             <Pressable style={s.btn} onPress={() => tp.espPair()}><Text style={s.btnText}>Pairing mode</Text></Pressable>
-            <Pressable style={[s.btn, s.btnGhost]} onPress={() => tp.espReconnect()}><Text style={s.btnText}>Reconnect</Text></Pressable>
             <Pressable style={[s.btn, s.btnGhost]} onPress={() => tp.espForget()}><Text style={s.btnText}>Forget</Text></Pressable>
           </Row>
+          <Pressable style={[s.btn, s.btnGhost, s.btnWide]} onPress={userDisconnect}>
+            <Text style={s.btnText}>Disconnect App</Text>
+          </Pressable>
         </>
       ),
     },
@@ -492,8 +525,8 @@ export default function App() {
           <View style={[s.dot, connected && s.dotOn]} />
           <Text style={s.brand}>T-DSP</Text>
           <View style={{ flex: 1 }} />
-          <Pressable style={s.btn} onPress={() => (connected ? disconnect() : connect())}>
-            <Text style={s.btnText}>{connected ? 'Disconnect' : `${tp.name} • Connect`}</Text>
+          <Pressable style={s.btn} onPress={() => (connected ? userDisconnect() : userConnect())}>
+            <Text style={s.btnText}>{connected ? 'Disconnect App' : connecting ? 'Connecting…' : 'Connect App'}</Text>
           </Pressable>
         </View>
         <Text style={s.statline}>{headerStatus}</Text>
@@ -506,7 +539,19 @@ export default function App() {
         </View>
       </View>
 
-      {!connected && <Text style={[s.muted, { textAlign: 'center', marginTop: 48 }]}>Connect a T-DSP device to begin.</Text>}
+      {!connected && (
+        <View style={s.connectHome}>
+          <Pressable style={[s.btn, s.connectBig]} onPress={userConnect}>
+            <Text style={s.connectBigText}>{connecting ? 'Connecting…' : 'Connect App'}</Text>
+          </Pressable>
+          <Text style={[s.muted, { textAlign: 'center', marginTop: 14 }]}>
+            {Platform.OS === 'web'
+              ? `Connect the app to your T-DSP over ${tp.name} to begin.`
+              : connecting ? 'Searching for your T-DSP over Bluetooth…'
+              : 'Connecting automatically — tap if it doesn’t find your T-DSP.'}
+          </Text>
+        </View>
+      )}
 
       {connected && (
         <View style={{ flex: 1 }}>
@@ -549,7 +594,7 @@ export default function App() {
 }
 
 const s = StyleSheet.create({
-  app: { flex: 1, backgroundColor: C.bg, paddingTop: Platform.OS === 'web' ? 0 : 34 },
+  app: { flex: 1, backgroundColor: C.bg, paddingTop: Platform.OS === 'web' ? 12 : 52 },
   header: { paddingHorizontal: 14, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: C.border, backgroundColor: C.bg },
   brandRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   dot: { width: 11, height: 11, borderRadius: 6, backgroundColor: '#da3633' },
@@ -598,6 +643,10 @@ const s = StyleSheet.create({
   text: { color: C.text, fontSize: 14 },
   btn: { backgroundColor: '#238636', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 7, alignItems: 'center' },
   btnWide: { marginTop: 4 },
+  // prominent "Connect App" call-to-action shown on the home screen when disconnected
+  connectHome: { marginTop: 56, paddingHorizontal: 24, alignItems: 'center' },
+  connectBig: { paddingVertical: 16, paddingHorizontal: 44, minWidth: 240 },
+  connectBigText: { color: C.text, fontSize: 17, fontWeight: '700' },
   grow1: { flex: 1 },
   headActions: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0 },   // content-sized → buttons keep natural width on the page header
   hdrActionsRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, paddingHorizontal: 14, paddingBottom: 12, marginTop: -2 },

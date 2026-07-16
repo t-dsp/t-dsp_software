@@ -281,5 +281,6 @@ export class BleTransport implements Transport {
   // ESP32-LOCAL Bluetooth control (act on the receiver, not the Teensy) → opcodes.
   espPair() { this.cmd(CMD.PAIRING_MODE); }
   espReconnect() { this.cmd(CMD.RECONNECT); }
+  espDisconnect() { this.cmd(CMD.DISCONNECT); }
   espForget() { this.cmd(CMD.FORGET); }
 }
