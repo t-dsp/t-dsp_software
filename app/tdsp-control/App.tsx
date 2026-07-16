@@ -48,7 +48,7 @@ const END_MODES: { key: EndMode; icon: string; label: string }[] = [
 // The opaque app-owned state we persist on the device (@APP=) so a reload/reconnect restores
 // it. Keep it small (device RAM buffer is fixed) and JSON-serializable; grow it as more
 // firmware-invisible UI settings need to survive a reconnect.
-type AppState = { end: EndMode };
+type AppState = { end: EndMode; groove?: string };   // groove = last-selected drum groove path (the device only reports the kit, not the picked groove)
 const isEndMode = (v: any): v is EndMode => END_MODES.some(m => m.key === v);
 
 function notify(msg: string) { if (Platform.OS === 'web') (globalThis as any).alert?.(msg); else Alert.alert('T-DSP', msg); }
@@ -273,6 +273,9 @@ export default function App() {
   function hydrateApp(a: any) {
     if (!a || typeof a !== 'object') return;
     if (isEndMode(a.end)) { appStateRef.current.end = a.end; setEndMode(a.end); tp.songLoop(a.end === 'repeat'); }
+    // The device's @STATE reports the drum kit but not which groove is picked, so restore the
+    // last-selected groove here — that way the Drums card shows it and ‹/› step from it at startup.
+    if (typeof a.groove === 'string' && a.groove) { appStateRef.current.groove = a.groove; setDrums(d => ({ ...d, sel: a.groove })); }
   }
 
   useEffect(() => tp.onLine(line => {
@@ -448,9 +451,13 @@ export default function App() {
   const stepGroove = (dir: number) => {   // step the drum preset; if one is playing, switch to the new one
     if (!grooves.length) return;
     const idx = grooves.findIndex(g => g.path === drums.sel);
-    const ni = Math.max(0, Math.min(grooves.length - 1, (idx < 0 ? 0 : idx) + dir));
+    // From no selection (idx<0) the first ‹/› lands on the first/last groove instead of skipping
+    // one — same cursor rule the song player's pickNext() uses, so ‹/› work right at startup.
+    const base = idx < 0 ? (dir > 0 ? -1 : 0) : idx;
+    const ni = Math.max(0, Math.min(grooves.length - 1, base + dir));
     const g = grooves[ni]; if (!g) return;
     setDrums(d => { if (d.playing) { tp.playGrooveFile(grooveFile(g)); return { ...d, sel: g.path, playing: g.name }; } return { ...d, sel: g.path }; });
+    persistApp({ groove: g.path });   // remember the pick so it survives an app reconnect
   };
   // The shared "continue rules": which song a skip (‹ ›) or a natural end advances to, per the
   // end-mode. Shuffle → a random *other* song; every other mode → the linear neighbor, wrapping
@@ -697,6 +704,9 @@ export default function App() {
       </>),
       body: (
         <View style={s.synthWrap}>
+          {/* Synth output level — the same control as the MIDI Player's Volume (both drive
+              @SONGVOL, the synth mix-bus fader), surfaced here since this is the synth page. */}
+          <VolSlider label="Volume" value={songVol} onChange={setSongVol} onCommit={v => tp.songVol(v)} disabled={!connected} />
           {/* nav bar: up-one-level on the left, breadcrumb trail beside it */}
           <View style={s.navBar}>
             <Pressable style={[s.upBtn, atRoot && s.upBtnOff]} onPress={goUp} disabled={atRoot}>
@@ -857,7 +867,7 @@ export default function App() {
           {cat.grooves.length === 0 ? <Text style={s.muted}>No grooves indexed.</Text> : (
             <ScrollView style={s.list} nestedScrollEnabled>
               {grooves.map(g => <ListBtn key={g.path} label={(drums.playing === g.name ? '♪ ' : '') + g.name} sel={drums.sel === g.path}
-                onPress={() => setDrums(d => ({ ...d, sel: g.path }))} />)}
+                onPress={() => { setDrums(d => ({ ...d, sel: g.path })); persistApp({ groove: g.path }); }} />)}
             </ScrollView>
           )}
           <Row>
