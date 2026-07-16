@@ -27,7 +27,9 @@
 #include <TAC5212.h>
 #include <TDspProgrammingKit.h>
 #include <MIDI.h>
+#if TDSP_HAS_USB_MIDI_HOST
 #include <USBHost_t36.h>   // USB host: receive MIDI from a controller (e.g. LinnStrument) via USB
+#endif
 #include <MidiRouter.h>    // MPE-aware fan-out: bend->semitones, CC74->timbre, pressure->onPressure
 #include <SD.h>
 #include <MTP_Teensy.h>   // expose the SD card to the host over USB (Serial+MTP)
@@ -131,8 +133,10 @@ tdsp::MidiFilePlayer   g_drumPlayer;         // dedicated LOOPING drum-groove pl
 
 // Live MIDI: a USB-host controller (LinnStrument etc.) + the DIN MIDI IN both feed
 // one MPE-aware router that normalizes bend/timbre/pressure into the synth sink.
+#if TDSP_HAS_USB_MIDI_HOST
 USBHost                g_usbHost;
 MIDIDevice             g_usbMidi(g_usbHost);
+#endif
 tdsp::MidiRouter       g_router;
 
 // Master clock: THE tempo authority. The song + drum players follow it via
@@ -1422,6 +1426,7 @@ void setup() {
     MIDI.setHandleNoteOff(midiNoteOff);
     MIDI.setHandlePitchBend(midiPitch);
     MIDI.setHandleControlChange(midiCC);
+#if TDSP_HAS_USB_MIDI_HOST
     // USB host: a controller (LinnStrument) plugged into the Teensy 4.1 host port.
     g_usbHost.begin();
     g_usbMidi.setHandleNoteOn(midiNoteOn);
@@ -1429,6 +1434,7 @@ void setup() {
     g_usbMidi.setHandleControlChange(midiCC);
     g_usbMidi.setHandlePitchChange(midiPitch);
     g_usbMidi.setHandleAfterTouchChannel(midiPressure);   // channel pressure = MPE Z-axis
+#endif
 
     // Live MIDI -> arp -> synth. The arp is a router sink; in bypass (default) it
     // forwards every event verbatim to its downstream synth sink, so behaviour is
@@ -1530,8 +1536,10 @@ void loop() {
 
     // Live MIDI: drain DIN + USB-host controllers, then advance the (non-blocking) song.
     while (MIDI.read()) { /* handlers fire per message */ }
+#if TDSP_HAS_USB_MIDI_HOST
     g_usbHost.Task();
     while (g_usbMidi.read()) { /* USB-host MIDI handlers fire per message */ }
+#endif
     g_player.tick();
     g_drumPlayer.tick();   // loops internally (setLooping), so no external re-arm needed
     g_arpFilter.tick(micros());   // drain the arp's gate-off queue (note steps fire on onClock)

@@ -468,7 +468,9 @@ static void sweepWait(uint32_t ms) {
 #if TDSP_HAS_SDCARD
         MTP.loop();          // service the MTP endpoint so the host doesn't time it out
 #endif
+#if TDSP_HAS_USB_MIDI_HOST
         g_usbHost.Task();
+#endif
         yield();
     }
 }

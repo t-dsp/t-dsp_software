@@ -12,18 +12,40 @@
 // makes the board's identity explicit and reviewable in one place.
 #pragma once
 
+// Capabilities/roles use #ifndef so the precedence is: command-line -D (env
+// override / testing) > this board header > tdsp_hw_config.h defaults. A build
+// normally sets none of these, so the header's values apply as written.
+
 // --- Capabilities this board HAS --------------------------------------------
+#ifndef TDSP_HAS_ESP32_BT
 #define TDSP_HAS_ESP32_BT      1
+#endif
+#ifndef TDSP_HAS_DIN_MIDI
 #define TDSP_HAS_DIN_MIDI      1
+#endif
+#ifndef TDSP_HAS_USB_MIDI_HOST
 #define TDSP_HAS_USB_MIDI_HOST 1
+#endif
+#ifndef TDSP_HAS_MIC_PREAMP
 #define TDSP_HAS_MIC_PREAMP    0            // line-level input; no mic preamp populated
+#endif
+#ifndef TDSP_IN_TYPE
 #define TDSP_IN_TYPE           TDSP_IN_LINE
+#endif
+#ifndef TDSP_OUT_TYPE
 #define TDSP_OUT_TYPE          TDSP_OUT_HEADPHONE
+#endif
 
 // --- Roles this board runs ---------------------------------------------------
+#ifndef TDSP_ROLE_SYNTH
 #define TDSP_ROLE_SYNTH        1
+#endif
+#ifndef TDSP_ROLE_SONG_PLAYER
 #define TDSP_ROLE_SONG_PLAYER  1
+#endif
+#ifndef TDSP_ROLE_MIXER
 #define TDSP_ROLE_MIXER        1
+#endif
 // TDSP_ROLE_BT_RECEIVER defaults to TDSP_HAS_ESP32_BT (1 here).
 
 // --- Power-on defaults (leave firmware defaults) -----------------------------

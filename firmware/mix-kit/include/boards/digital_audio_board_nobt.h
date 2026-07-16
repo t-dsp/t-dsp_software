@@ -12,18 +12,38 @@
 // Select it with:  -D TDSP_BOARD_HEADER="boards/digital_audio_board_nobt.h"
 #pragma once
 
+// #ifndef so precedence is: -D override > this header > tdsp_hw_config defaults.
+
 // --- Capabilities this board HAS --------------------------------------------
+#ifndef TDSP_HAS_ESP32_BT
 #define TDSP_HAS_ESP32_BT      0            // ESP32 not populated -> no Bluetooth, no A2DP receiver
+#endif
+#ifndef TDSP_HAS_DIN_MIDI
 #define TDSP_HAS_DIN_MIDI      1
+#endif
+#ifndef TDSP_HAS_USB_MIDI_HOST
 #define TDSP_HAS_USB_MIDI_HOST 1
+#endif
+#ifndef TDSP_HAS_MIC_PREAMP
 #define TDSP_HAS_MIC_PREAMP    0
+#endif
+#ifndef TDSP_IN_TYPE
 #define TDSP_IN_TYPE           TDSP_IN_LINE
+#endif
+#ifndef TDSP_OUT_TYPE
 #define TDSP_OUT_TYPE          TDSP_OUT_HEADPHONE
+#endif
 
 // --- Roles this board runs ---------------------------------------------------
+#ifndef TDSP_ROLE_SYNTH
 #define TDSP_ROLE_SYNTH        1
+#endif
+#ifndef TDSP_ROLE_SONG_PLAYER
 #define TDSP_ROLE_SONG_PLAYER  1
+#endif
+#ifndef TDSP_ROLE_MIXER
 #define TDSP_ROLE_MIXER        1
+#endif
 // TDSP_ROLE_BT_RECEIVER defaults to TDSP_HAS_ESP32_BT (0 here) -> A2DP path dropped.
 
 // Power-on defaults left at firmware defaults (see tdsp_hw_config.h).
