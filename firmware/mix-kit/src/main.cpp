@@ -97,8 +97,13 @@ AudioInputTDM_F32      tdmIn;                // SAI1 TDM RX: codec ADC (loopback
 // (A) Bluetooth: the async I2S resampler is int16-only (lib/TDspAsyncI2S has no
 // F32 variant), so we bridge its two output channels to F32 immediately with two
 // AudioConvert_I16toF32 — "convert as soon as possible".
+// Gated by TDSP_ROLE_BT_RECEIVER (default = TDSP_HAS_ESP32_BT). A board with no
+// ESP32 sets it 0 to drop the A2DP path — reclaiming the async I2S resampler's
+// filter[] (DTCM). The ESP32 control/flash kit is separate and always present.
+#if TDSP_ROLE_BT_RECEIVER
 AsyncAudioInput<AsyncAudioInputI2S2_16bitslave> btIn(false, false, 100, 20, 80);
 AudioConvert_I16toF32  btToF32L, btToF32R;
+#endif
 
 // (B) S/PDIF: F32-native async resampler — no int16 anywhere on this path. The
 // optical-OUT self-test tone stays int16 (separate SPDIF TX peripheral; it does
@@ -143,17 +148,24 @@ tdsp::ArpFilter        g_arpFilter;                 // live MIDI -> arp -> synth
 static bool            g_mpeMode = false;    // false = normal MIDI (bend +-2, ch10 drums), true = MPE
 
 AudioMixer4_F32        outL, outR;           // F32 mix: 0=BT, 1=local tone, 2=S/PDIF-in, 3=synth
-AudioAnalyzePeak_F32   peakBt, peakSpdif, peakOut;
+AudioAnalyzePeak_F32   peakSpdif, peakOut;
+#if TDSP_ROLE_BT_RECEIVER
+AudioAnalyzePeak_F32   peakBt;
+#endif
 
 // int16 leg: optical-out tone -> SPDIF TX (self-test loopback source)
 AudioConnection     c_txL    (spdifTone,  0, spdifOut, 0);
 AudioConnection     c_txR    (spdifTone,  0, spdifOut, 1);
 // int16 -> F32 bridges (BT L/R) — the int16 side of the convert blocks
+#if TDSP_ROLE_BT_RECEIVER
 AudioConnection     c_btcL   (btIn,       0, btToF32L, 0);
 AudioConnection     c_btcR   (btIn,       1, btToF32R, 0);
+#endif
 // F32 mix bus and 24-bit TDM output (synth engine feeds slot 3 from its backend)
-AudioConnection_F32 c_btL    (btToF32L,   0, outL, 0);
+#if TDSP_ROLE_BT_RECEIVER
+AudioConnection_F32 c_btL    (btToF32L,   0, outL, 0);   // BT -> mix slot 0
 AudioConnection_F32 c_btR    (btToF32R,   0, outR, 0);
+#endif
 AudioConnection_F32 c_toneL  (testTone,   0, outL, 1);
 AudioConnection_F32 c_toneR  (testTone,   0, outR, 1);
 #if TDSP_SPDIF_IN
@@ -162,7 +174,9 @@ AudioConnection_F32 c_spR    (spdifIn,    1, outR, 2);
 #endif
 AudioConnection_F32 c_outL   (outL,       0, tdmOut, 0);
 AudioConnection_F32 c_outR   (outR,       0, tdmOut, 1);
+#if TDSP_ROLE_BT_RECEIVER
 AudioConnection_F32 c_pkBt   (btToF32L,   0, peakBt,    0);
+#endif
 #if TDSP_SPDIF_IN
 AudioConnection_F32 c_pkSp   (spdifIn,    0, peakSpdif, 0);
 #endif
@@ -466,7 +480,11 @@ FLASHMEM static void setupCodec() {
 // mixer helper: 0=BT, 1=local test tone, 2=S/PDIF-in (slot 3 = Dexed, set once,
 // stays on independently of source-mode switches)
 static void setMix(float bt, float tone, float spdif) {
+#if TDSP_ROLE_BT_RECEIVER
     outL.gain(0, bt);    outR.gain(0, bt);
+#else
+    (void)bt;   // no BT receiver: mix slot 0 has no source
+#endif
     outL.gain(1, tone);  outR.gain(1, tone);
 #if !defined(TDSP_DRUM_TSF) && !defined(TDSP_DRUM_VOICE)
     outL.gain(2, spdif); outR.gain(2, spdif);
@@ -1573,7 +1591,11 @@ void loop() {
     // Status heartbeat print (the LED itself is driven by kit.service()).
     if (hb >= 1000) {
         hb = 0;
+#if TDSP_ROLE_BT_RECEIVER
         float pbt = peakBt.available()    ? peakBt.read()    : 0.0f;
+#else
+        float pbt = 0.0f;   // BT receiver gated out
+#endif
         float psp = peakSpdif.available() ? peakSpdif.read() : 0.0f;
         float po  = peakOut.available()   ? peakOut.read()   : 0.0f;
         Serial.printf("alive up=%lus  codec=%s(%s)  spdif=%s inFreq=%.0f  "
