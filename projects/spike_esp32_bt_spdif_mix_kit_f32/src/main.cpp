@@ -1050,21 +1050,21 @@ static void applyMidiMode(bool mpe) {
 // the USB CDC port (a Web Serial browser page, no ESP32 required). `reply` is the
 // stream a query answers on (only @GETCAT replies) so each channel gets its own
 // catalog. Returns true if the line was a recognized command.
-#ifdef TDSP_HAS_REPLAYGAIN
+#if defined(TDSP_HAS_REPLAYGAIN) && TDSP_DIAGNOSTICS
 static void runGainSweep(int startIdx = 0);   // ReplayGain sweep (any backend); resumable from a voice index
 #endif
-#ifdef TDSP_SYNTH_DEXED_POOL
+#if defined(TDSP_SYNTH_DEXED_POOL) && TDSP_DIAGNOSTICS
 static void runMpeSweep(int startIdx);        // MPE demo on each instrument; resumable
 static void runAxisProof(int axis);           // capture 1 note with an MPE axis at full
 static void runMpeCheck(void);                // measure every instrument under MPE; flag silent/clip
 #endif
-#ifdef TDSP_SYNTH_SF2_TSF
+#if defined(TDSP_SYNTH_SF2_TSF) && TDSP_DIAGNOSTICS
 static void runAxisProof(int axis);           // MPE axis proof ported to TSF (validates CC#74->cutoff)
 #endif
 
 FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     if      (strncmp(line, "@VOL=", 5) == 0)      setMasterVolumePct(atoi(line + 5));
-#ifdef TDSP_HAS_REPLAYGAIN
+#if defined(TDSP_HAS_REPLAYGAIN) && TDSP_DIAGNOSTICS
     else if (strncmp(line, "@GAIN=", 6) == 0)     runGainSweep(atoi(line + 6));   // resume sweep from index
 #endif
     else if (strncmp(line, "@DXVOICE=", 9) == 0) { synthSetInstrument(atoi(line + 9));
@@ -1153,9 +1153,11 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         Serial.printf("[timbre] mask=%u  bright=%d vib=%d trem=%d\n", g_poolSink.timbreMask(),
                       (m & 2) != 0, (m & 4) != 0, (m & 8) != 0);
     }
+#if TDSP_DIAGNOSTICS
     else if (strncmp(line, "@MPESWEEP=", 10) == 0) runMpeSweep(atoi(line + 10));   // MPE demo on each instrument from <start>
     else if (strncmp(line, "@PROOF=", 7) == 0)     runAxisProof(atoi(line + 7));   // capture 1 note w/ axis at full (0=press 1=timbre 2=bend 3=neutral)
     else if (strcmp(line, "@MPECHECK") == 0)       runMpeCheck();                  // QA every instrument under MPE (silent/clip)
+#endif
     else if (strncmp(line, "@LFOMODE=", 9) == 0) {     // 0 = respect patch LFO, 1 = force LFO
         bool force = atoi(line + 9) != 0;
         g_poolSink.setLfoForce(force);
@@ -1163,7 +1165,7 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         Serial.printf("[lfo] mode = %s\n", force ? "FORCE (vib/trem on any patch)" : "RESPECT patch LFO");
     }
 #endif
-#ifdef TDSP_SYNTH_SF2_TSF
+#if defined(TDSP_SYNTH_SF2_TSF) && TDSP_DIAGNOSTICS
     else if (strncmp(line, "@PROOF=", 7) == 0)     runAxisProof(atoi(line + 7));   // capture 1 note w/ axis at full (0=press 1=timbre 2=bend 3=neutral)
 #endif
     else if (strncmp(line, "@MIDIMODE=", 10) == 0) applyMidiMode(atoi(line + 10) != 0);
@@ -1523,12 +1525,16 @@ void loop() {
             else if (c == 'V') { synthSetInstrument((synthInstrument() + 1) % synthNumInstruments());
                                  if (g_mpeMode) synthSetMpeMode(true); }   // re-sync ch10 (MPE member)
             else if (c == 'M') { Serial.printf("[mem] external PSRAM: %u MB\n", external_psram_size); }
+#if TDSP_DIAGNOSTICS
             else if (c == 'T') { runInstrumentSelfTest(); }   // exercise all 128 GM + drums, log peaks
             else if (c == 'B') { runPitchBendTest(); }         // audible pitch-bend sweep on ch1
+#endif
             else if (c == 'E') { applyMidiMode(!g_mpeMode); }  // toggle MIDI <-> MPE mode locally
             else if (c == 'O') { g_loop = !g_loop; Serial.printf("[song] loop %s\n", g_loop ? "ON" : "off"); }  // lOop toggle
+#if TDSP_DIAGNOSTICS
             else if (c == 'A') { runMpeTest(); }               // simulate an MPE note (bend + pressure)
-#ifdef TDSP_SYNTH_DEXED_POOL
+#endif
+#if defined(TDSP_SYNTH_DEXED_POOL) && TDSP_DIAGNOSTICS
             else if (c == 'K') { runPizzClipTest(273); }       // pizz clip probe: is the attack snap clipping?
             else if (c == 'J') { runPizzCapture(273, 60, 110); } // capture onset waveform -> serial (aliasing/zero-cross)
             else if (c == 'R') { dxpClip.resetWorst(); adcProbe.resetWorst(); Serial.println("[jump] worst-discontinuity detectors reset (digital + analog)"); }
@@ -1539,7 +1545,7 @@ void loop() {
             else if (c == 'Q') { runPressureProof(); }               // capture a full-pressure note (prove vibrato/tremolo)
             else if (c == 'Z') { runMpeSweep(synthInstrument()); }   // MPE demo on every instrument from the current one
 #endif
-#ifdef TDSP_HAS_REPLAYGAIN
+#if defined(TDSP_HAS_REPLAYGAIN) && TDSP_DIAGNOSTICS
             else if (c == 'N') { runGainSweep(); }              // ReplayGain: sweep every voice, print trim table
 #endif
         }
