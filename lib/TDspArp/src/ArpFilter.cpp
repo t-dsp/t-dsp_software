@@ -2,9 +2,10 @@
 
 #include "ArpFilter.h"
 
-// We only store a tdsp::Clock* pointer and never dereference it here,
-// so the forward declaration in the header is sufficient — no Clock.h
-// include needed on the implementation side.
+// gridAlignedStepAnchor() dereferences the master clock (tickCount()) to lock
+// arp steps to the beat grid, so we need the full Clock definition here (the
+// header keeps only a forward declaration to stay light for its includers).
+#include <Clock.h>
 
 namespace tdsp {
 
@@ -157,9 +158,30 @@ void ArpFilter::onNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
         for (int i = 0; i < n; ++i) {
             emitNoteOn(chans[i], notes[i], vels[i], (uint32_t)(tps * _gate), srcChans[i]);
         }
-        _lastStepTick = _clockTickCount;
+        _lastStepTick = gridAlignedStepAnchor();   // lock the pattern to the master beat grid
         _stepIndex++;
     }
+}
+
+// Anchor the step grid to the MASTER beat grid instead of the (arbitrary)
+// keypress moment. onClock() advances _clockTickCount 1:1 with the master
+// Clock, but at a constant offset (the arp counter is never re-zeroed on a
+// transport re-zero). We cancel that offset by taking the phase from the
+// master clock's own tick count: with the returned anchor, the next step
+// boundary (_lastStepTick + ticksPerStep) coincides with the next master step
+// boundary (masterTick % ticksPerStep == 0) — i.e. steps land on the beat.
+uint32_t ArpFilter::gridAlignedStepAnchor() const {
+    const uint16_t tps = ticksPerStep();
+    if (!_clock || tps == 0) return _clockTickCount;       // no grid: keypress-relative (legacy)
+    const uint32_t phase = _clock->tickCount() % tps;      // ticks past the last master boundary
+    return _clockTickCount - phase;                        // next boundary is (tps - phase) ticks off
+}
+
+void ArpFilter::resyncToGrid() {
+    // Only meaningful while a pattern is actively running; a fresh press or the
+    // onClock baseline re-locks otherwise (both use gridAlignedStepAnchor()).
+    if (!_enabled || _heldCount == 0 || _lastStepTick == 0xFFFFFFFFu) return;
+    _lastStepTick = gridAlignedStepAnchor();
 }
 
 void ArpFilter::onNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) {
@@ -250,10 +272,11 @@ void ArpFilter::onClock() {
         return;
     }
 
-    // First step under a running clock: baseline _lastStepTick from
-    // current count so the first downbeat lands on a tick boundary.
+    // First step under a running clock (e.g. arp enabled while a chord is
+    // already held): baseline _lastStepTick to the MASTER beat grid so the
+    // pattern locks to the beat, not to this arbitrary tick.
     if (_lastStepTick == 0xFFFFFFFFu) {
-        _lastStepTick = _clockTickCount;
+        _lastStepTick = gridAlignedStepAnchor();
         // Don't emit on this exact tick — wait a full step so the
         // pattern isn't double-triggered when onNoteOn() already fired
         // the cold-start step above.
@@ -358,6 +381,18 @@ void ArpFilter::setEnabled(bool on) {
         _patternStateAscending = true;
         _lastStepTick = 0xFFFFFFFFu;
     }
+}
+
+void ArpFilter::restart() {
+    if (!_enabled) return;                 // nothing to re-trigger while bypassed
+    // Rewind the cycle to step 0 but KEEP the held chord, so a Play press restarts the
+    // pattern from the top. Clearing _lastStepTick makes the next onClock() cold-start the
+    // cycle from a fresh grid-aligned anchor (as if the chord had just been pressed).
+    _stepIndex = 0;
+    _repeatIndex = 0;
+    _octavePassIndex = 0;
+    _patternStateAscending = true;
+    _lastStepTick = 0xFFFFFFFFu;
 }
 
 void ArpFilter::setPattern(Pattern p) {

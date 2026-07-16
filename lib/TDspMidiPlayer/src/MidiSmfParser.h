@@ -136,6 +136,54 @@ static inline uint8_t initialBeatsPerBar(const uint8_t *d, size_t len) {
     return (uint8_t)q;
 }
 
+// The file's LOOP LENGTH in quarter-note beats (Clock beats): the highest
+// absolute tick reached across all tracks — the end-of-track boundary — divided
+// by the header's ticks-per-quarter (division). EXACT and FRACTIONAL: a 4/4 bar
+// returns 4.0, a 6/8 bar 3.0, a 7/8 bar 3.5, four bars of 4/4 = 16.0. A
+// tick-synced player wraps on this true musical length with zero rounding, so it
+// never drifts — see planning/tick-sync-playback/PLAN.md §2/§3. Meter-agnostic
+// (no time-sig needed; works on GMD grooves that omit it). Returns 0.0 when the
+// file is unparseable/empty so the caller can fall back to an ms-derived length.
+static inline double initialLoopBeats(const uint8_t *d, size_t len) {
+    if (len < 14 || memcmp(d, "MThd", 4) != 0) return 0.0;
+    uint16_t div = be16(d + 12);
+    if (div == 0 || (div & 0x8000)) return 0.0;            // 0 or SMPTE division
+    uint32_t maxTick = 0;
+    for (size_t p = 14; p + 8 <= len; ) {
+        if (memcmp(d + p, "MTrk", 4) != 0) break;
+        uint32_t tl = be32(d + p + 4);
+        size_t i = p + 8, e = i + tl; if (e > len) e = len;
+        uint32_t tick = 0; uint8_t status = 0;
+        while (i < e) {
+            tick += readVar(d, e, &i); if (i >= e) break;
+            uint8_t b0 = d[i]; if (b0 & 0x80) { status = b0; i++; }
+            if (status == 0xFF) {
+                if (i >= e) break;
+                (void)d[i++];                              // meta type (unused)
+                uint32_t ml = readVar(d, e, &i); i += ml;
+            } else if (status == 0xF0 || status == 0xF7) {
+                uint32_t sl = readVar(d, e, &i); i += sl;
+            } else {
+                uint8_t hi = status & 0xF0; i += (hi == 0xC0 || hi == 0xD0) ? 1 : 2;
+            }
+        }
+        if (tick > maxTick) maxTick = tick;
+        p = e;
+    }
+    if (maxTick == 0) return 0.0;
+    return (double)maxTick / (double)div;
+}
+
+// Snap a loop length derived from a LOSSY source (integer-ms rounding) to the
+// nearest eighth note (0.5 beat) — absorbs tick-quantization noise while still
+// permitting fractional bars (7/8 = 3.5, 5/8 = 2.5). Do NOT use on the exact
+// parse path: initialLoopBeats() is already exact. See PLAN §2.
+static inline double snapLoopBeatsHalf(double beats) {
+    if (beats <= 0.0) return 0.0;
+    double snapped = (double)(long)(beats * 2.0 + 0.5) / 2.0;   // round-to-nearest 0.5
+    return snapped > 0.0 ? snapped : 0.5;
+}
+
 // Parse buf[0..len) into out[0..maxOut). Returns event count, or -1 on error.
 // Streams the tracks with a k-way merge (no large heap scratch) — see below.
 // NOTE: writes into out[] while reading d[], so d and out MUST NOT alias.

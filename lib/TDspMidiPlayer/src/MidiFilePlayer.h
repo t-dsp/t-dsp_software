@@ -18,8 +18,10 @@
 // setChannelMask(0xFFFF) to hear everything.
 #pragma once
 #include <Arduino.h>
+#include <math.h>
 #include <stdint.h>
 #include <MidiSink.h>
+#include <Clock.h>
 #include "MidiFileEvent.h"
 
 namespace tdsp {
@@ -88,11 +90,62 @@ public:
         wait_ = ev_[0].deltaMs; clock_ = 0; acc_ = 0.0f;
         totalMs_ = 0; for (uint32_t i = 0; i < count; ++i) totalMs_ += ev[i].deltaMs;   // song length (for progress)
         elapsedMs_ = 0;
+        synced_ = false;              // default: free-running ms engine; setSyncedMode() opts in
         for (int c = 0; c < 16; c++) {          // reset per-channel bend range + RPN state
             pbRange_[c] = pbDefault_; rpnMsb_[c] = rpnLsb_[c] = 0x7F;
         }
         playing_ = true;
     }
+
+    // -------- Tick-synced (position-driven) mode --------
+    //
+    // Lock this player to the master Clock instead of the free-running ms
+    // accumulator: events are dispatched by the clock's absolute BEAT position,
+    // and the loop wraps on the EXACT musical length `loopBeats` (see
+    // smf::initialLoopBeats). Two synced players reading the same clock cannot
+    // drift apart — that is the whole point (planning/tick-sync-playback/PLAN.md).
+    //
+    // Call AFTER play(): play() loads the stream; this snaps the event cursor to
+    // the running grid (`fmod(now, loopBeats)`), so a groove/song that JOINS a
+    // running transport lands in phase (mid-loop join = mid-loop start). Starting
+    // together from beat 0 → both begin at their loop's downbeat.
+    //   clk       : the master clock (Conductor::clock()); nullptr disables sync.
+    //   loopBeats : exact loop length in quarter-note beats (fractional OK: 6/8=3.0, 7/8=3.5).
+    //   nativeBpm : the file's authored tempo — converts its ms deltas to beats.
+    void setSyncedMode(tdsp::Clock *clk, double loopBeats, float nativeBpm) {
+        clock_ptr_ = clk;
+        loopBeats_ = (loopBeats > 0.0) ? loopBeats : 0.0;
+        beatsPerMs_ = (nativeBpm > 0.0f) ? (double)nativeBpm / 60000.0 : 0.0;
+        synced_ = (clk != nullptr && loopBeats_ > 0.0 && beatsPerMs_ > 0.0 &&
+                   ev_ != nullptr && count_ > 0);
+        if (!synced_) return;
+        // Anchor to the global grid: this loop iteration's beat-0 sits at the
+        // largest multiple of loopBeats <= now (so downbeats of all synced
+        // players coincide). floor(now/loopBeats)*loopBeats == now - phase.
+        const double now = clock_ptr_->positionBeats();
+        lastMasterBeat_ = now;
+        double phase = fmod(now, loopBeats_);
+        if (phase < 0.0) phase = 0.0;
+        loopBaseBeat_ = now - phase;
+        idx_ = 0;
+        evCursorBeat_ = (double)ev_[0].deltaMs * beatsPerMs_;   // beat of ev_[0]
+        // Joined mid-loop: fast-forward (no dispatch) past events already gone by
+        // this phase — drum one-shots simply catch the next hit; a song joins in
+        // progress. (No-op when starting at the downbeat, phase ~ 0.)
+        while (idx_ + 1 < count_ && evCursorBeat_ < phase) {
+            ++idx_;
+            evCursorBeat_ += (double)ev_[idx_].deltaMs * beatsPerMs_;
+        }
+    }
+
+    // Revert to the free-running ms engine (e.g. a tempo-map song).
+    void clearSyncedMode() { synced_ = false; clock_ptr_ = nullptr; }
+    bool   isSynced()        const { return synced_; }
+    // Debug/telemetry for @SYNCPROBE / @STATE (PLAN §9): loop length, the
+    // loop-relative beat of the next event, and the master beat last seen.
+    double syncLoopBeats()   const { return loopBeats_; }
+    double syncCursorBeat()  const { return evCursorBeat_; }
+    double syncMasterBeat()  const { return lastMasterBeat_; }
 
     // Which channels this player panics on stop() (bit i => MIDI channel i+1).
     // Default = all. The song player sets this to spare channel 10 so stopping /
@@ -123,9 +176,20 @@ public:
     uint32_t eventIndex() const { return idx_; }
     uint32_t eventCount() const { return count_; }
 
+    // Total stream length in ms (sum of all deltas) = one loop period. Used to
+    // derive loopBeats for a baked stream that carries no tick/PPQN metadata:
+    // loopBeats = totalMs * nativeBpm / 60000 (then snap to the musical grid).
+    uint32_t totalMs() const { return totalMs_; }
+
     // Playback position 0..1000 (permille) by ELAPSED SONG TIME (not event index —
     // events aren't evenly spaced). Drives the app's MIDI Player progress bar.
     uint16_t positionPermille() const {
+        if (synced_ && loopBeats_ > 0.0) {                 // phase within the loop
+            double into = lastMasterBeat_ - loopBaseBeat_;  // beats into this iteration
+            if (into < 0.0) into = 0.0;
+            if (into > loopBeats_) into = loopBeats_;
+            return (uint16_t)(into / loopBeats_ * 1000.0);
+        }
         if (totalMs_ == 0) return 0;
         uint32_t e = elapsedMs_ > totalMs_ ? totalMs_ : elapsedMs_;
         return (uint16_t)(((uint64_t)e * 1000u) / totalMs_);
@@ -136,6 +200,7 @@ public:
     // drift), matching the original behaviour exactly at speed 1.0.
     void tick() {
         if (!playing_ || !sink_) return;
+        if (synced_) { tickSynced(); return; }        // position-driven path
         uint32_t real = clock_;                       // real ms since the last tick
         clock_ = 0;
         acc_ += (float)real * speed_;                 // advance in "song time"
@@ -163,6 +228,41 @@ public:
     }
 
 private:
+    // Position-driven dispatch. Fire every event whose absolute scheduled beat
+    // (loopBaseBeat_ + evCursorBeat_) has been reached, in order, then wrap on
+    // the EXACT musical boundary (loopBaseBeat_ + loopBeats_). Because the wrap
+    // is driven by the clock crossing loopBeats_ — not by ms accumulation — the
+    // loop length never rounds and never drifts. Seamless: NO all-notes-off at
+    // the seam (drum tails / held notes survive; authored loops release before
+    // it). Catch-up safe: if loop() stalled, keeps dispatching (and wrapping)
+    // until it is level with the clock, bounded by a runaway guard.
+    void tickSynced() {
+        if (!clock_ptr_ || loopBeats_ <= 0.0) return;
+        const double songBeat = clock_ptr_->positionBeats();
+        lastMasterBeat_ = songBeat;
+        uint32_t guard = 0;
+        const uint32_t guardMax = count_ * 2u + 32u;   // > one loop's catch-up; self-heals next tick
+        while (playing_) {
+            const double boundaryAbs = loopBaseBeat_ + loopBeats_;
+            const bool   haveEvent   = (idx_ < count_) && (evCursorBeat_ < loopBeats_);
+            const double nextAbs     = loopBaseBeat_ + evCursorBeat_;
+            if (haveEvent && songBeat >= nextAbs) {
+                dispatch(ev_[idx_]);
+                if (++idx_ < count_)
+                    evCursorBeat_ += (double)ev_[idx_].deltaMs * beatsPerMs_;
+                // idx_ == count_ -> haveEvent goes false; the boundary wrap below runs.
+            } else if (songBeat >= boundaryAbs) {
+                idx_          = 0;                       // seam: wrap to the loop top
+                loopBaseBeat_ += loopBeats_;             // exact musical length (no round)
+                evCursorBeat_ = (double)ev_[0].deltaMs * beatsPerMs_;
+                tookLoop_     = true;                    // downbeat signal (consumeLooped)
+            } else {
+                break;                                   // level with the clock; nothing due
+            }
+            if (++guard >= guardMax) break;              // runaway guard (pathological jump)
+        }
+    }
+
     void dispatch(const MidiFileEvent &e) {
         if (e.kind == kRest) return;
         if (!(chMask_ & (uint16_t)(1u << e.channel))) return;   // channel filtered
@@ -233,6 +333,15 @@ private:
     uint8_t              rpnMsb_[16] = {0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F};
     uint8_t              rpnLsb_[16] = {0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F,0x7F};
     uint16_t             chMask_    = kMaskNoDrums;
+
+    // --- Tick-synced (position-driven) state (setSyncedMode) ---
+    bool         synced_        = false;      // true => tickSynced(), ignore ms path
+    tdsp::Clock *clock_ptr_     = nullptr;    // master position authority (not owned)
+    double       loopBeats_     = 0.0;        // exact loop length (quarter-note beats)
+    double       beatsPerMs_    = 0.0;        // nativeBpm/60000 — ms-delta -> beats
+    double       loopBaseBeat_  = 0.0;        // absolute beat of this iteration's beat-0
+    double       evCursorBeat_  = 0.0;        // loop-relative beat of ev_[idx_]
+    double       lastMasterBeat_= 0.0;        // last clock position seen (progress/telemetry)
 };
 
 // Expand a legacy {deltaMs,note,velocity} note stream (the old SongEv format)

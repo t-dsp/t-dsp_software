@@ -285,11 +285,17 @@ export class BleTransport implements Transport {
   drumKit(i: number) { this.relay('@DRUMKIT=' + i); }
   playGrooveFile(name: string) { this.relay('@DRUMF=' + name); }
   stopDrums() { this.relay('@DRUM=stop'); }   // unconditional stop (NOT 'D' — that toggles: a double-tap/state-mismatch would restart drums)
+  drumVol(pct: number) { this.relay('@DRUMVOL=' + Math.max(0, Math.min(150, Math.round(pct)))); }
   songPlay(arg: string) { this.relay('@SONGF=' + arg); }
   stopSong() { this.relay('@SONG=stop'); }
+  songVol(pct: number) { this.relay('@SONGVOL=' + Math.max(0, Math.min(150, Math.round(pct)))); }
   songLoop(on: boolean) { this.relay('@LOOP=' + (on ? 1 : 0)); }
   launchQuantize(on: boolean) { this.relay('@QUANTIZE=' + (on ? 1 : 0)); }
+  metronome(on: boolean) { this.relay('@METRO=' + (on ? 1 : 0)); }
+  metronomeSig(bpb: number) { this.relay('@METROSIG=' + Math.max(1, Math.min(16, Math.round(bpb)))); }
+  metronomeVol(pct: number) { this.relay('@METROVOL=' + Math.max(0, Math.min(150, Math.round(pct)))); }
   arpOn(on: boolean) { this.relay('@ARPON=' + (on ? 1 : 0)); }
+  arpRestart() { this.relay('@ARPRESTART'); }
   arpPattern(i: number) { this.relay('@ARPPAT=' + i); }
   arpRate(i: number) { this.relay('@ARPRATE=' + i); }
   arpGate(pct: number) { this.relay('@ARPGATE=' + Math.max(5, Math.min(150, Math.round(pct)))); }

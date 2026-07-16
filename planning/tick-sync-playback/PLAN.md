@@ -71,11 +71,17 @@ the shared grid exists, nothing snaps to it.
   `(_lastUpdateMicros - _lastTickMicros)/_measuredIntervalUs` (`Clock.cpp:164-180`).
 - **Event spacing (v1, no reparse):** `eventBeatDelta_i = deltaMs_i × nativeBpm / 60000`.
   Walk incrementally (running beat cursor + `idx_`), don't re-sum.
-- **Loop length:** `loopBeats = round(totalBeats)` where
-  `totalBeats = lastEventTick / filePPQN` (compute at **parse**, exact, avoids ms round).
-  Fallback: `round(totalMs × nativeBpm / 60000)`. Integer beats, meter-agnostic.
+- **Loop length:** `loopBeats` is the **exact musical length in quarter-note beats**,
+  a `double` (need NOT be an integer). From `lastEventTick / filePPQN` at **parse**
+  (exact, avoids the ms round), or the authored bar count for baked loops. Fallback for
+  lossy/ms-derived lengths: `totalMs × nativeBpm / 60000` **snapped to the nearest 0.5
+  beat** (eighth-note granularity) to absorb tick-quantization noise. Meter-agnostic —
+  and, crucially, NOT rounded to a whole beat: a 6/8 bar = 3.0, a 7/8 bar = 3.5, a 5/8
+  bar = 2.5. See §3 for why this matters musically.
 - **Wrap:** `pos = fmod(songBeat, loopBeats)`. Dispatch the window `[prevPos, pos)` with
   wrap handling (if `pos < prevPos`, emit `[prevPos, loopBeats)` then `[0, pos)`).
+  Drift-freeness comes from computing `pos` **absolutely** with `fmod` (not from an
+  integer `loopBeats`), so any exact fractional length wraps without cumulative error.
 
 Because tempo lives entirely in the clock, the synced player has **no `speed_`** and
 **ignores the file's tempo** for playback rate; the file's positions are the musical grid,
@@ -84,21 +90,50 @@ see §7.)
 
 ---
 
-## 3. Measure-count handling (4 / 3 / 5 / 7 …)
+## 3. Measure-count handling — the three grids (musical correctness)
 
-- Loop length is stored in **beats, not bars** → inherently handles any meter.
-- `Conductor.beatsPerBar` (from the meter-detection work already merged —
-  `smf::initialBeatsPerBar()` + `applyMeter()` in main.cpp) defines where bar **downbeats**
-  fall; the loop wraps on **beats**. Examples: 5-beat loop in 5/4 = 1 bar; 6-beat loop in
-  3/4 = 2 bars; 16-beat loop in 4/4 = 4 bars.
-- **"Beat" = quarter note** in `Clock` (24 PPQN/quarter). For x/8 meters, `initialBeatsPerBar`
-  already converts `nn/2^dd → quarter-beats-per-bar` (6/8 → 3). Keep `loopBeats` in
-  **quarter-note beats** for consistency; document this. A 2-bar 6/8 loop = 6 quarter-beats.
-- **Non-integer-bar loops** (e.g. a 4.5-beat groove): `round()` to the nearest integer beat
-  (still drift-free, wraps on a beat). **Log/assert** when `loopBeats % beatsPerBar != 0`
-  so odd content is visible; its bar-1 will rotate against the global bar grid (acceptable/
-  rare). GMD grooves carry no time-sig meta (all report 4/4) — integer-beat quantization is
-  the safe, meter-agnostic default there.
+Getting this musically right means **not conflating three different grids**. They are
+computed from the same clock but answer different questions:
+
+| Grid | Question it answers | Unit | Authority |
+|------|--------------------|------|-----------|
+| **Loop-wrap** | when does the loop repeat? | exact quarter-beats (`double`, may be fractional) | `loopBeats` per player |
+| **Downbeat/bar** | where is beat 1 (the accent)? | integer quarter-beats | `Clock._beatsPerBar` (uint8) |
+| **Metronome pulse** | where do you tap your foot / click? | musical beat (see §13) | derived from the meter |
+
+- **"Beat" = quarter note** everywhere in `Clock` (24 PPQN / quarter). `initialBeatsPerBar`
+  converts the time-sig `nn/2^dd → quarter-beats-per-bar` (4/4→4, 3/4→3, 6/8→3, 12/8→6).
+
+- **Loop-wrap grid handles ANY meter** because `loopBeats` is an exact `double`
+  (§2). Examples — all wrap drift-free:
+  - 5/4, 1 bar → `loopBeats = 5.0`
+  - 3/4, 2 bars → `6.0`; 4/4, 4 bars → `16.0`
+  - **6/8, 1 bar → `3.0`** (three quarter-beats); 2 bars → `6.0`
+  - **7/8, 1 bar → `3.5`**; **5/8, 1 bar → `2.5`** — these were *wrong* under the old
+    "round to integer beats" rule and are now correct.
+
+- **Downbeat grid is integer-only** — `Clock._beatsPerBar` is a `uint8_t` count of
+  quarter-beats, so it is **exact for x/4 and for compound meters that land on a whole
+  number of quarters** (6/8→3, 12/8→6, 2/2→4). It **cannot** represent a bar of 3.5 or
+  2.5 quarters, so `initialBeatsPerBar` deliberately **falls back to 4** for 7/8, 5/8,
+  9/8, etc. (see `MidiSmfParser.h:131-134`). Consequence to state honestly: a 7/8 loop
+  **wraps correctly** (loopBeats 3.5) but its **bar-1 accent grid is approximate** (the
+  Clock still counts 4/4 bars underneath). This is acceptable for v1 — do **not** claim
+  "exact downbeats for any meter." Making 7/8 downbeats exact would require a
+  tick-defined bar length in `Clock` (a `_ticksPerBar` instead of `_beatsPerBar`); note
+  as a future item, out of scope for v1.
+
+- **Compound-meter felt beat ≠ Clock beat.** 6/8 is *felt in 2* (the pulse is the
+  **dotted quarter**), not in 3 quarters. The loop-wrap and downbeat grids don't care —
+  but the **metronome does** (§13): clicking every Clock quarter in 6/8 gives the "in 3"
+  subdivision, not the idiomatic "in 2" pulse. v1 metronome clicks Clock beats (correct
+  for x/4); the compound dotted-quarter pulse is a documented phase-2 (§13).
+
+- **Odd content:** `round`/snap `loopBeats` only via the §2 0.5-beat fallback (never to a
+  whole beat). **Log** when `fmod(loopBeats, beatsPerBar) != 0` so a loop whose length
+  isn't a whole number of the *current* bars is visible (its bar-1 rotates against the
+  global bar grid — rare, acceptable). GMD grooves carry no time-sig meta (all report
+  4/4); their exact `lastEventTick/division` length is still the right wrap value.
 
 ---
 
@@ -127,9 +162,11 @@ see §7.)
 - Do **not** change `MidiFileEvent` (stays 6 bytes) in v1.
 
 ### 4.3 `lib/TDspMidiPlayer/src/MidiSmfParser.h` / `MidiSmfFile.h`
-- Compute exact loop length at parse: add `smf::initialLoopBeats(buf,len)` (from
-  `lastEventTick / division`, meter-agnostic, integer-beat rounded) OR extend
+- Compute exact loop length at parse: add `smf::initialLoopBeats(buf,len)` returning a
+  `double` = `lastEventTick / division` (meter-agnostic; **exact fractional**, NOT
+  integer-rounded — see §2/§3, this is what makes 6/8→3.0, 7/8→3.5 correct) OR extend
   `loadSmfFile(...)` to also output `double* outLoopBeats` alongside the existing `outBpm`.
+  Apply the 0.5-beat fallback snap only on the lossy ms path.
 - Baked songs (no parse): compute `loopBeats` from the authored bar count / `seq()` length.
 
 ### 4.4 `lib/TDspTempo` (`Conductor.h`, `PlayerFollower.h`, `TempoFollower.h`)
@@ -160,6 +197,25 @@ see §7.)
 - **A concurrent session is actively editing these two files** (per-song native BPM +
   beat-locked authoring). Coordinate / rebase to avoid clobbering their work; do not sweep
   their uncommitted changes.
+
+### 4.7 Metronome (new, build-flag-gated) — see §13 for the full spec
+- **New:** `src/Metronome.h` (or `lib/TDspMetronome/`) — a pure master-clock consumer:
+  in `loop()` reads `g_conductor.clock().consumeBeatEdge()`, fires a click, accents when
+  `clock().beatInBar() == 0`. On/off flag. No tempo of its own (validates §1's single
+  authority). Compiled only when `-D TDSP_METRONOME=1`.
+- `firmware/mix-kit/platformio.ini`: new build flag `-D TDSP_METRONOME=1`, opted into the
+  test envs first (`teensy41_dexed_pool_nobt_drumvoice`, `teensy41_opll`). Gated so
+  slot-starved builds don't pay the mix-slot cost.
+- `main.cpp`: instantiate the click generator, sum it into a spare/second mixer input
+  (reuse the local **test-tone `AudioSynthWaveformSine_F32` slot** where present — it's a
+  bring-up aid, not production audio), wire `@METRO`/`CMD.SET_METRO`, poll the metronome in
+  `loop()`, expose state in `@STATE`. All under `#ifdef TDSP_METRONOME`.
+- Shared control (`handleControlLine()`): `@METRO=0|1` (+ optional `@METROVOL=`). Add a BLE
+  `CMD.SET_METRO` byte opcode (ESP32 firmware + app `src/tdspBle.ts`).
+- App (`app/tdsp-control/`): `tp.metronome(on)` in `src/transport.native.ts` (relay
+  `@METRO=`), `setMetronome` in `src/tdspBle.ts`, and a **Metronome card** in `App.tsx`
+  near the Tempo card (§13). ⚠️ Expo pinned to v57 — read
+  https://docs.expo.dev/versions/v57.0.0/ before touching app code (per app `AGENTS.md`).
 
 ---
 
@@ -243,8 +299,13 @@ grids). For finer fidelity:
   precision), vs the current ~90 ms/30 min.
 - Loop seam within one `loop()` iteration; no audible gap/overlap; no stuck notes on
   loop/stop/start.
-- Any-meter loops (4/3/5/6-8) lock and wrap on the correct grid.
-- No RAM regression (§8).
+- Any-meter loops (4/4, 3/4, 5/4, 6/8, 7/8) **wrap** on the correct grid (fractional
+  `loopBeats`); **downbeat accent** exact for x/4 + whole-quarter compound meters, 4/4
+  fallback (documented) for 7/8/5/8/9/8.
+- **Metronome** (when built with `-D TDSP_METRONOME=1`): on/off from the app card; clicks on
+  every beat with a downbeat accent; follows `@BPM` + the playing content's meter live; stays
+  phase-locked to the drum loop across the 30-min drift run.
+- No RAM regression (§8), including the metronome build.
 
 ---
 
@@ -260,8 +321,13 @@ grids). For finer fidelity:
 - **External MIDI clock** (`Clock::External`): `positionBeats()` must also work when slaved to
   0xF8 (`beatPhase` uses `_measuredIntervalUs`, set from external too). Confirm lockstep holds
   when following an external clock.
-- **x/8 beat unit** decision (quarter vs eighth) — keep quarter, align `loopBeats` with
-  `initialBeatsPerBar`.
+- **x/8 beat unit** decision (quarter vs eighth) — keep the Clock beat = quarter; carry
+  `loopBeats` as an **exact fractional** quarter-beat count so x/8 loops wrap right (6/8=3.0,
+  7/8=3.5). The downbeat grid stays integer (7/8/9/8 fall back to 4/4 bars — §3); a
+  tick-defined bar for exact odd-meter downbeats is future work.
+- **Compound/odd-meter metronome pulse** (§13): v1 clicks the Clock quarter (right for x/4).
+  6/8 "in 2" (dotted-quarter) and 7/8 groupings (2+2+3) need a subdivision/grouping control —
+  documented phase-2, not v1.
 - **Concurrent session** owns `test_songs.h` / `gen_test_songs.py` / `main.cpp` right now —
   coordinate; rebase; never sweep their uncommitted work into a commit.
 - **Launch-quantize** (concurrent App.tsx) — align start semantics if that toggle ships.
@@ -275,8 +341,11 @@ grids). For finer fidelity:
 3. `MidiFilePlayer` synced mode (`tickSynced`) + off-target tests.
 4. `main.cpp` wiring (drum first; transport-idle zero policy).
 5. Loop songs → synced; coordinate `test_songs.h` `loopBeats`.
-6. Hardware verify (drift probe + audible) across meters; RAM check.
-7. (Phase 2, optional) canonical-tick reparse for full fidelity.
+6. Metronome (§13): firmware click + `@METRO`/BLE + app card. Build-flag-gated. Doubles as
+   the audible lock probe for step 7 — bring it up before the hardware verify.
+7. Hardware verify (drift probe + audible metronome) across meters; RAM check.
+8. (Phase 2, optional) canonical-tick reparse for full fidelity; compound/odd-meter
+   metronome subdivision + exact odd-meter downbeats (`_ticksPerBar` in `Clock`).
 
 ---
 
@@ -294,3 +363,75 @@ grids). For finer fidelity:
   `applyMeter`, `song = meter master`) already merged.
 - `firmware/mix-kit/src/test_songs.h` — loop songs 13–17 (`seq()`-authored, bar-exact).
 - Drift research + the Option A/B analysis are in the conversation that produced this doc.
+
+---
+
+## 13. Metronome (build-flag feature + app section)
+
+A metronome is the natural first consumer of the master clock and the **audible proof**
+that the tick-sync work locks: an on-beat click that stays phase-locked to the drum loop +
+loop song *is* the acceptance test you can hear. It reads the same `tdsp::Clock` as
+everything else — no separate timebase — so it can never drift from the players.
+
+### 13.1 Behaviour
+- **On/off** only (plus optional volume). Default **off**.
+- **Follows the master automatically.** Tempo = the Conductor's BPM (already driven by
+  `@BPM` / a song's detected tempo); meter/downbeat = `Clock.beatsPerBar()` (already set by
+  `applyMeter()` from the playing song or groove). Change `@BPM` or start a 3/4 song and the
+  click retimes and re-accents with **zero extra wiring** — it just polls the clock.
+- **Downbeat accent:** click on every `consumeBeatEdge()`; when `beatInBar() == 0`, use the
+  **accent** click (higher pitch / louder). So 4/4 = "**1** 2 3 4", 3/4 = "**1** 2 3",
+  5/4 = "**1** 2 3 4 5" — the accent tracks whatever meter the content set.
+- **Musical scope (v1):** clicks the **Clock quarter-note beat**, which is idiomatically
+  correct for all **x/4** meters. For **compound** meters (6/8, 9/8, 12/8) v1 clicks the
+  quarter subdivision ("in 3/4/6"), not the dotted-quarter felt pulse ("in 2/3/4"); for
+  **irregular** meters (7/8, 5/8) the Clock is in 4/4 fallback (§3) so the click is a plain
+  4/4. **Phase-2:** a subdivision/grouping control (dotted-quarter compound pulse; 2+2+3
+  groupings) — noted, not in v1. This is the same quarter-vs-compound distinction called
+  out in §3; keep them consistent.
+
+### 13.2 Firmware (`src/Metronome.h`, `#ifdef TDSP_METRONOME`)
+- **State:** `bool _on`, optional `float _vol`, a short click envelope.
+- **Poll in `loop()`** (after `g_conductor.update(micros())`): if `_on &&
+  clock.consumeBeatEdge()` → trigger a click; pitch/level by `clock.beatInBar() == 0`.
+  Foreground dispatch, so jitter bound = one `loop()` iteration (same as the players, §6).
+  **Note:** `consumeBeatEdge()` is a single-consumer latch — the metronome must be the only
+  reader, or add a fan-out (mirror of the `onBarEdge()` fan-out in `Conductor::update`).
+- **Click generator (RAM-tight):** cheapest is to **retune + gate the existing local
+  test-tone `AudioSynthWaveformSine_F32`** per beat (accent ≈ 1500 Hz, normal ≈ 1000 Hz,
+  ~15 ms decay), so **no new mix slot** on builds that carry the test tone. Where that slot
+  is absent, add a tiny generator (sine/triangle + `AudioEffectEnvelope`) into a spare
+  mixer input, or a second `AudioMixer4_F32` stage. Keep it F32 to match the bus. RAM: one
+  oscillator + one envelope ≈ well under 1 KB; flag-gated so non-metronome builds pay zero.
+- **No interaction with the synced players:** the metronome neither starts nor zeroes the
+  transport — it only observes. It can run with nothing else playing (Internal clock
+  free-runs from boot), which makes it a handy standalone practice click.
+
+### 13.3 Control surface
+- **Serial/web (shared `handleControlLine()`):** `@METRO=0|1`, optional `@METROVOL=<0..150>`.
+  Report state in `@STATE` (`metro:on/off`, current `bpb`).
+- **BLE:** new `CMD.SET_METRO` byte opcode (0/1) in the ESP32 GATT control service and the
+  app's `CMD` table; optional `CMD.SET_METRO_VOL`.
+
+### 13.4 App section (`app/tdsp-control/`)
+- **New "Metronome" card** in `App.tsx`, placed next to the **Tempo** card (they share the
+  master-BPM mental model). Contents:
+  - A **Switch** (on/off) → `tp.metronome(v)`.
+  - Read-out of the **current meter** so the user sees what it's counting, e.g. "4/4 · 120
+    BPM" (meter from `@STATE` `bpb`, BPM from existing state). No tempo control of its own —
+    it points at the Tempo card.
+  - (Optional) a small volume slider → `tp.metronomeVol(pct)`.
+- **Transport plumbing:** `metronome(on)` in `src/transport.native.ts`
+  (`this.relay('@METRO=' + (on?1:0))`, mirroring `launchQuantize`) and `setMetronome` in
+  `src/tdspBle.ts` (`writeByteCmd(CMD.SET_METRO, on?1:0)`, mirroring `setArpOn`).
+- ⚠️ **Expo v57** — read https://docs.expo.dev/versions/v57.0.0/ before writing app code
+  (app `AGENTS.md`). Follow the existing card/`Switch` idiom (see the Launch-quantize row).
+
+### 13.5 Testing
+- **Audible lock probe:** metronome ON + drum `03 Pop Backbeat` + song `13 Loop Pop Changes`
+  — the click must sit exactly on the drum downbeat and stay there for the full 30-min drift
+  run (§9). Drift = the click sliding off the kick; this is the acceptance test you can hear.
+- **Meter re-accent:** start a 3/4 and a 5/4 test loop; confirm the accent moves to beat 1 of
+  the new meter live, and `@BPM` changes retime the click with no restart.
+- **RAM:** re-run the §8 `arm-none-eabi-size` check with `-D TDSP_METRONOME=1`; confirm no
+  ITCM-block cliff crossing and `.bss` growth < the click generator's footprint.

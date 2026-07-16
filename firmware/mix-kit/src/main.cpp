@@ -548,29 +548,57 @@ static void setMix(float bt, float tone, float spdif) {
 }
 
 // ---------------------------------------------------------------------------
-// Metronome (opt-in: -D TDSP_METRONOME) — an on-beat click locked to the master
-// clock. It is a pure Clock consumer (reads consumeBeatEdge()/beatInBar()), so it
-// follows @BPM and the playing content's meter automatically and can never drift
-// from the synced players — it IS the audible lock probe for the tick-sync work
-// (planning/tick-sync-playback/PLAN.md §13). Slot-free: it reuses the existing
-// local test-tone oscillator (testTone, mix slot 1), so it costs no extra audio
-// object or mixer slot on any build. v1 clicks the Clock quarter-note beat with a
-// downbeat accent (idiomatic for x/4); compound "in-2" pulses are a phase-2 item.
+// Metronome / idle time signature (beats per bar). Set by @METROSIG; drives the
+// metronome accent AND applyMeter()'s idle downbeat fallback. NOT gated on
+// TDSP_METRONOME because applyMeter() references it unconditionally.
+static uint8_t g_metroBpb = 4;
+
+// Emit "@BEAT=<i>/<n>" for the app's beat lights — but ONLY if the USB serial can
+// take it WITHOUT blocking loop(). Click/playback timing precision matters more than
+// a single light frame, and the app has a local-clock fallback, so if the TX buffer
+// is backed up we simply drop this frame instead of stalling the foreground (which
+// would jitter the metronome click / the synced players). This is the fix for
+// "the beat-light feed hurting precision".
+static void emitBeat(uint8_t i, uint8_t n) {
+    if (Serial.availableForWrite() >= 16) Serial.printf("@BEAT=%u/%u\n", (unsigned)i, (unsigned)n);
+}
+
+// Metronome (opt-in: -D TDSP_METRONOME) — a SELF-TIMED on-beat click, deliberately
+// NOT locked to the master-clock grid. It takes only the TEMPO from the Conductor
+// (g_conductor.bpm()) and keeps its OWN micros-based beat schedule + bar counter, so
+// it is immune to the grid re-zeroing, the content meter, and the clock's catch-up
+// ticks — and stays precise no matter what else runs. On Play the first click fires
+// immediately (= the downbeat); the accent lands on beat 1 of its own g_metroBpb bar.
+// It emits its own @BEAT (non-blocking) so the app's amber downbeat light counts
+// forward with it. Slot-free: reuses the local test-tone oscillator (testTone, mix
+// slot 1). v1 clicks the quarter-note beat; compound "in-2" pulses are a phase-2 item.
 #ifdef TDSP_METRONOME
-static bool          g_metroOn   = false;
-static float         g_metroPeak = 0.0f;   // current click's peak amplitude (0 = idle)
-static elapsedMillis g_metroAge;           // ms since the current click fired
-static constexpr float    kMetroGain      = 0.8f;    // mix-slot-1 gain while enabled
-static constexpr float    kMetroAccentAmp = 0.60f;   // beat 1 (downbeat) click level
-static constexpr float    kMetroBeatAmp   = 0.38f;   // other beats
-static constexpr float    kMetroAccentHz  = 1568.0f; // G6 — accent pitch
-static constexpr float    kMetroBeatHz    = 1046.0f; // C6 — normal pitch
+static bool          g_metroOn      = false;
+static uint8_t       g_metroBeatIdx = 0;     // beat within the metronome's OWN bar (0 = downbeat)
+static uint32_t      g_metroNextUs  = 0;     // micros() when the next click is due
+static float         g_metroPeak    = 0.0f;  // current click's peak amplitude (0 = idle)
+static elapsedMillis g_metroAge;             // ms since the current click fired
+static constexpr float    kMetroGain      = 0.9f;    // mix-slot-1 gain while enabled
+static constexpr float    kMetroAccentAmp = 0.85f;   // beat 1 (downbeat) click level
+static constexpr float    kMetroBeatAmp   = 0.30f;   // other beats (well below the accent)
+static constexpr float    kMetroAccentHz  = 2093.0f; // C7 — accent pitch (an octave over the beat)
+static constexpr float    kMetroBeatHz    = 1047.0f; // C6 — normal pitch
 static constexpr float    kMetroDecayMs   = 45.0f;   // percussive click decay
+static int           g_metroVolPct = 100;  // click level 0..150 (% of the default gain), independent of @VOL master
+static float metroSlotGain() { return kMetroGain * (g_metroVolPct / 100.0f); }   // slot-1 gain scaled by the volume
+
+// micros per quarter-note beat at the MASTER tempo (tempo only — not the grid phase).
+static uint32_t metroBeatUs() {
+    float bpm = g_conductor.bpm(); if (bpm < 1.0f) bpm = 1.0f;
+    return (uint32_t)(60000000.0f / bpm);
+}
 
 static void metroSetEnabled(bool on) {
     g_metroOn = on;
     if (on) {
-        outL.gain(1, kMetroGain); outR.gain(1, kMetroGain);   // open slot 1 for the click
+        g_metroBeatIdx = 0;             // next click is beat 1 (the downbeat)...
+        g_metroNextUs  = micros();      // ...and it fires immediately on Play
+        outL.gain(1, metroSlotGain()); outR.gain(1, metroSlotGain());   // open slot 1 for the click
     } else {
         g_metroPeak = 0.0f;
         testTone.amplitude(0.0f);
@@ -578,14 +606,24 @@ static void metroSetEnabled(bool on) {
     }
 }
 
-// Call once per loop() AFTER g_conductor.update() (which fires the beat latch).
+// Call once per loop(). Self-timed off micros() at the master tempo — independent
+// of the shared clock's grid, so serial/loop jitter can't drag it off the beat.
 static void metroPoll() {
-    tdsp::Clock &clk = g_conductor.clock();
-    if (clk.consumeBeatEdge() && g_metroOn) {                 // new beat -> strike a click
-        const bool accent = (clk.beatInBar() == 0);           // beat 1 = the downbeat
-        testTone.frequency(accent ? kMetroAccentHz : kMetroBeatHz);
-        g_metroPeak = accent ? kMetroAccentAmp : kMetroBeatAmp;
-        g_metroAge  = 0;
+    if (g_metroOn) {
+        const uint32_t now = micros();
+        if ((int32_t)(now - g_metroNextUs) >= 0) {            // a beat is due
+            const uint8_t bpb = g_metroBpb ? g_metroBpb : 1;
+            const bool accent = (g_metroBeatIdx == 0);        // beat 1 of the metronome's own bar
+            testTone.frequency(accent ? kMetroAccentHz : kMetroBeatHz);
+            g_metroPeak = accent ? kMetroAccentAmp : kMetroBeatAmp;
+            g_metroAge  = 0;
+            emitBeat(g_metroBeatIdx, bpb);                    // drive the app lights (non-blocking)
+            if (++g_metroBeatIdx >= bpb) g_metroBeatIdx = 0;
+            const uint32_t mpb = metroBeatUs();
+            g_metroNextUs += mpb;                             // schedule from the accumulator (drift-free)
+            if ((int32_t)(now - g_metroNextUs) >= 0)          // fell >1 beat behind (a stall) -> resync, don't burst
+                g_metroNextUs = now + mpb;
+        }
     }
     if (g_metroPeak > 0.0f) {                                 // percussive linear decay
         float a = g_metroPeak * (1.0f - (float)g_metroAge / kMetroDecayMs);
@@ -593,7 +631,36 @@ static void metroPoll() {
         testTone.amplitude(a);
     }
 }
+
+// Metronome click level (0..150 %). Scales slot-1 gain; applied live when running.
+static void setMetroVol(int pct) {
+    if (pct < 0) pct = 0; if (pct > 150) pct = 150;
+    g_metroVolPct = pct;
+    if (g_metroOn) { outL.gain(1, metroSlotGain()); outR.gain(1, metroSlotGain()); }
+}
 #endif  // TDSP_METRONOME
+
+// --- Beat position emit (@BEAT) ---------------------------------------------
+// Drives the app's visual beat lights off the REAL master clock — but ONLY while a
+// SONG or GROOVE is playing (they own the grid). A running metronome emits its OWN
+// @BEAT from metroPoll() (self-timed), so we skip here when it's on to avoid two
+// sources fighting over the lights. Idle with nothing playing -> no feed (the app
+// hides the strip). Watches beatCount() change (does NOT consume the beat latch) and
+// emits non-blocking via emitBeat(), so the light feed can never stall loop().
+static uint32_t g_lastBeatEmit = 0xFFFFFFFFu;   // force an emit on the first beat seen
+static void beatEmitPoll() {
+#ifdef TDSP_METRONOME
+    if (g_metroOn) return;                       // the metronome owns the lights while running
+#endif
+    if (!g_player.isPlaying() && !g_drumPlayer.isPlaying()) return;   // only show a real transport
+    tdsp::Clock &clk = g_conductor.clock();
+    if (!clk.running()) return;                  // clock stalled/stopped -> nothing to show
+    const uint32_t bc = clk.beatCount();
+    if (bc == g_lastBeatEmit) return;            // still within the same beat
+    g_lastBeatEmit = bc;
+    uint8_t bpb = clk.beatsPerBar(); if (!bpb) bpb = 1;
+    emitBeat(clk.beatInBar(), bpb);
+}
 
 // --- Non-blocking song sequencer --------------------------------------------
 // Song registry: index (sent by the app as @SONG=<i>) -> a transcoded MIDI
@@ -790,9 +857,12 @@ static void applyTempos() {
 // plays (song = master, same rule as the tempo lock); otherwise a looping groove
 // owns the meter; idle falls back to 4/4. Call after any song/groove start or stop.
 static void applyMeter() {
+    // Content owns the meter while it plays (song = master, else a looping
+    // groove); idle falls back to the METRONOME time signature (g_metroBpb,
+    // default 4/4) so a standalone click bars-up on the chosen signature.
     uint8_t bpb = g_player.isPlaying()     ? g_songBpb
                 : g_drumPlayer.isPlaying() ? g_drumBpb
-                                           : 4;
+                                           : g_metroBpb;
     g_conductor.setBeatsPerBar(bpb);
 }
 
@@ -1204,17 +1274,31 @@ static void setDrumVol(int pct) {
     if (pct < 0) pct = 0;
     if (pct > 150) pct = 150;
     g_drumVolPct = pct;
+#if defined(TDSP_DRUM_VOICE) || defined(TDSP_DRUM_TSF)
+    // The parallel drum voice owns mix slot 2, so scale THAT bus — a clean output
+    // attenuation where signal + noise fall together. Velocity scaling made the OPLL
+    // rhythm noisy at low levels: its hats/cymbals are noise generators whose level barely
+    // tracks velocity, so lowering velocity dropped the tonal drums but not the noise floor.
+    const float g = TDSP_DEFAULT_SYNTH_MAKEUP * (pct / 100.0f);   // 100 % == the 0.62 make-up
+    outL.gain(2, g); outR.gain(2, g);
+#else
+    // Drums share the main synth (GM channel 10) — no separate bus, so per-note velocity
+    // is the only per-source lever available here.
     g_drumPlayer.setVelocityScale(pct / 100.0f);
+#endif
     Serial.printf("[drum] vol -> %d%%\n", pct);
 }
-// MIDI-player level trim, independent of the @VOL master. Scales the song's note-on
-// velocities (0..150 %), mirroring setDrumVol for the dedicated drum player.
+// MIDI-player level, independent of the @VOL master. Scales the SYNTH mix bus (slot 3)
+// output — a true, patch-independent volume. Velocity scaling (the old approach) had "no
+// impact" because many DX7/FM voices have zero velocity->loudness sensitivity, so it only
+// shifted timbre. Slot 3 carries the whole melodic synth, so this is the synth-bus fader.
 static void setSongVol(int pct) {
     if (pct < 0) pct = 0;
     if (pct > 150) pct = 150;
     g_songVolPct = pct;
-    g_player.setVelocityScale(pct / 100.0f);
-    Serial.printf("[song] vol -> %d%%\n", pct);
+    const float g = TDSP_DEFAULT_SYNTH_MAKEUP * (pct / 100.0f);
+    outL.gain(3, g); outR.gain(3, g);
+    Serial.printf("[song] synth-bus vol -> %d%%\n", pct);
 }
 
 // Stream the device catalog (song + instrument names, '|'-delimited) to the ESP32
@@ -1503,6 +1587,19 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         reply.printf("@METRO=%d\n", g_metroOn ? 1 : 0);
         Serial.printf("[metro] %s\n", g_metroOn ? "ON" : "off");
     }
+    else if (strncmp(line, "@METROSIG=", 10) == 0) {   // metronome time signature = N beats/bar (accent on beat 1)
+        int n = atoi(line + 10); if (n < 1) n = 1; if (n > 16) n = 16;
+        g_metroBpb = (uint8_t)n;
+        g_metroBeatIdx = 0;   // restart the metronome's own bar so the new signature is heard from beat 1
+        applyMeter();         // keep the idle @STATE clock.bpb / arp grid consistent with the chosen signature
+        reply.printf("@METROSIG=%d\n", g_metroBpb);
+        Serial.printf("[metro] time signature = %d/4\n", g_metroBpb);
+    }
+    else if (strncmp(line, "@METROVOL=", 10) == 0) {   // click level 0..150 %, independent of the @VOL master
+        setMetroVol(atoi(line + 10));
+        reply.printf("@METROVOL=%d\n", g_metroVolPct);
+        Serial.printf("[metro] volume = %d%%\n", g_metroVolPct);
+    }
 #endif
     else if (strncmp(line, "@APP=", 5) == 0) {   // store the opaque app-owned state blob (see g_appState)
         strncpy(g_appState, line + 5, sizeof(g_appState) - 1);
@@ -1582,6 +1679,10 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         g_arpFilter.setEnabled(atoi(line + 7) != 0);
         reply.printf("@ARPON=%d\n", g_arpFilter.enabled() ? 1 : 0);
         Serial.printf("[arp] %s\n", g_arpFilter.enabled() ? "ON" : "bypass");
+    }
+    else if (strcmp(line, "@ARPRESTART") == 0) {           // Play press: re-trigger the cycle from step 0 (keeps the held chord)
+        g_arpFilter.restart();
+        Serial.println("[arp] restart");
     }
     else if (strncmp(line, "@ARPPAT=", 8) == 0) {          // pattern 0..25 (Up/.../Euclidean/UserSequence=25)
         g_arpFilter.setPattern((tdsp::ArpFilter::Pattern)atoi(line + 8));
@@ -1681,11 +1782,11 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         reply.printf("\"arp\":{\"on\":%d,\"pat\":%d,\"rate\":%d,\"oct\":%d,\"latch\":%d},",
                      g_arpFilter.enabled() ? 1 : 0, (int)g_arpFilter.pattern(), (int)g_arpFilter.rate(),
                      g_arpFilter.octaveRange(), g_arpFilter.latch() ? 1 : 0);
-        reply.printf("\"song\":{\"playing\":%d,\"p\":%d,\"sync\":%d,\"name\":", g_player.isPlaying() ? 1 : 0, g_player.positionPermille(), g_player.isSynced() ? 1 : 0);
+        reply.printf("\"song\":{\"playing\":%d,\"p\":%d,\"sync\":%d,\"vol\":%d,\"name\":", g_player.isPlaying() ? 1 : 0, g_player.positionPermille(), g_player.isSynced() ? 1 : 0, g_songVolPct);
         tdsp::catdb::jsonStr(reply, g_curSongName); reply.print("},");
-        reply.printf("\"drums\":{\"kit\":%d,\"playing\":%d,\"sync\":%d},", g_drumKit, g_drumPlayer.isPlaying() ? 1 : 0, g_drumPlayer.isSynced() ? 1 : 0);
+        reply.printf("\"drums\":{\"kit\":%d,\"playing\":%d,\"sync\":%d,\"vol\":%d},", g_drumKit, g_drumPlayer.isPlaying() ? 1 : 0, g_drumPlayer.isSynced() ? 1 : 0, g_drumVolPct);
 #ifdef TDSP_METRONOME
-        reply.printf("\"metro\":%d,", g_metroOn ? 1 : 0);   // metronome on/off (feature build only)
+        reply.printf("\"metro\":%d,\"metrosig\":%d,\"metrovol\":%d,", g_metroOn ? 1 : 0, g_metroBpb, g_metroVolPct);   // metronome on/off + time sig + click level (feature build only)
 #endif
         // Master-clock beat/bar so the app can show a downbeat indicator: beat is
         // 1-based (1 == the downbeat), bpb = beats per bar (from the content's time
@@ -1928,6 +2029,8 @@ void loop() {
 #ifdef TDSP_METRONOME
     metroPoll();   // strike/decay the on-beat click (consumes the clock's beat latch)
 #endif
+
+    beatEmitPoll();   // @BEAT=<beatInBar>/<beatsPerBar> once per beat, for the app's beat lights
 
     // Launch quantize: fire any armed song/groove exactly on a bar edge (flagged by
     // g_launchSched during the update() above), so they land on the shared downbeat. The

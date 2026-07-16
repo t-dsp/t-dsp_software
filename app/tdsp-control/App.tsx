@@ -63,24 +63,66 @@ const ProgressBar = ({ value }: { value: number }) => (
   <View style={s.progTrack}><View style={[s.progFill, { width: `${Math.max(0, Math.min(1, value)) * 100}%` }]} /></View>
 );
 
+// Header beat lights: one circle per beat of the bar, the current beat lit, beat 1 (the
+// downbeat / accent) in a distinct color. Two clock sources, preferring the device:
+//   • LIVE (`live`): the device's @BEAT feed — locked to the REAL master downbeat + meter.
+//   • LOCAL fallback: a self-correcting clock at the master BPM, for firmware that doesn't
+//     emit @BEAT. Matches the tempo but re-anchors its downbeat to "now" on tempo/meter change.
+// Only this component re-renders each beat (its own state), not the whole app.
+const DOWNBEAT = '#e3b341';   // amber — the accented beat 1, distinct from the green beats
+function BeatStrip({ sig, bpm, active, live }: { sig: number; bpm: number; active: boolean; live: { i: number; n: number } | null }) {
+  const [beat, setBeat] = useState(-1);
+  const anchor = useRef(0);
+  const useLive = active && !!live;
+  const beats = useLive ? live!.n : sig;   // device meter when live, else the @METROSIG setting
+  useEffect(() => {
+    if (useLive || !active || beats < 1 || bpm <= 0) { setBeat(-1); return; }   // live feed drives it directly — no local timer
+    const period = 60000 / bpm;   // ms per quarter-note beat
+    const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    anchor.current = now();
+    let timer: any;
+    // Self-correcting: each tick schedules the NEXT beat boundary off the fixed anchor,
+    // so setTimeout jitter never accumulates into drift.
+    const tick = () => {
+      const t = now();
+      const i = Math.floor((t - anchor.current) / period);
+      setBeat(((i % beats) + beats) % beats);
+      timer = setTimeout(tick, Math.max(0, anchor.current + (i + 1) * period - t));
+    };
+    tick();
+    return () => clearTimeout(timer);
+  }, [beats, bpm, active, useLive]);
+  if (!active || beats < 1) return null;
+  const lit = useLive ? live!.i : beat;
+  return (
+    <View style={s.beatStrip}>
+      {Array.from({ length: beats }, (_, i) => {
+        const on = i === lit, down = i === 0;
+        return <View key={i} style={[s.beatDot, down && s.beatDotDown, on && (down ? s.beatDotDownOn : s.beatDotOn)]} />;
+      })}
+    </View>
+  );
+}
+
 // Homepage card: the section's title, live value, and header controls. Fixed size so
 // every card matches. Title/value sit on top; controls always sit on their own row at
 // the bottom (a card is far narrower than the window, so they never share the title's
-// line). Controls are nested Pressables → they fire without navigating the card.
+// line). Only the › chevron opens the section — the card body itself is inert, so the
+// header controls (nested Pressables) never risk a stray navigation.
 function Card({ title, value, status, subtitle, actions, progress, onPress, style }:
   { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onPress: () => void; style?: any }) {
   return (
-    <Pressable style={[s.card, style]} onPress={onPress}>
+    <View style={[s.card, style]}>
       <View style={s.cardHead}>
         <View style={s.drawerLeft}>
           <Text style={s.drawerTitle} numberOfLines={1}>{title}</Text>
           {subtitle ?? <Subtitle value={value} status={status} />}
           {progress != null && <ProgressBar value={progress} />}
         </View>
-        <Text style={s.chev}>›</Text>
+        <Pressable onPress={onPress} hitSlop={10} style={s.chevBtn}><Text style={s.chev}>›</Text></Pressable>
       </View>
       {!!actions && <View style={s.cardActions}>{actions}</View>}
-    </Pressable>
+    </View>
   );
 }
 
@@ -112,6 +154,19 @@ const HdrBtn = ({ label, onPress, stop }: { label: string; onPress: () => void; 
   <Pressable onPress={onPress} style={[s.hdrBtn, stop && s.hdrBtnStop]}><Text style={s.hdrBtnText}>{label}</Text></Pressable>
 );
 const Row = ({ children }: any) => <View style={s.row}>{children}</View>;
+// A per-section level slider (0..150 %, 100 = the file's own velocity), independent of the
+// master @VOL. Live drag only moves the label; the value is sent on release (onSlidingComplete)
+// so a drag never bursts the serial link (mirrors ui.html's @change-not-@input behavior).
+const VolSlider = ({ label, value, onChange, onCommit, disabled }:
+  { label: string; value: number; onChange: (v: number) => void; onCommit: (v: number) => void; disabled?: boolean }) => (
+  <View style={s.volRow}>
+    <Text style={[s.muted, { width: 52 }]}>{label}</Text>
+    <Slider style={{ flex: 1, height: 34 }} minimumValue={0} maximumValue={150} step={1} value={value}
+      minimumTrackTintColor={C.accent} maximumTrackTintColor={C.border} thumbTintColor={C.accent}
+      disabled={disabled} onValueChange={onChange} onSlidingComplete={onCommit} />
+    <Text style={[s.muted, { width: 44, textAlign: 'right' }]}>{Math.round(value)}%</Text>
+  </View>
+);
 const Stat = ({ label, n, sub }: { label: string; n: number; sub?: string }) => (
   <View style={s.stat}><Text style={s.statN}>{n}</Text><Text style={s.statL}>{label}</Text>{!!sub && <Text style={s.statSub}>{sub}</Text>}</View>
 );
@@ -151,11 +206,16 @@ export default function App() {
   const [arpPresetId, setArpPresetId] = useState<string>('');   // which library preset is applied (for browser highlight)
   const [arpMode, setArpMode] = useState<'preset' | 'manual'>('preset');   // which editor drives the arp — one at a time so they never collide
   const [drums, setDrums] = useState<{ kit: number; sel: string | null; playing: string | null }>({ kit: 0, sel: null, playing: null });
+  const [drumVol, setDrumVol] = useState(100);        // drum-player level 0..150 %, independent of the master @VOL
   // `song` = the selected song's NAME (its stable identity now that there's no index). name = currently-playing title.
   const [player, setPlayer] = useState<{ song: string; playing: boolean; name: string; prog: number }>({ song: '', playing: false, name: '', prog: 0 });
+  const [songVol, setSongVol] = useState(100);        // MIDI-player level 0..150 %, independent of the master @VOL
   const [endMode, setEndMode] = useState<EndMode>('stop');   // what the player does when a song ends
   const [bpm, setBpm] = useState(120);
+  const [beatFeed, setBeatFeed] = useState<{ i: number; n: number } | null>(null);   // live @BEAT from the device (null = fall back to the local clock)
+  const beatStaleRef = useRef<any>(null);
   const [quant, setQuant] = useState(false);           // launch quantize: start songs/grooves on the next bar
+  const [metro, setMetro] = useState({ on: false, cap: false, sig: 4, vol: 100 });   // metronome click; cap=true once the device reports @METRO support; sig = beats/bar; vol = click level 0..150 %
   const [songBpm, setSongBpm] = useState(120);            // tempo of the last song that played
   const [selVoice, setSelVoice] = useState('');
   const [selVoiceName, setSelVoiceName] = useState('');   // last-picked instrument name (shown on the card, persists across browsing)
@@ -183,11 +243,25 @@ export default function App() {
     // present its stored value arrives right after and overrides this (see hydrateApp).
     if (j.loop != null) setEndMode(m => j.loop ? 'repeat' : (m === 'repeat' ? 'stop' : m));
     if (j.quant != null) setQuant(!!j.quant);
+    if (j.metro != null) setMetro(m => ({ ...m, on: !!j.metro, cap: true }));   // present only on metronome-capable builds
+    if (j.metrosig != null) setMetro(m => ({ ...m, sig: Math.max(1, Math.min(16, j.metrosig | 0)) || 4 }));
+    if (j.metrovol != null) setMetro(m => ({ ...m, vol: Math.max(0, Math.min(150, j.metrovol | 0)) }));
     if (j.arp) setArp({ on: !!j.arp.on, pat: clampIdx(j.arp.pat, ARP_PAT.length), rate: rateIndexFromFw(j.arp.rate | 0), oct: Math.max(1, Math.min(4, j.arp.oct | 0)) || 1, latch: !!j.arp.latch });
     if (j.song) setPlayer(p => ({ ...p, playing: !!j.song.playing, song: j.song.name || p.song, name: j.song.name || p.name, prog: j.song.p != null ? j.song.p / 1000 : (j.song.playing ? -1 : 0) }));
+    if (j.song?.vol != null) setSongVol(Math.max(0, Math.min(150, j.song.vol | 0)));
     if (j.drums) setDrums(d => ({ ...d, kit: j.drums.kit | 0, playing: j.drums.playing ? d.playing : null }));
+    if (j.drums?.vol != null) setDrumVol(Math.max(0, Math.min(150, j.drums.vol | 0)));
     if (j.voice) {
-      if (j.voice.cart) { setSelVoice('c' + j.voice.cart + ':' + (j.voice.cv | 0)); setSelVoiceName(j.voice.name || ''); setSelVoicePath('/dexed/' + j.voice.cart); }
+      if (j.voice.cart) {
+        const rel = j.voice.cart;
+        setSelVoice('c' + rel + ':' + (j.voice.cv | 0)); setSelVoiceName(j.voice.name || ''); setSelVoicePath('/dexed/' + rel);
+        // Preload the folder browser onto the current cart so Next/Prev step through its voices
+        // immediately at startup — otherwise voiceData is empty and stepVoice() bails on cart voices
+        // until the user manually dives into the folder/cart.
+        const slash = rel.lastIndexOf('/');
+        setVpath(slash >= 0 ? rel.slice(0, slash) : '');
+        setCart({ rel, name: (slash >= 0 ? rel.slice(slash + 1) : rel).replace(/\.syx$/i, '') });
+      }
       else if (j.voice.i != null && j.voice.i < 320) { setSelVoice('b' + (j.voice.i | 0)); setSelVoiceName(j.voice.name || ''); setSelVoicePath('Bundled'); }
     }
   }
@@ -218,6 +292,17 @@ export default function App() {
         if (manualStopRef.current) manualStopRef.current = false;   // user hit Stop → don't auto-advance
         else onSongEndRef.current();                                // natural end → Continue/Shuffle per the end-mode
       } else setPlayer(p => ({ ...p, playing: true, prog: Math.max(0, Math.min(1, v / 1000)) }));
+    } else if (line.startsWith('@BEAT=')) {
+      // Live beat position from the master clock: "@BEAT=<beatInBar>/<beatsPerBar>".
+      // Drives the header beat lights locked to the real device downbeat. If these stop
+      // arriving (old firmware, or the clock stalled), clear the feed so BeatStrip falls
+      // back to its local BPM-driven clock.
+      const p = line.slice(6).split('/'); const i = parseInt(p[0], 10), n = parseInt(p[1], 10);
+      if (i >= 0 && n >= 1) {
+        setBeatFeed({ i, n });
+        if (beatStaleRef.current) clearTimeout(beatStaleRef.current);
+        beatStaleRef.current = setTimeout(() => setBeatFeed(null), 1500);
+      }
     } else if (line.startsWith('[song]')) {
       // Follow the song's detected tempo: set master BPM to it (song + drums lock to that).
       const m = line.match(/([\d.]+)\s*bpm/); if (m) { const b = Math.round(parseFloat(m[1])); if (b >= 20 && b <= 300) { setSongBpm(b); setBpm(b); tp.masterBpm(b); } }
@@ -443,6 +528,10 @@ export default function App() {
   // Entering Manual mode ALWAYS lands on a clean slate — otherwise a preset's invisible extras
   // (scatter channel, step mask, scale…) linger and the manual controls appear dead.
   const enterManualMode = () => { setArpMode('manual'); resetArpManual(); };
+  // Independent transport: Play (re)starts — if already on it restarts the cycle from step 0
+  // (@ARPRESTART) rather than being a no-op; Stop bypasses. So you can re-trigger a running arp.
+  const playArp = () => { if (arp.on) tp.arpRestart(); else { setArp(a => ({ ...a, on: true })); tp.arpOn(true); } };
+  const stopArp = () => { setArp(a => ({ ...a, on: false })); tp.arpOn(false); };
   const activePresetName = ARP_LIBRARY.find(p => p.id === arpPresetId)?.name || '';
   const playSong = () => { const sg = cat.songs.find(x => x.name === player.song) || cat.songs[0]; if (!sg) return; tp.songPlay(songArg(sg)); setPlayer(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };  // -1 until the device reports position
   const stopSong = () => { manualStopRef.current = true; tp.stopSong(); setPlayer(p => ({ ...p, playing: false, prog: 0 })); };
@@ -567,6 +656,38 @@ export default function App() {
         </>
       ),
     },
+    // METRONOME — on-beat click locked to the master clock. Shown only on builds that
+    // report @METRO support (metro.cap, set from @STATE). Follows the master BPM + the
+    // playing content's meter automatically — it's a pure clock consumer, no own tempo.
+    {
+      id: 'metro', title: 'Metronome', show: metro.cap, value: metro.on ? 'Playing' : 'Paused',
+      actions: (
+        metro.on
+          ? <HdrBtn label="⏸" stop onPress={() => { setMetro(m => ({ ...m, on: false })); tp.metronome(false); }} />
+          : <HdrBtn label="▶" onPress={() => { setMetro(m => ({ ...m, on: true })); tp.metronome(true); }} />
+      ),
+      body: (
+        <>
+          <Pressable style={[s.btn, metro.on && s.btnGhost]}
+            onPress={() => { const v = !metro.on; setMetro(m => ({ ...m, on: v })); tp.metronome(v); }}>
+            <Text style={s.btnText}>{metro.on ? '⏸  Pause' : '▶  Play'}</Text>
+          </Pressable>
+          <Text style={s.muted}>Play starts on the downbeat — the beat lights light beat 1 and count forward from there. Runs at the master tempo ({Math.round(bpm)} BPM); set it on the Tempo card.</Text>
+          <Text style={[s.text, { marginTop: 6 }]}>Click volume</Text>
+          <VolSlider label="Volume" value={metro.vol} onChange={v => setMetro(m => ({ ...m, vol: v }))} onCommit={v => tp.metronomeVol(v)} disabled={!connected} />
+          <Text style={[s.text, { marginTop: 6 }]}>Time signature</Text>
+          <Text style={s.muted}>Beats per bar — the click accents beat 1 of each bar. The metronome runs on its own clock, so this is independent of any song or groove that's playing.</Text>
+          <Row>
+            {[2, 3, 4, 5, 6, 7].map(n => (
+              <Pressable key={n} style={[s.pill, metro.sig === n && s.pillOn]}
+                onPress={() => { setMetro(m => ({ ...m, sig: n })); tp.metronomeSig(n); }}>
+                <Text style={s.text}>{n}/4</Text>
+              </Pressable>
+            ))}
+          </Row>
+        </>
+      ),
+    },
     // SYNTH / VOICES — folder browser over bundled voices + the whole /dexed library
     {
       id: 'synth', title: 'Synth / Voices', show: true, value: synthValue, subtitle: synthSubtitle, fullHeight: true,
@@ -634,6 +755,7 @@ export default function App() {
       </>),
       body: (
         <>
+          <VolSlider label="Volume" value={songVol} onChange={setSongVol} onCommit={v => tp.songVol(v)} disabled={!connected} />
           {cat.songs.length === 0 ? <Text style={s.muted}>No songs indexed.</Text> : (
             <ScrollView style={s.list} nestedScrollEnabled>
               {cat.songs.map(sg => <ListBtn key={sg.file || sg.name} label={(player.playing && player.song === sg.name ? '♪ ' : '') + sg.name} sel={player.song === sg.name}
@@ -658,12 +780,21 @@ export default function App() {
       actions: (<>
         <HdrBtn label="‹" stop onPress={() => stepArpNav(-1)} />
         <HdrBtn label="›" stop onPress={() => stepArpNav(1)} />
-        <Switch value={arp.on} onValueChange={v => { setArp(a => ({ ...a, on: v })); tp.arpOn(v); }} style={{ marginLeft: 6 }} />
+        <HdrBtn label="▶" onPress={playArp} />
+        <HdrBtn label="■" stop onPress={stopArp} />
       </>),
       body: (
         <>
-          <Row><Text style={[s.muted, { flex: 1 }]}>Enabled</Text>
-            <Switch value={arp.on} onValueChange={v => { setArp(a => ({ ...a, on: v })); tp.arpOn(v); }} /></Row>
+          {/* Play and Stop are independent (not a toggle): Play re-triggers a running arp,
+              Stop bypasses it. The active state is shown by which button is highlighted. */}
+          <Row>
+            <Pressable style={[s.btn, s.grow1, arp.on && s.btnOn]} onPress={playArp}>
+              <Text style={s.btnText}>▶  {arp.on ? 'Restart' : 'Play'}</Text>
+            </Pressable>
+            <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={stopArp}>
+              <Text style={s.btnText}>■  Stop</Text>
+            </Pressable>
+          </Row>
           {/* Two tabs — Preset vs Manual — so only ONE editor drives the arp at a time and it's
               always clear which. Both write the same device config, so we never show both at once. */}
           <View style={s.arpTabs}>
@@ -716,6 +847,7 @@ export default function App() {
       </>),
       body: (
         <>
+          <VolSlider label="Volume" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />
           <Row><Text style={[s.muted, { flex: 1 }]}>Kit: {cat.drumkits[drums.kit]?.name || '—'}</Text>
             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
               {cat.drumkits.map((k, i) => <Pressable key={i} style={[s.pill, drums.kit === i && s.pillOn]} onPress={() => { setDrums(d => ({ ...d, kit: i })); tp.drumKit(i); }}><Text style={s.text}>{k.name}</Text></Pressable>)}
@@ -770,7 +902,7 @@ export default function App() {
   // Display order (homepage cards + page routing). Performance sections first
   // (play → pick a voice → tempo → arp → drums), then system (connection, BT, codec).
   // Unlisted ids fall to the end in their definition order (stable sort).
-  const SECTION_ORDER = ['player', 'synth', 'bpm', 'arp', 'drums', 'conn', 'bt', 'codec'];
+  const SECTION_ORDER = ['player', 'synth', 'bpm', 'metro', 'arp', 'drums', 'conn', 'bt', 'codec'];
   const ord = (id: string) => { const i = SECTION_ORDER.indexOf(id); return i < 0 ? 999 : i; };
   const visible = sections.filter(x => x.show).sort((a, b) => ord(a.id) - ord(b.id));
   const cur = route === 'home' ? null : visible.find(x => x.id === route);
@@ -789,6 +921,7 @@ export default function App() {
           </Pressable>
         </View>
         <Text style={s.statline}>{headerStatus}</Text>
+        <BeatStrip sig={metro.sig} bpm={bpm} active={connected && (metro.on || player.playing || !!drums.playing)} live={beatFeed} />
         <View style={s.volRow}>
           <Text style={s.volLbl}>VOL</Text>
           <Slider style={{ flex: 1, height: 34 }} minimumValue={0} maximumValue={100} step={1}
@@ -882,6 +1015,12 @@ const s = StyleSheet.create({
   dotOn: { backgroundColor: C.accent },
   brand: { color: C.text, fontWeight: '800', fontSize: 18, letterSpacing: 0.5 },
   statline: { color: C.muted, fontSize: 12, marginTop: 3 },
+  // header beat lights (BeatStrip) — one dot per beat of the bar
+  beatStrip: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 6, height: 14 },
+  beatDot: { width: 12, height: 12, borderRadius: 6, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border },
+  beatDotDown: { borderColor: 'rgba(227,179,65,0.55)' },   // downbeat marked even when unlit
+  beatDotOn: { backgroundColor: C.accent, borderColor: C.accent, shadowColor: C.accent, shadowOpacity: 0.9, shadowRadius: 6, elevation: 4, transform: [{ scale: 1.18 }] },
+  beatDotDownOn: { backgroundColor: DOWNBEAT, borderColor: DOWNBEAT, shadowColor: DOWNBEAT, shadowOpacity: 0.9, shadowRadius: 6, elevation: 4, transform: [{ scale: 1.18 }] },
   volRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
   volLbl: { color: C.muted, fontSize: 11, width: 26 },
   volVal: { color: C.text, fontSize: 13, width: 28, textAlign: 'right' },
@@ -900,7 +1039,8 @@ const s = StyleSheet.create({
   tag: { color: C.muted, fontSize: 12, backgroundColor: C.chip, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10, overflow: 'hidden', alignSelf: 'flex-start' },
   progTrack: { height: 4, borderRadius: 2, backgroundColor: C.chip, marginTop: 6, overflow: 'hidden' },
   progFill: { height: '100%', borderRadius: 2, backgroundColor: C.accent },
-  chev: { color: C.muted, fontSize: 20, marginLeft: 'auto' },
+  chevBtn: { marginLeft: 'auto', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6 },
+  chev: { color: C.muted, fontSize: 22, lineHeight: 22 },
   // section page
   page: { maxWidth: 720, width: '100%', alignSelf: 'center' },
   pageHead: { paddingHorizontal: 14, paddingTop: 12, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: C.border },
@@ -946,6 +1086,7 @@ const s = StyleSheet.create({
   hdrBtnStop: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
   hdrBtnText: { color: C.text, fontSize: 15, fontWeight: '700' },
   btnGhost: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
+  btnOn: { borderWidth: 2, borderColor: C.accent },   // active-transport highlight (arp running)
   btnText: { color: C.text, fontSize: 13, fontWeight: '600' },
   input: { backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 7, color: C.text, paddingHorizontal: 10, paddingVertical: 8, fontSize: 14 },
   list: { maxHeight: 300, borderWidth: 1, borderColor: C.border, borderRadius: 7 },

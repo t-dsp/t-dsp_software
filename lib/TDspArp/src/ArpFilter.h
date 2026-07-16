@@ -208,6 +208,13 @@ public:
     // Safe to call if _clock is null.
     void tick(uint32_t nowMicros);
 
+    // Re-lock the running pattern to the master beat grid. Call after the
+    // transport re-zeros (Conductor::start()) while the arp is holding a chord,
+    // so the pattern snaps back onto the new downbeat instead of keeping its
+    // old (now-stale) phase. No-op if idle/disabled — a fresh press re-locks on
+    // its own via the grid-aligned cold-start anchor.
+    void resyncToGrid();
+
     // -------- MidiSink overrides (from upstream router) --------
     void onNoteOn      (uint8_t channel, uint8_t note, uint8_t velocity) override;
     void onNoteOff     (uint8_t channel, uint8_t note, uint8_t velocity) override;
@@ -227,6 +234,9 @@ public:
     // -------- Parameter API --------
     void setEnabled(bool on);
     bool enabled()   const { return _enabled; }
+    // Restart the running pattern from step 0 without dropping the held chord — a Play
+    // press that re-triggers the cycle even when the arp is already on. No-op if bypassed.
+    void restart();
 
     void setPattern(Pattern p);
     Pattern pattern() const { return _pattern; }
@@ -431,6 +441,12 @@ private:
     void addHeld   (uint8_t ch, uint8_t note, uint8_t vel);
     void removeHeld(uint8_t ch, uint8_t note);
     void clearAllHeld();
+
+    // Compute a _lastStepTick value that locks the step grid to the MASTER
+    // beat grid (via _clock->tickCount()) rather than the keypress phase, so
+    // arp steps land on the beat with the drums / song / metronome. Falls back
+    // to the raw keypress count when no clock is attached.
+    uint32_t gridAlignedStepAnchor() const;
 
     // Step generation — decide what to play this step.
     // Returns count of notes; fills outNotes/outVels/outChans/outSrcChans.

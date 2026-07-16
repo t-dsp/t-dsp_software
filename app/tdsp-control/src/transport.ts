@@ -72,11 +72,17 @@ export interface Transport {
   drumKit(index: number): void;
   playGrooveFile(name: string): void;
   stopDrums(): void;
+  drumVol(pct: number): void;                         // drum-player level (@DRUMVOL=, 0..150 %), independent of the master @VOL
   songPlay(arg: string): void;                        // play by name/filename (@SONGF=) — mirrors playGrooveFile
   stopSong(): void;
+  songVol(pct: number): void;                         // MIDI-player level (@SONGVOL=, 0..150 %), independent of the master @VOL
   songLoop(on: boolean): void;                        // loop the current song (@LOOP=)
   launchQuantize(on: boolean): void;                  // defer song/groove starts to the next bar (@QUANTIZE=)
+  metronome(on: boolean): void;                       // on-beat click, follows master BPM + meter (@METRO=)
+  metronomeSig(bpb: number): void;                    // metronome/idle time signature = N beats/bar (@METROSIG=)
+  metronomeVol(pct: number): void;                    // metronome click level (@METROVOL=, 0..150 %), independent of the master @VOL
   arpOn(on: boolean): void;
+  arpRestart(): void;                                 // re-trigger the running arp cycle from step 0 (@ARPRESTART)
   arpPattern(i: number): void;
   arpRate(i: number): void;                // i = firmware Rate index (see ARP_RATES[].fw)
   arpGate(pct: number): void;              // gate length % (@ARPGATE=, 5..150)
