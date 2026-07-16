@@ -20,6 +20,8 @@ export interface Catalog {
   hasDrums: boolean;   // does the built engine render ch10 drums? (hides the Drums section when false)
   drumEngine: string;  // parallel drum-voice label (e.g. "OPLL", "TSF"); '' if the synth does its own
   hasBt: boolean;      // does the board have the ESP32 Bluetooth-audio receiver? (hides the Bluetooth section when false)
+  hasSf: boolean;      // can the engine load an SD /sf2 font as the MAIN synth? (SF2/TSF) — else don't fetch/show soundfonts
+  hasDexed: boolean;   // does the engine use the /dexed DX7 cart library? (Dexed variants) — else don't browse it
   builtMs: number;
   instruments: Instrument[];
   dexed: Cart[];
@@ -30,7 +32,7 @@ export interface Catalog {
 }
 
 export const EMPTY_CATALOG: Catalog = {
-  engine: '', hasDrums: false, drumEngine: '', hasBt: true, builtMs: 0, instruments: [], dexed: [], grooves: [], songs: [], soundfonts: [], drumkits: [],
+  engine: '', hasDrums: false, drumEngine: '', hasBt: true, hasSf: true, hasDexed: true, builtMs: 0, instruments: [], dexed: [], grooves: [], songs: [], soundfonts: [], drumkits: [],
 };
 
 function parseNdjson<T = any>(text: string): T[] {
@@ -94,33 +96,42 @@ export async function loadCatalog(t: Transport, onProgress?: (p: LoadProgress) =
   }
   const ix = parseNdjson(ixText);
   const meta = ix.find((r: any) => r && r.v) || {};
+  // Fetch ONLY the catalogs this flashed engine can actually use (meta capability flags) —
+  // not everything on the card. Absent flag → assume present (old firmware, back-compat).
+  // instruments + songs are always relevant (current voices / any engine plays MIDI).
+  const wantSf = meta.sf !== false;        // soundfonts: only SF2/TSF can load an SD .sf2 as the main synth
+  const wantDrums = meta.drums !== false;  // grooves + drum kits: only a drum-capable engine
+  const fetch = FETCH.filter(f =>
+    f.type === 'soundfonts' ? wantSf
+      : (f.type === 'grooves' || f.type === 'drumkits') ? wantDrums
+        : true);
   // The device announces each file's size in files[] (added so the client knows the total
   // up front). Old firmware omits `bytes` → det=false, fall back to a file count.
   const bytesOf: Record<string, number> = {};
   if (Array.isArray(meta.files)) for (const f of meta.files) if (f && f.type) bytesOf[f.type] = (f.bytes | 0);
-  const totalBytes = FETCH.reduce((s, f) => s + (bytesOf[f.type] || 0), 0);
+  const totalBytes = fetch.reduce((s, f) => s + (bytesOf[f.type] || 0), 0);
   const det = totalBytes > 0;
-  const total = det ? totalBytes : FETCH.length;
+  const total = det ? totalBytes : fetch.length;
 
   // The transport allows ONE @READ in flight at a time, so fetch sequentially (Promise.all
   // would make 4 of 5 reads reject with "read in progress" and come back empty).
   const out: Partial<Record<keyof Catalog, any[]>> = {};
   let done = 0;
-  for (let k = 0; k < FETCH.length; k++) {
-    const f = FETCH[k];
+  for (let k = 0; k < fetch.length; k++) {
+    const f = fetch[k];
     const base = done;
-    emit({ done: base, total, label: f.label, index: k + 1, count: FETCH.length, det }, true);   // phase change → force
+    emit({ done: base, total, label: f.label, index: k + 1, count: fetch.length, det }, true);   // phase change → force
     let txt = '';
     try {
       // Live intra-file progress (throttled): add THIS file's received bytes to the running
       // base so the bar keeps moving during a big/slow read (e.g. grooves), not just between files.
       txt = await t.readFile(f.path, (recv) => {
-        if (det) emit({ done: Math.min(total, base + recv), total, label: f.label, index: k + 1, count: FETCH.length, det });
+        if (det) emit({ done: Math.min(total, base + recv), total, label: f.label, index: k + 1, count: fetch.length, det });
       });
     } catch { txt = ''; }
     out[f.type] = parseNdjson(txt);
     done = Math.min(total, base + (det ? (bytesOf[f.type] || 0) : 1));   // advance by the announced size → the bar reaches 100%
-    emit({ done, total, label: f.label, index: k + 1, count: FETCH.length, det }, true);
+    emit({ done, total, label: f.label, index: k + 1, count: fetch.length, det }, true);
   }
   // NOTE: /dexed is NOT bulk-loaded. With 11k carts x 32 inline voice names the NDJSON is
   // ~6 MB — too big to @READ on every connect (it timed out and the library came back empty).
@@ -131,6 +142,8 @@ export async function loadCatalog(t: Transport, onProgress?: (p: LoadProgress) =
     hasDrums: meta.drums !== false,   // absent (old firmware) -> assume drums; explicit false -> hide
     drumEngine: meta.drumEngine || '',
     hasBt: meta.bt !== false,         // absent (old firmware) -> assume BT present; explicit false -> hide
+    hasSf: wantSf,                    // engine can load an SD soundfont as the main synth
+    hasDexed: meta.dexed !== false,   // engine uses the /dexed DX7 cart library
     builtMs: meta.built || 0,
     instruments: out.instruments || [], dexed: [],
     grooves: out.grooves || [], songs: out.songs || [], soundfonts: out.soundfonts || [], drumkits: out.drumkits || [],

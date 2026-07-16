@@ -12,14 +12,16 @@ import Slider from '@react-native-community/slider';
 import { createTransport } from './src/transportFactory';
 import { Catalog, EMPTY_CATALOG, loadCatalog, LoadProgress, Song, songArg } from './src/catalog';
 import type { Transport, DirPage } from './src/transport';
+import ArpStepGrid from './src/ui/ArpStepGrid';
+import ArpPresetBrowser from './src/ui/ArpPresetBrowser';
+import { ARP_PATTERNS as ARP_PAT, ARP_RATES, rateIndexFromFw, PAT_USER_SEQUENCE, DEFAULT_SHAPE, SeqStep } from './src/arpSeq';
+import { applyArpPreset, ArpPreset, ARP_LIBRARY } from './src/arpLibrary';
 
 const EMPTY_DIR: DirPage = { path: '', page: 0, npages: 1, folders: [], carts: [] };
 const grooveFile = (g: { path: string; name: string }) => g.path.split('/').pop() || (g.name + '.mid');   // @DRUMF wants filename WITH .mid
 const kb = (n: number) => (n / 1024).toFixed(1);   // bytes -> "12.3" KB, for the load progress readout
 
 const C = { bg: '#0d1117', card: '#161b22', card2: '#0e131a', border: '#30363d', text: '#e6edf3', muted: '#8b949e', accent: '#3fb950', sel: 'rgba(31,111,235,0.28)', chip: '#21262d' };
-const ARP_PAT = ['Up', 'Down', 'Up/Down', 'Random'];
-const ARP_RATE = ['1/4', '1/8', '1/8T', '1/16', '1/16T', '1/32'];
 // TAC5212 DAC high-pass filter presets (@HPF mode). 0 = off (all-pass); the rest are
 // sub-audio cutoffs that block DC/rumble. Index === the firmware mode number.
 const HPF_MODES = [
@@ -42,6 +44,12 @@ const END_MODES: { key: EndMode; icon: string; label: string }[] = [
   { key: 'continue', icon: '➡',  label: 'Continue'   },  // arrow → play the next song
   { key: 'stop',     icon: '◻',  label: 'Stop after' },  // hollow square → stop when it ends (default)
 ];
+
+// The opaque app-owned state we persist on the device (@APP=) so a reload/reconnect restores
+// it. Keep it small (device RAM buffer is fixed) and JSON-serializable; grow it as more
+// firmware-invisible UI settings need to survive a reconnect.
+type AppState = { end: EndMode };
+const isEndMode = (v: any): v is EndMode => END_MODES.some(m => m.key === v);
 
 function notify(msg: string) { if (Platform.OS === 'web') (globalThis as any).alert?.(msg); else Alert.alert('T-DSP', msg); }
 
@@ -127,6 +135,10 @@ export default function App() {
   const [loadElapsed, setLoadElapsed] = useState(0);             // seconds on the current catalog load — shows it's alive even if a read stalls
   const manualStopRef = useRef(false);                  // set on user Stop so the resulting @SONGP=-1 isn't treated as a natural song end
   const onSongEndRef = useRef<() => void>(() => {});     // latest "song finished naturally" handler (continue/shuffle); kept in a ref so the @SONGP listener never goes stale
+  // App-owned settings the firmware can't derive but must echo back so an app reload/reconnect
+  // restores them (persisted opaque on the device via @APP=, see saveAppState). This ref is the
+  // single source of what we persist — add a field here + hydrate it below to save more.
+  const appStateRef = useRef<AppState>({ end: 'stop' });
   const [cat, setCat] = useState<Catalog>(EMPTY_CATALOG);
   const [loaded, setLoaded] = useState(false);
   const [route, setRoute] = useState<string>('home');   // 'home' or a section id
@@ -135,6 +147,9 @@ export default function App() {
   const lastHpfRef = useRef(2);                         // remembers the last non-off cutoff so the Enable switch can restore it
   const [bt, setBt] = useState({ conn: false, peer: '' });
   const [arp, setArp] = useState({ on: false, pat: 0, rate: 0, oct: 1, latch: false });
+  const [seq, setSeq] = useState<SeqStep[]>(() => DEFAULT_SHAPE.steps.map(s => ({ ...s })));   // User Sequence step table (device doesn't echo it, so the app owns it)
+  const [arpPresetId, setArpPresetId] = useState<string>('');   // which library preset is applied (for browser highlight)
+  const [arpMode, setArpMode] = useState<'preset' | 'manual'>('preset');   // which editor drives the arp — one at a time so they never collide
   const [drums, setDrums] = useState<{ kit: number; sel: string | null; playing: string | null }>({ kit: 0, sel: null, playing: null });
   // `song` = the selected song's NAME (its stable identity now that there's no index). name = currently-playing title.
   const [player, setPlayer] = useState<{ song: string; playing: boolean; name: string; prog: number }>({ song: '', playing: false, name: '', prog: 0 });
@@ -162,11 +177,11 @@ export default function App() {
     if (j.vol != null) setVol(j.vol);
     if (j.hpf != null) { const m = clampIdx(j.hpf, HPF_MODES.length); setHpf(m); if (m) lastHpfRef.current = m; }
     if (j.bpm != null) setBpm(j.bpm);
-    // The device only tracks a loop on/off flag (it has no notion of continue/shuffle,
-    // which are app-side). loop on ⇒ Repeat; loop off ⇒ keep the app's mode unless it was
-    // Repeat (then fall back to Stop).
+    // Fallback end-mode guess from the loop flag, for firmware without @APP: loop on ⇒ Repeat;
+    // loop off ⇒ keep the app's mode unless it was Repeat (then fall back to Stop). When @APP is
+    // present its stored value arrives right after and overrides this (see hydrateApp).
     if (j.loop != null) setEndMode(m => j.loop ? 'repeat' : (m === 'repeat' ? 'stop' : m));
-    if (j.arp) setArp({ on: !!j.arp.on, pat: clampIdx(j.arp.pat, ARP_PAT.length), rate: clampIdx(j.arp.rate, ARP_RATE.length), oct: Math.max(1, Math.min(4, j.arp.oct | 0)) || 1, latch: !!j.arp.latch });
+    if (j.arp) setArp({ on: !!j.arp.on, pat: clampIdx(j.arp.pat, ARP_PAT.length), rate: rateIndexFromFw(j.arp.rate | 0), oct: Math.max(1, Math.min(4, j.arp.oct | 0)) || 1, latch: !!j.arp.latch });
     if (j.song) setPlayer(p => ({ ...p, playing: !!j.song.playing, song: j.song.name || p.song, name: j.song.name || p.name, prog: j.song.p != null ? j.song.p / 1000 : (j.song.playing ? -1 : 0) }));
     if (j.drums) setDrums(d => ({ ...d, kit: j.drums.kit | 0, playing: j.drums.playing ? d.playing : null }));
     if (j.voice) {
@@ -175,9 +190,22 @@ export default function App() {
     }
   }
 
+  // Restore the opaque app-owned state (@APP=). This is the authoritative source for settings
+  // the firmware can't derive; it overrides hydrate()'s loop-based end-mode guess and keeps the
+  // firmware loop flag in step. Each persisted field is validated + applied here — add new ones
+  // alongside `end` and mirror them in appStateRef so persistApp() keeps sending the full blob.
+  function hydrateApp(a: any) {
+    if (!a || typeof a !== 'object') return;
+    if (isEndMode(a.end)) { appStateRef.current.end = a.end; setEndMode(a.end); tp.songLoop(a.end === 'repeat'); }
+  }
+
   useEffect(() => tp.onLine(line => {
     if (line.startsWith('@STATE=')) {
       try { hydrate(JSON.parse(line.slice(line.indexOf('=') + 1))); } catch {}
+    } else if (line.startsWith('@APP=')) {
+      // The device's opaque app-owned state blob (emitted with @STATE and echoed on save).
+      // Restore the settings the firmware can't derive; ignore anything unrecognized.
+      try { hydrateApp(JSON.parse(line.slice(5))); } catch {}
     } else if (line.indexOf('"conn"') >= 0 && line.indexOf('"vol"') >= 0) {
       const m = line.match(/\{.*\}/); if (m) { try { const j = JSON.parse(m[0]); setBt({ conn: !!j.conn, peer: j.peer || '' }); if (j.vol != null) setVol(j.vol); } catch {} }
     } else if (line.startsWith('@SONGP=')) {
@@ -258,7 +286,8 @@ export default function App() {
   // and concatenate — a folder can hold hundreds of carts. The `alive` gate drops a stale
   // fetch when the user navigates away mid-walk.
   useEffect(() => {
-    if (!loaded || vpath === '@bundled') { setLevel(EMPTY_DIR); return; }
+    // Only Dexed engines use the /dexed cart library; on others don't even call @DXLS.
+    if (!loaded || vpath === '@bundled' || !cat.hasDexed) { setLevel(EMPTY_DIR); return; }
     let alive = true;
     setLibBusy(true);
     (async () => {
@@ -274,7 +303,7 @@ export default function App() {
       finally { if (alive) setLibBusy(false); }
     })();
     return () => { alive = false; };
-  }, [vpath, loaded]);
+  }, [vpath, loaded, cat.hasDexed]);
 
   // Fetch an open cart's 32 voice names via @DXVL.
   useEffect(() => {
@@ -336,11 +365,22 @@ export default function App() {
     const g = grooves[ni]; if (!g) return;
     setDrums(d => { if (d.playing) { tp.playGrooveFile(grooveFile(g)); return { ...d, sel: g.path, playing: g.name }; } return { ...d, sel: g.path }; });
   };
-  const stepSong = (dir: number) => {   // step the selected song; if one is playing, start the new one
-    if (!cat.songs.length) return;
-    const idx = cat.songs.findIndex(sg => sg.name === player.song);
-    const ni = Math.max(0, Math.min(cat.songs.length - 1, (idx < 0 ? 0 : idx) + dir));
-    const sg = cat.songs[ni]; if (!sg) return;
+  // The shared "continue rules": which song a skip (‹ ›) or a natural end advances to, per the
+  // end-mode. Shuffle → a random *other* song; every other mode → the linear neighbor, wrapping
+  // both ways. Both the transport buttons and the auto-advance route through this.
+  const pickNext = (dir: number): Song | null => {
+    const songs = cat.songs;
+    if (!songs.length) return null;
+    const idx = songs.findIndex(sg => sg.name === player.song);
+    if (endMode === 'shuffle' && songs.length > 1) {
+      let r = idx; while (r === idx) r = Math.floor(Math.random() * songs.length);   // never repeat the current song
+      return songs[r];
+    }
+    const base = idx < 0 ? (dir > 0 ? -1 : 0) : idx;
+    return songs[((base + dir) % songs.length + songs.length) % songs.length];   // wrap both ways
+  };
+  const stepSong = (dir: number) => {   // ‹ › skip — follows the end-mode continue rules; plays the new song if one is playing
+    const sg = pickNext(dir); if (!sg) return;
     setPlayer(p => { if (p.playing) { tp.songPlay(songArg(sg)); return { ...p, song: sg.name, name: sg.name }; } return { ...p, song: sg.name }; });
   };
   const stepBpm = (delta: number) => { const b = Math.max(20, Math.min(300, Math.round(bpm) + delta)); setBpm(b); tp.masterBpm(b); };
@@ -349,21 +389,68 @@ export default function App() {
   // toggles between Off and the last non-off cutoff (default 12 Hz) so a disable is undoable.
   const setHpfMode = (mode: number) => { setHpf(mode); if (mode) lastHpfRef.current = mode; tp.dacHpf(mode); };
   const toggleHpf = (on: boolean) => setHpfMode(on ? (lastHpfRef.current || 2) : 0);
-  const stepArpPat = (dir: number) => { const i = (arp.pat + dir + ARP_PAT.length) % ARP_PAT.length; setArp(a => ({ ...a, pat: i })); tp.arpPattern(i); };
+  // Select an arp pattern. Entering User Sequence also (re)uploads the current step
+  // table, since the device doesn't persist/echo it — the app is its source of truth.
+  const selectPattern = (i: number) => {
+    setArp(a => ({ ...a, pat: i }));
+    tp.arpPattern(i);
+    if (i === PAT_USER_SEQUENCE) tp.arpSequence(seq);
+    setArpPresetId('');   // manual pattern pick diverges from any applied library preset
+  };
+  const stepArpPat = (dir: number) => selectPattern((arp.pat + dir + ARP_PAT.length) % ARP_PAT.length);
+  // A step-grid edit: keep the app copy and push it live. If the arp isn't already on the
+  // User Sequence pattern, switch to it so the edit is immediately audible.
+  const applySeq = (steps: SeqStep[]) => {
+    setSeq(steps);
+    tp.arpSequence(steps);
+    if (arp.pat !== PAT_USER_SEQUENCE) { setArp(a => ({ ...a, pat: PAT_USER_SEQUENCE })); tp.arpPattern(PAT_USER_SEQUENCE); }
+    setArpPresetId('');
+  };
+  // Apply a preset from the 238-entry library: push its params to the device, reflect them
+  // in the arp UI (pattern/rate/octaves/latch pills), and adopt its step table if any.
+  const applyPreset = (p: ArpPreset) => {
+    const st = applyArpPreset(tp, p);
+    setArp(a => ({ ...a, pat: st.pat, rate: st.rate, oct: st.oct, latch: st.latch }));
+    if (st.seq) setSeq(st.seq);
+    setArpPresetId(p.id);
+  };
+  // Header ‹ › steps within the ACTIVE editor: through the library in Preset mode, through
+  // the pattern list in Manual mode — so the arrows never touch the tab you're not using.
+  const stepPreset = (dir: number) => {
+    if (!ARP_LIBRARY.length) return;
+    const idx = ARP_LIBRARY.findIndex(p => p.id === arpPresetId);
+    const ni = (idx < 0 ? (dir > 0 ? -1 : 0) : idx) + dir;
+    applyPreset(ARP_LIBRARY[(ni + ARP_LIBRARY.length) % ARP_LIBRARY.length]);
+  };
+  const stepArpNav = (dir: number) => (arpMode === 'preset' ? stepPreset(dir) : stepArpPat(dir));
+  // Manual "Reset" — clear a preset's hidden extras (scale, velocity curve, step mask, MPE…)
+  // back to engine defaults while keeping the pattern/rate/octaves/latch the pills show. This
+  // is the escape hatch from "I tweaked a preset and don't know what invisible state remains".
+  const resetArpManual = () => {
+    tp.arpPreset({
+      pat: arp.pat, rate: ARP_RATES[arp.rate].fw, gatePct: 50, swingPct: 50,
+      oct: arp.oct, octMode: 0, latch: arp.latch, velMode: 0, velFixed: 100, velAccent: 127,
+      stepMask: -1, stepLength: 16, mpeMode: 0, outCh: 1, scatterBase: 2, scatterCount: 4,
+      scale: 0, scaleRoot: 0, transpose: 0, repeat: 1,
+    });
+    setArpPresetId('');
+  };
+  const activePresetName = ARP_LIBRARY.find(p => p.id === arpPresetId)?.name || '';
   const playSong = () => { const sg = cat.songs.find(x => x.name === player.song) || cat.songs[0]; if (!sg) return; tp.songPlay(songArg(sg)); setPlayer(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };  // -1 until the device reports position
   const stopSong = () => { manualStopRef.current = true; tp.stopSong(); setPlayer(p => ({ ...p, playing: false, prog: 0 })); };
   const playSongOf = (sg: Song) => { tp.songPlay(songArg(sg)); setPlayer(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };
+  // Merge a patch into the persisted app-state and push the whole blob to the device (@APP=)
+  // so it survives an app reload/reconnect. The device stores it opaquely; the app owns it.
+  const persistApp = (patch: Partial<AppState>) => { appStateRef.current = { ...appStateRef.current, ...patch }; tp.saveAppState(appStateRef.current); };
   // End-of-song mode. Only 'repeat' arms the firmware's seamless loop; the rest let the song
-  // end (device emits @SONGP=-1) and we advance app-side.
-  const applyEndMode = (m: EndMode) => { setEndMode(m); tp.songLoop(m === 'repeat'); };
+  // end (device emits @SONGP=-1) and we advance app-side. The choice is persisted on the device.
+  const applyEndMode = (m: EndMode) => { setEndMode(m); tp.songLoop(m === 'repeat'); persistApp({ end: m }); };
   const cycleEndMode = () => { const i = END_MODES.findIndex(m => m.key === endMode); applyEndMode(END_MODES[(i + 1) % END_MODES.length].key); };
   // Runs when a song finishes on its own (not a manual Stop). Kept fresh in a ref so the
-  // one-time @SONGP listener always sees the current mode/song/catalog.
+  // one-time @SONGP listener always sees the current mode/song/catalog. Continue/Shuffle
+  // advance per the shared pickNext rules; 'stop' does nothing; 'repeat' loops in firmware.
   onSongEndRef.current = () => {
-    if (!cat.songs.length) return;
-    if (endMode === 'continue') { const idx = cat.songs.findIndex(sg => sg.name === player.song); const nx = cat.songs[((idx < 0 ? -1 : idx) + 1) % cat.songs.length]; if (nx) playSongOf(nx); }
-    else if (endMode === 'shuffle') { const r = cat.songs[Math.floor(Math.random() * cat.songs.length)]; if (r) playSongOf(r); }
-    // 'stop' → nothing; 'repeat' → never reaches here (the firmware loops the song)
+    if (endMode === 'continue' || endMode === 'shuffle') { const nx = pickNext(1); if (nx) playSongOf(nx); }
   };
   const playGroove = () => { const g = cat.grooves.find(x => x.path === drums.sel); if (g) { tp.playGrooveFile(grooveFile(g)); setDrums(d => ({ ...d, playing: g.name })); } };
   const stopDrums = () => { tp.stopDrums(); setDrums(d => ({ ...d, playing: null })); };
@@ -415,7 +502,7 @@ export default function App() {
               <Stat label="Instruments" n={cat.instruments.length} sub="+ SD library" />
               <Stat label="Grooves" n={cat.grooves.length} />
               <Stat label="Songs" n={cat.songs.length} />
-              <Stat label="Soundfonts" n={cat.soundfonts.length} />
+              {cat.hasSf && <Stat label="Soundfonts" n={cat.soundfonts.length} />}
               <Stat label="Drum kits" n={cat.drumkits.length} />
             </View>
           )}
@@ -510,10 +597,11 @@ export default function App() {
             <ScrollView ref={browseRef} style={s.picker} nestedScrollEnabled scrollEventThrottle={32}
               onScroll={e => { pickerY.current[listId] = e.nativeEvent.contentOffset.y; }}>
               {vpath === '' && <ListBtn label={'★ Bundled voices (' + cat.instruments.length + ')'} onPress={() => setVpath('@bundled')} />}
-              {level.folders.map(f => <ListBtn key={'f' + f} label={'📁 ' + f} onPress={() => setVpath(vpath ? vpath + '/' + f : f)} />)}
-              {level.carts.map(c => <ListBtn key={c.rel} label={'🎛 ' + c.name} onPress={() => setCart({ rel: c.rel, name: c.name })} />)}
-              {!!libErr && <Text style={[s.muted, { padding: 12 }]}>⚠ SD library: {libErr} — restart the dev server with `expo start --web -c` and hard-reload.</Text>}
-              {!libErr && level.folders.length === 0 && level.carts.length === 0 && <Text style={s.muted}>{vpath === '' ? 'No SD library found (/dexed empty?)' : '(empty folder)'}</Text>}
+              {/* /dexed cart library — only on Dexed engines (others have no cart library to browse) */}
+              {cat.hasDexed && level.folders.map(f => <ListBtn key={'f' + f} label={'📁 ' + f} onPress={() => setVpath(vpath ? vpath + '/' + f : f)} />)}
+              {cat.hasDexed && level.carts.map(c => <ListBtn key={c.rel} label={'🎛 ' + c.name} onPress={() => setCart({ rel: c.rel, name: c.name })} />)}
+              {cat.hasDexed && !!libErr && <Text style={[s.muted, { padding: 12 }]}>⚠ SD library: {libErr} — restart the dev server with `expo start --web -c` and hard-reload.</Text>}
+              {cat.hasDexed && !libErr && level.folders.length === 0 && level.carts.length === 0 && <Text style={s.muted}>{vpath === '' ? 'No SD library found (/dexed empty?)' : '(empty folder)'}</Text>}
             </ScrollView>
           )}
         </View>
@@ -550,24 +638,56 @@ export default function App() {
     },
     // ARPEGGIATOR
     {
-      id: 'arp', title: 'Arpeggiator', show: true, value: (arp.on ? '' : '(off)  ') + ARP_PAT[arp.pat] + '  ·  ' + ARP_RATE[arp.rate],
+      id: 'arp', title: 'Arpeggiator', show: true,
+      value: (arp.on ? '' : '(off)  ') + (arpMode === 'preset'
+        ? (activePresetName || 'Preset — none picked')
+        : ARP_PAT[arp.pat] + '  ·  ' + ARP_RATES[arp.rate].label),
       actions: (<>
-        <HdrBtn label="‹" stop onPress={() => stepArpPat(-1)} />
-        <HdrBtn label="›" stop onPress={() => stepArpPat(1)} />
+        <HdrBtn label="‹" stop onPress={() => stepArpNav(-1)} />
+        <HdrBtn label="›" stop onPress={() => stepArpNav(1)} />
         <Switch value={arp.on} onValueChange={v => { setArp(a => ({ ...a, on: v })); tp.arpOn(v); }} style={{ marginLeft: 6 }} />
       </>),
       body: (
         <>
           <Row><Text style={[s.muted, { flex: 1 }]}>Enabled</Text>
             <Switch value={arp.on} onValueChange={v => { setArp(a => ({ ...a, on: v })); tp.arpOn(v); }} /></Row>
-          <Row><Text style={[s.muted, { flex: 1 }]}>Pattern</Text>
-            {ARP_PAT.map((p, i) => <Pressable key={i} style={[s.pill, arp.pat === i && s.pillOn]} onPress={() => { setArp(a => ({ ...a, pat: i })); tp.arpPattern(i); }}><Text style={s.text}>{p}</Text></Pressable>)}</Row>
-          <Row><Text style={[s.muted, { flex: 1 }]}>Rate</Text>
-            {ARP_RATE.map((r, i) => <Pressable key={i} style={[s.pill, arp.rate === i && s.pillOn]} onPress={() => { setArp(a => ({ ...a, rate: i })); tp.arpRate(i); }}><Text style={s.text}>{r}</Text></Pressable>)}</Row>
-          <Row><Text style={[s.muted, { flex: 1 }]}>Octaves {arp.oct}</Text>
-            {[1, 2, 3, 4].map(n => <Pressable key={n} style={[s.pill, arp.oct === n && s.pillOn]} onPress={() => { setArp(a => ({ ...a, oct: n })); tp.arpOctaves(n); }}><Text style={s.text}>{n}</Text></Pressable>)}</Row>
-          <Row><Text style={[s.muted, { flex: 1 }]}>Latch</Text>
-            <Switch value={arp.latch} onValueChange={v => { setArp(a => ({ ...a, latch: v })); tp.arpLatch(v); }} /></Row>
+          {/* Two tabs — Preset vs Manual — so only ONE editor drives the arp at a time and it's
+              always clear which. Both write the same device config, so we never show both at once. */}
+          <View style={s.arpTabs}>
+            <Pressable style={[s.arpTab, arpMode === 'preset' && s.arpTabOn]} onPress={() => setArpMode('preset')}>
+              <Text style={[s.arpTabTxt, arpMode === 'preset' && s.arpTabTxtOn]}>Presets</Text>
+            </Pressable>
+            <Pressable style={[s.arpTab, arpMode === 'manual' && s.arpTabOn]} onPress={() => setArpMode('manual')}>
+              <Text style={[s.arpTabTxt, arpMode === 'manual' && s.arpTabTxtOn]}>Manual</Text>
+            </Pressable>
+          </View>
+
+          {arpMode === 'preset' ? (
+            /* PRESET tab — browse the 238-preset library and apply one. */
+            <>
+              <Text style={s.muted}>{activePresetName ? 'Active preset: ' + activePresetName : 'Pick a preset — it sets everything (pattern, rate, feel, scale…). Switch to Manual to tweak.'}</Text>
+              <ArpPresetBrowser onApply={applyPreset} activeId={arpPresetId} />
+            </>
+          ) : (
+            /* MANUAL tab — hand-build the arp. Editing anything here diverges from a preset. */
+            <>
+              <Text style={s.muted}>Pattern</Text>
+              <View style={s.patGrid}>
+                {ARP_PAT.map((p, i) => <Pressable key={i} style={[s.patCell, arp.pat === i && s.patCellOn]} onPress={() => selectPattern(i)}><Text style={s.patCellTxt} numberOfLines={1}>{p}</Text></Pressable>)}
+              </View>
+              {/* User Sequence: the step-grid editor + shape presets (the "actual arpeggiator preset" pattern). */}
+              {arp.pat === PAT_USER_SEQUENCE && <ArpStepGrid steps={seq} onChange={applySeq} />}
+              <Row><Text style={[s.muted, { flex: 1 }]}>Rate</Text>
+                {ARP_RATES.map((r, i) => <Pressable key={i} style={[s.pill, arp.rate === i && s.pillOn]} onPress={() => { setArp(a => ({ ...a, rate: i })); tp.arpRate(r.fw); setArpPresetId(''); }}><Text style={s.text}>{r.label}</Text></Pressable>)}</Row>
+              <Row><Text style={[s.muted, { flex: 1 }]}>Octaves {arp.oct}</Text>
+                {[1, 2, 3, 4].map(n => <Pressable key={n} style={[s.pill, arp.oct === n && s.pillOn]} onPress={() => { setArp(a => ({ ...a, oct: n })); tp.arpOctaves(n); setArpPresetId(''); }}><Text style={s.text}>{n}</Text></Pressable>)}</Row>
+              <Row><Text style={[s.muted, { flex: 1 }]}>Latch</Text>
+                <Switch value={arp.latch} onValueChange={v => { setArp(a => ({ ...a, latch: v })); tp.arpLatch(v); setArpPresetId(''); }} /></Row>
+              <Pressable style={[s.btn, s.btnGhost, s.btnWide]} onPress={resetArpManual}>
+                <Text style={s.btnText}>Reset to plain arp</Text>
+              </Pressable>
+            </>
+          )}
         </>
       ),
     },
@@ -818,6 +938,18 @@ const s = StyleSheet.create({
   list: { maxHeight: 300, borderWidth: 1, borderColor: C.border, borderRadius: 7 },
   listBtn: { paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.border },
   listBtnSel: { backgroundColor: C.sel },
+  // Pattern picker: a wrapping GRID so every one of the 26 patterns is reachable at once
+  // (a horizontal strip hid the ones past the first row). Cells stretch to fill each row.
+  // Preset/Manual segmented tabs — one arp editor active at a time.
+  arpTabs: { flexDirection: 'row', backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 9, padding: 3, gap: 3, marginTop: 2 },
+  arpTab: { flex: 1, alignItems: 'center', paddingVertical: 9, borderRadius: 7 },
+  arpTabOn: { backgroundColor: C.sel, borderWidth: 1, borderColor: C.accent },
+  arpTabTxt: { color: C.muted, fontSize: 14, fontWeight: '700' },
+  arpTabTxtOn: { color: C.text },
+  patGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 2 },
+  patCell: { backgroundColor: C.chip, paddingHorizontal: 8, paddingVertical: 9, borderRadius: 8, minWidth: 74, flexGrow: 1, flexBasis: 74, alignItems: 'center' },
+  patCellOn: { backgroundColor: C.sel, borderWidth: 1, borderColor: C.accent },
+  patCellTxt: { color: C.text, fontSize: 13, fontWeight: '600' },
   pill: { backgroundColor: C.chip, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14 },
   pillOn: { backgroundColor: C.sel, borderWidth: 1, borderColor: C.accent },
   statGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },

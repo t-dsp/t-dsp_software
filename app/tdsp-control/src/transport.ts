@@ -7,6 +7,8 @@
 // The UI talks ONLY to this interface, so it is transport-agnostic. Catalog browsing is
 // local (see catalog.ts); the transport carries file reads (@READ) + high-level ACTIONS.
 
+import type { SeqStep, ArpWireParams } from './arpSeq';   // type-only: erased at compile time, so no runtime resolution issue
+
 export type LineHandler = (line: string) => void;
 
 // One level of the /dexed library, fetched LIVE (lazy) via @DXLS — never bulk-downloaded.
@@ -52,7 +54,14 @@ export interface Transport {
 
   // Ask the device for its current settings (@STATE). The reply arrives as an
   // "@STATE={…}" line via onLine(), which the UI parses to hydrate every card on connect.
+  // The device also emits an "@APP={…}" line (the opaque app-owned state, see saveAppState).
   requestState(): void;
+
+  // Persist an opaque app-owned settings blob on the device so it survives an app
+  // reload/reconnect (@APP=). The firmware never interprets it — it only stores + echoes it;
+  // the app owns the schema. Serialized here as compact JSON. Hydrated back via the "@APP="
+  // line delivered through onLine(). RAM-only on the device (does not survive a reboot).
+  saveAppState(state: unknown): void;
 
   // ---- actions (map to @-lines on web, to BLE opcodes on native) ----
   masterVolume(pct: number): void;                    // header master volume (@VOL=, 0..100) — the TAC5212 OUT1/OUT2 DAC level
@@ -68,9 +77,13 @@ export interface Transport {
   songLoop(on: boolean): void;                        // loop the current song (@LOOP=)
   arpOn(on: boolean): void;
   arpPattern(i: number): void;
-  arpRate(i: number): void;
+  arpRate(i: number): void;                // i = firmware Rate index (see ARP_RATES[].fw)
+  arpGate(pct: number): void;              // gate length % (@ARPGATE=, 5..150)
+  arpSwing(pct: number): void;             // swing % (@ARPSWING=, 50..85; 50 = straight)
   arpOctaves(n: number): void;
   arpLatch(on: boolean): void;
+  arpSequence(steps: SeqStep[]): void;   // upload the User Sequence step table (@ARPSEQ=)
+  arpPreset(params: ArpWireParams): void; // apply a whole preset atomically (@ARPPRESET=)
   espPair(): void;
   espReconnect(): void;      // (re)connect A2DP audio to the last paired source
   espDisconnect(): void;     // drop the current A2DP audio source

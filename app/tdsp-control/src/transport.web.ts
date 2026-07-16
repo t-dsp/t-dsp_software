@@ -3,6 +3,8 @@
 // control.html. Chromium-only; requires a secure context (localhost / https).
 
 import { parseDxls } from './dxls';
+import { encodeSequence, encodeArpParams } from './arpSeq';
+import type { SeqStep, ArpWireParams } from './arpSeq';
 import type { Transport, LineHandler, DirPage } from './transport';
 
 interface FilePending { path: string; parts: Record<number, string>; resolve: (t: string) => void; reject: (e: any) => void; timer: any; onProgress?: (r: number, t: number) => void; total: number; received: number; }
@@ -162,6 +164,7 @@ export class WebSerialTransport implements Transport {
   }
 
   requestState() { this.send('@STATE'); }
+  saveAppState(state: unknown) { this.send('@APP=' + JSON.stringify(state)); }   // opaque app-owned blob; device stores + echoes
 
   // ---- actions (@-lines) ----
   masterVolume(pct: number) { this.send('@VOL=' + Math.max(0, Math.min(100, Math.round(pct)))); }
@@ -178,8 +181,12 @@ export class WebSerialTransport implements Transport {
   arpOn(on: boolean) { this.send('@ARPON=' + (on ? 1 : 0)); }
   arpPattern(i: number) { this.send('@ARPPAT=' + i); }
   arpRate(i: number) { this.send('@ARPRATE=' + i); }
+  arpGate(pct: number) { this.send('@ARPGATE=' + Math.max(5, Math.min(150, Math.round(pct)))); }
+  arpSwing(pct: number) { this.send('@ARPSWING=' + Math.max(50, Math.min(85, Math.round(pct)))); }
   arpOctaves(n: number) { this.send('@ARPOCT=' + n); }
   arpLatch(on: boolean) { this.send('@ARPLATCH=' + (on ? 1 : 0)); }
+  arpSequence(steps: SeqStep[]) { this.send('@ARPSEQ=' + encodeSequence(steps)); }
+  arpPreset(params: ArpWireParams) { this.send('@ARPPRESET=' + encodeArpParams(params)); }
   espPair() { this.send('P'); }
   espReconnect() { this.send('r'); }
   espDisconnect() { this.send('X'); }   // Teensy relays 'X' -> ESP32 'x' (A2DP disconnect)

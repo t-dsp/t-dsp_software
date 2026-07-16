@@ -94,6 +94,48 @@ static inline float initialBpm(const uint8_t *d, size_t len) {
     return 60000000.0f / (float)bestUspq;
 }
 
+// The file's INITIAL time signature as QUARTER-NOTE beats per bar (the Clock's
+// beat is one quarter note). From the time-signature meta (FF 58 04 nn dd cc bb)
+// at the lowest tick: beats = nn * 4 / (2^dd) — e.g. 4/4->4, 3/4->3, 2/4->2,
+// 2/2->4, 6/8->3, 9/8->4 (rounds off? no — see below), 12/8->6. Returns 4
+// (common time) if there is no meta, and also for meters that don't land on a
+// whole number of quarter beats (e.g. 7/8, 5/8): those keep 4/4 bar edges rather
+// than drift. Lightweight (scans meta only); used to set the master bar length so
+// beatInBar()/barPhase()/the downbeat are correct for non-4/4 content.
+static inline uint8_t initialBeatsPerBar(const uint8_t *d, size_t len) {
+    if (len < 14 || memcmp(d, "MThd", 4) != 0) return 4;
+    uint32_t bestTick = 0xFFFFFFFFu; uint8_t num = 0, denPow = 0;
+    for (size_t p = 14; p + 8 <= len; ) {
+        if (memcmp(d + p, "MTrk", 4) != 0) break;
+        uint32_t tl = be32(d + p + 4);
+        size_t i = p + 8, e = i + tl; if (e > len) e = len;
+        uint32_t tick = 0; uint8_t status = 0;
+        while (i < e) {
+            tick += readVar(d, e, &i); if (i >= e) break;
+            uint8_t b0 = d[i]; if (b0 & 0x80) { status = b0; i++; }
+            if (status == 0xFF) {
+                if (i >= e) break;
+                uint8_t meta = d[i++]; uint32_t ml = readVar(d, e, &i);
+                if (meta == 0x58 && ml >= 2 && i + 2 <= e && tick < bestTick) {
+                    bestTick = tick; num = d[i]; denPow = d[i + 1];
+                }
+                i += ml;
+            } else if (status == 0xF0 || status == 0xF7) {
+                uint32_t sl = readVar(d, e, &i); i += sl;
+            } else {
+                uint8_t hi = status & 0xF0; i += (hi == 0xC0 || hi == 0xD0) ? 1 : 2;
+            }
+        }
+        p = e;
+    }
+    if (num == 0 || denPow > 7) return 4;                  // no meta / absurd denominator
+    uint32_t den = 1u << denPow;                           // 2^dd (note value: 4=quarter, 8=eighth)
+    uint32_t q = (uint32_t)num * 4u / den;                 // quarter-note beats per bar
+    if (q * den != (uint32_t)num * 4u) return 4;           // not a whole # of quarters (7/8, 5/8)
+    if (q < 1 || q > 32) return 4;
+    return (uint8_t)q;
+}
+
 // Parse buf[0..len) into out[0..maxOut). Returns event count, or -1 on error.
 // Streams the tracks with a k-way merge (no large heap scratch) — see below.
 // NOTE: writes into out[] while reading d[], so d and out MUST NOT alias.

@@ -40,8 +40,10 @@ static inline size_t ocramHeapFree() {
 // event count, or -1 on error (open/size/read/parse failure). Runs from the
 // main loop only (heap alloc + SD I/O; never the audio ISR).
 // `outBpm` (optional) receives the file's initial tempo in BPM — used to lock a
-// drum groove to a playing song. Left untouched on failure.
-static int loadSmfFile(const char *path, MidiFileEvent *out, int maxOut, float *outBpm = nullptr) {
+// drum groove to a playing song. `outBpb` (optional) receives the initial time
+// signature as quarter-note beats per bar (see initialBeatsPerBar) so the master
+// clock's bar/downbeat matches non-4/4 content. Both left untouched on failure.
+static int loadSmfFile(const char *path, MidiFileEvent *out, int maxOut, float *outBpm = nullptr, uint8_t *outBpb = nullptr) {
     File f = SD.open(path, FILE_READ);
     if (!f) return -1;
     size_t len = f.size();
@@ -80,6 +82,7 @@ static int loadSmfFile(const char *path, MidiFileEvent *out, int maxOut, float *
     };
     if (got != len) { release(buf); return -1; }
     if (outBpm) *outBpm = initialBpm(buf, len);
+    if (outBpb) *outBpb = initialBeatsPerBar(buf, len);
     int n = parseSmf(buf, len, out, maxOut);
     release(buf);
     return n;

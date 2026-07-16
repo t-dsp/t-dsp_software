@@ -13,7 +13,8 @@
     "synthwave":    { "color": "#ff47d6", "label": "Synthwave" },
     "psy":          { "color": "#47ffc7", "label": "Psy" },
     "experimental": { "color": "#d17dff", "label": "Experimental" },
-    "mpe":          { "color": "#47d4ff", "label": "MPE" }
+    "mpe":          { "color": "#47d4ff", "label": "MPE" },
+    "sequence":     { "color": "#5be0a0", "label": "Step Sequence" }
   },
   "presets": [
     { "id": "arp_classic_up_8", "name": "Simple Up 1/8", "category": "classic", "description": "Straight ascending 1/8 note arp over one octave.",
@@ -490,6 +491,28 @@
     { "id": "arp_mpe_pernote_stair", "name": "PerNote Staircase", "category": "mpe", "description": "Stair-climbing per-note pattern with octave spread.",
       "params": { "pattern": 22, "rate": 11, "gate": 0.4, "swing": 0.5, "octaveRange": 3, "octaveMode": 0, "latch": true, "hold": false, "velMode": 0, "velFixed": 85, "velAccent": 127, "stepMask": -1, "stepLength": 16, "mpeMode": 3, "outputChannel": 2, "scatterBase": 2, "scatterCount": 4, "scale": 0, "scaleRoot": 0, "transpose": 0, "repeat": 1 } },
     { "id": "arp_exp_backward_pulse", "name": "Backward Pulse", "category": "experimental", "description": "Reversed-play pattern with heavy repeats.",
-      "params": { "pattern": 7, "rate": 12, "gate": 0.3, "swing": 0.7, "octaveRange": 3, "octaveMode": 1, "latch": true, "hold": false, "velMode": 4, "velFixed": 120, "velAccent": 60, "stepMask": 55706, "stepLength": 16, "mpeMode": 0, "outputChannel": 1, "scatterBase": 2, "scatterCount": 4, "scale": 0, "scaleRoot": 6, "transpose": 0, "repeat": 3 } }
+      "params": { "pattern": 7, "rate": 12, "gate": 0.3, "swing": 0.7, "octaveRange": 3, "octaveMode": 1, "latch": true, "hold": false, "velMode": 4, "velFixed": 120, "velAccent": 60, "stepMask": 55706, "stepLength": 16, "mpeMode": 0, "outputChannel": 1, "scatterBase": 2, "scatterCount": 4, "scale": 0, "scaleRoot": 6, "transpose": 0, "repeat": 3 } },
+
+    { "id": "arp_seq_schema_note", "name": "Step Sequence (format)", "category": "sequence", "description": "pattern:25 = PatUserSequence. params.steps is an explicit step table; each step is {d,o,v}: d = degree into the sorted held notes (d:-1 rest, d:-2 full chord), o = octave shift, v = velocity (0 = inherit velMode). The engine transposes the shape to whatever key/chord is held. The app mirrors this set in app/tdsp-control/src/arpSeq.ts (SHAPES).",
+      "params": { "pattern": 25, "rate": 8, "gate": 0.5, "swing": 0.5, "octaveRange": 1, "octaveMode": 0, "latch": false, "hold": false, "velMode": 0, "velFixed": 100, "velAccent": 127, "stepMask": -1, "stepLength": 8, "mpeMode": 0, "outputChannel": 1, "scatterBase": 2, "scatterCount": 4, "scale": 0, "scaleRoot": 0, "transpose": 0, "repeat": 1,
+        "steps": [ {"d":0,"o":0,"v":112},{"d":1,"o":0,"v":0},{"d":2,"o":0,"v":0},{"d":3,"o":0,"v":0} ] } },
+    { "id": "arp_seq_up8", "name": "Up 8", "category": "sequence", "description": "Ascending eighth-note run over the held notes — the plainest step shape.",
+      "params": { "pattern": 25, "rate": 8, "gate": 0.5, "swing": 0.5, "octaveRange": 1, "octaveMode": 0, "latch": false, "hold": false, "velMode": 0, "velFixed": 100, "velAccent": 127, "stepMask": -1, "stepLength": 8, "mpeMode": 0, "outputChannel": 1, "scatterBase": 2, "scatterCount": 4, "scale": 0, "scaleRoot": 0, "transpose": 0, "repeat": 1,
+        "steps": [ {"d":0,"o":0,"v":112},{"d":1,"o":0,"v":0},{"d":2,"o":0,"v":0},{"d":3,"o":0,"v":0},{"d":4,"o":0,"v":0},{"d":5,"o":0,"v":0},{"d":6,"o":0,"v":0},{"d":7,"o":0,"v":0} ] } },
+    { "id": "arp_seq_up_octave", "name": "Up + Octave", "category": "sequence", "description": "Four notes up, then the same four an octave higher — classic octave-spanning arp.",
+      "params": { "pattern": 25, "rate": 11, "gate": 0.5, "swing": 0.5, "octaveRange": 1, "octaveMode": 0, "latch": false, "hold": false, "velMode": 0, "velFixed": 100, "velAccent": 127, "stepMask": -1, "stepLength": 8, "mpeMode": 0, "outputChannel": 1, "scatterBase": 2, "scatterCount": 4, "scale": 0, "scaleRoot": 0, "transpose": 0, "repeat": 1,
+        "steps": [ {"d":0,"o":0,"v":112},{"d":1,"o":0,"v":0},{"d":2,"o":0,"v":0},{"d":3,"o":0,"v":0},{"d":0,"o":1,"v":0},{"d":1,"o":1,"v":0},{"d":2,"o":1,"v":0},{"d":3,"o":1,"v":0} ] } },
+    { "id": "arp_seq_octave_jump", "name": "Octave Jump", "category": "sequence", "description": "Single held note bounced across three octaves — great mono-key riff.",
+      "params": { "pattern": 25, "rate": 11, "gate": 0.45, "swing": 0.5, "octaveRange": 1, "octaveMode": 0, "latch": false, "hold": false, "velMode": 0, "velFixed": 100, "velAccent": 127, "stepMask": -1, "stepLength": 4, "mpeMode": 0, "outputChannel": 1, "scatterBase": 2, "scatterCount": 4, "scale": 0, "scaleRoot": 0, "transpose": 0, "repeat": 1,
+        "steps": [ {"d":0,"o":0,"v":112},{"d":0,"o":1,"v":0},{"d":0,"o":2,"v":0},{"d":0,"o":1,"v":0} ] } },
+    { "id": "arp_seq_trance_gate", "name": "Trance Gate", "category": "sequence", "description": "Root note gated into a pumping rhythm with rests and ghost hits.",
+      "params": { "pattern": 25, "rate": 11, "gate": 0.4, "swing": 0.5, "octaveRange": 1, "octaveMode": 0, "latch": false, "hold": false, "velMode": 0, "velFixed": 100, "velAccent": 127, "stepMask": -1, "stepLength": 8, "mpeMode": 0, "outputChannel": 1, "scatterBase": 2, "scatterCount": 4, "scale": 0, "scaleRoot": 0, "transpose": 0, "repeat": 1,
+        "steps": [ {"d":0,"o":0,"v":112},{"d":-1,"o":0,"v":0},{"d":0,"o":0,"v":64},{"d":0,"o":0,"v":0},{"d":-1,"o":0,"v":0},{"d":0,"o":0,"v":112},{"d":-1,"o":0,"v":0},{"d":0,"o":0,"v":64} ] } },
+    { "id": "arp_seq_chord_stab", "name": "Chord Stab", "category": "sequence", "description": "Whole held chord stabbed on the beat with rests between — the 'c' degree plays every held note at once.",
+      "params": { "pattern": 25, "rate": 8, "gate": 0.35, "swing": 0.5, "octaveRange": 1, "octaveMode": 0, "latch": false, "hold": false, "velMode": 0, "velFixed": 100, "velAccent": 127, "stepMask": -1, "stepLength": 8, "mpeMode": 0, "outputChannel": 1, "scatterBase": 2, "scatterCount": 4, "scale": 0, "scaleRoot": 0, "transpose": 0, "repeat": 1,
+        "steps": [ {"d":-2,"o":0,"v":112},{"d":-1,"o":0,"v":0},{"d":-2,"o":0,"v":64},{"d":-1,"o":0,"v":0},{"d":-2,"o":0,"v":112},{"d":-1,"o":0,"v":0},{"d":-2,"o":1,"v":0},{"d":-2,"o":0,"v":64} ] } },
+    { "id": "arp_seq_pedal_thumb", "name": "Pedal Thumb", "category": "sequence", "description": "Low held note pedals between each ascending note (thumb-style).",
+      "params": { "pattern": 25, "rate": 11, "gate": 0.5, "swing": 0.5, "octaveRange": 1, "octaveMode": 0, "latch": false, "hold": false, "velMode": 0, "velFixed": 100, "velAccent": 127, "stepMask": -1, "stepLength": 8, "mpeMode": 0, "outputChannel": 1, "scatterBase": 2, "scatterCount": 4, "scale": 0, "scaleRoot": 0, "transpose": 0, "repeat": 1,
+        "steps": [ {"d":0,"o":0,"v":112},{"d":1,"o":0,"v":0},{"d":0,"o":0,"v":0},{"d":2,"o":0,"v":0},{"d":0,"o":0,"v":112},{"d":3,"o":0,"v":0},{"d":0,"o":0,"v":0},{"d":4,"o":0,"v":0} ] } }
   ]
 }

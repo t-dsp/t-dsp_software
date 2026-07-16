@@ -465,7 +465,7 @@ static int cmpFloatAsc(const void *a, const void *b) {
 static void sweepWait(uint32_t ms) {
     uint32_t t0 = millis();
     while (millis() - t0 < ms) {
-#if TDSP_HAS_SDCARD
+#if TDSP_HAS_SDCARD && defined(USB_MTPDISK_SERIAL)
         MTP.loop();          // service the MTP endpoint so the host doesn't time it out
 #endif
 #if TDSP_HAS_USB_MIDI_HOST

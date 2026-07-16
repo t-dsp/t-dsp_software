@@ -34,7 +34,9 @@
 #endif
 #include <MidiRouter.h>    // MPE-aware fan-out: bend->semitones, CC74->timbre, pressure->onPressure
 #include <SD.h>
+#ifdef USB_MTPDISK_SERIAL
 #include <MTP_Teensy.h>   // expose the SD card to the host over USB (Serial+MTP)
+#endif
 #include <TDspSdXfer.h>   // host->SD file push over USB CDC (@WB), fast, no reflash
 #include "async_input.h"
 #include "input_i2s2_16bit.h"
@@ -282,6 +284,20 @@ static bool g_sdReady = false;
   static const char *kDrumEngineName = "TSF";
 #else
   static const char *kDrumEngineName = "";   // GM engines render their own ch10 drums
+#endif
+
+// Catalog relevance (compile-time, from the synth build) -> fed into EngineCaps so the app
+// fetches only the catalogs this engine can use. hasSoundfonts = SF2/TSF can load an SD .sf2
+// as the MAIN synth; hasDexedLibrary = the /dexed DX7 cart browser is meaningful.
+#if defined(TDSP_SYNTH_SF2) || defined(TDSP_SYNTH_SF2_TSF)
+  static const bool kEngineUsesSoundfonts   = true;
+#else
+  static const bool kEngineUsesSoundfonts   = false;
+#endif
+#if defined(TDSP_SYNTH_DEXED) || defined(TDSP_SYNTH_DEXED_POOL)
+  static const bool kEngineUsesDexedLibrary = true;
+#else
+  static const bool kEngineUsesDexedLibrary = false;
 #endif
 
 #ifdef TDSP_SYNTH_DEXED_POOL
@@ -648,6 +664,15 @@ static int  g_songBrowse = 0;       // dev-key ('S') browse cursor into songs.nd
 static bool g_loop = false;         // when set, a song restarts itself when it ends
 static bool g_songWasPlaying = false;  // edge-detect natural song end (for loop) in loop()
 
+// Generic app-owned state blob. The app has settings the firmware never interprets or acts
+// on (e.g. the MIDI player's end-of-song mode: shuffle/continue/stop) but which must survive
+// an app reload/reconnect. Rather than a per-setting command + @STATE field for each, the app
+// serializes them into ONE opaque payload (compact JSON, its own schema) and we just store +
+// echo it. RAM cost is a single fixed buffer; the app-only state is tiny, so 256 bytes is
+// plenty and stays under the 288-byte USB/BLE line buffers once the "@APP=" prefix is added.
+// This is RAM-only: it survives an app reload while the box stays powered, not a reboot.
+static char g_appState[256] = "";
+
 // Load the selected song into g_buf and hand it to the player. Baked built-ins
 // expand from their legacy SongEv[] (channel 0); SD songs parse straight to
 // MidiFileEvent[] (full channel/program/velocity). The player is non-blocking
@@ -673,6 +698,8 @@ static bool g_engineHasDrums = false;// engine renders ch10 (captured once at se
 static float         g_masterBpm     = TDSP_DEFAULT_BPM;  // the one tempo knob (40..240), board-configurable
 static float         g_songBpm       = 120.0f;  // playing/last song NATIVE tempo
 static float         g_drumFileBpm   = 120.0f;  // selected groove's NATIVE tempo
+static uint8_t       g_songBpb       = 4;       // playing/last song's beats-per-bar (quarter beats)
+static uint8_t       g_drumBpb       = 4;       // selected groove's beats-per-bar
 static elapsedMillis g_songBarClock;            // ms since the playing song's beat 1
 static bool          g_drumArmed     = false;   // SYNCHRO: groove loaded, waiting for the first live note
 static uint32_t      g_drumArmedN    = 0;
@@ -687,6 +714,18 @@ static void applyTempos() {
     g_songFollow.setNativeBpm(g_songBpm);
     g_drumFollow.setNativeBpm(g_drumFileBpm);
     g_conductor.setBpm(g_masterBpm);
+}
+
+// Set the master bar length from the CONTENT's time signature so the downbeat
+// (beatInBar()==0 / barPhase()==0) and consumeBarEdge() land on real bar 1 for
+// non-4/4 material — not just common time. The song is the meter master while one
+// plays (song = master, same rule as the tempo lock); otherwise a looping groove
+// owns the meter; idle falls back to 4/4. Call after any song/groove start or stop.
+static void applyMeter() {
+    uint8_t bpb = g_player.isPlaying()     ? g_songBpb
+                : g_drumPlayer.isPlaying() ? g_drumBpb
+                                           : 4;
+    g_conductor.setBeatsPerBar(bpb);
 }
 
 // Clean slate before starting ANY song: silence sounding notes + clear latched
@@ -721,7 +760,9 @@ FLASHMEM static bool songStartBuiltin(const char *name) {
         snprintf(g_curSongArg,  sizeof g_curSongArg,  "%s", testsong::kTestSongs[i].name);
         Serial.printf("[song] %s -> %s (%s, %lu events, start)\n", g_curSongName, synthName(),
                       testsong::kTestSongs[i].mpe ? "MPE" : "MIDI", (unsigned long)testsong::kTestSongs[i].count);
+        g_songBpb = 4;   // baked test sequence: no time-sig meta -> common time
         g_player.play(testsong::kTestSongs[i].ev, testsong::kTestSongs[i].count);
+        applyMeter();
         g_songBarClock = 0;
         return true;
     }
@@ -736,7 +777,8 @@ FLASHMEM static bool songStartBuiltin(const char *name) {
         snprintf(g_curSongName, sizeof g_curSongName, "%s", kBuiltinSongs[i].name);
         snprintf(g_curSongArg,  sizeof g_curSongArg,  "%s", kBuiltinSongs[i].name);
         Serial.printf("[song] %s (%.1f bpm est) -> %s (start)\n", g_curSongName, (double)g_songBpm, synthName());
-        if (n) { applyTempos(); g_player.play(g_buf, n); g_songBarClock = 0; }
+        g_songBpb = 4;   // baked legacy demo: no time-sig meta -> common time
+        if (n) { applyTempos(); g_player.play(g_buf, n); applyMeter(); g_songBarClock = 0; }
         return true;
     }
     return false;
@@ -746,16 +788,17 @@ FLASHMEM static bool songStartBuiltin(const char *name) {
 FLASHMEM static bool songStartSd(const char *path, const char *disp, const char *arg) {
     songPrep();
     if (g_mpeMode) applyMidiMode(false);
-    g_songBpm = 120.0f;
-    int got = tdsp::smf::loadSmfFile(path, g_buf, MAX_EVENTS, &g_songBpm);   // parse + tempo
+    g_songBpm = 120.0f; g_songBpb = 4;
+    int got = tdsp::smf::loadSmfFile(path, g_buf, MAX_EVENTS, &g_songBpm, &g_songBpb);   // parse + tempo + time-sig
     if (got <= 0) { Serial.printf("[song] SD load FAILED: %s\n", path); return false; }
     snprintf(g_curSongName, sizeof g_curSongName, "%s", disp);
     snprintf(g_curSongArg,  sizeof g_curSongArg,  "%s", arg);
-    Serial.printf("[song] %s (SD, %lu events, %.1f bpm, psram=%uMB ocramFree=%luKB) -> %s (start)\n",
-                  disp, (unsigned long)got, (double)g_songBpm,
+    Serial.printf("[song] %s (SD, %lu events, %.1f bpm, %u beats/bar, psram=%uMB ocramFree=%luKB) -> %s (start)\n",
+                  disp, (unsigned long)got, (double)g_songBpm, (unsigned)g_songBpb,
                   (unsigned)external_psram_size, (unsigned long)(tdsp::smf::ocramHeapFree() / 1024), synthName());
     applyTempos();   // retime the song (and groove) to the master BPM
     g_player.play(g_buf, (uint32_t)got);
+    applyMeter();    // bar length from the song's time signature (song = meter master)
     g_songBarClock = 0;
     return true;
 }
@@ -792,6 +835,7 @@ static void songStop() {
         g_synthSink->onAllNotesOff(0);
     }
     Serial.println("[song] stopped");
+    applyMeter();   // song gave up the meter -> revert to a looping groove's, else 4/4
 }
 
 // Called every loop(): if a looping song just ended on its own, restart it. Manual
@@ -909,6 +953,14 @@ static void buildDrumList() {
 // about streaming 128 GM program NAMES (OPLL reports false yet still plays drums).
 static bool drumEngineOk() { return g_engineHasDrums; }
 
+// One place that snapshots this build's catalog capabilities for the catalog builder.
+// Adding a capability = one field here + one in EngineCaps + one meta line in CatalogDb.h;
+// the @REINDEX / boot-reindex call sites never change.
+static tdsp::catdb::EngineCaps engineCaps() {
+    return { synthName(), drumEngineOk(), kDrumEngineName, (TDSP_ROLE_BT_RECEIVER != 0),
+             kEngineUsesSoundfonts, kEngineUsesDexedLibrary };
+}
+
 // While a groove is the drums, mute the SONG's own channel-10 track so a song with
 // its own drums (most full .mid) doesn't fight the groove — the groove IS the beat.
 // Restored when the groove stops. No-op on engines that don't do drums.
@@ -933,8 +985,8 @@ FLASHMEM // Load + start a groove by its full SD path. Shared by the legacy nume
 // client resolves from catalog.tsv — so playback is decoupled from firmware scan order.
 static void drumStartPath(const char* path, const char* disp) {
     if (!drumEngineOk()) { Serial.printf("[drum] %s has no channel-10 drum map — use TSF/SF2/OPL3/OPLL\n", synthName()); return; }
-    g_drumFileBpm = 120.0f;
-    int got = tdsp::smf::loadSmfFile(path, g_drumBuf, MAX_DRUM_EVENTS, &g_drumFileBpm);
+    g_drumFileBpm = 120.0f; g_drumBpb = 4;
+    int got = tdsp::smf::loadSmfFile(path, g_drumBuf, MAX_DRUM_EVENTS, &g_drumFileBpm, &g_drumBpb);
     if (got <= 0) { Serial.printf("[drum] load FAILED: %s\n", path); return; }
     drumApplyKit();
     g_drumPlayer.setVelocityScale(g_drumVolPct / 100.0f);
@@ -951,8 +1003,9 @@ static void drumStartPath(const char* path, const char* disp) {
     muteSongDrums(true);                                        // groove is the drums now
     g_drumPlayer.play(g_drumBuf, (uint32_t)got);               // immediate: beat 1 = now
     g_conductor.start();                                        // zero the master clock to this downbeat
-    Serial.printf("[drum] %s (%d ev, %.1f bpm) kit=%s @ master %.0f bpm vol=%d%%\n",
-                  disp, got, (double)g_drumFileBpm, kDrumKits[g_drumKit].name, (double)g_masterBpm, g_drumVolPct);
+    applyMeter();                                              // bar length from the groove's time-sig (unless a song owns the meter)
+    Serial.printf("[drum] %s (%d ev, %.1f bpm, %u beats/bar) kit=%s @ master %.0f bpm vol=%d%%\n",
+                  disp, got, (double)g_drumFileBpm, (unsigned)g_drumBpb, kDrumKits[g_drumKit].name, (double)g_masterBpm, g_drumVolPct);
 }
 static void drumStart(int idx) {   // legacy numeric index (flat menu / serial C/D keys)
     if (g_numDrums == 0) { Serial.println("[drum] no grooves on SD (/drums) — run tools/fetch_drums.py"); return; }
@@ -975,6 +1028,7 @@ static void drumStop() {
     if (!g_drumPlayer.isPlaying()) return;
     g_drumPlayer.stop();                                       // releases the groove's ch10 notes
     Serial.println("[drum] stopped");
+    applyMeter();   // groove gave up the meter -> revert to a playing song's, else 4/4
 }
 static void setDrumKit(int i) {
     if (i < 0) i = 0;
@@ -1148,6 +1202,7 @@ static void midiNoteOn  (byte ch, byte note, byte vel) {
         muteSongDrums(true);
         g_drumPlayer.play(g_drumBuf, g_drumArmedN);
         g_conductor.start();                        // downbeat is this note
+        applyMeter();                               // bar length from the groove's time-sig
         g_drumArmed = false;
         Serial.println("[drum] SYNCHRO start (first note)");
     }
@@ -1238,7 +1293,7 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         else songStartIndex(atoi(line + 6));   // @SONG=<catalog index> (legacy; resolved via songs.ndjson)
     }
     else if (strcmp(line, "@GETCAT") == 0)        refreshCatalog(reply);   // re-scan SD + send catalog
-    else if (strcmp(line, "@REINDEX") == 0)       { tdsp::catdb::buildCatalog(synthName(), drumEngineOk(), kDrumEngineName, (TDSP_ROLE_BT_RECEIVER != 0), catdbWriteBundled, millis()); reply.println("@REINDEXED"); }  // rebuild /tdsp/*.ndjson DB (upsert)
+    else if (strcmp(line, "@REINDEX") == 0)       { tdsp::catdb::buildCatalog(engineCaps(), catdbWriteBundled, millis()); reply.println("@REINDEXED"); }  // rebuild /tdsp/*.ndjson DB (upsert)
     else if (strncmp(line, "@READ=", 6) == 0)     streamFile(reply, line + 6);  // generic file fetch (catalog transport)
     else if (strncmp(line, "@WB=", 4) == 0) {                                    // host->SD file write; raw payload follows. USB CDC only.
         if (&reply != &Serial) reply.println("@WERR=0\x1fusb only");
@@ -1263,6 +1318,13 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     else if (strncmp(line, "@HPF=", 5) == 0)      setDacHpfMode(atoi(line + 5));
     else if (strncmp(line, "@LOOP=", 6) == 0)   { g_loop = (atoi(line + 6) != 0);
                                  Serial.printf("[song] loop %s\n", g_loop ? "ON" : "off"); }
+    else if (strncmp(line, "@APP=", 5) == 0) {   // store the opaque app-owned state blob (see g_appState)
+        strncpy(g_appState, line + 5, sizeof(g_appState) - 1);
+        g_appState[sizeof(g_appState) - 1] = 0;
+        reply.printf("@APP=%s\n", g_appState);   // echo so the app can confirm the round-trip
+    }
+    else if (strcmp(line, "@APP") == 0)          // query: return the stored app-state blob
+        reply.printf("@APP=%s\n", g_appState);
 #ifdef TDSP_SYNTH_DEXED_POOL
     else if (strncmp(line, "@PRESSURE=", 10) == 0) {   // pressure routing bitmask:
         uint8_t m = (uint8_t)atoi(line + 10);          // 1=VOL 2=BRIGHT 4=VIB 8=TREM (combine)
@@ -1335,9 +1397,31 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         reply.printf("@ARPON=%d\n", g_arpFilter.enabled() ? 1 : 0);
         Serial.printf("[arp] %s\n", g_arpFilter.enabled() ? "ON" : "bypass");
     }
-    else if (strncmp(line, "@ARPPAT=", 8) == 0) {          // pattern 0..23 (Up/Down/UpDown/.../Euclidean)
+    else if (strncmp(line, "@ARPPAT=", 8) == 0) {          // pattern 0..25 (Up/.../Euclidean/UserSequence=25)
         g_arpFilter.setPattern((tdsp::ArpFilter::Pattern)atoi(line + 8));
         reply.printf("@ARPPAT=%d\n", (int)g_arpFilter.pattern());
+    }
+    else if (strncmp(line, "@ARPSEQ=", 8) == 0) {          // user step-sequence table for PatUserSequence (25)
+        // Space-separated steps; each step is  degree[:octave[:velocity]]  where
+        // degree is a number (index into the sorted held notes), 'r' (rest) or
+        // 'c' (chord = all held). octave defaults 0, velocity 0 = inherit VelMode.
+        // Empty payload clears the sequence. Example:  @ARPSEQ=0 1 2 3:1 r c:0:110
+        char buf[256];
+        strncpy(buf, line + 8, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = 0;
+        g_arpFilter.clearSequence();
+        uint8_t idx = 0;
+        for (char* tok = strtok(buf, " "); tok && idx < tdsp::ArpFilter::kMaxSteps; tok = strtok(nullptr, " ")) {
+            int8_t degree;
+            if (tok[0] == 'r' || tok[0] == 'R')      degree = tdsp::ArpFilter::SeqRest;
+            else if (tok[0] == 'c' || tok[0] == 'C') degree = tdsp::ArpFilter::SeqChord;
+            else                                     degree = (int8_t)atoi(tok);
+            int oct = 0, vel = 0;
+            const char* c1 = strchr(tok, ':');
+            if (c1) { oct = atoi(c1 + 1); const char* c2 = strchr(c1 + 1, ':'); if (c2) vel = atoi(c2 + 1); }
+            g_arpFilter.setSequenceStep(idx++, degree, (int8_t)oct, (uint8_t)vel);
+        }
+        reply.printf("@ARPSEQ=%d\n", g_arpFilter.sequenceLength());
     }
     else if (strncmp(line, "@ARPRATE=", 9) == 0) {         // rate 0..14 (1/1 .. 1/32t) — relative to master BPM
         g_arpFilter.setRate((tdsp::ArpFilter::Rate)atoi(line + 9));
@@ -1359,6 +1443,48 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         g_arpFilter.setLatch(atoi(line + 10) != 0);
         reply.printf("@ARPLATCH=%d\n", g_arpFilter.latch() ? 1 : 0);
     }
+    else if (strncmp(line, "@ARPPRESET=", 11) == 0) {      // apply a whole preset atomically (one line = all params)
+        // Space-separated key=value tokens; only the keys present are applied, so callers
+        // can send a subset. Keys: pat rate gate(%) swing(%) oct octm latch vel vfix vacc
+        // mask len mpe outch scb scc scale scroot tr rep. (The step table rides @ARPSEQ.)
+        // e.g. @ARPPRESET=pat=25 rate=8 gate=50 swing=50 oct=1 scale=2 scroot=0 rep=1
+        char buf[256];
+        strncpy(buf, line + 11, sizeof(buf) - 1);
+        buf[sizeof(buf) - 1] = 0;
+        int applied = 0;
+        for (char* tok = strtok(buf, " "); tok; tok = strtok(nullptr, " ")) {
+            char* eq = strchr(tok, '=');
+            if (!eq) continue;
+            *eq = 0;
+            const char* k = tok;
+            const long v = strtol(eq + 1, nullptr, 10);
+            auto &A = g_arpFilter;
+            using AF = tdsp::ArpFilter;
+            if      (!strcmp(k, "pat"))   A.setPattern((AF::Pattern)v);
+            else if (!strcmp(k, "rate"))  A.setRate((AF::Rate)v);
+            else if (!strcmp(k, "gate"))  A.setGate(v / 100.0f);
+            else if (!strcmp(k, "swing")) A.setSwing(v / 100.0f);
+            else if (!strcmp(k, "oct"))   A.setOctaveRange((uint8_t)v);
+            else if (!strcmp(k, "octm"))  A.setOctaveMode((AF::OctaveMode)v);
+            else if (!strcmp(k, "latch")) A.setLatch(v != 0);
+            else if (!strcmp(k, "vel"))   A.setVelMode((AF::VelMode)v);
+            else if (!strcmp(k, "vfix"))  A.setFixedVelocity((uint8_t)v);
+            else if (!strcmp(k, "vacc"))  A.setAccentVelocity((uint8_t)v);
+            else if (!strcmp(k, "mask"))  A.setStepMask((uint32_t)v);
+            else if (!strcmp(k, "len"))   A.setStepLength((uint8_t)v);
+            else if (!strcmp(k, "mpe"))   A.setMpeMode((AF::MpeMode)v);
+            else if (!strcmp(k, "outch")) A.setOutputChannel((uint8_t)v);
+            else if (!strcmp(k, "scb"))   A.setScatterBaseChannel((uint8_t)v);
+            else if (!strcmp(k, "scc"))   A.setScatterCount((uint8_t)v);
+            else if (!strcmp(k, "scale")) A.setScale((AF::Scale)v);
+            else if (!strcmp(k, "scroot"))A.setScaleRoot((uint8_t)v);
+            else if (!strcmp(k, "tr"))    A.setTranspose((int8_t)v);
+            else if (!strcmp(k, "rep"))   A.setRepeat((uint8_t)v);
+            else continue;
+            ++applied;
+        }
+        reply.printf("@ARPPRESET=%d\n", applied);
+    }
     // Full current-state snapshot (one JSON line) so the app can hydrate every card on
     // connect instead of assuming defaults. Reports what the device actually knows —
     // i.e. what's ACTIVE, not a UI "selection" the firmware never sees.
@@ -1372,6 +1498,13 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         reply.printf("\"song\":{\"playing\":%d,\"p\":%d,\"name\":", g_player.isPlaying() ? 1 : 0, g_player.positionPermille());
         tdsp::catdb::jsonStr(reply, g_curSongName); reply.print("},");
         reply.printf("\"drums\":{\"kit\":%d,\"playing\":%d},", g_drumKit, g_drumPlayer.isPlaying() ? 1 : 0);
+        // Master-clock beat/bar so the app can show a downbeat indicator: beat is
+        // 1-based (1 == the downbeat), bpb = beats per bar (from the content's time
+        // signature), barp = 0..1000 permille through the bar, run = clock running.
+        { tdsp::Clock &clk = g_conductor.clock();
+          reply.printf("\"clock\":{\"beat\":%d,\"bpb\":%d,\"barp\":%d,\"run\":%d},",
+                       clk.beatInBar() + 1, clk.beatsPerBar(),
+                       (int)(clk.barPhase() * 1000.0f + 0.5f), clk.running() ? 1 : 0); }
         reply.print("\"voice\":{");
 #if defined(TDSP_SYNTH_DEXED) || defined(TDSP_SYNTH_DEXED_POOL)
         if (g_curCartRel[0]) {   // last pick was a /dexed cart voice (@DXPICK)
@@ -1381,6 +1514,7 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
 #endif
         { reply.printf("\"i\":%d,\"name\":", synthInstrument()); tdsp::catdb::jsonStr(reply, synthInstrumentName(synthInstrument())); }
         reply.print("}}\n");
+        reply.printf("@APP=%s\n", g_appState);   // opaque app-owned state, emitted with @STATE so one connect rehydrates both
     }
     else return false;
     return true;
@@ -1437,8 +1571,13 @@ void setup() {
     Serial.printf("[sd] card %s\n", g_sdReady ? "ready" : "not present");
     // MTP: present the SD to the host over USB so songs can be dropped into /songs
     // without pulling the card. Serial (debug + ESP32 flash bridge) is unaffected.
+    // Only in the Serial+MTP USB build. A plain USB_SERIAL build (e.g. the Linux
+    // flash host, where the MTP composite's DTR handshake fails on cdc_acm and the
+    // DTR-gated Serial never transmits) skips MTP; files reach the SD over @WB instead.
+#ifdef USB_MTPDISK_SERIAL
     MTP.begin();
     if (g_sdReady) MTP.addFilesystem(SD, "T-DSP Songs");
+#endif
 #endif
     // Songs are catalog-backed (no RAM registry); seed the current-song slot + browse
     // cursor from songs.ndjson if a catalog exists, so @STATE and the dev keys have a
@@ -1555,8 +1694,7 @@ void setup() {
         if (engineChanged || versionChanged) {
             Serial.printf("[catdb] catalog stale (engine %s->%s, v %d->%d) -> auto-reindex\n",
                           have ? stored : "(none)", synthName(), storedVer, tdsp::catdb::kCatalogVersion);
-            tdsp::catdb::buildCatalog(synthName(), drumEngineOk(), kDrumEngineName,
-                                      (TDSP_ROLE_BT_RECEIVER != 0), catdbWriteBundled, millis());
+            tdsp::catdb::buildCatalog(engineCaps(), catdbWriteBundled, millis());
         }
     }
 #endif
@@ -1587,7 +1725,7 @@ void loop() {
     // ticks the slow LED heartbeat and returns false.
     if (kit.service(Serial)) return;
 
-#if TDSP_HAS_SDCARD
+#if TDSP_HAS_SDCARD && defined(USB_MTPDISK_SERIAL)
     MTP.loop();   // service USB file transfers to/from the SD (host drag-and-drop)
 #endif
 
@@ -1632,7 +1770,7 @@ void loop() {
     // the ESP32 relays from BLE — lets a Web Serial browser page drive the device with
     // NO ESP32 attached) and single debug KEYS (t/a/s/W/...). A byte of '@' starts a
     // command line; anything else is a key. They can't collide (keys are never '@').
-    static char usbLine[160];
+    static char usbLine[288];   // 288 fits a full 32-step @ARPSEQ line; other cmds are far shorter
     static size_t usbN = 0;
     static bool usbInCmd = false;
     while (Serial.available()) {
@@ -1719,7 +1857,7 @@ void loop() {
     }
 
     // Mirror the ESP32's UART log to USB, line-buffered with an [esp] prefix.
-    static char line[160];
+    static char line[288];   // 288 fits a full 32-step @ARPSEQ line relayed from the BLE app
     static size_t n = 0;
     while (kit.uart().available()) {
         char c = (char)kit.uart().read();

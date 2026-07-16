@@ -21,6 +21,8 @@
 import { PermissionsAndroid, Platform } from 'react-native';
 import { BleManager, Device, State, Subscription } from 'react-native-ble-plx';
 import { parseDxls } from './dxls';
+import { encodeSequence, encodeArpParams } from './arpSeq';
+import type { SeqStep, ArpWireParams } from './arpSeq';
 import type { Transport, LineHandler, DirPage } from './transport';
 import { CMD, TDSP_SVC_UUID, TDSP_CMD_UUID, TDSP_STAT_UUID, TDSP_FILE_UUID } from './tdspBle';
 
@@ -263,6 +265,7 @@ export class BleTransport implements Transport {
   }
 
   requestState() { this.relay('@STATE'); }
+  saveAppState(state: unknown) { this.relay('@APP=' + JSON.stringify(state)); }   // opaque app-owned blob; device stores + echoes
 
   // ---- actions (identical @-lines to transport.web.ts, over the relay) --------
   masterVolume(pct: number) { this.byte(CMD.SET_VOLUME, Math.max(0, Math.min(100, Math.round(pct)))); }   // opcode: ESP32 caches for status
@@ -279,8 +282,12 @@ export class BleTransport implements Transport {
   arpOn(on: boolean) { this.relay('@ARPON=' + (on ? 1 : 0)); }
   arpPattern(i: number) { this.relay('@ARPPAT=' + i); }
   arpRate(i: number) { this.relay('@ARPRATE=' + i); }
+  arpGate(pct: number) { this.relay('@ARPGATE=' + Math.max(5, Math.min(150, Math.round(pct)))); }
+  arpSwing(pct: number) { this.relay('@ARPSWING=' + Math.max(50, Math.min(85, Math.round(pct)))); }
   arpOctaves(n: number) { this.relay('@ARPOCT=' + n); }
   arpLatch(on: boolean) { this.relay('@ARPLATCH=' + (on ? 1 : 0)); }
+  arpSequence(steps: SeqStep[]) { this.relay('@ARPSEQ=' + encodeSequence(steps)); }
+  arpPreset(params: ArpWireParams) { this.relay('@ARPPRESET=' + encodeArpParams(params)); }
   // ESP32-LOCAL Bluetooth control (act on the receiver, not the Teensy) → opcodes.
   espPair() { this.cmd(CMD.PAIRING_MODE); }
   espReconnect() { this.cmd(CMD.RECONNECT); }

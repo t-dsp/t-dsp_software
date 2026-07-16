@@ -214,7 +214,8 @@ static long buildSource(const char *key, const char *outPath, const char *srcDir
 // Catalog schema/builder version. BUMP when the layout or content the builder writes
 // changes (e.g. GM engines now ship instrument names) so setup()'s auto-reindex rebuilds
 // a stale catalog even when the engine name is unchanged. v2: GM instrument names written.
-static const int kCatalogVersion = 2;
+// v3: meta gains "sf"/"dexed" capability flags (app fetches only relevant catalogs).
+static const int kCatalogVersion = 3;
 
 // Read the engine name ("engine":"...") and schema version ("v":N) stored in
 // /tdsp/index.ndjson. `out` is set empty and *outVer is set 0 if the file/field is
@@ -244,13 +245,21 @@ static bool readStoredEngine(char *out, size_t n, int *outVer = nullptr) {
 }
 
 // ---- top-level build -------------------------------------------------------
-// engineName: synthName() from the caller. hasBt: does this board have the ESP32
-// Bluetooth-audio receiver (drives the meta "bt" flag -> app hides its BT card when
-// false). buildBundled: optional callback that writes /tdsp/instruments.ndjson +
-// /tdsp/drumkits.ndjson (compile-time lists the caller owns). Returns true on success.
+// EngineCaps: which SD catalogs THIS engine can actually use. Written to index.ndjson
+// meta so the app fetches only what's needed (not everything on the card) and hides the
+// UI for the rest. buildBundled: optional callback that writes /tdsp/instruments.ndjson
+// + /tdsp/drumkits.ndjson (compile-time lists the caller owns). Returns true on success.
+struct EngineCaps {
+    const char *engineName;
+    bool        hasDrums;         // engine renders ch10 drums -> grooves + drum kits relevant
+    const char *drumEngine;       // parallel drum-voice label ("OPLL"/"TSF"), "" if the synth does its own
+    bool        hasBt;            // ESP32 Bluetooth-audio receiver present -> app shows the BT card
+    bool        hasSoundfonts;    // engine can browse+load /sf2 fonts as the MAIN synth (SF2/TSF)
+    bool        hasDexedLibrary;  // engine uses the /dexed DX7 cart library (live-browsed)
+};
 typedef void (*BundledFn)();
 
-static bool buildCatalog(const char *engineName, bool hasDrums, const char *drumEngine, bool hasBt, BundledFn buildBundled, uint32_t nowMs) {
+static bool buildCatalog(const EngineCaps &caps, BundledFn buildBundled, uint32_t nowMs) {
     if (!::g_sdReady) { Serial.println("[catdb] no SD -> cannot build"); return false; }
     ensureRoot();
     Serial.println("[catdb] building /tdsp/ catalog...");
@@ -291,12 +300,14 @@ static bool buildCatalog(const char *engineName, bool hasDrums, const char *drum
     File ix = SD.open("/tdsp/index.ndjson", FILE_WRITE);
     if (ix) {
         ix.print("{\"v\":"); ix.print(kCatalogVersion); ix.print(",\"built\":"); ix.print(nowMs);
-        ix.print(",\"engine\":"); jsonStr(ix, engineName);
-        ix.print(",\"drums\":"); ix.print(hasDrums ? "true" : "false");
-        if (drumEngine && drumEngine[0]) { ix.print(",\"drumEngine\":"); jsonStr(ix, drumEngine); }
-        // Bluetooth-audio capability: false on the ESP32-not-populated board so the app
-        // hides its Bluetooth card. Absent (old firmware) -> client assumes present.
-        ix.print(",\"bt\":"); ix.print(hasBt ? "true" : "false");
+        ix.print(",\"engine\":"); jsonStr(ix, caps.engineName);
+        ix.print(",\"drums\":"); ix.print(caps.hasDrums ? "true" : "false");
+        if (caps.drumEngine && caps.drumEngine[0]) { ix.print(",\"drumEngine\":"); jsonStr(ix, caps.drumEngine); }
+        // Capability flags -> the app fetches only the catalogs this engine can use and hides the
+        // UI for the rest. Absent (old firmware) -> client assumes present (back-compat).
+        ix.print(",\"bt\":"); ix.print(caps.hasBt ? "true" : "false");
+        ix.print(",\"sf\":"); ix.print(caps.hasSoundfonts ? "true" : "false");
+        ix.print(",\"dexed\":"); ix.print(caps.hasDexedLibrary ? "true" : "false");
         ix.print(",\"files\":[");
         const char *fs[] = {"dexed","grooves","songs","soundfonts","samples","instruments","drumkits"};
         for (int i = 0; i < 7; ++i) {
