@@ -26,7 +26,9 @@
 #include <Audio.h>
 #include <TAC5212.h>
 #include <TDspProgrammingKit.h>
+#if TDSP_HAS_DIN_MIDI
 #include <MIDI.h>
+#endif
 #if TDSP_HAS_USB_MIDI_HOST
 #include <USBHost_t36.h>   // USB host: receive MIDI from a controller (e.g. LinnStrument) via USB
 #endif
@@ -81,7 +83,9 @@ constexpr uint8_t TAC5212_I2C_ADDRESS = 0x51;
 
 // Physical MIDI IN: schematic MIDI_RX = Teensy pin 0 (Serial1 RX) via the H11L1
 // opto. Drives the Dexed source below. (See projects/spike_midi_dexed.)
+#if TDSP_HAS_DIN_MIDI
 MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, MIDI);
+#endif
 
 // --- Audio graph — F32 mix bus, 24-bit (32-bit slot) TDM out ----------------
 // In the OpenAudio F32 world AudioOutputTDM_F32 masters SAI1 and owns
@@ -1101,7 +1105,9 @@ static void streamFile(Print& out, const char* path) {
 // semitones (per-channel range: 2 in MIDI mode, 48 in MPE / RPN), CC74 -> timbre,
 // and channel pressure -> pressure. The router then drives the same g_synthSink the
 // song player uses. Callbacks are shared by the DIN (MIDI.h) and USB host (MIDIDevice)
-// sources — their setHandle* signatures match.
+// sources — their setHandle* signatures match. Compiled only if at least one
+// hardware MIDI input exists (else nothing registers them).
+#if TDSP_HAS_DIN_MIDI || TDSP_HAS_USB_MIDI_HOST
 static void midiNoteOn  (byte ch, byte note, byte vel) {
     // SYNCHRO START (PSS-140 style): the first live note kicks off an armed groove on
     // beat 1 — you pick the downbeat by when you play. (vel 0 = note-off, ignore.)
@@ -1118,6 +1124,7 @@ static void midiNoteOff (byte ch, byte note, byte vel) { g_router.handleNoteOff(
 static void midiCC      (byte ch, byte cc,   byte val) { g_router.handleControlChange(ch, cc, val); }
 static void midiPitch   (byte ch, int bend)            { g_router.handlePitchBend(ch, (int16_t)bend); }
 static void midiPressure(byte ch, byte pressure)       { g_router.handleChannelPressure(ch, pressure); }
+#endif  // TDSP_HAS_DIN_MIDI || TDSP_HAS_USB_MIDI_HOST
 
 // Switch the device between normal MIDI and MPE (per-note expression). Sets the
 // router's per-channel bend range (2 vs the LinnStrument's 48-semi default) and lets
@@ -1419,6 +1426,7 @@ void setup() {
     spdifTone.frequency(1000.0f); spdifTone.amplitude(0.25f);
     if (g_codecOk) applyVol();
 
+#if TDSP_HAS_DIN_MIDI
     // Physical MIDI IN on Serial1 (pin 0), omni, soft-thru off -> the router.
     MIDI.begin(MIDI_CHANNEL_OMNI);
     MIDI.turnThruOff();
@@ -1426,6 +1434,7 @@ void setup() {
     MIDI.setHandleNoteOff(midiNoteOff);
     MIDI.setHandlePitchBend(midiPitch);
     MIDI.setHandleControlChange(midiCC);
+#endif
 #if TDSP_HAS_USB_MIDI_HOST
     // USB host: a controller (LinnStrument) plugged into the Teensy 4.1 host port.
     g_usbHost.begin();
@@ -1535,7 +1544,9 @@ void loop() {
     g_conductor.update(micros());
 
     // Live MIDI: drain DIN + USB-host controllers, then advance the (non-blocking) song.
+#if TDSP_HAS_DIN_MIDI
     while (MIDI.read()) { /* handlers fire per message */ }
+#endif
 #if TDSP_HAS_USB_MIDI_HOST
     g_usbHost.Task();
     while (g_usbMidi.read()) { /* USB-host MIDI handlers fire per message */ }
