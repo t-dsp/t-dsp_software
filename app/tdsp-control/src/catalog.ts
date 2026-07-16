@@ -74,7 +74,11 @@ export async function loadCatalog(t: Transport, onProgress?: (p: LoadProgress) =
   // (boot / SD settle), and a single transient failure shouldn't look like "no catalog".
   let ixText = '';
   for (let attempt = 0; ; attempt++) {
-    try { ixText = await t.readFile('/tdsp/index.ndjson'); break; }
+    try {
+      ixText = await t.readFile('/tdsp/index.ndjson', (recv, tot) =>
+        onProgress?.({ done: recv, total: tot, label: 'Reading index', index: 0, count: FETCH.length, det: tot > 0 }));
+      break;
+    }
     catch (e) { if (attempt >= 2) throw e; await new Promise(r => setTimeout(r, 700)); }
   }
   const ix = parseNdjson(ixText);
@@ -93,10 +97,18 @@ export async function loadCatalog(t: Transport, onProgress?: (p: LoadProgress) =
   let done = 0;
   for (let k = 0; k < FETCH.length; k++) {
     const f = FETCH[k];
-    onProgress?.({ done, total, label: f.label, index: k + 1, count: FETCH.length, det });
-    let txt = ''; try { txt = await t.readFile(f.path); } catch { txt = ''; }
+    const base = done;
+    onProgress?.({ done: base, total, label: f.label, index: k + 1, count: FETCH.length, det });
+    let txt = '';
+    try {
+      // Live intra-file progress: add THIS file's received bytes to the running base so
+      // the bar keeps moving during a big/slow read (e.g. grooves), not just between files.
+      txt = await t.readFile(f.path, (recv) => {
+        if (det) onProgress?.({ done: Math.min(total, base + recv), total, label: f.label, index: k + 1, count: FETCH.length, det });
+      });
+    } catch { txt = ''; }
     out[f.type] = parseNdjson(txt);
-    done = Math.min(total, done + (det ? (bytesOf[f.type] || 0) : 1));   // advance by the announced size → the bar reaches 100%
+    done = Math.min(total, base + (det ? (bytesOf[f.type] || 0) : 1));   // advance by the announced size → the bar reaches 100%
     onProgress?.({ done, total, label: f.label, index: k + 1, count: FETCH.length, det });
   }
   // NOTE: /dexed is NOT bulk-loaded. With 11k carts x 32 inline voice names the NDJSON is

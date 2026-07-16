@@ -5,7 +5,9 @@
 import { parseDxls } from './dxls';
 import type { Transport, LineHandler, DirPage } from './transport';
 
-interface FilePending { path: string; parts: Record<number, string>; resolve: (t: string) => void; reject: (e: any) => void; timer: any; }
+interface FilePending { path: string; parts: Record<number, string>; resolve: (t: string) => void; reject: (e: any) => void; timer: any; onProgress?: (r: number, t: number) => void; total: number; received: number; }
+// Decoded byte count of a base64 chunk (for streaming progress; avoids decoding mid-stream).
+const b64bytes = (s: string) => Math.max(0, Math.floor(s.replace(/=+$/, '').length * 3 / 4));
 interface DirPending { path: string; resolve: (d: DirPage) => void; reject: (e: any) => void; timer: any; }
 interface VoicesPending { rel: string; resolve: (v: string[]) => void; reject: (e: any) => void; timer: any; }
 
@@ -83,11 +85,15 @@ export class WebSerialTransport implements Transport {
   }
 
   private onDeviceLine(line: string) {
-    // @READ frame transport
-    if (line.startsWith('@FB=')) { if (this.file) { this.file.parts = {}; this.armFileTimer(this.file); } return; }
+    // @READ frame transport. @FB=<id>\x1f<path>\x1f<bytes> begins a file; the byte total
+    // lets us report a live progress fraction as @FD chunks arrive.
+    if (line.startsWith('@FB=')) {
+      if (this.file) { const p = line.slice(4).split('\x1f'); this.file.parts = {}; this.file.total = +p[2] || 0; this.file.received = 0; this.armFileTimer(this.file); this.file.onProgress?.(0, this.file.total); }
+      return;
+    }
     if (line.startsWith('@FD=')) {
       const p = line.slice(4).split('\x1f');
-      if (this.file && p.length === 3) { this.file.parts[+p[1]] = p[2]; this.armFileTimer(this.file); }
+      if (this.file && p.length === 3) { this.file.parts[+p[1]] = p[2]; this.file.received += b64bytes(p[2]); this.armFileTimer(this.file); this.file.onProgress?.(this.file.received, this.file.total); }
       return;
     }
     if (line.startsWith('@FE=')) {
@@ -115,10 +121,10 @@ export class WebSerialTransport implements Transport {
     this.handlers.forEach(h => h(line));
   }
 
-  readFile(path: string): Promise<string> {
+  readFile(path: string, onProgress?: (received: number, total: number) => void): Promise<string> {
     return new Promise((resolve, reject) => {
       if (this.file) { reject('a file read is in progress'); return; }
-      const f: FilePending = { path, parts: {}, resolve, reject, timer: null };
+      const f: FilePending = { path, parts: {}, resolve, reject, timer: null, onProgress, total: 0, received: 0 };
       this.file = f;
       this.armFileTimer(f);   // idle watchdog; re-armed on every @FB/@FD frame
       this.send('@READ=' + path);

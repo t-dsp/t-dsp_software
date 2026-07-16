@@ -15,6 +15,7 @@ import type { Transport, DirPage } from './src/transport';
 
 const EMPTY_DIR: DirPage = { path: '', page: 0, npages: 1, folders: [], carts: [] };
 const grooveFile = (g: { path: string; name: string }) => g.path.split('/').pop() || (g.name + '.mid');   // @DRUMF wants filename WITH .mid
+const kb = (n: number) => (n / 1024).toFixed(1);   // bytes -> "12.3" KB, for the load progress readout
 
 const C = { bg: '#0d1117', card: '#161b22', card2: '#0e131a', border: '#30363d', text: '#e6edf3', muted: '#8b949e', accent: '#3fb950', sel: 'rgba(31,111,235,0.28)', chip: '#21262d' };
 const ARP_PAT = ['Up', 'Down', 'Up/Down', 'Random'];
@@ -112,6 +113,7 @@ export default function App() {
   const userDiscRef = useRef(false);                    // synchronous mirror of userDisc so an in-flight connect() can see a cancel immediately
   const connectingRef = useRef(false);                  // synchronous guard so the auto-poll can't double-connect
   const [prog, setProg] = useState<LoadProgress | null>(null);   // catalog load progress (drives the loading screen); null when not loading
+  const [loadElapsed, setLoadElapsed] = useState(0);             // seconds on the current catalog load — shows it's alive even if a read stalls
   const manualStopRef = useRef(false);                  // set on user Stop so the resulting @SONGP=-1 isn't treated as a natural song end
   const onSongEndRef = useRef<() => void>(() => {});     // latest "song finished naturally" handler (continue/shuffle); kept in a ref so the @SONGP listener never goes stale
   const [cat, setCat] = useState<Catalog>(EMPTY_CATALOG);
@@ -220,6 +222,14 @@ export default function App() {
     const id = setInterval(tick, 4000);
     return () => { cancelled = true; clearInterval(id); };
   }, [userDisc]);
+  // Tick an elapsed-seconds counter while the catalog is loading, so the load screen
+  // reads as "working" even if a single @READ stalls (a frozen bar looks broken).
+  useEffect(() => {
+    if (!(connected && !loaded)) { setLoadElapsed(0); return; }
+    const t0 = Date.now();
+    const id = setInterval(() => setLoadElapsed(Math.floor((Date.now() - t0) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [connected, loaded]);
   async function load() {
     try { const c = await loadCatalog(tp, setProg); setCat(c); setLoaded(true); setProg(null); }
     catch (e: any) {
@@ -635,14 +645,17 @@ export default function App() {
         <View style={s.loadWrap}>
           <ActivityIndicator color={C.accent} size="large" />
           <Text style={s.loadTitle}>Loading catalog…</Text>
-          {prog && prog.det && prog.total > 0 ? (
+          {prog && prog.index > 0 && prog.det && prog.total > 0 ? (
+            // A file is streaming and the device reported sizes: live byte-fraction bar.
             <>
-              <View style={s.loadTrack}><View style={[s.loadFill, { width: `${Math.round(100 * prog.done / prog.total)}%` }]} /></View>
-              <Text style={s.loadSub}>{prog.label} · {prog.index}/{prog.count} · {Math.round(100 * prog.done / prog.total)}% of {Math.ceil(prog.total / 1024)} KB</Text>
+              <View style={s.loadTrack}><View style={[s.loadFill, { width: `${Math.min(100, Math.round(100 * prog.done / prog.total))}%` }]} /></View>
+              <Text style={s.loadSub}>{prog.label} · {prog.index}/{prog.count} · {Math.min(100, Math.round(100 * prog.done / prog.total))}% · {kb(prog.done)}/{kb(prog.total)} KB</Text>
             </>
           ) : (
-            <Text style={s.loadSub}>{prog && prog.index ? `${prog.label} · ${prog.index}/${prog.count}` : 'Reading index…'}</Text>
+            // Reading the index, or old firmware with no sizes: name the step instead.
+            <Text style={s.loadSub}>{prog && prog.index > 0 ? `${prog.label} · ${prog.index}/${prog.count}` : 'Reading catalog index…'}</Text>
           )}
+          <Text style={s.loadHint}>{loadElapsed}s elapsed{loadElapsed >= 6 ? ` · streaming over ${tp.name}…` : ''}</Text>
         </View>
       )}
 
@@ -749,6 +762,7 @@ const s = StyleSheet.create({
   loadTrack: { width: '100%', maxWidth: 360, height: 8, borderRadius: 4, backgroundColor: C.chip, overflow: 'hidden' },
   loadFill: { height: '100%', borderRadius: 4, backgroundColor: C.accent },
   loadSub: { color: C.muted, fontSize: 13, textAlign: 'center' },
+  loadHint: { color: C.muted, fontSize: 11, textAlign: 'center', opacity: 0.8 },
   grow1: { flex: 1 },
   headActions: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0 },   // content-sized → buttons keep natural width on the page header
   hdrActionsRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, paddingHorizontal: 14, paddingBottom: 12, marginTop: -2 },

@@ -67,7 +67,9 @@ async function ensurePermissions(): Promise<boolean> {
   } catch { return false; }
 }
 
-interface FilePending { resolve: (t: string) => void; reject: (e: any) => void; timer: any; }
+interface FilePending { resolve: (t: string) => void; reject: (e: any) => void; timer: any; onProgress?: (r: number, t: number) => void; total: number; received: number; }
+// Decoded byte count of a base64 chunk (for streaming progress; avoids decoding mid-stream).
+const b64bytes = (s: string) => Math.max(0, Math.floor(s.replace(/=+$/, '').length * 3 / 4));
 interface DirPending { path: string; resolve: (d: DirPage) => void; reject: (e: any) => void; timer: any; }
 interface VoicesPending { rel: string; resolve: (v: string[]) => void; reject: (e: any) => void; timer: any; }
 
@@ -187,8 +189,8 @@ export class BleTransport implements Transport {
       }
     }
     if (line.startsWith('@REINDEXED')) { const r = this.reindexDone; this.reindexDone = null; r?.(); return; }
-    if (line.startsWith('@FB=')) { this.fileAsm = { id: line.slice(4).split(FUS)[0], chunks: [] }; if (this.filePending) this.armFileTimer(this.filePending); return; }
-    if (line.startsWith('@FD=')) { const f = line.slice(4).split(FUS); const a = this.fileAsm; if (a && f[0] === a.id) a.chunks[parseInt(f[1], 10)] = f[2]; if (this.filePending) this.armFileTimer(this.filePending); return; }
+    if (line.startsWith('@FB=')) { const f = line.slice(4).split(FUS); this.fileAsm = { id: f[0], chunks: [] }; if (this.filePending) { this.filePending.total = +f[2] || 0; this.filePending.received = 0; this.armFileTimer(this.filePending); this.filePending.onProgress?.(0, this.filePending.total); } return; }
+    if (line.startsWith('@FD=')) { const f = line.slice(4).split(FUS); const a = this.fileAsm; if (a && f[0] === a.id) a.chunks[parseInt(f[1], 10)] = f[2]; if (this.filePending) { this.filePending.received += b64bytes(f[2]); this.armFileTimer(this.filePending); this.filePending.onProgress?.(this.filePending.received, this.filePending.total); } return; }
     if (line.startsWith('@FE=')) {
       const f = line.slice(4).split(FUS), a = this.fileAsm, p = this.filePending;
       if (a && p) {
@@ -203,11 +205,11 @@ export class BleTransport implements Transport {
     if (line.startsWith('@FERR=')) { const p = this.filePending; if (p) { clearTimeout(p.timer); this.filePending = null; this.fileAsm = null; p.reject(new Error(line.slice(6))); } return; }
   }
 
-  readFile(path: string): Promise<string> {
+  readFile(path: string, onProgress?: (received: number, total: number) => void): Promise<string> {
     return new Promise((resolve, reject) => {
       if (!this.device) { reject(new Error('not connected')); return; }
       if (this.filePending) { reject(new Error('a file read is in progress')); return; }
-      const p: FilePending = { resolve, reject, timer: null };
+      const p: FilePending = { resolve, reject, timer: null, onProgress, total: 0, received: 0 };
       this.filePending = p;
       this.fileAsm = { id: undefined, chunks: [] };
       this.armFileTimer(p);   // idle watchdog; re-armed on every @FB/@FD frame

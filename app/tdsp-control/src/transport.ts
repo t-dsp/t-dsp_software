@@ -36,8 +36,10 @@ export interface Transport {
   // Subscribe to raw device lines (BT status, etc.). Returns an unsubscribe fn.
   onLine(cb: LineHandler): () => void;
 
-  // Fetch an SD file (the catalog transport): @READ -> reassembled text.
-  readFile(path: string): Promise<string>;
+  // Fetch an SD file (the catalog transport): @READ -> reassembled text. onProgress
+  // (optional) fires as bytes stream in (received, total) so the UI can show a live bar
+  // during a large/slow transfer — `total` is the device-reported file size (0 if unknown).
+  readFile(path: string, onProgress?: (received: number, total: number) => void): Promise<string>;
 
   // Lazy /dexed browse (the SD library is too big to ship in the catalog): list one
   // folder level (@DXLS) or fetch one cart's 32 voice names (@DXVL). `path`/`cartRel`
