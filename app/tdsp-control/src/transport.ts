@@ -74,6 +74,7 @@ export interface Transport {
   stopDrums(): void;
   drumVol(pct: number): void;                         // drum-player level (@DRUMVOL=, 0..150 %), independent of the master @VOL
   songPlay(arg: string): void;                        // play by name/filename (@SONGF=) — mirrors playGrooveFile
+  songRestart(arg: string): void;                     // hard restart from the top on a fresh downbeat (@SONGRESTART=): zeroes the clock, ignores launch-quantize
   stopSong(): void;
   songVol(pct: number): void;                         // MIDI-player level (@SONGVOL=, 0..150 %), independent of the master @VOL
   songLoop(on: boolean): void;                        // loop the current song (@LOOP=)

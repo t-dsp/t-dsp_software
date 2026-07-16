@@ -304,7 +304,11 @@ export default function App() {
       if (i >= 0 && n >= 1) {
         setBeatFeed({ i, n });
         if (beatStaleRef.current) clearTimeout(beatStaleRef.current);
-        beatStaleRef.current = setTimeout(() => setBeatFeed(null), 1500);
+        // Generous window: the device emits every beat (even idle/stopped now), so this
+        // only fires for genuinely-absent feeds (old firmware, reindex, disconnect). 3.5s
+        // covers a full beat down past the 20 BPM floor, so a slow tempo never flickers to
+        // the local clock between beats.
+        beatStaleRef.current = setTimeout(() => setBeatFeed(null), 3500);
       }
     } else if (line.startsWith('[song]')) {
       // Follow the song's detected tempo: set master BPM to it (song + drums lock to that).
@@ -475,7 +479,7 @@ export default function App() {
   };
   const stepSong = (dir: number) => {   // ‹ › skip — follows the end-mode continue rules; plays the new song if one is playing
     const sg = pickNext(dir); if (!sg) return;
-    setPlayer(p => { if (p.playing) { tp.songPlay(songArg(sg)); return { ...p, song: sg.name, name: sg.name }; } return { ...p, song: sg.name }; });
+    setPlayer(p => { if (p.playing) { tp.songRestart(songArg(sg)); return { ...p, song: sg.name, name: sg.name }; } return { ...p, song: sg.name }; });
   };
   const stepBpm = (delta: number) => { const b = Math.max(20, Math.min(300, Math.round(bpm) + delta)); setBpm(b); tp.masterBpm(b); };
   const stepVol = (delta: number) => { const v = Math.max(0, Math.min(100, Math.round(vol) + delta)); setVol(v); tp.masterVolume(v); };
@@ -540,7 +544,7 @@ export default function App() {
   const playArp = () => { if (arp.on) tp.arpRestart(); else { setArp(a => ({ ...a, on: true })); tp.arpOn(true); } };
   const stopArp = () => { setArp(a => ({ ...a, on: false })); tp.arpOn(false); };
   const activePresetName = ARP_LIBRARY.find(p => p.id === arpPresetId)?.name || '';
-  const playSong = () => { const sg = cat.songs.find(x => x.name === player.song) || cat.songs[0]; if (!sg) return; tp.songPlay(songArg(sg)); setPlayer(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };  // -1 until the device reports position
+  const playSong = () => { const sg = cat.songs.find(x => x.name === player.song) || cat.songs[0]; if (!sg) return; tp.songRestart(songArg(sg)); setPlayer(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };  // restart from the top on a fresh downbeat; -1 until the device reports position
   const stopSong = () => { manualStopRef.current = true; tp.stopSong(); setPlayer(p => ({ ...p, playing: false, prog: 0 })); };
   const playSongOf = (sg: Song) => { tp.songPlay(songArg(sg)); setPlayer(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };
   // Merge a patch into the persisted app-state and push the whole blob to the device (@APP=)

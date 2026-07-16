@@ -641,18 +641,20 @@ static void setMetroVol(int pct) {
 #endif  // TDSP_METRONOME
 
 // --- Beat position emit (@BEAT) ---------------------------------------------
-// Drives the app's visual beat lights off the REAL master clock — but ONLY while a
-// SONG or GROOVE is playing (they own the grid). A running metronome emits its OWN
-// @BEAT from metroPoll() (self-timed), so we skip here when it's on to avoid two
-// sources fighting over the lights. Idle with nothing playing -> no feed (the app
-// hides the strip). Watches beatCount() change (does NOT consume the beat latch) and
-// emits non-blocking via emitBeat(), so the light feed can never stall loop().
+// Drives the app's visual beat lights off the REAL master clock whenever the
+// metronome is OFF. While a song/groove plays it reflects the content's grid (real
+// downbeat + meter); while idle it free-runs at the master tempo and the @METROSIG
+// time signature (clk.beatsPerBar() falls back to g_metroBpb via applyMeter), so the
+// lights ALWAYS show where the system thinks the beat is — even stopped. A running
+// metronome emits its OWN @BEAT from metroPoll() (self-timed), so we skip here when
+// it's on to avoid two sources fighting over the lights. Watches beatCount() change
+// (does NOT consume the beat latch) and emits non-blocking via emitBeat(), so the
+// light feed can never stall loop().
 static uint32_t g_lastBeatEmit = 0xFFFFFFFFu;   // force an emit on the first beat seen
 static void beatEmitPoll() {
 #ifdef TDSP_METRONOME
     if (g_metroOn) return;                       // the metronome owns the lights while running
 #endif
-    if (!g_player.isPlaying() && !g_drumPlayer.isPlaying()) return;   // only show a real transport
     tdsp::Clock &clk = g_conductor.clock();
     if (!clk.running()) return;                  // clock stalled/stopped -> nothing to show
     const uint32_t bc = clk.beatCount();
@@ -866,17 +868,23 @@ static void applyMeter() {
     g_conductor.setBeatsPerBar(bpb);
 }
 
-// Zero the master transport (downbeat = now) ONLY when nothing is already
-// playing — the FIRST player to start defines the grid's zero point; every
-// later player JOINS the running grid in phase (a synced player anchors itself
-// via fmod(now, loopBeats) in setSyncedMode). Never yank the grid out from under
-// an already-locked song/groove/arp. PLAN §5. Call this BEFORE the new player's
-// play()/setSyncedMode(), so the anchor reads the (possibly re-zeroed) clock.
+// When set, the next ensureTransportStarted() re-zeroes the grid even if something is
+// already playing — a Play / ‹ › press that hard-restarts the song on a fresh downbeat.
+static bool g_forceTransportZero = false;
+
+// Zero the master transport (downbeat = now) when nothing is already playing — the FIRST
+// player to start defines the grid's zero point; every later player JOINS the running grid
+// in phase (a synced player anchors itself via fmod(now, loopBeats) in setSyncedMode). Never
+// yank the grid out from under an already-locked song/groove/arp — UNLESS g_forceTransportZero
+// is set, i.e. the user explicitly asked to restart the song from the top (see songRestart).
+// PLAN §5. Call this BEFORE the new player's play()/setSyncedMode(), so the anchor reads the
+// (possibly re-zeroed) clock.
 static void ensureTransportStarted() {
-    if (!g_player.isPlaying() && !g_drumPlayer.isPlaying()) {
+    if (g_forceTransportZero || (!g_player.isPlaying() && !g_drumPlayer.isPlaying())) {
         g_conductor.start();
         g_arpFilter.resyncToGrid();   // a chord held on the arp re-locks to the new downbeat
     }
+    g_forceTransportZero = false;
 }
 
 // Lock a LOOPING song to the master beat grid (like the drums + arp) so it wraps
@@ -1253,6 +1261,17 @@ static void songLaunch(const char* arg) {
     }
     songStartArg(arg);
 }
+// Hard restart from the top, in time: re-zero the master transport (downbeat = now) so a
+// synced/looping song begins at beat 0 — instead of jumping to the running clock's current
+// phase — then play the song from its first event. Bypasses launch-quantize: this press
+// DEFINES the downbeat. The re-zero also re-locks a drum groove + held arp chord to the same
+// fresh downbeat, so everything restarts in phase. The app's MIDI-player Play / ‹ › use this.
+static void songRestart(const char* arg) {
+    if (!arg || !*arg) return;
+    g_forceTransportZero = true;   // ensureTransportStarted() (called right before play()) re-zeroes even mid-playback
+    songStartArg(arg);
+    g_forceTransportZero = false;  // safety: clear if songStartArg bailed before consuming it (non-looping / not found)
+}
 static void drumLaunchFile(const char* fname) {
     if (g_launchQuantize && g_conductor.running()) {
         snprintf(g_pendingDrumFile, sizeof g_pendingDrumFile, "%s", fname);
@@ -1539,6 +1558,7 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     }
 #endif
     else if (strncmp(line, "@SONGF=", 7) == 0)    songLaunch(line + 7);     // @SONGF=<filename|name> (play by name — the app's path; bar-quantized if @QUANTIZE=1)
+    else if (strncmp(line, "@SONGRESTART=", 13) == 0) songRestart(line + 13);   // hard restart on a fresh downbeat (zeroes the clock, ignores quantize) — the app's Play / ‹ ›
     else if (strncmp(line, "@SONG=", 6) == 0) {
         if (strcmp(line + 6, "stop") == 0) songStop();
         else songStartIndex(atoi(line + 6));   // @SONG=<catalog index> (legacy; resolved via songs.ndjson)
