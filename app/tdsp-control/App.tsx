@@ -558,6 +558,10 @@ export default function App() {
   };
   const playGroove = () => { const g = cat.grooves.find(x => x.path === drums.sel); if (g) { tp.playGrooveFile(grooveFile(g)); setDrums(d => ({ ...d, playing: g.name })); } };
   const stopDrums = () => { tp.stopDrums(); setDrums(d => ({ ...d, playing: null })); };
+  // Metronome transport, independent Play/Stop (mirrors the arp). Play sends @METRO=1 even
+  // when already running — the firmware restarts the bar from beat 1 — so it re-triggers.
+  const playMetro = () => { setMetro(m => ({ ...m, on: true })); tp.metronome(true); };
+  const stopMetro = () => { setMetro(m => ({ ...m, on: false })); tp.metronome(false); };
 
   const headerStatus = !connected ? 'Not connected' :
     [cat.engine || 'synth', cat.drumEngine ? cat.drumEngine + ' drums' : '', '♩ ' + Math.round(bpm) + ' BPM', tp.name, bt.conn ? 'BT:' + (bt.peer || 'on') : '', drums.playing ? '♪ ' + drums.playing : ''].filter(Boolean).join('  ·  ');
@@ -668,17 +672,22 @@ export default function App() {
     // playing content's meter automatically — it's a pure clock consumer, no own tempo.
     {
       id: 'metro', title: 'Metronome', show: metro.cap, value: metro.on ? 'Playing' : 'Paused',
-      actions: (
-        metro.on
-          ? <HdrBtn label="⏸" stop onPress={() => { setMetro(m => ({ ...m, on: false })); tp.metronome(false); }} />
-          : <HdrBtn label="▶" onPress={() => { setMetro(m => ({ ...m, on: true })); tp.metronome(true); }} />
-      ),
+      actions: (<>
+        <HdrBtn label="▶" onPress={playMetro} />
+        <HdrBtn label="■" stop onPress={stopMetro} />
+      </>),
       body: (
         <>
-          <Pressable style={[s.btn, metro.on && s.btnGhost]}
-            onPress={() => { const v = !metro.on; setMetro(m => ({ ...m, on: v })); tp.metronome(v); }}>
-            <Text style={s.btnText}>{metro.on ? '⏸  Pause' : '▶  Play'}</Text>
-          </Pressable>
+          {/* Independent Play/Stop (not a toggle): Play re-triggers the count from beat 1
+              even while running; Stop silences it. Active state = which button is lit. */}
+          <Row>
+            <Pressable style={[s.btn, s.grow1, metro.on && s.btnOn]} onPress={playMetro}>
+              <Text style={s.btnText}>▶  {metro.on ? 'Restart' : 'Play'}</Text>
+            </Pressable>
+            <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={stopMetro}>
+              <Text style={s.btnText}>■  Stop</Text>
+            </Pressable>
+          </Row>
           <Text style={s.muted}>Play starts on the downbeat — the beat lights light beat 1 and count forward from there. Runs at the master tempo ({Math.round(bpm)} BPM); set it on the Tempo card.</Text>
           <Text style={[s.text, { marginTop: 6 }]}>Click volume</Text>
           <VolSlider label="Volume" value={metro.vol} onChange={v => setMetro(m => ({ ...m, vol: v }))} onCommit={v => tp.metronomeVol(v)} disabled={!connected} />
