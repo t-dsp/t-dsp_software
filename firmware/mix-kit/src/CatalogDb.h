@@ -211,20 +211,28 @@ static long buildSource(const char *key, const char *outPath, const char *srcDir
     return lines;
 }
 
-// Engine name stored in /tdsp/index.ndjson ("engine":"..."), read into out (set
-// empty if the file/field is absent). Lets setup() detect a firmware engine change
-// across a reflash and auto-rebuild the catalog, so the app isn't stuck showing the
-// previous engine. Returns true if a value was read.
-static bool readStoredEngine(char *out, size_t n) {
+// Catalog schema/builder version. BUMP when the layout or content the builder writes
+// changes (e.g. GM engines now ship instrument names) so setup()'s auto-reindex rebuilds
+// a stale catalog even when the engine name is unchanged. v2: GM instrument names written.
+static const int kCatalogVersion = 2;
+
+// Read the engine name ("engine":"...") and schema version ("v":N) stored in
+// /tdsp/index.ndjson. `out` is set empty and *outVer is set 0 if the file/field is
+// absent. Lets setup() detect an engine change OR a builder-version change across a
+// reflash and auto-rebuild, so the app is never stuck on a stale catalog. Returns true
+// if the engine name was read.
+static bool readStoredEngine(char *out, size_t n, int *outVer = nullptr) {
     if (out && n) out[0] = 0;
+    if (outVer) *outVer = 0;
     if (!::g_sdReady || !out || n == 0) return false;
     File f = SD.open("/tdsp/index.ndjson");
     if (!f) return false;
     char buf[256];
-    int got = f.read(buf, sizeof(buf) - 1);   // engine is near the front of the one-line manifest
+    int got = f.read(buf, sizeof(buf) - 1);   // v + engine are near the front of the one-line manifest
     f.close();
     if (got <= 0) return false;
     buf[got] = 0;
+    if (outVer) { const char *v = strstr(buf, "\"v\":"); if (v) *outVer = atoi(v + 4); }
     const char *key = "\"engine\":\"";
     const char *p = strstr(buf, key);
     if (!p) return false;
@@ -282,7 +290,7 @@ static bool buildCatalog(const char *engineName, bool hasDrums, const char *drum
     SD.remove("/tdsp/index.ndjson");
     File ix = SD.open("/tdsp/index.ndjson", FILE_WRITE);
     if (ix) {
-        ix.print("{\"v\":1,\"built\":"); ix.print(nowMs);
+        ix.print("{\"v\":"); ix.print(kCatalogVersion); ix.print(",\"built\":"); ix.print(nowMs);
         ix.print(",\"engine\":"); jsonStr(ix, engineName);
         ix.print(",\"drums\":"); ix.print(hasDrums ? "true" : "false");
         if (drumEngine && drumEngine[0]) { ix.print(",\"drumEngine\":"); jsonStr(ix, drumEngine); }

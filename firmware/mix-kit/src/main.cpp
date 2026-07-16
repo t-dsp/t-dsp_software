@@ -835,11 +835,14 @@ static void catdbWriteBundled() {
     SD.remove("/tdsp/instruments.ndjson");
     File o = SD.open("/tdsp/instruments.ndjson", FILE_WRITE);
     if (o) {
-        if (!synthIsGM())   // GM engines stream no names (client renders GM 0..127 itself)
-            for (int i = 0; i < synthNumInstruments(); ++i) {
-                o.print("{\"i\":"); o.print(i); o.print(",\"name\":");
-                tdsp::catdb::jsonStr(o, synthInstrumentName(i)); o.print("}\n");
-            }
+        // Write every engine's instrument names — INCLUDING GM. The app has no built-in
+        // GM-128 table; it only renders what the catalog carries, so GM engines (TSF/SF2)
+        // must ship their 128 names here or the Synth/Voices list is empty. The names come
+        // from synthInstrumentName(), the same source @DXVOICE selects, so they always agree.
+        for (int i = 0; i < synthNumInstruments(); ++i) {
+            o.print("{\"i\":"); o.print(i); o.print(",\"name\":");
+            tdsp::catdb::jsonStr(o, synthInstrumentName(i)); o.print("}\n");
+        }
         o.close();
     }
     SD.remove("/tdsp/drumkits.ndjson");
@@ -1545,11 +1548,13 @@ void setup() {
     // the running one (or no catalog exists yet), rebuild it now — engine capability is
     // finalized above, so drumEngineOk() is valid here. Unchanged engine -> no rebuild.
     if (g_sdReady) {
-        char stored[64];
-        bool have = tdsp::catdb::readStoredEngine(stored, sizeof stored);
-        if (!have || strcmp(stored, synthName()) != 0) {
-            Serial.printf("[catdb] engine changed (%s -> %s) -> auto-reindex\n",
-                          have ? stored : "(none)", synthName());
+        char stored[64]; int storedVer = 0;
+        bool have = tdsp::catdb::readStoredEngine(stored, sizeof stored, &storedVer);
+        bool engineChanged  = !have || strcmp(stored, synthName()) != 0;
+        bool versionChanged = storedVer != tdsp::catdb::kCatalogVersion;   // builder layout/content bumped
+        if (engineChanged || versionChanged) {
+            Serial.printf("[catdb] catalog stale (engine %s->%s, v %d->%d) -> auto-reindex\n",
+                          have ? stored : "(none)", synthName(), storedVer, tdsp::catdb::kCatalogVersion);
             tdsp::catdb::buildCatalog(synthName(), drumEngineOk(), kDrumEngineName,
                                       (TDSP_ROLE_BT_RECEIVER != 0), catdbWriteBundled, millis());
         }
