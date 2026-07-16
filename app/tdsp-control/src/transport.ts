@@ -75,6 +75,7 @@ export interface Transport {
   songPlay(arg: string): void;                        // play by name/filename (@SONGF=) — mirrors playGrooveFile
   stopSong(): void;
   songLoop(on: boolean): void;                        // loop the current song (@LOOP=)
+  launchQuantize(on: boolean): void;                  // defer song/groove starts to the next bar (@QUANTIZE=)
   arpOn(on: boolean): void;
   arpPattern(i: number): void;
   arpRate(i: number): void;                // i = firmware Rate index (see ARP_RATES[].fw)

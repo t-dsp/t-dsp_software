@@ -686,6 +686,21 @@ static int  g_drumVolPct   = 100;   // drum level 0..150 (% of file velocity)
 static bool g_drumSynchro  = false; // SYNCHRO START (PSS-140 style): groove starts on your first note
 static bool g_engineHasDrums = false;// engine renders ch10 (captured once at setup; not the live mask)
 
+// LAUNCH QUANTIZE (opt-in, default off): defer a song/groove START to the next bar edge of
+// the free-running master clock — the SAME grid the arp already steps on — so songs, grooves
+// and the arp all share one downbeat and stay locked. A launch only ever waits ≤ 1 bar. The
+// per-loop restart of a looping song is NOT quantized (it re-arms via songStartArg directly),
+// so a loop never grows a bar-long gap. This aligns to the free grid without re-zeroing it.
+static bool g_launchQuantize   = false;
+static bool g_songLaunchPending = false;
+static char g_pendingSongArg[64] = {0};
+static bool g_drumLaunchPending = false;
+static char g_pendingDrumFile[80] = {0};
+// A tiny tempo follower that just flags each bar edge so loop() can fire pending launches
+// OUTSIDE the conductor's follower fan-out (keeps the heavy SD-load start off the callback).
+struct LaunchScheduler : tdsp::ITempoFollower { volatile bool barHit = false; void onBarEdge() override { barHit = true; } };
+static LaunchScheduler g_launchSched;
+
 // --- Master tempo (BPM) — one knob drives the song AND the drum groove -------
 // The song and the groove each have a NATIVE tempo; the master BPM retimes both
 // to a single tempo so they stay locked, and moving it speeds/slows both together:
@@ -755,11 +770,14 @@ FLASHMEM static bool songStartBuiltin(const char *name) {
         if (strcasecmp(name, testsong::kTestSongs[i].name) != 0) continue;
         songPrep();
         applyMidiMode(testsong::kTestSongs[i].mpe);
-        g_songBpm = 120.0f; applyTempos();                             // baked test seq: no tempo meta
+        g_songBpm = testsong::kTestSongs[i].bpm; applyTempos();        // per-song native tempo -> master
         snprintf(g_curSongName, sizeof g_curSongName, "%s", testsong::kTestSongs[i].name);
         snprintf(g_curSongArg,  sizeof g_curSongArg,  "%s", testsong::kTestSongs[i].name);
-        Serial.printf("[song] %s -> %s (%s, %lu events, start)\n", g_curSongName, synthName(),
-                      testsong::kTestSongs[i].mpe ? "MPE" : "MIDI", (unsigned long)testsong::kTestSongs[i].count);
+        // Print the BPM so the app auto-follows the song's tempo (its @STATE/[song] handler
+        // sets master BPM from this) — drums + arp then lock to the same grid.
+        Serial.printf("[song] %s -> %s (%s, %lu events, %.1f bpm, start)\n", g_curSongName, synthName(),
+                      testsong::kTestSongs[i].mpe ? "MPE" : "MIDI", (unsigned long)testsong::kTestSongs[i].count,
+                      (double)g_songBpm);
         g_songBpb = 4;   // baked test sequence: no time-sig meta -> common time
         g_player.play(testsong::kTestSongs[i].ev, testsong::kTestSongs[i].count);
         applyMeter();
@@ -879,7 +897,7 @@ static const int kNumDrumKits = sizeof(kDrumKits) / sizeof(kDrumKits[0]);
 // Catalog DB (CatalogDb.h) bundled-list hook: the engine's compile-time voice names +
 // the GM drum-kit table live here, so the indexer calls back into main.cpp to emit
 // /tdsp/instruments.ndjson + /tdsp/drumkits.ndjson alongside the SD-scanned sources.
-static void catdbWriteBundled() {
+FLASHMEM static void catdbWriteBundled() {
     SD.remove("/tdsp/instruments.ndjson");
     File o = SD.open("/tdsp/instruments.ndjson", FILE_WRITE);
     if (o) {
@@ -987,7 +1005,7 @@ static void drumApplyKit() {
 FLASHMEM // Load + start a groove by its full SD path. Shared by the legacy numeric index
 // (flat menu / serial keys) and the browser's play-by-filename (@DRUMF=), which the
 // client resolves from catalog.tsv — so playback is decoupled from firmware scan order.
-static void drumStartPath(const char* path, const char* disp) {
+static void drumStartPath(const char* path, const char* disp, bool rezero = true) {
     if (!drumEngineOk()) { Serial.printf("[drum] %s has no channel-10 drum map — use TSF/SF2/OPL3/OPLL\n", synthName()); return; }
     g_drumFileBpm = 120.0f; g_drumBpb = 4;
     int got = tdsp::smf::loadSmfFile(path, g_drumBuf, MAX_DRUM_EVENTS, &g_drumFileBpm, &g_drumBpb);
@@ -1006,7 +1024,10 @@ static void drumStartPath(const char* path, const char* disp) {
     g_drumArmed = false;
     muteSongDrums(true);                                        // groove is the drums now
     g_drumPlayer.play(g_drumBuf, (uint32_t)got);               // immediate: beat 1 = now
-    g_conductor.start();                                        // zero the master clock to this downbeat
+    // Normally the groove downbeat re-zeros the master clock. Under launch-quantize we're
+    // ALREADY firing on a bar edge of the free-running grid, so don't re-zero (that would
+    // shove the grid out from under an already-locked song/arp).
+    if (rezero) g_conductor.start();                            // zero the master clock to this downbeat
     applyMeter();                                              // bar length from the groove's time-sig (unless a song owns the meter)
     Serial.printf("[drum] %s (%d ev, %.1f bpm, %u beats/bar) kit=%s @ master %.0f bpm vol=%d%%\n",
                   disp, got, (double)g_drumFileBpm, (unsigned)g_drumBpb, kDrumKits[g_drumKit].name, (double)g_masterBpm, g_drumVolPct);
@@ -1018,13 +1039,13 @@ static void drumStart(int idx) {   // legacy numeric index (flat menu / serial C
     g_drumSel = idx;
     drumStartPath(g_drums[idx].path, g_drums[idx].name);
 }
-static void drumStartFile(const char* fname) {   // by filename — the browser's play path
+static void drumStartFile(const char* fname, bool rezero = true) {   // by filename — the browser's play path
     char path[128]; snprintf(path, sizeof(path), "/drums/%s", fname);
     char disp[64]; size_t c = strlen(fname);
     if (c > 4 && strcasecmp(fname + c - 4, ".mid") == 0) c -= 4;   // strip .mid for the log
     if (c > sizeof(disp) - 1) c = sizeof(disp) - 1;
     memcpy(disp, fname, c); disp[c] = 0;
-    drumStartPath(path, disp);
+    drumStartPath(path, disp, rezero);
 }
 static void drumStop() {
     g_drumArmed = false;                                       // cancel a synchro-armed groove
@@ -1040,6 +1061,27 @@ static void setDrumKit(int i) {
     g_drumKit = i;
     if (drumEngineOk()) drumApplyKit();
     Serial.printf("[drum] kit -> %s (prog %u)\n", kDrumKits[i].name, kDrumKits[i].prog);
+}
+
+// --- Launch quantize: the user-facing START entry points. When quantize is on they arm a
+// pending launch that loop() fires on the next bar edge; otherwise they start immediately.
+static void songLaunch(const char* arg) {
+    if (g_launchQuantize && g_conductor.running()) {
+        snprintf(g_pendingSongArg, sizeof g_pendingSongArg, "%s", arg);
+        g_songLaunchPending = true; g_launchSched.barHit = false;   // wait for the NEXT bar edge
+        Serial.printf("[sync] song launch armed: %s -> next bar\n", arg);
+        return;
+    }
+    songStartArg(arg);
+}
+static void drumLaunchFile(const char* fname) {
+    if (g_launchQuantize && g_conductor.running()) {
+        snprintf(g_pendingDrumFile, sizeof g_pendingDrumFile, "%s", fname);
+        g_drumLaunchPending = true; g_launchSched.barHit = false;
+        Serial.printf("[sync] drum launch armed: %s -> next bar\n", fname);
+        return;
+    }
+    drumStartFile(fname);
 }
 // Master tempo (BPM) — one knob retimes BOTH the song and the drum groove, live.
 static void setMasterBpm(int bpm) {
@@ -1291,7 +1333,7 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         reply.printf("@DXPICKED=%s\t%d\t%s\n", buf, voice, nm ? nm : "?");
     }
 #endif
-    else if (strncmp(line, "@SONGF=", 7) == 0)    songStartArg(line + 7);   // @SONGF=<filename|name> (play by name — the app's path)
+    else if (strncmp(line, "@SONGF=", 7) == 0)    songLaunch(line + 7);     // @SONGF=<filename|name> (play by name — the app's path; bar-quantized if @QUANTIZE=1)
     else if (strncmp(line, "@SONG=", 6) == 0) {
         if (strcmp(line + 6, "stop") == 0) songStop();
         else songStartIndex(atoi(line + 6));   // @SONG=<catalog index> (legacy; resolved via songs.ndjson)
@@ -1313,12 +1355,18 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         if (strcmp(line + 6, "stop") == 0) drumStop();
         else drumStart(atoi(line + 6));   // @DRUM=<groove index> (legacy flat menu)
     }
-    else if (strncmp(line, "@DRUMF=", 7) == 0)    drumStartFile(line + 7);  // @DRUMF=<filename> (browser, via catalog.tsv)
+    else if (strncmp(line, "@DRUMF=", 7) == 0)    drumLaunchFile(line + 7); // @DRUMF=<filename> (browser, via catalog.tsv; bar-quantized if @QUANTIZE=1)
     else if (strncmp(line, "@DRUMKIT=", 9) == 0)   setDrumKit(atoi(line + 9));    // GM kit ("instrument")
     else if (strncmp(line, "@DRUMVOL=", 9) == 0)    setDrumVol(atoi(line + 9));    // 0..150 %
     else if (strncmp(line, "@BPM=", 5) == 0)        setMasterBpm(atoi(line + 5));  // master tempo (song+drum)
     else if (strncmp(line, "@DRUMSYNCHRO=", 13) == 0) { g_drumSynchro = (atoi(line + 13) != 0);   // start-on-first-note
                                  Serial.printf("[drum] synchro start %s\n", g_drumSynchro ? "ON (play a note to start)" : "off (start on Play)"); }
+    else if (strncmp(line, "@QUANTIZE=", 10) == 0) {   // launch quantize: defer song/groove start to the next bar edge
+        g_launchQuantize = (atoi(line + 10) != 0);
+        if (!g_launchQuantize) { g_songLaunchPending = g_drumLaunchPending = false; }   // dropping the mode cancels any armed launch
+        reply.printf("@QUANTIZE=%d\n", g_launchQuantize ? 1 : 0);
+        Serial.printf("[sync] launch quantize %s\n", g_launchQuantize ? "ON (starts land on the next bar)" : "off (start now)");
+    }
     else if (strncmp(line, "@HPF=", 5) == 0)      setDacHpfMode(atoi(line + 5));
     else if (strncmp(line, "@LOOP=", 6) == 0)   { g_loop = (atoi(line + 6) != 0);
                                  Serial.printf("[song] loop %s\n", g_loop ? "ON" : "off"); }
@@ -1495,7 +1543,7 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     else if (strcmp(line, "@STATE") == 0) {
         int volPct = g_appMasterPct;   // app-facing master is the digital gain
         if (volPct < 0) volPct = 0; if (volPct > 100) volPct = 100;
-        reply.printf("@STATE={\"vol\":%d,\"hpf\":%d,\"bpm\":%d,\"loop\":%d,", volPct, g_hpf, (int)(g_masterBpm + 0.5f), g_loop ? 1 : 0);
+        reply.printf("@STATE={\"vol\":%d,\"hpf\":%d,\"bpm\":%d,\"loop\":%d,\"quant\":%d,", volPct, g_hpf, (int)(g_masterBpm + 0.5f), g_loop ? 1 : 0, g_launchQuantize ? 1 : 0);
         reply.printf("\"arp\":{\"on\":%d,\"pat\":%d,\"rate\":%d,\"oct\":%d,\"latch\":%d},",
                      g_arpFilter.enabled() ? 1 : 0, (int)g_arpFilter.pattern(), (int)g_arpFilter.rate(),
                      g_arpFilter.octaveRange(), g_arpFilter.latch() ? 1 : 0);
@@ -1524,7 +1572,7 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     return true;
 }
 
-void setup() {
+FLASHMEM void setup() {
     hardResetCodecPower();
 
     Serial.begin(115200);
@@ -1659,6 +1707,7 @@ void setup() {
     g_conductor.begin(g_masterBpm);
     g_conductor.addFollower(&g_songFollow);
     g_conductor.addFollower(&g_drumFollow);
+    g_conductor.addFollower(&g_launchSched);   // flags bar edges so loop() can fire quantized launches
     g_router.addSink(&g_clockSink);
     g_conductor.setTickHook(+[](void*){ g_router.handleClock(); }, nullptr);
     synthBegin();
@@ -1738,6 +1787,15 @@ void loop() {
     // and fires bar-edge callbacks to followers; in External mode this is the
     // stall watchdog. Cheap when nothing's due.
     g_conductor.update(micros());
+
+    // Launch quantize: fire any armed song/groove exactly on a bar edge (flagged by
+    // g_launchSched during the update() above), so they land on the shared downbeat. The
+    // groove fires with rezero=false so it aligns to the free grid instead of resetting it.
+    if (g_launchSched.barHit) {
+        g_launchSched.barHit = false;
+        if (g_songLaunchPending) { g_songLaunchPending = false; songStartArg(g_pendingSongArg); }
+        if (g_drumLaunchPending) { g_drumLaunchPending = false; drumStartFile(g_pendingDrumFile, /*rezero=*/false); }
+    }
 
     // Live MIDI: drain DIN + USB-host controllers, then advance the (non-blocking) song.
 #if TDSP_HAS_DIN_MIDI
@@ -1889,9 +1947,10 @@ void loop() {
 #endif
         float psp = peakSpdif.available() ? peakSpdif.read() : 0.0f;
         float po  = peakOut.available()   ? peakOut.read()   : 0.0f;
-        Serial.printf("alive up=%lus  codec=%s(%s)  spdif=%s inFreq=%.0f  "
+        Serial.printf("alive up=%lus  bpm=%.0f(%s)  codec=%s(%s)  spdif=%s inFreq=%.0f  "
                       "btPeak=%.3f spdifPeak=%.3f outPeak=%.3f  cpuMax=%.1f%% memMax=%u\n",
                       (unsigned long)(millis() / 1000),
+                      (double)g_masterBpm, g_conductor.running() ? "run" : "idle",
                       g_codecOk ? "OK" : "FAIL", g_codecMsg,
                       AsyncAudioInputSPDIF3::isLocked() ? "LOCKED" : "no-signal",
 #if TDSP_SPDIF_IN

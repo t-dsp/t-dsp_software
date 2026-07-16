@@ -136,14 +136,23 @@ export class BleTransport implements Transport {
 
   private scanAndConnect(): Promise<Device> {
     return new Promise((resolve, reject) => {
-      let done = false;
+      let settled = false, picking = false;
+      const stopScan = () => { try { this.mgr.stopDeviceScan(); } catch {} };
+      // ONE deadline for the whole scan+connect. Critically this also bounds the GATT
+      // connect: dev.connect() can hang forever when reconnecting to the ESP32 (single
+      // central, still tearing down the prior link), which would leave connectingRef
+      // stuck true and the app wedged. On timeout we reject cleanly so the caller resets
+      // and the Connect button stays responsive (user can retry).
+      const done = (fn: () => void) => { if (settled) return; settled = true; clearTimeout(deadline); stopScan(); fn(); };
+      const deadline = setTimeout(() => done(() => reject(new Error('No T-DSP device found (timed out)'))), 20000);
+      stopScan();   // clear any lingering scan from a prior/aborted attempt so this one is clean
       this.mgr.startDeviceScan([TDSP_SVC_UUID], null, async (err, dev) => {
-        if (err) { if (!done) { done = true; this.mgr.stopDeviceScan(); reject(err); } return; }
-        if (!dev || done) return;
-        done = true; this.mgr.stopDeviceScan();
-        try { resolve(await dev.connect()); } catch (e) { reject(e); }
+        if (err) { done(() => reject(err)); return; }
+        if (!dev || picking || settled) return;
+        picking = true; stopScan();                       // found it — stop scanning, connect once
+        try { const d = await dev.connect({ timeout: 12000 }); done(() => resolve(d)); }
+        catch (e) { done(() => reject(e)); }
       });
-      setTimeout(() => { if (!done) { done = true; this.mgr.stopDeviceScan(); reject(new Error('No T-DSP device found')); } }, 15000);
     });
   }
 
@@ -279,6 +288,7 @@ export class BleTransport implements Transport {
   songPlay(arg: string) { this.relay('@SONGF=' + arg); }
   stopSong() { this.relay('@SONG=stop'); }
   songLoop(on: boolean) { this.relay('@LOOP=' + (on ? 1 : 0)); }
+  launchQuantize(on: boolean) { this.relay('@QUANTIZE=' + (on ? 1 : 0)); }
   arpOn(on: boolean) { this.relay('@ARPON=' + (on ? 1 : 0)); }
   arpPattern(i: number) { this.relay('@ARPPAT=' + i); }
   arpRate(i: number) { this.relay('@ARPRATE=' + i); }

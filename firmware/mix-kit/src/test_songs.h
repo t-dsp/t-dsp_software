@@ -16,31 +16,31 @@ static constexpr uint8_t CC  = tdsp::kControlChange;
 static constexpr uint8_t PB  = tdsp::kPitchBend;
 static constexpr uint8_t CP  = tdsp::kChannelPressure;
 
-// 01 Midi Test Sweep  (98 events)
+// 01 Midi Test Sweep  (96 events, 120 bpm)
 static const MidiFileEvent kSweep[] PROGMEM = {
-  {0,ON,0,48,100},{95,OFF,0,48,0},{15,ON,0,49,100},{95,OFF,0,49,0},{15,ON,0,50,100},
-  {95,OFF,0,50,0},{15,ON,0,51,100},{95,OFF,0,51,0},{15,ON,0,52,100},{95,OFF,0,52,0},
-  {15,ON,0,53,100},{95,OFF,0,53,0},{15,ON,0,54,100},{95,OFF,0,54,0},{15,ON,0,55,100},
-  {95,OFF,0,55,0},{15,ON,0,56,100},{95,OFF,0,56,0},{15,ON,0,57,100},{95,OFF,0,57,0},
-  {15,ON,0,58,100},{95,OFF,0,58,0},{15,ON,0,59,100},{95,OFF,0,59,0},{15,ON,0,60,100},
-  {95,OFF,0,60,0},{15,ON,0,61,100},{95,OFF,0,61,0},{15,ON,0,62,100},{95,OFF,0,62,0},
-  {15,ON,0,63,100},{95,OFF,0,63,0},{15,ON,0,64,100},{95,OFF,0,64,0},{15,ON,0,65,100},
-  {95,OFF,0,65,0},{15,ON,0,66,100},{95,OFF,0,66,0},{15,ON,0,67,100},{95,OFF,0,67,0},
-  {15,ON,0,68,100},{95,OFF,0,68,0},{15,ON,0,69,100},{95,OFF,0,69,0},{15,ON,0,70,100},
-  {95,OFF,0,70,0},{15,ON,0,71,100},{95,OFF,0,71,0},{15,ON,0,72,100},{95,OFF,0,72,0},
-  {15,ON,0,71,100},{95,OFF,0,71,0},{15,ON,0,70,100},{95,OFF,0,70,0},{15,ON,0,69,100},
-  {95,OFF,0,69,0},{15,ON,0,68,100},{95,OFF,0,68,0},{15,ON,0,67,100},{95,OFF,0,67,0},
-  {15,ON,0,66,100},{95,OFF,0,66,0},{15,ON,0,65,100},{95,OFF,0,65,0},{15,ON,0,64,100},
-  {95,OFF,0,64,0},{15,ON,0,63,100},{95,OFF,0,63,0},{15,ON,0,62,100},{95,OFF,0,62,0},
-  {15,ON,0,61,100},{95,OFF,0,61,0},{15,ON,0,60,100},{95,OFF,0,60,0},{15,ON,0,59,100},
-  {95,OFF,0,59,0},{15,ON,0,58,100},{95,OFF,0,58,0},{15,ON,0,57,100},{95,OFF,0,57,0},
-  {15,ON,0,56,100},{95,OFF,0,56,0},{15,ON,0,55,100},{95,OFF,0,55,0},{15,ON,0,54,100},
-  {95,OFF,0,54,0},{15,ON,0,53,100},{95,OFF,0,53,0},{15,ON,0,52,100},{95,OFF,0,52,0},
-  {15,ON,0,51,100},{95,OFF,0,51,0},{15,ON,0,50,100},{95,OFF,0,50,0},{15,ON,0,49,100},
-  {95,OFF,0,49,0},{15,ON,0,48,100},{95,OFF,0,48,0},
+  {0,ON,0,48,100},{112,OFF,0,48,0},{13,ON,0,49,100},{113,OFF,0,49,0},{12,ON,0,50,100},
+  {112,OFF,0,50,0},{13,ON,0,51,100},{113,OFF,0,51,0},{12,ON,0,52,100},{112,OFF,0,52,0},
+  {13,ON,0,53,100},{113,OFF,0,53,0},{12,ON,0,54,100},{112,OFF,0,54,0},{13,ON,0,55,100},
+  {113,OFF,0,55,0},{12,ON,0,56,100},{112,OFF,0,56,0},{13,ON,0,57,100},{113,OFF,0,57,0},
+  {12,ON,0,58,100},{112,OFF,0,58,0},{13,ON,0,59,100},{113,OFF,0,59,0},{12,ON,0,60,100},
+  {112,OFF,0,60,0},{13,ON,0,61,100},{113,OFF,0,61,0},{12,ON,0,62,100},{112,OFF,0,62,0},
+  {13,ON,0,63,100},{113,OFF,0,63,0},{12,ON,0,64,100},{112,OFF,0,64,0},{13,ON,0,65,100},
+  {113,OFF,0,65,0},{12,ON,0,66,100},{112,OFF,0,66,0},{13,ON,0,67,100},{113,OFF,0,67,0},
+  {12,ON,0,68,100},{112,OFF,0,68,0},{13,ON,0,69,100},{113,OFF,0,69,0},{12,ON,0,70,100},
+  {112,OFF,0,70,0},{13,ON,0,71,100},{113,OFF,0,71,0},{12,ON,0,72,100},{112,OFF,0,72,0},
+  {13,ON,0,71,100},{113,OFF,0,71,0},{12,ON,0,70,100},{112,OFF,0,70,0},{13,ON,0,69,100},
+  {113,OFF,0,69,0},{12,ON,0,68,100},{112,OFF,0,68,0},{13,ON,0,67,100},{113,OFF,0,67,0},
+  {12,ON,0,66,100},{112,OFF,0,66,0},{13,ON,0,65,100},{113,OFF,0,65,0},{12,ON,0,64,100},
+  {112,OFF,0,64,0},{13,ON,0,63,100},{113,OFF,0,63,0},{12,ON,0,62,100},{112,OFF,0,62,0},
+  {13,ON,0,61,100},{113,OFF,0,61,0},{12,ON,0,60,100},{112,OFF,0,60,0},{13,ON,0,59,100},
+  {113,OFF,0,59,0},{12,ON,0,58,100},{112,OFF,0,58,0},{13,ON,0,57,100},{113,OFF,0,57,0},
+  {12,ON,0,56,100},{112,OFF,0,56,0},{13,ON,0,55,100},{113,OFF,0,55,0},{12,ON,0,54,100},
+  {112,OFF,0,54,0},{13,ON,0,53,100},{113,OFF,0,53,0},{12,ON,0,52,100},{112,OFF,0,52,0},
+  {13,ON,0,51,100},{113,OFF,0,51,0},{12,ON,0,50,100},{112,OFF,0,50,0},{13,ON,0,49,100},
+  {125,OFF,0,49,0},
 };
 
-// 02 Midi Test Chord  (26 events)
+// 02 Midi Test Chord  (26 events, 120 bpm)
 static const MidiFileEvent kChord[] PROGMEM = {
   {0,ON,0,60,96},{0,ON,0,64,96},{0,ON,0,67,96},{650,OFF,0,60,0},{0,OFF,0,64,0},{0,OFF,0,67,0},
   {40,ON,0,65,96},{0,ON,0,69,96},{0,ON,0,72,96},{650,OFF,0,65,0},{0,OFF,0,69,0},{0,OFF,0,72,0},
@@ -49,7 +49,7 @@ static const MidiFileEvent kChord[] PROGMEM = {
   {0,OFF,0,67,0},{0,OFF,0,72,0},
 };
 
-// 03 Midi Test Velocity  (16 events)
+// 03 Midi Test Velocity  (16 events, 120 bpm)
 static const MidiFileEvent kVelocity[] PROGMEM = {
   {0,ON,0,60,16},{260,OFF,0,60,0},{120,ON,0,60,32},{260,OFF,0,60,0},{120,ON,0,60,48},
   {260,OFF,0,60,0},{120,ON,0,60,64},{260,OFF,0,60,0},{120,ON,0,60,80},{260,OFF,0,60,0},
@@ -57,21 +57,24 @@ static const MidiFileEvent kVelocity[] PROGMEM = {
   {260,OFF,0,60,0},
 };
 
-// 04 Midi Test Arpeggio  (48 events)
+// 04 Midi Test Arpeggio  (64 events, 120 bpm)
 static const MidiFileEvent kArp[] PROGMEM = {
-  {0,ON,0,60,100},{85,OFF,0,60,0},{5,ON,0,64,100},{85,OFF,0,64,0},{5,ON,0,67,100},
-  {85,OFF,0,67,0},{5,ON,0,71,100},{85,OFF,0,71,0},{5,ON,0,72,100},{85,OFF,0,72,0},
-  {5,ON,0,71,100},{85,OFF,0,71,0},{5,ON,0,67,100},{85,OFF,0,67,0},{5,ON,0,64,100},
-  {85,OFF,0,64,0},{5,ON,0,60,100},{85,OFF,0,60,0},{5,ON,0,64,100},{85,OFF,0,64,0},
-  {5,ON,0,67,100},{85,OFF,0,67,0},{5,ON,0,71,100},{85,OFF,0,71,0},{5,ON,0,72,100},
-  {85,OFF,0,72,0},{5,ON,0,71,100},{85,OFF,0,71,0},{5,ON,0,67,100},{85,OFF,0,67,0},
-  {5,ON,0,64,100},{85,OFF,0,64,0},{5,ON,0,60,100},{85,OFF,0,60,0},{5,ON,0,64,100},
-  {85,OFF,0,64,0},{5,ON,0,67,100},{85,OFF,0,67,0},{5,ON,0,71,100},{85,OFF,0,71,0},
-  {5,ON,0,72,100},{85,OFF,0,72,0},{5,ON,0,71,100},{85,OFF,0,71,0},{5,ON,0,67,100},
-  {85,OFF,0,67,0},{5,ON,0,64,100},{85,OFF,0,64,0},
+  {0,ON,0,60,100},{106,OFF,0,60,0},{19,ON,0,64,100},{106,OFF,0,64,0},{19,ON,0,67,100},
+  {106,OFF,0,67,0},{19,ON,0,71,100},{106,OFF,0,71,0},{19,ON,0,72,100},{106,OFF,0,72,0},
+  {19,ON,0,71,100},{106,OFF,0,71,0},{19,ON,0,67,100},{106,OFF,0,67,0},{19,ON,0,64,100},
+  {106,OFF,0,64,0},{19,ON,0,60,100},{106,OFF,0,60,0},{19,ON,0,64,100},{106,OFF,0,64,0},
+  {19,ON,0,67,100},{106,OFF,0,67,0},{19,ON,0,71,100},{106,OFF,0,71,0},{19,ON,0,72,100},
+  {106,OFF,0,72,0},{19,ON,0,71,100},{106,OFF,0,71,0},{19,ON,0,67,100},{106,OFF,0,67,0},
+  {19,ON,0,64,100},{106,OFF,0,64,0},{19,ON,0,60,100},{106,OFF,0,60,0},{19,ON,0,64,100},
+  {106,OFF,0,64,0},{19,ON,0,67,100},{106,OFF,0,67,0},{19,ON,0,71,100},{106,OFF,0,71,0},
+  {19,ON,0,72,100},{106,OFF,0,72,0},{19,ON,0,71,100},{106,OFF,0,71,0},{19,ON,0,67,100},
+  {106,OFF,0,67,0},{19,ON,0,64,100},{106,OFF,0,64,0},{19,ON,0,60,100},{106,OFF,0,60,0},
+  {19,ON,0,64,100},{106,OFF,0,64,0},{19,ON,0,67,100},{106,OFF,0,67,0},{19,ON,0,71,100},
+  {106,OFF,0,71,0},{19,ON,0,72,100},{106,OFF,0,72,0},{19,ON,0,71,100},{106,OFF,0,71,0},
+  {19,ON,0,67,100},{106,OFF,0,67,0},{19,ON,0,64,100},{125,OFF,0,64,0},
 };
 
-// 05 Midi Test Pitch Bend  (277 events)
+// 05 Midi Test Pitch Bend  (277 events, 120 bpm)
 static const MidiFileEvent kPB[] PROGMEM = {
   {0,ON,0,62,105},{30,CC,0,101,0},{0,CC,0,100,0},{0,CC,0,6,12},{10,PB,0,117,64},
   {10,PB,0,106,65},{10,PB,0,95,66},{10,PB,0,84,67},{10,PB,0,73,68},{10,PB,0,62,69},
@@ -130,13 +133,13 @@ static const MidiFileEvent kPB[] PROGMEM = {
   {10,PB,0,11,63},{10,PB,0,0,64},{200,OFF,0,62,0},
 };
 
-// 06 Midi Test Sustain  (10 events)
+// 06 Midi Test Sustain  (10 events, 120 bpm)
 static const MidiFileEvent kSustain[] PROGMEM = {
   {0,CC,0,64,127},{20,ON,0,60,100},{150,OFF,0,60,0},{20,ON,0,64,100},{150,OFF,0,64,0},
   {20,ON,0,67,100},{150,OFF,0,67,0},{20,ON,0,72,100},{150,OFF,0,72,0},{900,CC,0,64,0},
 };
 
-// 07 MPE Test Bend  (191 events)
+// 07 MPE Test Bend  (191 events, 120 bpm)
 static const MidiFileEvent kMpeBend[] PROGMEM = {
   {0,ON,1,60,100},{0,ON,2,64,100},{0,ON,3,67,100},{1000,CC,2,101,0},{0,CC,2,100,0},{0,CC,2,6,1},
   {10,PB,2,37,63},{10,PB,2,74,62},{10,PB,2,111,61},{10,PB,2,20,61},{10,PB,2,57,60},
@@ -177,7 +180,7 @@ static const MidiFileEvent kMpeBend[] PROGMEM = {
   {10,PB,2,0,64},{800,PB,2,0,64},{0,OFF,1,60,0},{0,OFF,2,64,0},{0,OFF,3,67,0},
 };
 
-// 08 MPE Test Octave  (289 events)
+// 08 MPE Test Octave  (289 events, 120 bpm)
 static const MidiFileEvent kMpeOct[] PROGMEM = {
   {0,ON,1,60,100},{0,ON,2,60,100},{600,CC,2,101,0},{0,CC,2,100,0},{0,CC,2,6,12},{10,PB,2,59,64},
   {10,PB,2,117,64},{10,PB,2,48,65},{10,PB,2,106,65},{10,PB,2,37,66},{10,PB,2,95,66},
@@ -239,7 +242,7 @@ static const MidiFileEvent kMpeOct[] PROGMEM = {
   {700,PB,2,0,64},{0,OFF,1,60,0},{0,OFF,2,60,0},
 };
 
-// 09 MPE Test Pressure  (643 events)
+// 09 MPE Test Pressure  (643 events, 120 bpm)
 static const MidiFileEvent kMpePress[] PROGMEM = {
   {0,ON,1,60,100},{40,CP,1,0,0},{15,CP,1,2,0},{15,CP,1,4,0},{15,CP,1,6,0},{15,CP,1,8,0},
   {15,CP,1,11,0},{15,CP,1,13,0},{15,CP,1,15,0},{15,CP,1,17,0},{15,CP,1,19,0},{15,CP,1,21,0},
@@ -355,7 +358,7 @@ static const MidiFileEvent kMpePress[] PROGMEM = {
   {15,CP,1,0,0},{60,OFF,1,60,0},
 };
 
-// 10 MPE Full Demo  (751 events)
+// 10 MPE Full Demo  (751 events, 120 bpm)
 static const MidiFileEvent kMpeDemo[] PROGMEM = {
   {0,ON,1,62,100},{0,CC,1,101,0},{0,CC,1,100,0},{0,CC,1,6,12},{10,PB,1,117,64},{10,PB,1,106,65},
   {10,PB,1,95,66},{10,PB,1,84,67},{10,PB,1,73,68},{10,PB,1,62,69},{10,PB,1,51,70},
@@ -498,7 +501,7 @@ static const MidiFileEvent kMpeDemo[] PROGMEM = {
   {200,OFF,1,60,0},{0,OFF,2,64,0},
 };
 
-// 11 MPE Showcase  (3475 events)
+// 11 MPE Showcase  (3475 events, 120 bpm)
 static const MidiFileEvent kMpeShow[] PROGMEM = {
   {0,ON,1,60,96},{0,CC,1,101,0},{0,CC,1,100,0},{0,CC,1,6,12},{0,ON,2,60,96},{0,CC,2,101,0},
   {0,CC,2,100,0},{0,CC,2,6,12},{0,ON,3,60,96},{0,CC,3,101,0},{0,CC,3,100,0},{0,CC,3,6,12},
@@ -1135,7 +1138,7 @@ static const MidiFileEvent kMpeShow[] PROGMEM = {
   {15,CP,4,2,0},{15,CP,4,0,0},{0,OFF,1,60,0},{0,OFF,2,64,0},{0,OFF,3,67,0},{0,OFF,4,72,0},
 };
 
-// 12 MPE Timbre  (686 events)
+// 12 MPE Timbre  (686 events, 120 bpm)
 static const MidiFileEvent kMpeTimbre[] PROGMEM = {
   {0,ON,1,60,100},{0,CC,1,74,0},{15,CC,1,74,1},{15,CC,1,74,2},{15,CC,1,74,4},{15,CC,1,74,5},
   {15,CC,1,74,6},{15,CC,1,74,7},{15,CC,1,74,8},{15,CC,1,74,9},{15,CC,1,74,11},{15,CC,1,74,12},
@@ -1274,20 +1277,89 @@ static const MidiFileEvent kMpeTimbre[] PROGMEM = {
   {15,CC,1,74,4},{15,CC,1,74,3},{15,CC,1,74,1},{15,CC,1,74,0},{250,OFF,1,55,0},{0,OFF,2,67,0},
 };
 
-struct TestSong { const char *name; const MidiFileEvent *ev; uint32_t count; bool mpe; };
+// 13 Loop Pop Changes  (32 events, 120 bpm)
+static const MidiFileEvent kPop[] PROGMEM = {
+  {0,ON,0,48,90},{0,ON,0,55,90},{0,ON,0,60,90},{0,ON,0,64,90},{2000,OFF,0,48,0},{0,OFF,0,55,0},
+  {0,OFF,0,60,0},{0,OFF,0,64,0},{0,ON,0,43,90},{0,ON,0,55,90},{0,ON,0,59,90},{0,ON,0,62,90},
+  {2000,OFF,0,43,0},{0,OFF,0,55,0},{0,OFF,0,59,0},{0,OFF,0,62,0},{0,ON,0,45,90},{0,ON,0,52,90},
+  {0,ON,0,60,90},{0,ON,0,64,90},{2000,OFF,0,45,0},{0,OFF,0,52,0},{0,OFF,0,60,0},{0,OFF,0,64,0},
+  {0,ON,0,41,90},{0,ON,0,53,90},{0,ON,0,60,90},{0,ON,0,65,90},{2000,OFF,0,41,0},{0,OFF,0,53,0},
+  {0,OFF,0,60,0},{0,OFF,0,65,0},
+};
+
+// 14 Loop Jazz ii-V-I  (32 events, 100 bpm)
+static const MidiFileEvent kJazz[] PROGMEM = {
+  {0,ON,0,50,84},{0,ON,0,57,84},{0,ON,0,60,84},{0,ON,0,65,84},{2400,OFF,0,50,0},{0,OFF,0,57,0},
+  {0,OFF,0,60,0},{0,OFF,0,65,0},{0,ON,0,43,84},{0,ON,0,59,84},{0,ON,0,62,84},{0,ON,0,65,84},
+  {2400,OFF,0,43,0},{0,OFF,0,59,0},{0,OFF,0,62,0},{0,OFF,0,65,0},{0,ON,0,48,84},{0,ON,0,55,84},
+  {0,ON,0,59,84},{0,ON,0,64,84},{2400,OFF,0,48,0},{0,OFF,0,55,0},{0,OFF,0,59,0},{0,OFF,0,64,0},
+  {0,ON,0,45,84},{0,ON,0,55,84},{0,ON,0,61,84},{0,ON,0,64,84},{2400,OFF,0,45,0},{0,OFF,0,55,0},
+  {0,OFF,0,61,0},{0,OFF,0,64,0},
+};
+
+// 15 Loop Minor Cinematic  (32 events, 80 bpm)
+static const MidiFileEvent kCine[] PROGMEM = {
+  {0,ON,0,45,82},{0,ON,0,57,82},{0,ON,0,60,82},{0,ON,0,64,82},{6000,OFF,0,45,0},{0,OFF,0,57,0},
+  {0,OFF,0,60,0},{0,OFF,0,64,0},{0,ON,0,43,82},{0,ON,0,55,82},{0,ON,0,59,82},{0,ON,0,62,82},
+  {6000,OFF,0,43,0},{0,OFF,0,55,0},{0,OFF,0,59,0},{0,OFF,0,62,0},{0,ON,0,41,82},{0,ON,0,53,82},
+  {0,ON,0,60,82},{0,ON,0,65,82},{6000,OFF,0,41,0},{0,OFF,0,53,0},{0,OFF,0,60,0},{0,OFF,0,65,0},
+  {0,ON,0,40,82},{0,ON,0,56,82},{0,ON,0,59,82},{0,ON,0,64,82},{6000,OFF,0,40,0},{0,OFF,0,56,0},
+  {0,OFF,0,59,0},{0,OFF,0,64,0},
+};
+
+// 16 Loop Acid Bassline  (64 events, 128 bpm)
+static const MidiFileEvent kAcid[] PROGMEM = {
+  {0,ON,0,33,118},{100,OFF,0,33,0},{17,ON,0,45,82},{100,OFF,0,45,0},{17,ON,0,33,82},
+  {100,OFF,0,33,0},{18,ON,0,48,82},{99,OFF,0,48,0},{18,ON,0,36,118},{99,OFF,0,36,0},
+  {18,ON,0,33,82},{100,OFF,0,33,0},{17,ON,0,40,82},{100,OFF,0,40,0},{17,ON,0,45,82},
+  {100,OFF,0,45,0},{18,ON,0,33,118},{99,OFF,0,33,0},{18,ON,0,45,82},{99,OFF,0,45,0},
+  {18,ON,0,55,82},{99,OFF,0,55,0},{18,ON,0,45,82},{100,OFF,0,45,0},{17,ON,0,40,118},
+  {100,OFF,0,40,0},{17,ON,0,36,82},{100,OFF,0,36,0},{18,ON,0,45,82},{99,OFF,0,45,0},
+  {18,ON,0,43,82},{99,OFF,0,43,0},{18,ON,0,33,118},{100,OFF,0,33,0},{17,ON,0,45,82},
+  {100,OFF,0,45,0},{17,ON,0,33,82},{100,OFF,0,33,0},{18,ON,0,48,82},{99,OFF,0,48,0},
+  {18,ON,0,36,118},{99,OFF,0,36,0},{18,ON,0,45,82},{100,OFF,0,45,0},{17,ON,0,40,82},
+  {100,OFF,0,40,0},{17,ON,0,33,82},{100,OFF,0,33,0},{17,ON,0,45,118},{100,OFF,0,45,0},
+  {18,ON,0,33,82},{99,OFF,0,33,0},{18,ON,0,55,82},{99,OFF,0,55,0},{18,ON,0,52,82},
+  {100,OFF,0,52,0},{17,ON,0,48,118},{100,OFF,0,48,0},{17,ON,0,45,82},{100,OFF,0,45,0},
+  {18,ON,0,43,82},{99,OFF,0,43,0},{18,ON,0,45,82},{117,OFF,0,45,0},
+};
+
+// 17 Loop Octave Bass  (64 events, 128 bpm)
+static const MidiFileEvent kOctave[] PROGMEM = {
+  {0,ON,0,45,118},{199,OFF,0,45,0},{35,ON,0,57,84},{200,OFF,0,57,0},{35,ON,0,45,84},
+  {199,OFF,0,45,0},{35,ON,0,57,84},{199,OFF,0,57,0},{36,ON,0,45,84},{199,OFF,0,45,0},
+  {35,ON,0,57,84},{199,OFF,0,57,0},{35,ON,0,45,84},{199,OFF,0,45,0},{36,ON,0,57,84},
+  {199,OFF,0,57,0},{35,ON,0,41,118},{199,OFF,0,41,0},{35,ON,0,53,84},{200,OFF,0,53,0},
+  {35,ON,0,41,84},{199,OFF,0,41,0},{35,ON,0,53,84},{199,OFF,0,53,0},{35,ON,0,41,84},
+  {200,OFF,0,41,0},{35,ON,0,53,84},{199,OFF,0,53,0},{35,ON,0,41,84},{199,OFF,0,41,0},
+  {36,ON,0,53,84},{199,OFF,0,53,0},{35,ON,0,48,118},{199,OFF,0,48,0},{35,ON,0,60,84},
+  {200,OFF,0,60,0},{35,ON,0,48,84},{199,OFF,0,48,0},{35,ON,0,60,84},{199,OFF,0,60,0},
+  {36,ON,0,48,84},{199,OFF,0,48,0},{35,ON,0,60,84},{199,OFF,0,60,0},{35,ON,0,48,84},
+  {199,OFF,0,48,0},{36,ON,0,60,84},{199,OFF,0,60,0},{35,ON,0,43,118},{199,OFF,0,43,0},
+  {35,ON,0,55,84},{200,OFF,0,55,0},{35,ON,0,43,84},{199,OFF,0,43,0},{35,ON,0,55,84},
+  {199,OFF,0,55,0},{35,ON,0,43,84},{200,OFF,0,43,0},{35,ON,0,55,84},{199,OFF,0,55,0},
+  {35,ON,0,43,84},{199,OFF,0,43,0},{36,ON,0,55,84},{234,OFF,0,55,0},
+};
+
+struct TestSong { const char *name; const MidiFileEvent *ev; uint32_t count; bool mpe; float bpm; };
 static const TestSong kTestSongs[] = {
-  { "01 Midi Test Sweep", kSweep, (uint32_t)(sizeof(kSweep)/sizeof(kSweep[0])), false },
-  { "02 Midi Test Chord", kChord, (uint32_t)(sizeof(kChord)/sizeof(kChord[0])), false },
-  { "03 Midi Test Velocity", kVelocity, (uint32_t)(sizeof(kVelocity)/sizeof(kVelocity[0])), false },
-  { "04 Midi Test Arpeggio", kArp, (uint32_t)(sizeof(kArp)/sizeof(kArp[0])), false },
-  { "05 Midi Test Pitch Bend", kPB, (uint32_t)(sizeof(kPB)/sizeof(kPB[0])), false },
-  { "06 Midi Test Sustain", kSustain, (uint32_t)(sizeof(kSustain)/sizeof(kSustain[0])), false },
-  { "07 MPE Test Bend", kMpeBend, (uint32_t)(sizeof(kMpeBend)/sizeof(kMpeBend[0])), true },
-  { "08 MPE Test Octave", kMpeOct, (uint32_t)(sizeof(kMpeOct)/sizeof(kMpeOct[0])), true },
-  { "09 MPE Test Pressure", kMpePress, (uint32_t)(sizeof(kMpePress)/sizeof(kMpePress[0])), true },
-  { "10 MPE Full Demo", kMpeDemo, (uint32_t)(sizeof(kMpeDemo)/sizeof(kMpeDemo[0])), true },
-  { "11 MPE Showcase", kMpeShow, (uint32_t)(sizeof(kMpeShow)/sizeof(kMpeShow[0])), true },
-  { "12 MPE Timbre", kMpeTimbre, (uint32_t)(sizeof(kMpeTimbre)/sizeof(kMpeTimbre[0])), true },
+  { "01 Midi Test Sweep", kSweep, (uint32_t)(sizeof(kSweep)/sizeof(kSweep[0])), false, 120.0f },
+  { "02 Midi Test Chord", kChord, (uint32_t)(sizeof(kChord)/sizeof(kChord[0])), false, 120.0f },
+  { "03 Midi Test Velocity", kVelocity, (uint32_t)(sizeof(kVelocity)/sizeof(kVelocity[0])), false, 120.0f },
+  { "04 Midi Test Arpeggio", kArp, (uint32_t)(sizeof(kArp)/sizeof(kArp[0])), false, 120.0f },
+  { "05 Midi Test Pitch Bend", kPB, (uint32_t)(sizeof(kPB)/sizeof(kPB[0])), false, 120.0f },
+  { "06 Midi Test Sustain", kSustain, (uint32_t)(sizeof(kSustain)/sizeof(kSustain[0])), false, 120.0f },
+  { "07 MPE Test Bend", kMpeBend, (uint32_t)(sizeof(kMpeBend)/sizeof(kMpeBend[0])), true, 120.0f },
+  { "08 MPE Test Octave", kMpeOct, (uint32_t)(sizeof(kMpeOct)/sizeof(kMpeOct[0])), true, 120.0f },
+  { "09 MPE Test Pressure", kMpePress, (uint32_t)(sizeof(kMpePress)/sizeof(kMpePress[0])), true, 120.0f },
+  { "10 MPE Full Demo", kMpeDemo, (uint32_t)(sizeof(kMpeDemo)/sizeof(kMpeDemo[0])), true, 120.0f },
+  { "11 MPE Showcase", kMpeShow, (uint32_t)(sizeof(kMpeShow)/sizeof(kMpeShow[0])), true, 120.0f },
+  { "12 MPE Timbre", kMpeTimbre, (uint32_t)(sizeof(kMpeTimbre)/sizeof(kMpeTimbre[0])), true, 120.0f },
+  { "13 Loop Pop Changes", kPop, (uint32_t)(sizeof(kPop)/sizeof(kPop[0])), false, 120.0f },
+  { "14 Loop Jazz ii-V-I", kJazz, (uint32_t)(sizeof(kJazz)/sizeof(kJazz[0])), false, 100.0f },
+  { "15 Loop Minor Cinematic", kCine, (uint32_t)(sizeof(kCine)/sizeof(kCine[0])), false, 80.0f },
+  { "16 Loop Acid Bassline", kAcid, (uint32_t)(sizeof(kAcid)/sizeof(kAcid[0])), false, 128.0f },
+  { "17 Loop Octave Bass", kOctave, (uint32_t)(sizeof(kOctave)/sizeof(kOctave[0])), false, 128.0f },
 };
 static const int kNumTestSongs = (int)(sizeof(kTestSongs)/sizeof(kTestSongs[0]));
 

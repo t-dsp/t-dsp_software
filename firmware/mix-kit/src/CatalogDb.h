@@ -259,7 +259,7 @@ struct EngineCaps {
 };
 typedef void (*BundledFn)();
 
-static bool buildCatalog(const EngineCaps &caps, BundledFn buildBundled, uint32_t nowMs) {
+FLASHMEM static bool buildCatalog(const EngineCaps &caps, BundledFn buildBundled, uint32_t nowMs) {
     if (!::g_sdReady) { Serial.println("[catdb] no SD -> cannot build"); return false; }
     ensureRoot();
     Serial.println("[catdb] building /tdsp/ catalog...");

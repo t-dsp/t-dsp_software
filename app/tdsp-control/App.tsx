@@ -155,6 +155,7 @@ export default function App() {
   const [player, setPlayer] = useState<{ song: string; playing: boolean; name: string; prog: number }>({ song: '', playing: false, name: '', prog: 0 });
   const [endMode, setEndMode] = useState<EndMode>('stop');   // what the player does when a song ends
   const [bpm, setBpm] = useState(120);
+  const [quant, setQuant] = useState(false);           // launch quantize: start songs/grooves on the next bar
   const [songBpm, setSongBpm] = useState(120);            // tempo of the last song that played
   const [selVoice, setSelVoice] = useState('');
   const [selVoiceName, setSelVoiceName] = useState('');   // last-picked instrument name (shown on the card, persists across browsing)
@@ -181,6 +182,7 @@ export default function App() {
     // loop off ⇒ keep the app's mode unless it was Repeat (then fall back to Stop). When @APP is
     // present its stored value arrives right after and overrides this (see hydrateApp).
     if (j.loop != null) setEndMode(m => j.loop ? 'repeat' : (m === 'repeat' ? 'stop' : m));
+    if (j.quant != null) setQuant(!!j.quant);
     if (j.arp) setArp({ on: !!j.arp.on, pat: clampIdx(j.arp.pat, ARP_PAT.length), rate: rateIndexFromFw(j.arp.rate | 0), oct: Math.max(1, Math.min(4, j.arp.oct | 0)) || 1, latch: !!j.arp.latch });
     if (j.song) setPlayer(p => ({ ...p, playing: !!j.song.playing, song: j.song.name || p.song, name: j.song.name || p.name, prog: j.song.p != null ? j.song.p / 1000 : (j.song.playing ? -1 : 0) }));
     if (j.drums) setDrums(d => ({ ...d, kit: j.drums.kit | 0, playing: j.drums.playing ? d.playing : null }));
@@ -551,6 +553,11 @@ export default function App() {
           <Pressable style={[s.btn, s.btnGhost]} onPress={() => { const b = player.playing ? songBpm : 120; setBpm(b); tp.masterBpm(b); }}>
             <Text style={s.btnText}>Reset → {player.playing ? songBpm + ' (playing song)' : '120'} BPM</Text></Pressable>
           <Text style={s.muted}>Master tempo — the MIDI song player and drum grooves lock to this. It auto-follows a song's detected tempo on play.</Text>
+          <Row><View style={{ flex: 1 }}>
+              <Text style={s.text}>Launch quantize</Text>
+              <Text style={s.muted}>Start songs & grooves on the next bar so they lock together.</Text>
+            </View>
+            <Switch value={quant} onValueChange={v => { setQuant(v); tp.launchQuantize(v); }} /></Row>
         </>
       ),
     },

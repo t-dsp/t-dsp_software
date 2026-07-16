@@ -178,6 +178,7 @@ export class WebSerialTransport implements Transport {
   songPlay(arg: string) { this.send('@SONGF=' + arg); }
   stopSong() { this.send('@SONG=stop'); }
   songLoop(on: boolean) { this.send('@LOOP=' + (on ? 1 : 0)); }
+  launchQuantize(on: boolean) { this.send('@QUANTIZE=' + (on ? 1 : 0)); }
   arpOn(on: boolean) { this.send('@ARPON=' + (on ? 1 : 0)); }
   arpPattern(i: number) { this.send('@ARPPAT=' + i); }
   arpRate(i: number) { this.send('@ARPRATE=' + i); }

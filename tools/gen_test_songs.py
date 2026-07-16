@@ -50,14 +50,59 @@ def vib(ch, amp_semi, cycles, total_ms, center_semi=0.0, step_ms=20):
         out.append((step_ms, PB, ch, *bend(semis_to_bend(s))))
     return out
 
+# ---- beat-locked authoring -------------------------------------------------
+# The device plays events as millisecond deltas; applyTempos() then scales the whole
+# stream by master/native BPM, so a song authored at its native BPM plays at whatever
+# the master tempo is. For a song to LOOP while STAYING ON THE BEAT (so it locks with a
+# drum groove), two things must hold: (1) it is an exact integer number of 4/4 bars, and
+# (2) there is NO per-note rounding drift — else each loop creeps a few ms and slowly
+# desyncs. seq() guarantees both: events are authored at absolute BEAT positions and the
+# ms deltas are DIFFERENCES OF ROUNDED ABSOLUTE times, so the total is exactly one rounding
+# of end_beat (constant every loop), and the final event lands on the bar line.
+def seq(bpm, events, end_beat):
+    spb = 60000.0 / bpm                       # ms per beat at this song's native tempo
+    ordered = sorted(enumerate(events), key=lambda x: (x[1][0], x[0]))   # stable by beat
+    out, prev = [], 0
+    for _, (beat, kind, ch, d1, d2) in ordered:
+        a = round(beat * spb)
+        out.append((a - prev, kind, ch, d1, d2)); prev = a
+    # The last authored event MUST sit on end_beat (the loop boundary) so the loop length
+    # is exactly end_beat; assert it so a mis-authored song fails loudly, not silently short.
+    assert prev == round(end_beat * spb), f"loop not bar-aligned: last={prev} end={round(end_beat*spb)}"
+    return out
+
+# A progression of chords, each held `bars` bars. Release-then-attack at each bar line
+# (the previous chord's note-offs are authored before the next chord's note-ons at the same
+# beat, and seq()'s stable sort keeps that order) so the arp re-captures a clean new chord.
+def chords(bpm, prog, bars=1, vel=88, ch=0):
+    ev, t = [], 0.0
+    for chord in prog:
+        for n in chord: ev.append((t, ON, ch, n, vel))
+        for n in chord: ev.append((t + bars * 4, OFF, ch, n, 0))
+        t += bars * 4
+    return seq(bpm, ev, t)
+
+# A single-note sequence. items = list of (note|None, dur_beats, vel); None = rest. Notes
+# are staccato (gate) except the last, which rings to the bar line so the loop length is
+# exact. Great arp fodder (a moving single note) or a standalone bass/lead line.
+def notes(bpm, items, ch=0, gate=0.85):
+    ev, t, N = [], 0.0, len(items)
+    for i, (n, dur, vel) in enumerate(items):
+        if n is not None:
+            ev.append((t, ON, ch, n, vel))
+            ev.append((t + (dur if i == N - 1 else dur * gate), OFF, ch, n, 0))
+        t += dur
+    return seq(bpm, ev, t)
+
 def sweep():
-    ev = []
-    notes = list(range(48, 73)) + list(range(71, 47, -1))  # chromatic up 2 oct span then back
-    first = True
-    for n in notes:
-        ev.append((0 if first else 15, ON, 0, n, 100)); first = False
-        ev.append((95, OFF, 0, n, 0))
-    return ev
+    # Chromatic run up 2 octaves and back as steady 16th notes (beat-locked so it locks to
+    # the grid). 48 notes = 12 beats = exactly 3 bars, so it loops on the bar line too.
+    line = list(range(48, 72)) + list(range(72, 48, -1))   # 48..71 up, 72..49 down = 48 notes
+    return notes(120, [(n, 0.25, 100) for n in line], gate=0.9)
+
+def chord():
+    # I - IV - V - I triads (C major), one bar each (beat-locked, loops on the bar).
+    return chords(120, [(60,64,67), (65,69,72), (67,71,74), (60,64,67,72)], bars=1, vel=96)
 
 def chord():
     ev = []
@@ -81,15 +126,9 @@ def velocity():
     return ev
 
 def arpeggio():
-    ev = []
-    # Cmaj7 arpeggio up and down, twice, fast
+    # Cmaj7 arpeggio up/down as steady 16th notes; 32 notes = 2 bars, loops on the bar.
     pat = [60, 64, 67, 71, 72, 71, 67, 64]
-    first = True
-    for _ in range(3):
-        for n in pat:
-            ev.append((0 if first else 5, ON, 0, n, 100)); first = False
-            ev.append((85, OFF, 0, n, 0))
-    return ev
+    return notes(120, [(n, 0.25, 100) for n in pat * 4], gate=0.85)
 
 def pitchbend():
     n = 62  # hold a note, smoothly sweep bend up -> down -> back to center
@@ -322,19 +361,78 @@ def mpe_timbre():
     ev.append((250, OFF, 1, 55, 0)); ev.append((0, OFF, 2, 67, 0))
     return ev
 
+# ============================================================================
+# Loopable, beat-locked BACKING songs — several styles, built to run UNDER the
+# drum grooves in sync (integer bars, drift-free) and to feed the arpeggiator
+# (hold chords / moving single notes -> the arp arpeggiates them in key). Turn on
+# Repeat (@LOOP=1) to loop; start a groove at the same tempo and they lock.
+# ============================================================================
+
+def pop_changes():
+    # Pop I-V-vi-IV in C (the "four-chord song"), one bar each = 4 bars @120. Bright,
+    # instantly familiar; the arp turns it into a shimmering pop sequence.
+    return chords(120, [
+        [48, 55, 60, 64],   # C   (C3 G3 C4 E4)
+        [43, 55, 59, 62],   # G   (G2 G3 B3 D4)
+        [45, 52, 60, 64],   # Am  (A2 E3 C4 E4)
+        [41, 53, 60, 65],   # F   (F2 F3 C4 F4)
+    ], bars=1, vel=90)
+
+def jazz_251():
+    # Jazz ii-V-I-VI7 turnaround in C with 7th chords, one bar each = 4 bars @100. Lush,
+    # a bit smoky; arpeggiated it gives classic jazz-piano runs.
+    return chords(100, [
+        [50, 57, 60, 65],   # Dm7   (D3 A3 C4 F4)
+        [43, 59, 62, 65],   # G7    (G2 B3 D4 F4)
+        [48, 55, 59, 64],   # Cmaj7 (C3 G3 B3 E4)
+        [45, 55, 61, 64],   # A7    (A2 G3 C#4 E4)
+    ], bars=1, vel=84)
+
+def minor_cine():
+    # Andalusian cadence i-VII-VI-V in A minor, TWO bars each = 8 bars @80. Slow and
+    # dramatic; the long holds let the arp build tension across each chord.
+    return chords(80, [
+        [45, 57, 60, 64],   # Am  (A2 A3 C4 E4)
+        [43, 55, 59, 62],   # G   (G2 G3 B3 D4)
+        [41, 53, 60, 65],   # F   (F2 F3 C4 F4)
+        [40, 56, 59, 64],   # E   (E2 G#3 B3 E4)  major V for the cadence
+    ], bars=2, vel=82)
+
+def acid_bass():
+    # 303-style single-note 16th line, A-minor pentatonic, 2 bars @128 with octave jumps
+    # and fifths. Drives on its own; through the arp it becomes a squelchy acid sequence.
+    line = [33,45,33,48, 36,33,40,45, 33,45,55,45, 40,36,45,43,
+            33,45,33,48, 36,45,40,33, 45,33,55,52, 48,45,43,45]
+    return notes(128, [(n, 0.25, 118 if i % 4 == 0 else 82) for i, n in enumerate(line)])
+
+def octave_pulse():
+    # Driving techno root-octave 8th-note bass through A-F-C-G, one bar each = 4 bars @128.
+    # Relentless pulse on its own; feeds the arp a moving root for octave/pattern play.
+    items = []
+    for r in (45, 41, 48, 43):                 # A2 F2 C3 G2
+        for j in range(8):                     # 8 eighths per bar, alternating root/octave
+            items.append((r + (12 if j % 2 else 0), 0.5, 118 if j == 0 else 84))
+    return notes(128, items)
+
+# (var, display name, events, mpe, native_bpm)
 TESTS = [
-    ("kSweep",    "01 Midi Test Sweep",      sweep(),        "false"),
-    ("kChord",    "02 Midi Test Chord",      chord(),        "false"),
-    ("kVelocity", "03 Midi Test Velocity",   velocity(),     "false"),
-    ("kArp",      "04 Midi Test Arpeggio",   arpeggio(),     "false"),
-    ("kPB",       "05 Midi Test Pitch Bend", pitchbend(),    "false"),
-    ("kSustain",  "06 Midi Test Sustain",    sustain(),      "false"),
-    ("kMpeBend",  "07 MPE Test Bend",        mpe_bend(),     "true"),
-    ("kMpeOct",   "08 MPE Test Octave",      mpe_octave(),   "true"),
-    ("kMpePress", "09 MPE Test Pressure",    mpe_pressure(), "true"),
-    ("kMpeDemo",  "10 MPE Full Demo",        mpe_demo(),     "true"),
-    ("kMpeShow",  "11 MPE Showcase",         mpe_showcase(), "true"),
-    ("kMpeTimbre","12 MPE Timbre",           mpe_timbre(),   "true"),
+    ("kSweep",    "01 Midi Test Sweep",      sweep(),        "false", 120),
+    ("kChord",    "02 Midi Test Chord",      chord(),        "false", 120),
+    ("kVelocity", "03 Midi Test Velocity",   velocity(),     "false", 120),
+    ("kArp",      "04 Midi Test Arpeggio",   arpeggio(),     "false", 120),
+    ("kPB",       "05 Midi Test Pitch Bend", pitchbend(),    "false", 120),
+    ("kSustain",  "06 Midi Test Sustain",    sustain(),      "false", 120),
+    ("kMpeBend",  "07 MPE Test Bend",        mpe_bend(),     "true",  120),
+    ("kMpeOct",   "08 MPE Test Octave",      mpe_octave(),   "true",  120),
+    ("kMpePress", "09 MPE Test Pressure",    mpe_pressure(), "true",  120),
+    ("kMpeDemo",  "10 MPE Full Demo",        mpe_demo(),     "true",  120),
+    ("kMpeShow",  "11 MPE Showcase",         mpe_showcase(), "true",  120),
+    ("kMpeTimbre","12 MPE Timbre",           mpe_timbre(),   "true",  120),
+    ("kPop",      "13 Loop Pop Changes",     pop_changes(),  "false", 120),
+    ("kJazz",     "14 Loop Jazz ii-V-I",     jazz_251(),     "false", 100),
+    ("kCine",     "15 Loop Minor Cinematic", minor_cine(),   "false",  80),
+    ("kAcid",     "16 Loop Acid Bassline",   acid_bass(),    "false", 128),
+    ("kOctave",   "17 Loop Octave Bass",     octave_pulse(), "false", 128),
 ]
 
 def emit():
@@ -357,8 +455,8 @@ def emit():
     L.append("static constexpr uint8_t PB  = tdsp::kPitchBend;")
     L.append("static constexpr uint8_t CP  = tdsp::kChannelPressure;")
     L.append("")
-    for var, name, ev, mpe in TESTS:
-        L.append(f"// {name}  ({len(ev)} events)")
+    for var, name, ev, mpe, bpm in TESTS:
+        L.append(f"// {name}  ({len(ev)} events, {bpm} bpm)")
         # PROGMEM keeps the array in (memory-mapped, directly-readable) flash instead of
         # letting the linker copy it into DTCM/RAM1 at boot — RAM1 is tight on this build.
         L.append(f"static const MidiFileEvent {var}[] PROGMEM = {{")
@@ -372,10 +470,13 @@ def emit():
             L.append(line)
         L.append("};")
         L.append("")
-    L.append("struct TestSong { const char *name; const MidiFileEvent *ev; uint32_t count; bool mpe; };")
+    # `bpm` = the song's NATIVE tempo. songStartBuiltin() feeds it to applyTempos() so the
+    # song plays at the master BPM (drums + arp lock to the same grid). The beat-locked ones
+    # (13-17) are exact integer bars, so they loop without drifting off the beat.
+    L.append("struct TestSong { const char *name; const MidiFileEvent *ev; uint32_t count; bool mpe; float bpm; };")
     L.append("static const TestSong kTestSongs[] = {")
-    for var, name, ev, mpe in TESTS:
-        L.append(f'  {{ "{name}", {var}, (uint32_t)(sizeof({var})/sizeof({var}[0])), {mpe} }},')
+    for var, name, ev, mpe, bpm in TESTS:
+        L.append(f'  {{ "{name}", {var}, (uint32_t)(sizeof({var})/sizeof({var}[0])), {mpe}, {bpm}.0f }},')
     L.append("};")
     L.append("static const int kNumTestSongs = (int)(sizeof(kTestSongs)/sizeof(kTestSongs[0]));")
     L.append("")
@@ -386,5 +487,5 @@ def emit():
 import sys
 open(sys.argv[1], "w", encoding="utf-8").write(emit())
 print("wrote", sys.argv[1])
-for var, name, ev, mpe in TESTS:
-    print(f"  {name}: {len(ev)} events, mpe={mpe}")
+for var, name, ev, mpe, bpm in TESTS:
+    print(f"  {name}: {len(ev)} events, mpe={mpe}, {bpm} bpm")
