@@ -60,7 +60,7 @@ export interface Transport {
   drumKit(index: number): void;
   playGrooveFile(name: string): void;
   stopDrums(): void;
-  playSong(index: number): void;
+  songPlay(arg: string): void;                        // play by name/filename (@SONGF=) — mirrors playGrooveFile
   stopSong(): void;
   songLoop(on: boolean): void;                        // loop the current song (@LOOP=)
   arpOn(on: boolean): void;

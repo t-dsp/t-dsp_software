@@ -270,7 +270,7 @@ export class BleTransport implements Transport {
   drumKit(i: number) { this.relay('@DRUMKIT=' + i); }
   playGrooveFile(name: string) { this.relay('@DRUMF=' + name); }
   stopDrums() { this.relay('D'); }
-  playSong(i: number) { this.relay('@SONG=' + i); }
+  songPlay(arg: string) { this.relay('@SONGF=' + arg); }
   stopSong() { this.relay('@SONG=stop'); }
   songLoop(on: boolean) { this.relay('@LOOP=' + (on ? 1 : 0)); }
   arpOn(on: boolean) { this.relay('@ARPON=' + (on ? 1 : 0)); }

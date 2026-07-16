@@ -6,9 +6,11 @@ import type { Transport } from './transport';
 
 export interface Cart { path: string; folder: string; name: string; voices: string[]; }
 export interface Groove { path: string; name: string; }
-// Songs are indexed by the firmware's play registry (g_songs) — `i` is what @SONG= expects
-// (built-ins + SD, NOT a bare /songs file list). Built from the bundled writer, not flatScan.
-export interface Song { i: number; name: string; }
+// Songs are catalog rows scanned straight off the card (+ baked built-ins) — no capped
+// registry, no index. Play by NAME via @SONGF: `file` (the SD filename) when present,
+// else `name` for a built-in. `songArg()` picks the right one.
+export interface Song { name: string; file?: string; }
+export const songArg = (s: Song): string => s.file ?? s.name;
 export interface Soundfont { path: string; name: string; bytes: number; }
 export interface Instrument { i: number; name: string; }
 export interface DrumKit { name: string; prog: number; }
@@ -40,10 +42,6 @@ function parseNdjson<T = any>(text: string): T[] {
   return out;
 }
 
-async function readOrEmpty(t: Transport, path: string): Promise<any[]> {
-  try { return parseNdjson(await t.readFile(path)); } catch { return []; }
-}
-
 /** True if the device has a built catalog (index.ndjson present + parseable). */
 export async function hasCatalog(t: Transport): Promise<boolean> {
   try {
@@ -52,8 +50,26 @@ export async function hasCatalog(t: Transport): Promise<boolean> {
   } catch { return false; }
 }
 
-/** Load the full catalog. Throws if index.ndjson is missing (caller can offer @REINDEX). */
-export async function loadCatalog(t: Transport): Promise<Catalog> {
+// Progress reported to the UI during loadCatalog so it can show a real load bar instead
+// of a half-populated (broken-looking) homepage. `det` = determinate: true when the device
+// announced per-file byte sizes (index.ndjson `files[].bytes`) so `done/total` is a byte
+// fraction; false on old firmware, where total/done fall back to a plain file count.
+export interface LoadProgress { done: number; total: number; label: string; index: number; count: number; det: boolean; }
+
+// The catalog files fetched on connect, in order. /dexed + /samples are deliberately NOT
+// here (the SD library is browsed live — see below), so they don't count toward the total.
+const FETCH: { type: keyof Catalog; path: string; label: string }[] = [
+  { type: 'instruments', path: '/tdsp/instruments.ndjson', label: 'Instruments' },
+  { type: 'grooves',     path: '/tdsp/grooves.ndjson',     label: 'Grooves' },
+  { type: 'songs',       path: '/tdsp/songs.ndjson',       label: 'Songs' },
+  { type: 'soundfonts',  path: '/tdsp/soundfonts.ndjson',  label: 'Soundfonts' },
+  { type: 'drumkits',    path: '/tdsp/drumkits.ndjson',    label: 'Drum kits' },
+];
+
+/** Load the full catalog. Throws if index.ndjson is missing (caller can offer @REINDEX).
+ *  onProgress (optional) fires before + after each file so the UI can show a load bar. */
+export async function loadCatalog(t: Transport, onProgress?: (p: LoadProgress) => void): Promise<Catalog> {
+  onProgress?.({ done: 0, total: 0, label: 'Catalog', index: 0, count: FETCH.length, det: false });   // indeterminate until the index arrives
   // Retry the index read a couple times — the board can be briefly busy right after connect
   // (boot / SD settle), and a single transient failure shouldn't look like "no catalog".
   let ixText = '';
@@ -63,25 +79,38 @@ export async function loadCatalog(t: Transport): Promise<Catalog> {
   }
   const ix = parseNdjson(ixText);
   const meta = ix.find((r: any) => r && r.v) || {};
+  // The device announces each file's size in files[] (added so the client knows the total
+  // up front). Old firmware omits `bytes` → det=false, fall back to a file count.
+  const bytesOf: Record<string, number> = {};
+  if (Array.isArray(meta.files)) for (const f of meta.files) if (f && f.type) bytesOf[f.type] = (f.bytes | 0);
+  const totalBytes = FETCH.reduce((s, f) => s + (bytesOf[f.type] || 0), 0);
+  const det = totalBytes > 0;
+  const total = det ? totalBytes : FETCH.length;
+
   // The transport allows ONE @READ in flight at a time, so fetch sequentially (Promise.all
-  // would make 5 of 6 reads reject with "read in progress" and come back empty).
-  const instruments = await readOrEmpty(t, '/tdsp/instruments.ndjson');
+  // would make 4 of 5 reads reject with "read in progress" and come back empty).
+  const out: Partial<Record<keyof Catalog, any[]>> = {};
+  let done = 0;
+  for (let k = 0; k < FETCH.length; k++) {
+    const f = FETCH[k];
+    onProgress?.({ done, total, label: f.label, index: k + 1, count: FETCH.length, det });
+    let txt = ''; try { txt = await t.readFile(f.path); } catch { txt = ''; }
+    out[f.type] = parseNdjson(txt);
+    done = Math.min(total, done + (det ? (bytesOf[f.type] || 0) : 1));   // advance by the announced size → the bar reaches 100%
+    onProgress?.({ done, total, label: f.label, index: k + 1, count: FETCH.length, det });
+  }
   // NOTE: /dexed is NOT bulk-loaded. With 11k carts x 32 inline voice names the NDJSON is
   // ~6 MB — too big to @READ on every connect (it timed out and the library came back empty).
   // The SD library is browsed LIVE instead, folder-by-folder, via transport.browseDir()/
   // cartVoices() (@DXLS/@DXVL). `dexed` stays [] in the catalog.
-  const dexed: Cart[] = [];
-  const grooves = await readOrEmpty(t, '/tdsp/grooves.ndjson');
-  const songs = await readOrEmpty(t, '/tdsp/songs.ndjson');
-  const soundfonts = await readOrEmpty(t, '/tdsp/soundfonts.ndjson');
-  const drumkits = await readOrEmpty(t, '/tdsp/drumkits.ndjson');
   return {
     engine: meta.engine || '',
     hasDrums: meta.drums !== false,   // absent (old firmware) -> assume drums; explicit false -> hide
     drumEngine: meta.drumEngine || '',
     builtMs: meta.built || 0,
-    instruments, dexed, grooves, songs, soundfonts, drumkits,
-  };
+    instruments: out.instruments || [], dexed: [],
+    grooves: out.grooves || [], songs: out.songs || [], soundfonts: out.soundfonts || [], drumkits: out.drumkits || [],
+  } as Catalog;
 }
 
 /** Cart path relative to /dexed (what @DXPICK expects). */

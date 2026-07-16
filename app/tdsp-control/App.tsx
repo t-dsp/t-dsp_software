@@ -10,7 +10,7 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { View, Text, Pressable, ScrollView, FlatList, TextInput, Switch, StyleSheet, ActivityIndicator, Platform, Alert, useWindowDimensions } from 'react-native';
 import Slider from '@react-native-community/slider';
 import { createTransport } from './src/transportFactory';
-import { Catalog, EMPTY_CATALOG, loadCatalog } from './src/catalog';
+import { Catalog, EMPTY_CATALOG, loadCatalog, LoadProgress, Song, songArg } from './src/catalog';
 import type { Transport, DirPage } from './src/transport';
 
 const EMPTY_DIR: DirPage = { path: '', page: 0, npages: 1, folders: [], carts: [] };
@@ -109,7 +109,9 @@ export default function App() {
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [userDisc, setUserDisc] = useState(false);      // user tapped Disconnect App → suppress auto-reconnect
+  const userDiscRef = useRef(false);                    // synchronous mirror of userDisc so an in-flight connect() can see a cancel immediately
   const connectingRef = useRef(false);                  // synchronous guard so the auto-poll can't double-connect
+  const [prog, setProg] = useState<LoadProgress | null>(null);   // catalog load progress (drives the loading screen); null when not loading
   const manualStopRef = useRef(false);                  // set on user Stop so the resulting @SONGP=-1 isn't treated as a natural song end
   const onSongEndRef = useRef<() => void>(() => {});     // latest "song finished naturally" handler (continue/shuffle); kept in a ref so the @SONGP listener never goes stale
   const [cat, setCat] = useState<Catalog>(EMPTY_CATALOG);
@@ -119,7 +121,8 @@ export default function App() {
   const [bt, setBt] = useState({ conn: false, peer: '' });
   const [arp, setArp] = useState({ on: false, pat: 0, rate: 0, oct: 1, latch: false });
   const [drums, setDrums] = useState<{ kit: number; sel: string | null; playing: string | null }>({ kit: 0, sel: null, playing: null });
-  const [player, setPlayer] = useState<{ song: number; playing: boolean; name: string; prog: number }>({ song: 0, playing: false, name: '', prog: 0 });
+  // `song` = the selected song's NAME (its stable identity now that there's no index). name = currently-playing title.
+  const [player, setPlayer] = useState<{ song: string; playing: boolean; name: string; prog: number }>({ song: '', playing: false, name: '', prog: 0 });
   const [endMode, setEndMode] = useState<EndMode>('stop');   // what the player does when a song ends
   const [bpm, setBpm] = useState(120);
   const [songBpm, setSongBpm] = useState(120);            // tempo of the last song that played
@@ -148,7 +151,7 @@ export default function App() {
     // Repeat (then fall back to Stop).
     if (j.loop != null) setEndMode(m => j.loop ? 'repeat' : (m === 'repeat' ? 'stop' : m));
     if (j.arp) setArp({ on: !!j.arp.on, pat: clampIdx(j.arp.pat, ARP_PAT.length), rate: clampIdx(j.arp.rate, ARP_RATE.length), oct: Math.max(1, Math.min(4, j.arp.oct | 0)) || 1, latch: !!j.arp.latch });
-    if (j.song) setPlayer(p => ({ ...p, playing: !!j.song.playing, song: j.song.i | 0, prog: j.song.p != null ? j.song.p / 1000 : (j.song.playing ? -1 : 0) }));
+    if (j.song) setPlayer(p => ({ ...p, playing: !!j.song.playing, song: j.song.name || p.song, name: j.song.name || p.name, prog: j.song.p != null ? j.song.p / 1000 : (j.song.playing ? -1 : 0) }));
     if (j.drums) setDrums(d => ({ ...d, kit: j.drums.kit | 0, playing: j.drums.playing ? d.playing : null }));
     if (j.voice) {
       if (j.voice.cart) { setSelVoice('c' + j.voice.cart + ':' + (j.voice.cv | 0)); setSelVoiceName(j.voice.name || ''); setSelVoicePath('/dexed/' + j.voice.cart); }
@@ -179,18 +182,26 @@ export default function App() {
     if (connectingRef.current || tp.isConnected()) return;   // live check (state may be stale) — no double-connect
     connectingRef.current = true; setConnecting(true);
     try {
-      await tp.connect(); setConnected(true);
+      await tp.connect();
+      // The user may have tapped Disconnect while the link was being established — honor it
+      // and bail before we show any UI or pull the catalog (userDiscRef is the synchronous truth).
+      if (userDiscRef.current) { await tp.disconnect().catch(() => {}); return; }
+      setConnected(true);
       await load();
+      if (userDiscRef.current) { await disconnect(); return; }   // cancelled during the catalog load
       tp.requestState();   // pull the device's real current settings → hydrate every card (see @STATE handler)
     }
-    catch (e: any) { if (!auto) notify('Connect failed: ' + e + (Platform.OS === 'web' ? '\n\nClose any control.html tab (one page owns the port), then retry.' : '')); }
+    // A user cancel can surface as a connect rejection (port/scan aborted) — don't toast that.
+    catch (e: any) { if (!auto && !userDiscRef.current) notify('Connect failed: ' + e + (Platform.OS === 'web' ? '\n\nClose any control.html tab (one page owns the port), then retry.' : '')); }
     finally { connectingRef.current = false; setConnecting(false); }
   }
-  async function disconnect() { try { await tp.disconnect(); } catch {} setConnected(false); setLoaded(false); setRoute('home'); }
+  async function disconnect() { try { await tp.disconnect(); } catch {} setConnected(false); setConnecting(false); setLoaded(false); setProg(null); setRoute('home'); }
   // Button handlers wrap connect/disconnect so a *manual* disconnect suppresses auto-reconnect
   // (else the poll below would immediately reconnect and the Disconnect button would do nothing).
-  const userConnect = () => { setUserDisc(false); connect(); };
-  const userDisconnect = () => { setUserDisc(true); disconnect(); };
+  // userDiscRef is set synchronously (before the async setState lands) so connect() sees a
+  // mid-connect cancel right away. A user disconnect works from the connecting state too.
+  const userConnect = () => { userDiscRef.current = false; setUserDisc(false); connect(); };
+  const userDisconnect = () => { userDiscRef.current = true; setUserDisc(true); disconnect(); };
 
   // Auto-connect + auto-reconnect (native/BLE only). Web Serial can't auto-open — the browser
   // requires a user gesture to pick the port — so on web we keep the manual Connect button.
@@ -210,8 +221,9 @@ export default function App() {
     return () => { cancelled = true; clearInterval(id); };
   }, [userDisc]);
   async function load() {
-    try { setCat(await loadCatalog(tp)); setLoaded(true); }
+    try { const c = await loadCatalog(tp, setProg); setCat(c); setLoaded(true); setProg(null); }
     catch (e: any) {
+      setProg(null);
       const yes = Platform.OS === 'web'
         ? (globalThis as any).confirm?.('Catalog load failed: ' + (e?.message || e) + '\n\nRebuild it now (@REINDEX)?')
         : true;
@@ -307,16 +319,16 @@ export default function App() {
   };
   const stepSong = (dir: number) => {   // step the selected song; if one is playing, start the new one
     if (!cat.songs.length) return;
-    const idx = cat.songs.findIndex(sg => sg.i === player.song);
+    const idx = cat.songs.findIndex(sg => sg.name === player.song);
     const ni = Math.max(0, Math.min(cat.songs.length - 1, (idx < 0 ? 0 : idx) + dir));
     const sg = cat.songs[ni]; if (!sg) return;
-    setPlayer(p => { if (p.playing) { tp.playSong(sg.i); return { ...p, song: sg.i, name: sg.name }; } return { ...p, song: sg.i }; });
+    setPlayer(p => { if (p.playing) { tp.songPlay(songArg(sg)); return { ...p, song: sg.name, name: sg.name }; } return { ...p, song: sg.name }; });
   };
   const stepBpm = (delta: number) => { const b = Math.max(20, Math.min(300, Math.round(bpm) + delta)); setBpm(b); tp.masterBpm(b); };
   const stepArpPat = (dir: number) => { const i = (arp.pat + dir + ARP_PAT.length) % ARP_PAT.length; setArp(a => ({ ...a, pat: i })); tp.arpPattern(i); };
-  const playSong = () => { const sg = cat.songs.find(x => x.i === player.song); tp.playSong(player.song); setPlayer(p => ({ ...p, playing: true, name: sg?.name || '', prog: -1 })); };  // -1 until the device reports position
+  const playSong = () => { const sg = cat.songs.find(x => x.name === player.song) || cat.songs[0]; if (!sg) return; tp.songPlay(songArg(sg)); setPlayer(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };  // -1 until the device reports position
   const stopSong = () => { manualStopRef.current = true; tp.stopSong(); setPlayer(p => ({ ...p, playing: false, prog: 0 })); };
-  const playSongIdx = (i: number) => { const sg = cat.songs.find(x => x.i === i); tp.playSong(i); setPlayer(p => ({ ...p, song: i, playing: true, name: sg?.name || '', prog: -1 })); };
+  const playSongOf = (sg: Song) => { tp.songPlay(songArg(sg)); setPlayer(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };
   // End-of-song mode. Only 'repeat' arms the firmware's seamless loop; the rest let the song
   // end (device emits @SONGP=-1) and we advance app-side.
   const applyEndMode = (m: EndMode) => { setEndMode(m); tp.songLoop(m === 'repeat'); };
@@ -325,8 +337,8 @@ export default function App() {
   // one-time @SONGP listener always sees the current mode/song/catalog.
   onSongEndRef.current = () => {
     if (!cat.songs.length) return;
-    if (endMode === 'continue') { const idx = cat.songs.findIndex(sg => sg.i === player.song); const nx = cat.songs[((idx < 0 ? -1 : idx) + 1) % cat.songs.length]; if (nx) playSongIdx(nx.i); }
-    else if (endMode === 'shuffle') { const r = cat.songs[Math.floor(Math.random() * cat.songs.length)]; if (r) playSongIdx(r.i); }
+    if (endMode === 'continue') { const idx = cat.songs.findIndex(sg => sg.name === player.song); const nx = cat.songs[((idx < 0 ? -1 : idx) + 1) % cat.songs.length]; if (nx) playSongOf(nx); }
+    else if (endMode === 'shuffle') { const r = cat.songs[Math.floor(Math.random() * cat.songs.length)]; if (r) playSongOf(r); }
     // 'stop' → nothing; 'repeat' → never reaches here (the firmware loops the song)
   };
   const playGroove = () => { const g = cat.grooves.find(x => x.path === drums.sel); if (g) { tp.playGrooveFile(grooveFile(g)); setDrums(d => ({ ...d, playing: g.name })); } };
@@ -486,7 +498,7 @@ export default function App() {
     // MIDI PLAYER — select a song; Play/Stop in the header (works collapsed); loop toggle
     {
       id: 'player', title: 'MIDI Player', show: true,
-      value: (player.playing ? '♪ ' : '') + (cat.songs.find(sg => sg.i === player.song)?.name || '—'),
+      value: (player.playing ? '♪ ' : '') + (player.song || '—'),
       progress: player.playing && player.prog >= 0 ? player.prog : undefined,   // bar shows only once the device reports a position
       actions: (<>
         <HdrBtn label="‹" stop onPress={() => stepSong(-1)} />
@@ -499,8 +511,8 @@ export default function App() {
         <>
           {cat.songs.length === 0 ? <Text style={s.muted}>No songs indexed.</Text> : (
             <ScrollView style={s.list} nestedScrollEnabled>
-              {cat.songs.map(sg => <ListBtn key={sg.i} label={(player.playing && player.song === sg.i ? '♪ ' : '') + sg.name} sel={player.song === sg.i}
-                onPress={() => setPlayer(p => ({ ...p, song: sg.i }))} />)}
+              {cat.songs.map(sg => <ListBtn key={sg.file || sg.name} label={(player.playing && player.song === sg.name ? '♪ ' : '') + sg.name} sel={player.song === sg.name}
+                onPress={() => setPlayer(p => ({ ...p, song: sg.name }))} />)}
             </ScrollView>
           )}
           <Row><Text style={[s.muted, { flex: 1 }]}>When finished</Text>
@@ -585,8 +597,8 @@ export default function App() {
           <View style={[s.dot, connected && s.dotOn]} />
           <Text style={s.brand}>T-DSP</Text>
           <View style={{ flex: 1 }} />
-          <Pressable style={s.btn} onPress={() => (connected ? userDisconnect() : userConnect())}>
-            <Text style={s.btnText}>{connected ? 'Disconnect App' : connecting ? 'Connecting…' : 'Connect App'}</Text>
+          <Pressable style={s.btn} onPress={() => (connected || connecting ? userDisconnect() : userConnect())}>
+            <Text style={s.btnText}>{connected ? 'Disconnect App' : connecting ? 'Cancel' : 'Connect App'}</Text>
           </Pressable>
         </View>
         <Text style={s.statline}>{headerStatus}</Text>
@@ -601,19 +613,40 @@ export default function App() {
 
       {!connected && (
         <View style={s.connectHome}>
-          <Pressable style={[s.btn, s.connectBig]} onPress={userConnect}>
-            <Text style={s.connectBigText}>{connecting ? 'Connecting…' : 'Connect App'}</Text>
+          {/* While connecting, this big button cancels the attempt (and suppresses auto-reconnect)
+              so you can stop it from the connecting state, not just once connected. */}
+          <Pressable style={[s.btn, s.connectBig, connecting && s.btnGhost]} onPress={() => (connecting ? userDisconnect() : userConnect())}>
+            <Text style={s.connectBigText}>{connecting ? 'Cancel' : 'Connect App'}</Text>
           </Pressable>
           <Text style={[s.muted, { textAlign: 'center', marginTop: 14 }]}>
-            {Platform.OS === 'web'
-              ? `Connect the app to your T-DSP over ${tp.name} to begin.`
-              : connecting ? 'Searching for your T-DSP over Bluetooth…'
-              : 'Connecting automatically — tap if it doesn’t find your T-DSP.'}
+            {connecting
+              ? (Platform.OS === 'web' ? 'Opening the serial port…' : 'Searching for your T-DSP over Bluetooth…')
+              : Platform.OS === 'web'
+                ? `Connect the app to your T-DSP over ${tp.name} to begin.`
+                : 'Connecting automatically — tap Cancel to stay disconnected.'}
           </Text>
         </View>
       )}
 
-      {connected && (
+      {/* Connected but the catalog is still streaming: show a load screen instead of the
+          half-populated (broken-looking) homepage. Determinate bar when the device announced
+          sizes; otherwise an indeterminate spinner. */}
+      {connected && !loaded && (
+        <View style={s.loadWrap}>
+          <ActivityIndicator color={C.accent} size="large" />
+          <Text style={s.loadTitle}>Loading catalog…</Text>
+          {prog && prog.det && prog.total > 0 ? (
+            <>
+              <View style={s.loadTrack}><View style={[s.loadFill, { width: `${Math.round(100 * prog.done / prog.total)}%` }]} /></View>
+              <Text style={s.loadSub}>{prog.label} · {prog.index}/{prog.count} · {Math.round(100 * prog.done / prog.total)}% of {Math.ceil(prog.total / 1024)} KB</Text>
+            </>
+          ) : (
+            <Text style={s.loadSub}>{prog && prog.index ? `${prog.label} · ${prog.index}/${prog.count}` : 'Reading index…'}</Text>
+          )}
+        </View>
+      )}
+
+      {connected && loaded && (
         <View style={{ flex: 1 }}>
           {/* ===== HOMEPAGE: a responsive grid of section cards ===== */}
           {!cur && (
@@ -710,6 +743,12 @@ const s = StyleSheet.create({
   connectHome: { marginTop: 56, paddingHorizontal: 24, alignItems: 'center' },
   connectBig: { paddingVertical: 16, paddingHorizontal: 44, minWidth: 240 },
   connectBigText: { color: C.text, fontSize: 17, fontWeight: '700' },
+  // catalog loading screen (connected, not yet loaded)
+  loadWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, gap: 14 },
+  loadTitle: { color: C.text, fontSize: 17, fontWeight: '700' },
+  loadTrack: { width: '100%', maxWidth: 360, height: 8, borderRadius: 4, backgroundColor: C.chip, overflow: 'hidden' },
+  loadFill: { height: '100%', borderRadius: 4, backgroundColor: C.accent },
+  loadSub: { color: C.muted, fontSize: 13, textAlign: 'center' },
   grow1: { flex: 1 },
   headActions: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0 },   // content-sized → buttons keep natural width on the page header
   hdrActionsRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, paddingHorizontal: 14, paddingBottom: 12, marginTop: -2 },

@@ -165,7 +165,7 @@ export class WebSerialTransport implements Transport {
   drumKit(i: number) { this.send('@DRUMKIT=' + i); }
   playGrooveFile(name: string) { this.send('@DRUMF=' + name); }
   stopDrums() { this.send('D'); }
-  playSong(i: number) { this.send('@SONG=' + i); }
+  songPlay(arg: string) { this.send('@SONGF=' + arg); }
   stopSong() { this.send('@SONG=stop'); }
   songLoop(on: boolean) { this.send('@LOOP=' + (on ? 1 : 0)); }
   arpOn(on: boolean) { this.send('@ARPON=' + (on ? 1 : 0)); }
