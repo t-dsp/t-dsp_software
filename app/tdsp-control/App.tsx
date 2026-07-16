@@ -464,7 +464,7 @@ export default function App() {
   const stopDrums = () => { tp.stopDrums(); setDrums(d => ({ ...d, playing: null })); };
 
   const headerStatus = !connected ? 'Not connected' :
-    [cat.engine || 'synth', cat.drumEngine ? cat.drumEngine + ' drums' : '', tp.name, bt.conn ? 'BT:' + (bt.peer || 'on') : '', drums.playing ? '♪ ' + drums.playing : ''].filter(Boolean).join('  ·  ');
+    [cat.engine || 'synth', cat.drumEngine ? cat.drumEngine + ' drums' : '', '♩ ' + Math.round(bpm) + ' BPM', tp.name, bt.conn ? 'BT:' + (bt.peer || 'on') : '', drums.playing ? '♪ ' + drums.playing : ''].filter(Boolean).join('  ·  ');
 
   // ===== the sections: one entry drives both its homepage card and its page. =====
   // `value`/`status` = the subtitle; `actions` = the header controls; `body` = the page.
