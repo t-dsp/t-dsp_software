@@ -28,10 +28,9 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TSV = os.path.join(HERE, "boards.tsv")
-# The mix-kit PlatformIO project. Updated when the project is promoted out of
-# projects/ into its top-level home (see the consolidation plan).
+# The mix-kit PlatformIO project, promoted to firmware/mix-kit (out of projects/).
 DEFAULT_PROJECT_DIR = os.path.normpath(
-    os.path.join(HERE, "..", "projects", "spike_esp32_bt_spdif_mix_kit_f32")
+    os.path.join(HERE, "..", "firmware", "mix-kit")
 )
 
 
