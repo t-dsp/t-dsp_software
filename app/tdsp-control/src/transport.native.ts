@@ -266,6 +266,7 @@ export class BleTransport implements Transport {
 
   // ---- actions (identical @-lines to transport.web.ts, over the relay) --------
   masterVolume(pct: number) { this.byte(CMD.SET_VOLUME, Math.max(0, Math.min(100, Math.round(pct)))); }   // opcode: ESP32 caches for status
+  dacHpf(mode: number) { this.relay('@HPF=' + Math.max(0, Math.min(3, Math.round(mode)))); }   // Teensy-side codec filter → generic relay
   masterBpm(bpm: number) { this.relay('@BPM=' + Math.max(20, Math.min(300, Math.round(bpm)))); }
   dxVoice(i: number) { this.relay('@DXVOICE=' + i); }
   dxPick(cartRel: string, voice: number) { this.relay('@DXPICK=' + cartRel + '\t' + voice); }

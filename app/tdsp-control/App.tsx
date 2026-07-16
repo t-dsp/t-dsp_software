@@ -20,6 +20,17 @@ const kb = (n: number) => (n / 1024).toFixed(1);   // bytes -> "12.3" KB, for th
 const C = { bg: '#0d1117', card: '#161b22', card2: '#0e131a', border: '#30363d', text: '#e6edf3', muted: '#8b949e', accent: '#3fb950', sel: 'rgba(31,111,235,0.28)', chip: '#21262d' };
 const ARP_PAT = ['Up', 'Down', 'Up/Down', 'Random'];
 const ARP_RATE = ['1/4', '1/8', '1/8T', '1/16', '1/16T', '1/32'];
+// TAC5212 DAC high-pass filter presets (@HPF mode). 0 = off (all-pass); the rest are
+// sub-audio cutoffs that block DC/rumble. Index === the firmware mode number.
+const HPF_MODES = [
+  { mode: 0, label: 'Off' },
+  { mode: 1, label: '1 Hz' },
+  { mode: 2, label: '12 Hz' },
+  { mode: 3, label: '96 Hz' },
+];
+// The header VOL / TAC5212 output slider maps 1..100% → -60..0 dB on the DAC (0 = mute),
+// mirroring the firmware's setMasterVolumePct. Shown as a dB readout in the codec section.
+const volDb = (pct: number) => (pct <= 0 ? '-∞' : (-60 + 0.60 * pct).toFixed(1));
 
 // What the MIDI player does when the current song finishes. The header button cycles
 // through these; default 'stop'. Only 'repeat' uses the firmware's seamless loop
@@ -120,6 +131,8 @@ export default function App() {
   const [loaded, setLoaded] = useState(false);
   const [route, setRoute] = useState<string>('home');   // 'home' or a section id
   const [vol, setVol] = useState(80);
+  const [hpf, setHpf] = useState(0);                    // TAC5212 DAC high-pass filter mode (0=off)
+  const lastHpfRef = useRef(2);                         // remembers the last non-off cutoff so the Enable switch can restore it
   const [bt, setBt] = useState({ conn: false, peer: '' });
   const [arp, setArp] = useState({ on: false, pat: 0, rate: 0, oct: 1, latch: false });
   const [drums, setDrums] = useState<{ kit: number; sel: string | null; playing: string | null }>({ kit: 0, sel: null, playing: null });
@@ -147,6 +160,7 @@ export default function App() {
   const clampIdx = (v: any, n: number) => Math.max(0, Math.min(n - 1, (v | 0)));
   function hydrate(j: any) {
     if (j.vol != null) setVol(j.vol);
+    if (j.hpf != null) { const m = clampIdx(j.hpf, HPF_MODES.length); setHpf(m); if (m) lastHpfRef.current = m; }
     if (j.bpm != null) setBpm(j.bpm);
     // The device only tracks a loop on/off flag (it has no notion of continue/shuffle,
     // which are app-side). loop on ⇒ Repeat; loop off ⇒ keep the app's mode unless it was
@@ -330,6 +344,11 @@ export default function App() {
     setPlayer(p => { if (p.playing) { tp.songPlay(songArg(sg)); return { ...p, song: sg.name, name: sg.name }; } return { ...p, song: sg.name }; });
   };
   const stepBpm = (delta: number) => { const b = Math.max(20, Math.min(300, Math.round(bpm) + delta)); setBpm(b); tp.masterBpm(b); };
+  const stepVol = (delta: number) => { const v = Math.max(0, Math.min(100, Math.round(vol) + delta)); setVol(v); tp.masterVolume(v); };
+  // TAC5212 DAC high-pass filter. Picking a preset sets the mode; the Enable switch
+  // toggles between Off and the last non-off cutoff (default 12 Hz) so a disable is undoable.
+  const setHpfMode = (mode: number) => { setHpf(mode); if (mode) lastHpfRef.current = mode; tp.dacHpf(mode); };
+  const toggleHpf = (on: boolean) => setHpfMode(on ? (lastHpfRef.current || 2) : 0);
   const stepArpPat = (dir: number) => { const i = (arp.pat + dir + ARP_PAT.length) % ARP_PAT.length; setArp(a => ({ ...a, pat: i })); tp.arpPattern(i); };
   const playSong = () => { const sg = cat.songs.find(x => x.name === player.song) || cat.songs[0]; if (!sg) return; tp.songPlay(songArg(sg)); setPlayer(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };  // -1 until the device reports position
   const stopSong = () => { manualStopRef.current = true; tp.stopSong(); setPlayer(p => ({ ...p, playing: false, prog: 0 })); };
@@ -583,14 +602,44 @@ export default function App() {
         </>
       ),
     },
-    // TAC5212
+    // TAC5212 — codec output level + DAC high-pass filter
     {
       id: 'codec', title: 'TAC5212', show: true,
-      body: <Text style={s.muted}>Codec routing + trims. (Controls added as the command set lands.) Master output is the header volume.</Text>,
+      value: (vol <= 0 ? 'Muted' : Math.round(vol) + ' / 100') + '  ·  HPF ' + HPF_MODES[hpf].label,
+      actions: (<>
+        <HdrBtn label="−" stop onPress={() => stepVol(-1)} />
+        <HdrBtn label="＋" onPress={() => stepVol(1)} />
+      </>),
+      body: (
+        <>
+          <Text style={s.muted}>TAC5212 headphone output (OUT1/OUT2). This is the master DAC level — the same control as the header VOL.</Text>
+          <Text style={s.sectionLbl}>Output volume</Text>
+          <View style={s.volRow}>
+            <Pressable style={s.pill} onPress={() => stepVol(-1)}><Text style={s.text}>−</Text></Pressable>
+            <Slider style={{ flex: 1, height: 34 }} minimumValue={0} maximumValue={100} step={1} value={vol}
+              minimumTrackTintColor={C.accent} maximumTrackTintColor={C.border} thumbTintColor={C.accent}
+              disabled={!connected} onValueChange={setVol} onSlidingComplete={v => tp.masterVolume(v)} />
+            <Pressable style={s.pill} onPress={() => stepVol(1)}><Text style={s.text}>＋</Text></Pressable>
+          </View>
+          <Text style={s.muted}>{vol <= 0 ? 'Muted' : Math.round(vol) + ' / 100  ·  ' + volDb(vol) + ' dB'}</Text>
+
+          <Text style={s.sectionLbl}>DAC high-pass filter</Text>
+          <Row><Text style={[s.muted, { flex: 1 }]}>Enabled</Text>
+            <Switch value={hpf !== 0} onValueChange={toggleHpf} /></Row>
+          <Row><Text style={[s.muted, { flex: 1 }]}>Cutoff</Text>
+            {HPF_MODES.map(m => <Pressable key={m.mode} style={[s.pill, hpf === m.mode && s.pillOn]} onPress={() => setHpfMode(m.mode)}><Text style={s.text}>{m.label}</Text></Pressable>)}</Row>
+          <Text style={s.muted}>A sub-audio high-pass on the DAC output that blocks DC offset and rumble. Off = all-pass; higher cutoffs trim more low end.</Text>
+        </>
+      ),
     },
   ];
 
-  const visible = sections.filter(x => x.show);
+  // Display order (homepage cards + page routing). Performance sections first
+  // (play → pick a voice → tempo → arp → drums), then system (connection, BT, codec).
+  // Unlisted ids fall to the end in their definition order (stable sort).
+  const SECTION_ORDER = ['player', 'synth', 'bpm', 'arp', 'drums', 'conn', 'bt', 'codec'];
+  const ord = (id: string) => { const i = SECTION_ORDER.indexOf(id); return i < 0 ? 999 : i; };
+  const visible = sections.filter(x => x.show).sort((a, b) => ord(a.id) - ord(b.id));
   const cur = route === 'home' ? null : visible.find(x => x.id === route);
   const fullPages = visible.filter(x => x.fullHeight);   // kept mounted so their scroll/folder position survives navigation
 
@@ -742,6 +791,7 @@ const s = StyleSheet.create({
   picker: { flex: 1, borderWidth: 1, borderColor: C.border, borderRadius: 7 },
   row: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
   muted: { color: C.muted, fontSize: 13 },
+  sectionLbl: { color: C.text, fontSize: 13, fontWeight: '700', marginTop: 10, marginBottom: 2 },
   text: { color: C.text, fontSize: 14 },
   btn: { backgroundColor: '#238636', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 7, alignItems: 'center' },
   btnWide: { marginTop: 4 },

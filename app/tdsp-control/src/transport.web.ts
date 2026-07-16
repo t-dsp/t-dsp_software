@@ -165,6 +165,7 @@ export class WebSerialTransport implements Transport {
 
   // ---- actions (@-lines) ----
   masterVolume(pct: number) { this.send('@VOL=' + Math.max(0, Math.min(100, Math.round(pct)))); }
+  dacHpf(mode: number) { this.send('@HPF=' + Math.max(0, Math.min(3, Math.round(mode)))); }
   masterBpm(bpm: number) { this.send('@BPM=' + Math.max(20, Math.min(300, Math.round(bpm)))); }
   dxVoice(i: number) { this.send('@DXVOICE=' + i); }
   dxPick(cartRel: string, voice: number) { this.send('@DXPICK=' + cartRel + '\t' + voice); }

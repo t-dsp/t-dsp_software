@@ -404,27 +404,47 @@ static void i2cBusRecover(uint8_t sdaPin = 18, uint8_t sclPin = 19) {
 static bool g_codecOk = false;
 static const char *g_codecMsg = "not run";
 
-static float g_dvol = TDSP_DEFAULT_MASTER_DB;   // power-on master (board-configurable, default -20 dB)
-static void applyVol() {
+// --- Two-stage master volume --------------------------------------------------
+// (1) CODEC analog level (g_dvol): the TAC5212 DAC output in dB, FIXED per board
+//     (headphone vs line calibration, TDSP_DEFAULT_OUT_DVOL_DB). Pushed to the codec
+//     once at init via applyVol(); the app does NOT move it. (Diagnostics may nudge
+//     it for loopback captures.)
+// (2) APP master (g_appMasterPct): a DIGITAL gain at the F32 TDM output
+//     (tdmOut.setGain, skipped when unity), driven by the app @VOL and the +/- keys.
+//     This is the user-facing master; the codec's analog output stays board-fixed so
+//     line-out calibration is preserved.
+static float g_dvol = TDSP_DEFAULT_OUT_DVOL_DB;   // codec analog output level (board-fixed)
+static void applyVol() {                          // push g_dvol to the TAC5212 DAC
     g_codec.out(1).setDvol(g_dvol);
     g_codec.out(2).setDvol(g_dvol);
 }
 
-// Master headphone volume from the phone app: it arrives as an "@VOL=<pct>" line
-// on the ESP32 UART (App -> BLE -> ESP32 -> here). 0..100% -> DAC dB: 0 = mute,
-// 1..100 maps linearly across -60..0 dB. Controls the TAC5212 OUT1/OUT2 (HP jack).
+static int g_appMasterPct = TDSP_DEFAULT_APP_VOL_PCT;   // digital app master, 0..100 %
+static float appPctToGain(int pct) {              // 0 = mute, 1..100 -> -60..0 dB -> linear
+    if (pct <= 0) return 0.0f;
+    if (pct > 100) pct = 100;
+    return powf(10.0f, (-60.0f + 0.60f * (float)pct) / 20.0f);
+}
+static void applyAppMaster() { tdmOut.setGain(appPctToGain(g_appMasterPct)); }
+
+// App master volume from the phone app ("@VOL=<pct>") or the +/- keys. A DIGITAL
+// gain, so the codec's analog output stays at its fixed board level. 0=mute, 100=unity.
 static void setMasterVolumePct(int pct) {
     if (pct < 0) pct = 0;
     if (pct > 100) pct = 100;
-    g_dvol = (pct == 0) ? -128.0f : (-60.0f + 0.60f * (float)pct);
-    if (g_codecOk) applyVol();
-    Serial.printf("[vol] app set %d%% -> %.1f dB\n", pct, g_dvol);
+    g_appMasterPct = pct;
+    applyAppMaster();
+    Serial.printf("[vol] app master %d%% (gain %.4f), codec fixed %.1f dB\n",
+                  pct, (double)appPctToGain(pct), (double)g_dvol);
 }
 
 // TAC5212 DAC highpass filter from the phone app: arrives as "@HPF=<mode>" on the
 // ESP32 UART. mode 0 = off (all-pass), 1/2/3 = 1/12/96 Hz cutoff. Chip-global,
-// applied to the DAC output (the ADC path is disabled in this firmware).
+// applied to the DAC output (the ADC path is disabled in this firmware). g_hpf keeps
+// the current mode so @STATE can hydrate the app's filter control on connect.
+static int g_hpf = 0;   // 0=off, 1=1Hz, 2=12Hz, 3=96Hz
 static void setDacHpfMode(int mode) {
+    if (mode < 0 || mode > 3) mode = 0;
     tac5212::DacHpf hpf;
     switch (mode) {
         case 1:  hpf = tac5212::DacHpf::Cut1Hz;  break;
@@ -432,6 +452,7 @@ static void setDacHpfMode(int mode) {
         case 3:  hpf = tac5212::DacHpf::Cut96Hz; break;
         default: hpf = tac5212::DacHpf::Programmable; break;  // 0 / unknown = off
     }
+    g_hpf = mode;
     if (g_codecOk) g_codec.setDacHpf(hpf);
     Serial.printf("[hpf] app set DAC HPF mode %d\n", mode);
 }
@@ -459,8 +480,16 @@ FLASHMEM static void setupCodec() {
     g_codec.setRxSlotOffset(1);
     g_codec.setRxChannelSlot(1, 0);
     g_codec.setRxChannelSlot(2, 1);
-    g_codec.out(1).setMode(tac5212::OutMode::HpDriver);
-    g_codec.out(2).setMode(tac5212::OutMode::HpDriver);
+    // Output driver mode from the board profile (TDSP_OUT_TYPE).
+#if TDSP_OUT_TYPE == TDSP_OUT_LINE
+    const tac5212::OutMode kOutMode = tac5212::OutMode::SeLine;      // single-ended line
+#elif TDSP_OUT_TYPE == TDSP_OUT_BALANCED
+    const tac5212::OutMode kOutMode = tac5212::OutMode::DiffLine;    // differential / balanced line
+#else
+    const tac5212::OutMode kOutMode = tac5212::OutMode::HpDriver;    // headphone
+#endif
+    g_codec.out(1).setMode(kOutMode);
+    g_codec.out(2).setMode(kOutMode);
     g_codec.out(1).setDvol(-128.0f);
     g_codec.out(2).setDvol(-128.0f);
     // --- ADC capture of the analog loopback (OUT1/OUT2 -> IN1/IN2) ---------------
@@ -483,6 +512,7 @@ FLASHMEM static void setupCodec() {
     g_codec.powerDac(true);
     delay(100);
     g_codec.setDspAvddSelect(true);
+    setDacHpfMode(g_hpf);   // enforce the tracked HPF mode (boot: 0/off) so @STATE matches the chip; a re-init restores the current mode
 }
 
 // mixer helper: 0=BT, 1=local test tone, 2=S/PDIF-in (slot 3 = Dexed, set once,
@@ -1330,9 +1360,9 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     // connect instead of assuming defaults. Reports what the device actually knows —
     // i.e. what's ACTIVE, not a UI "selection" the firmware never sees.
     else if (strcmp(line, "@STATE") == 0) {
-        int volPct = (g_dvol <= -127.0f) ? 0 : (int)((g_dvol + 60.0f) / 0.60f + 0.5f);
+        int volPct = g_appMasterPct;   // app-facing master is the digital gain
         if (volPct < 0) volPct = 0; if (volPct > 100) volPct = 100;
-        reply.printf("@STATE={\"vol\":%d,\"bpm\":%d,\"loop\":%d,", volPct, (int)(g_masterBpm + 0.5f), g_loop ? 1 : 0);
+        reply.printf("@STATE={\"vol\":%d,\"hpf\":%d,\"bpm\":%d,\"loop\":%d,", volPct, g_hpf, (int)(g_masterBpm + 0.5f), g_loop ? 1 : 0);
         reply.printf("\"arp\":{\"on\":%d,\"pat\":%d,\"rate\":%d,\"oct\":%d,\"latch\":%d},",
                      g_arpFilter.enabled() ? 1 : 0, (int)g_arpFilter.pattern(), (int)g_arpFilter.rate(),
                      g_arpFilter.octaveRange(), g_arpFilter.latch() ? 1 : 0);
@@ -1424,7 +1454,8 @@ void setup() {
                                                  // F32 domain, where there's real headroom.
     testTone.frequency(440.0f);  testTone.amplitude(0.0f);
     spdifTone.frequency(1000.0f); spdifTone.amplitude(0.25f);
-    if (g_codecOk) applyVol();
+    if (g_codecOk) applyVol();   // codec at its fixed board level (g_dvol)
+    applyAppMaster();            // digital app master start (TDSP_DEFAULT_APP_VOL_PCT)
 
 #if TDSP_HAS_DIN_MIDI
     // Physical MIDI IN on Serial1 (pin 0), omni, soft-thru off -> the router.
@@ -1612,18 +1643,17 @@ void loop() {
             else if (c == 'x') { static bool on = true; on = !on;
                                  spdifTone.amplitude(on ? 0.25f : 0.0f);
                                  Serial.printf("[cmd] S/PDIF out tone %s\n", on ? "ON" : "OFF"); }
-            else if (c == '+') { g_dvol += 3.0f; if (g_dvol > 0) g_dvol = 0;
-                                 applyVol(); Serial.printf("[cmd] vol %.0f dB\n", g_dvol); }
-            else if (c == '-') { g_dvol -= 3.0f; if (g_dvol < -60) g_dvol = -60;
-                                 applyVol(); Serial.printf("[cmd] vol %.0f dB\n", g_dvol); }
+            else if (c == '+') { setMasterVolumePct(g_appMasterPct + 5); }   // app master +5%
+            else if (c == '-') { setMasterVolumePct(g_appMasterPct - 5); }   // app master -5%
             else if (c == 'd') { Serial.printf("[reg] RX_OFF(26)=%02X RX_CH1(28)=%02X RX_CH2(29)=%02X "
                                  "CH_EN(76)=%02X PWR(78)=%02X\n",
                                  g_codec.readRegister(0, 0x26), g_codec.readRegister(0, 0x28),
                                  g_codec.readRegister(0, 0x29), g_codec.readRegister(0, 0x76),
                                  g_codec.readRegister(0, 0x78)); }
-            else if (c == 'i') { Serial.println("[cmd] re-init codec"); setupCodec(); applyVol();
-                                 Serial.printf("[cmd] codec=%s (%s), vol %.0f dB\n",
-                                               g_codecOk ? "OK" : "FAIL", g_codecMsg, g_dvol); }
+            else if (c == 'i') { Serial.println("[cmd] re-init codec"); setupCodec();
+                                 if (g_codecOk) applyVol(); applyAppMaster();
+                                 Serial.printf("[cmd] codec=%s (%s), out %.0f dB, app master %d%%\n",
+                                               g_codecOk ? "OK" : "FAIL", g_codecMsg, (double)g_dvol, g_appMasterPct); }
             else if (c == 'W') { if (g_player.isPlaying()) songStop();                       // play/stop
                                  else if (g_curSongArg[0]) songStartArg(g_curSongArg);
                                  else songStartIndex(0); }

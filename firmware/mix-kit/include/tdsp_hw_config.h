@@ -177,10 +177,11 @@ static inline int tdspMuxAutoSelectCodec(uint8_t codecAddr) {
 #ifndef TDSP_IN_TYPE
 #define TDSP_IN_TYPE TDSP_IN_LINE
 #endif
-#define TDSP_OUT_HEADPHONE 0
-#define TDSP_OUT_LINE      1
+#define TDSP_OUT_HEADPHONE 0    // TAC5212 HpDriver  (mono-SE at OUTxP, 16 Ohm min load)
+#define TDSP_OUT_LINE      1    // TAC5212 SeLine    (mono-SE line driver)
+#define TDSP_OUT_BALANCED  2    // TAC5212 DiffLine  (differential / balanced line)
 #ifndef TDSP_OUT_TYPE
-#define TDSP_OUT_TYPE TDSP_OUT_HEADPHONE   // firmware drives OUT1/OUT2 as HpDriver today
+#define TDSP_OUT_TYPE TDSP_OUT_HEADPHONE
 #endif
 
 // --- Roles (which SUBSYSTEMS are active; composable / additive) --------------
@@ -200,8 +201,18 @@ static inline int tdspMuxAutoSelectCodec(uint8_t codecAddr) {
 #endif
 
 // --- Power-on defaults (baked; a board header overrides) ---------------------
-#ifndef TDSP_DEFAULT_MASTER_DB
-#define TDSP_DEFAULT_MASTER_DB (-20.0f)   // g_dvol start (TAC5212 OUT1/OUT2 dB)
+// Two-stage master volume (see main.cpp):
+//   (1) TDSP_DEFAULT_OUT_DVOL_DB -- the TAC5212 DAC's ANALOG output level, fixed
+//       per board (headphone vs line calibration). Set once at codec init.
+//   (2) TDSP_DEFAULT_APP_VOL_PCT -- the DIGITAL app master (tdmOut.setGain) start,
+//       0..100 % (what the app fader / +/- keys drive). 0 = mute, 100 = unity.
+// Defaults (codec 0 dB x ~67% digital ~= -20 dB) reproduce the legacy start level
+// while keeping full range (100% = 0 dB analog, the old max).
+#ifndef TDSP_DEFAULT_OUT_DVOL_DB
+#define TDSP_DEFAULT_OUT_DVOL_DB (0.0f)
+#endif
+#ifndef TDSP_DEFAULT_APP_VOL_PCT
+#define TDSP_DEFAULT_APP_VOL_PCT 67
 #endif
 #ifndef TDSP_DEFAULT_BPM
 #define TDSP_DEFAULT_BPM 120.0f           // master clock start tempo (40..240)

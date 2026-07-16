@@ -55,7 +55,8 @@ export interface Transport {
   requestState(): void;
 
   // ---- actions (map to @-lines on web, to BLE opcodes on native) ----
-  masterVolume(pct: number): void;                    // header master volume (@VOL=, 0..100)
+  masterVolume(pct: number): void;                    // header master volume (@VOL=, 0..100) — the TAC5212 OUT1/OUT2 DAC level
+  dacHpf(mode: number): void;                         // TAC5212 DAC high-pass filter (@HPF=): 0=off, 1=1Hz, 2=12Hz, 3=96Hz
   masterBpm(bpm: number): void;                       // master tempo (@BPM=) — song + drums lock to it
   dxVoice(index: number): void;                       // select a bundled voice
   dxPick(cartRel: string, voice: number): void;       // load /dexed cart voice
