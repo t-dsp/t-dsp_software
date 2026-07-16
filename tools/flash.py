@@ -14,6 +14,11 @@ Examples:
     python tools/flash.py --serial 18402920       # resolve a specific serial (dry-run)
     python tools/flash.py --serial 18402920 --upload   # actually flash it
 
+After a successful --upload, the repo's SD assets (songs/drums) are synced to the
+board automatically via tools/sync_assets.py. Disable with --no-sync or by setting
+TDSP_SYNC_ASSETS=false. Flashing doesn't wipe the SD card, so this only writes
+what's missing/changed. (Dry runs never sync.)
+
 NOTE (bench-verify): USB-serial detection via `pio device list` is best-effort
 and OS/enumeration dependent (a Teensy in HID-bootloader mode is not a COM port).
 Use --serial to bypass detection until the detection path is verified on a bench.
@@ -25,6 +30,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 TSV = os.path.join(HERE, "boards.tsv")
@@ -90,6 +96,73 @@ def resolve_and_run(serial, row, project_dir, upload):
     return subprocess.run(cmd).returncode
 
 
+def finish(args, rc):
+    """Run the post-flash asset sync when appropriate; return the process exit code.
+    Only syncs after a real, successful --upload. A sync hiccup is surfaced but the
+    flash itself is never undone by it."""
+    if not args.upload:
+        return rc                                      # dry run -> never sync
+    if rc != 0:
+        print("[sync] skipped: upload failed", file=sys.stderr)
+        return rc
+    if sync_disabled(args):
+        print("[sync] skipped (disabled via --no-sync / TDSP_SYNC_ASSETS)")
+        return rc
+    print("[sync] flash OK -> syncing SD assets...")
+    port = wait_for_teensy_port()
+    if port is None:
+        print("[sync] no Teensy port detected after flash; run "
+              "'python tools/sync_assets.py' manually once the board is up.", file=sys.stderr)
+        return rc
+    src = run_sync(port, args.sync_soundfont)
+    if src != 0:
+        print("[sync] asset sync reported errors (see above); flash itself succeeded.",
+              file=sys.stderr)
+        return src
+    return rc
+
+
+def sync_disabled(args):
+    """Auto-sync is on by default; off via --no-sync or TDSP_SYNC_ASSETS=false/0/no/off."""
+    if args.no_sync:
+        return True
+    return os.environ.get("TDSP_SYNC_ASSETS", "").strip().lower() in ("0", "false", "no", "off")
+
+
+def wait_for_teensy_port(timeout=20.0, settle=2.5):
+    """After a flash the board reboots + re-enumerates. Wait for a Teensy (VID
+    16C0) port to (re)appear, then let the firmware boot and mount the SD card.
+    Returns the port name, or None if pyserial is missing / nothing showed up."""
+    try:
+        from serial.tools import list_ports
+    except ImportError:
+        print("[sync] pyserial not available; letting sync_assets.py self-detect", file=sys.stderr)
+        return None
+    time.sleep(2.0)                                    # let the reboot begin (old port drops)
+    deadline = time.monotonic() + timeout
+    port = None
+    while time.monotonic() < deadline:
+        cands = [p.device for p in list_ports.comports() if p.vid == 0x16C0]
+        if cands:
+            port = cands[0]
+            break
+        time.sleep(0.3)
+    if port:
+        time.sleep(settle)                             # firmware boot + SD mount
+    return port
+
+
+def run_sync(port_hint, soundfont):
+    script = os.path.join(HERE, "sync_assets.py")
+    cmd = [sys.executable, script]
+    if port_hint:
+        cmd += ["--port", port_hint]
+    if soundfont:
+        cmd += ["--soundfont"]
+    print(f"[sync] {' '.join(cmd)}")
+    return subprocess.run(cmd).returncode
+
+
 def main():
     ap = argparse.ArgumentParser(description="Flash the mix-kit firmware matching a Teensy's serial.")
     ap.add_argument("--serial", help="skip detection; resolve this serial number")
@@ -97,6 +170,10 @@ def main():
     ap.add_argument("--list", action="store_true", help="print the serial->firmware map and exit")
     ap.add_argument("--project-dir", default=DEFAULT_PROJECT_DIR, help="mix-kit PlatformIO project dir")
     ap.add_argument("--tsv", default=TSV, help="board map file")
+    ap.add_argument("--no-sync", action="store_true",
+                    help="do NOT sync SD assets after a successful upload")
+    ap.add_argument("--sync-soundfont", action="store_true",
+                    help="also push the GM soundfont during the post-flash sync (big, opt-in)")
     args = ap.parse_args()
 
     rows = load_map(args.tsv)
@@ -112,7 +189,8 @@ def main():
         if not row:
             print(f"[error] serial {args.serial} not in {args.tsv}", file=sys.stderr)
             return 2
-        return resolve_and_run(args.serial, row, args.project_dir, args.upload)
+        rc = resolve_and_run(args.serial, row, args.project_dir, args.upload)
+        return finish(args, rc)
 
     # Auto-detect
     found = detect_serials()
@@ -129,7 +207,7 @@ def main():
     for s, port, desc in known:
         print(f"[detected] {s} on {port} ({desc})")
         rc |= resolve_and_run(s, rows[s], args.project_dir, args.upload)
-    return rc
+    return finish(args, rc)
 
 
 if __name__ == "__main__":
