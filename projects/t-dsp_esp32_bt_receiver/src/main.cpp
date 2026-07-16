@@ -342,6 +342,17 @@ static void enterPairingMode(const char *why) {
                 why, BT_DEVICE_NAME);
 }
 
+// Go fully idle: NOT connectable, NOT discoverable, no auto-reconnect. Bluetooth audio is
+// explicit — it only (re)connects on an app command: "Connect Bluetooth Audio" (reconnect
+// to the last bonded phone) or "Pairing mode" (accept a new phone). Used on boot and after
+// any A2DP disconnect, so a phone can't silently re-attach on its own.
+static void goIdle(const char *why) {
+  a2dp_sink.set_connectable(false);
+  a2dp_sink.set_discoverability(ESP_BT_NON_DISCOVERABLE);
+  g_discoverable = false;
+  Serial.printf("[a2dp] idle (%s) -- Bluetooth audio off until you connect it\n", why);
+}
+
 // A2DP connection state changed (called by the A2DP lib, BT task context).
 // Persistent-pairing policy: whenever NOTHING is connected we stay discoverable
 // so the phone can reconnect after any failure; while a source is connected we
@@ -360,8 +371,8 @@ static void onA2dpConnState(esp_a2d_connection_state_t state, void *) {
       g_hasPendingConnect = false;
       a2dp_sink.connect_to(g_pendingConnect);
     } else {
-      // dropped or failed -> immediately reopen for (re)pairing
-      enterPairingMode("a2dp disconnected");
+      // Dropped or user-disconnected -> stay OFF. Explicit-only: no auto re-pair / re-attach.
+      goIdle("a2dp disconnected");
     }
   }
   pushStatus();
@@ -408,9 +419,11 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
         a2dp_sink.clean_last_connection();
         break;
       case CMD_RECONNECT: {
+        a2dp_sink.set_connectable(true);  // allow the reconnect handshake (we boot idle/non-connectable)
         bool ok = a2dp_sink.reconnect();  // sink -> last paired phone (needs a stored bond)
         Serial.printf("[ble] cmd: RECONNECT A2DP -> %s\n",
                       ok ? "attempting" : "no last device (pair first)");
+        if (!ok) goIdle("reconnect: no bond");   // nothing to connect -> back to idle
         break;
       }
       case CMD_SET_VOLUME:
@@ -680,7 +693,7 @@ void setup() {
   // The bond can still be wiped on demand -- the 'f' serial command and the BLE
   // FORGET opcode both call clean_last_connection(), after which there is no
   // device to auto-reconnect to and the sink is freshly pairable.
-  a2dp_sink.set_auto_reconnect(true);
+  a2dp_sink.set_auto_reconnect(false);   // explicit only: never auto-reconnect to the last phone
 
   // Mirror A2DP connect/disconnect out to the BLE status characteristic.
   a2dp_sink.set_on_connection_state_changed(onA2dpConnState);
@@ -716,10 +729,10 @@ void setup() {
   a2dp_sink.set_pin_config(pin_config);
 
   a2dp_sink.start(BT_DEVICE_NAME);
-  // Boot straight into pairing mode so a phone can connect immediately, and stay
-  // there any time nothing is connected (see onA2dpConnState).
-  enterPairingMode("boot");
-  Serial.printf("A2DP sink up. Pair with \"%s\".\n", BT_DEVICE_NAME);
+  // Boot IDLE, not pairing: Bluetooth audio is explicit. Tap "Connect Bluetooth Audio"
+  // in the app to reconnect the last phone, or "Pairing mode" to add a new one.
+  goIdle("boot");
+  Serial.printf("A2DP sink up (idle). Connect from the app to start Bluetooth audio.\n");
 
   // BLE control comes up AFTER A2DP so it attaches to the running stack.
   setupBle();
