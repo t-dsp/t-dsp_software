@@ -1142,38 +1142,39 @@ static void audioArmTransport() { applyMeter(); ensureTransportStarted(); }
 // (`parsedLoopBeats`), else derived from the baked stream's total ms at its native
 // tempo and snapped to the eighth-note grid. Leaves the player in ms mode if there
 // is no usable loop length.
-static void songApplySync(double parsedLoopBeats) {
-    g_songLoopBeats = 0.0;
-    // ALWAYS grid-lock the player to the master clock (the metronome), looping or not, so both
-    // players + drums share one phase-aligned, drift-free grid. loopBeats = the exact loop length
-    // (SD parse) else the song's full length derived from its ms at native tempo; when NOT looping,
-    // the player plays through once and stops at that boundary (MidiFilePlayer::tickSynced honours
-    // loop_). Only a song with no usable length falls back to the ms engine.
+// Grid-lock a track's player to the master clock (unified — replaces songApplySync/song2ApplySync).
+// ALWAYS syncs, looping or not, so all players + drums share one phase-aligned, drift-free grid.
+// loopBeats = exact loop length (SD parse) else derived from the stream's ms at native tempo; a
+// non-looping song plays through once and stops at that boundary (tickSynced honours loop_). No
+// usable length -> falls back to the ms engine.
+static void songApplySync(Track &t, double parsedLoopBeats) {
+    *t.loopBeats = 0.0;
     double lb = parsedLoopBeats;
     if (lb <= 0.0)                               // baked/full stream (no loop meta): derive from ms
-        lb = tdsp::smf::snapLoopBeatsHalf((double)g_player.totalMs() * (double)g_songBpm / 60000.0);
+        lb = tdsp::smf::snapLoopBeatsHalf((double)t.player->totalMs() * (double)*t.bpm / 60000.0);
     if (lb <= 0.0) return;
-    g_songLoopBeats = lb;
+    *t.loopBeats = lb;
     const bool anchorNow = g_syncAnchorNow; g_syncAnchorNow = false;
-    g_player.setSyncedMode(&g_conductor.clock(), lb, g_songBpm, anchorNow);
-    Serial.printf("[song] grid-locked: len=%.2f beats @ %.1f bpm (%s%s)\n", lb, (double)g_songBpm, g_loop ? "loop" : "one-shot", anchorNow ? ", from top" : "");
+    t.player->setSyncedMode(&g_conductor.clock(), lb, *t.bpm, anchorNow);
+    Serial.printf("[song] grid-locked: len=%.2f beats @ %.1f bpm (%s%s)\n", lb, (double)*t.bpm, *t.loop ? "loop" : "one-shot", anchorNow ? ", from top" : "");
 }
 
 // Clean slate before starting ANY song: silence sounding notes + clear latched
 // per-engine expression (bend / mod / aftertouch), so a bend left mid-glide by the
 // previous song can't carry over. Spare channel 10 while a drum groove is looping —
 // an all-channels reset would cut the drums for a beat when you press Play.
-static void songPrep() {
-    if (g_drumPlayer.isPlaying()) {
-        for (uint8_t ch = 1; ch <= 16; ++ch) if (ch != 10) g_synthSink->onAllNotesOff(ch);
+// Clean slate before a track starts a song (unified — replaces songPrep/song2Prep). Voice 1
+// (caps.prepSpecial) shares its sink with the ch10 drum groove so it spares ch10, and resets the
+// multitimbral audition trim (a song is multitimbral; the last-picker trim no longer describes it).
+// Voice 2 has a private sink -> a bare all-notes-off.
+static void songPrep(Track &t) {
+    if (t.caps.prepSpecial && g_drumPlayer.isPlaying()) {
+        for (uint8_t ch = 1; ch <= 16; ++ch) if (ch != 10) t.sink->onAllNotesOff(ch);
     } else {
-        g_synthSink->onAllNotesOff(0);
+        t.sink->onAllNotesOff(0);
     }
 #ifdef TDSP_REPLAYGAIN_MULTITIMBRAL
-    // A song is multitimbral (each channel runs its own program), so the Tier-1 audition
-    // bus trim — set to the last picker voice — no longer describes what's sounding. Reset
-    // it to unity; Tier-2 per-GM-program normalization (in the engine/sink) takes over.
-    synthAuditionTrim()->setGain(1.0f);
+    if (t.caps.prepSpecial) synthAuditionTrim()->setGain(1.0f);
 #endif
 }
 
@@ -1184,7 +1185,7 @@ FLASHMEM static bool songStartBuiltin(const char *name) {
     // expression) then hand the events straight to the player — no expansion needed.
     for (int i = 0; i < testsong::kNumTestSongs; ++i) {
         if (strcasecmp(name, testsong::kTestSongs[i].name) != 0) continue;
-        songPrep();
+        songPrep(g_tracks[0]);
         applyMidiMode(testsong::kTestSongs[i].mpe);
         g_songBpm = testsong::kTestSongs[i].bpm; applyTempos();        // per-song native tempo -> master
         snprintf(g_curSongName, sizeof g_curSongName, "%s", testsong::kTestSongs[i].name);
@@ -1197,7 +1198,7 @@ FLASHMEM static bool songStartBuiltin(const char *name) {
         g_songBpb = 4;   // baked test sequence: no time-sig meta -> common time
         ensureTransportStarted();   // auto-start: define the grid on the first player, else lock in phase
         g_player.play(testsong::kTestSongs[i].ev, testsong::kTestSongs[i].count);
-        songApplySync(0.0);   // baked: loopBeats derived from the stream's total ms
+        songApplySync(g_tracks[0], 0.0);   // baked: loopBeats derived from the stream's total ms
         applyMeter();
         g_songBarClock = 0;
         return true;
@@ -1206,7 +1207,7 @@ FLASHMEM static bool songStartBuiltin(const char *name) {
     // device in MPE mode — return to normal MIDI so a multitimbral song plays right.
     for (int i = 0; i < kNumBuiltin; ++i) {
         if (strcasecmp(name, kBuiltinSongs[i].name) != 0) continue;
-        songPrep();
+        songPrep(g_tracks[0]);
         if (g_mpeMode) applyMidiMode(false);
         g_songBpm = kBuiltinSongs[i].bpm;
         uint32_t n = tdsp::expandLegacyNotes(kBuiltinSongs[i].ev, kBuiltinSongs[i].count, g_buf, MAX_EVENTS);
@@ -1218,7 +1219,7 @@ FLASHMEM static bool songStartBuiltin(const char *name) {
             applyTempos();
             ensureTransportStarted();
             g_player.play(g_buf, n);
-            songApplySync(0.0);   // baked: loopBeats derived from the stream's total ms
+            songApplySync(g_tracks[0], 0.0);   // baked: loopBeats derived from the stream's total ms
             applyMeter(); g_songBarClock = 0;
         }
         return true;
@@ -1228,7 +1229,7 @@ FLASHMEM static bool songStartBuiltin(const char *name) {
 
 // Play an SD .mid by absolute path (disp = display name, arg = the @SONGF replay arg).
 FLASHMEM static bool songStartSd(const char *path, const char *disp, const char *arg) {
-    songPrep();
+    songPrep(g_tracks[0]);
     if (g_mpeMode) applyMidiMode(false);
     g_songBpm = 120.0f; g_songBpb = 4; double parsedLoopBeats = 0.0;
     int got = tdsp::smf::loadSmfFile(path, g_buf, MAX_EVENTS, &g_songBpm, &g_songBpb, &parsedLoopBeats);   // + exact loop length
@@ -1241,7 +1242,7 @@ FLASHMEM static bool songStartSd(const char *path, const char *disp, const char 
     applyTempos();   // retime the song (and groove) to the master BPM
     ensureTransportStarted();       // auto-start: define the grid if idle, else join in phase
     g_player.play(g_buf, (uint32_t)got);
-    songApplySync(parsedLoopBeats);             // lock a looping song to the grid (exact length from the parse)
+    songApplySync(g_tracks[0], parsedLoopBeats);   // lock a looping song to the grid (exact length from the parse)
     applyMeter();    // bar length from the song's time signature (song = meter master)
     g_songBarClock = 0;
     return true;
@@ -1306,19 +1307,6 @@ static void songLoopTick() {
 // meter, or the global MPE mode, so a second song plays on the keyboard voice independently and
 // stays locked to the same master grid (song2ApplySync joins the running clock in phase — see
 // ensureTransportStarted, which now also counts player 2 as holding the grid).
-static void song2Prep() { g_synthSinkB->onAllNotesOff(0); }   // silence only voice 2's own notes
-static void song2ApplySync(double parsedLoopBeats) {
-    g_song2LoopBeats = 0.0;
-    // Always grid-lock player 2 to the master clock too (see songApplySync) so A and B share phase.
-    double lb = parsedLoopBeats;
-    if (lb <= 0.0)
-        lb = tdsp::smf::snapLoopBeatsHalf((double)g_player2.totalMs() * (double)g_song2Bpm / 60000.0);
-    if (lb <= 0.0) return;
-    g_song2LoopBeats = lb;
-    const bool anchorNow = g_syncAnchorNow; g_syncAnchorNow = false;
-    g_player2.setSyncedMode(&g_conductor.clock(), lb, g_song2Bpm, anchorNow);
-    Serial.printf("[song2] grid-locked: len=%.2f beats @ %.1f bpm (%s%s)\n", lb, (double)g_song2Bpm, g_song2Loop ? "loop" : "one-shot", anchorNow ? ", from top" : "");
-}
 // LOAD (the slow, blocking part) a player-2 song into memory + stash where to play it from.
 // No sink/clock side effects — safe to call while other players run, off the downbeat. Returns
 // false if not found / load failed. song2FirePreloaded() then starts it instantly.
@@ -1364,12 +1352,12 @@ FLASHMEM static bool song2Preload(const char *arg) {
 // loop(). anchorNow=true starts it from its top at the current beat (a quantized bar launch).
 static void song2FirePreloaded(bool anchorNow) {
     if (!g_song2PreEv || g_song2PreCount == 0) return;
-    song2Prep();
+    songPrep(g_tracks[1]);
     applyTempos();
     ensureTransportStarted();   // join the running grid in phase (or define it if idle)
     g_player2.play(g_song2PreEv, g_song2PreCount);
     g_syncAnchorNow = anchorNow;
-    song2ApplySync(g_song2PreLoopBeats);
+    songApplySync(g_tracks[1], g_song2PreLoopBeats);
 }
 FLASHMEM static void song2StartArg(const char *arg) {
     if (!g_voice2Split) {   // Synth B off -> engines 4..7 belong to Synth A; playing here would collide
