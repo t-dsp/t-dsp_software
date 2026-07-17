@@ -107,6 +107,35 @@ export interface Transport {
   arp2Latch(on: boolean): void;
   arp2Sequence(steps: SeqStep[]): void;               // @ARP2SEQ=
   arp2Preset(params: ArpWireParams): void;            // @ARP2PRESET=
+  // ---- MIDI Player 2 (a second, independent song player routed to the voice-2 synth side, so
+  // two songs can play at once; gated by @STATE caps.voice2). Mirrors the songPlay/… set but on
+  // @SONG2* / @LOOP2, with its own position feed @SONG2P=. Player-2 output level rides the
+  // voice-2 bus (voice2Vol / @VOICE2VOL) — there is no separate @SONG2VOL. ----
+  song2Play(arg: string): void;                       // play by name/filename on player 2 (@SONG2F=)
+  song2Restart(arg: string): void;                    // hard restart from the top on a fresh downbeat (@SONG2RESTART=)
+  stopSong2(): void;                                  // stop player 2 (@SONG2=stop)
+  song2Loop(on: boolean): void;                       // loop player 2's current song (@LOOP2=)
+  // ---- Loop recorder (build-flag gated; shown only when @STATE caps.rec) ----
+  recVoice(v: number): void;                          // which voice the record controls target (@RECV=, 1|2)
+  recBars(n: number): void;                           // loop length in bars (@RECBARS=, 1|2|4|8)
+  recSig(bpb: number): void;                          // record/master time signature = N beats/bar (@RECSIG=)
+  recArm(on: boolean): void;                          // arm a fresh (replace) recording / stop (@REC=)
+  recOverdub(on: boolean): void;                      // arm an overdub onto the existing clip / stop (@RECDUB=)
+  recPlay(on: boolean): void;                         // resume a stopped clip / stop (@RECPLAY=)
+  recClear(): void;                                   // wipe the selected voice's clip (@RECCLR)
+  // ---- Audio loop recorder (records the MASTER MIX as looping audio; N independent
+  // loops. Shown only when @STATE caps.audioloop > 0 — it reports how many loops actually
+  // allocated, which is RAM/PSRAM dependent). See planning/audio-looper/DESIGN.md. ----
+  audioLoopSel(i: number): void;                      // select the loop the controls target (@ALSEL=)
+  audioLoopBars(n: number): void;                     // loop length in bars (@ALBARS=, 1|2|4|8)
+  audioLoopMono(on: boolean): void;                   // mono storage = 2x loop length (@ALMONO=)
+  audioLoopFollow(on: boolean): void;                 // track master tempo, pitch shifts (@ALFOLLOW=)
+  audioLoopLevel(pct: number): void;                  // loop return level 0..100 (@ALLEVEL=)
+  audioLoopArm(on: boolean): void;                    // arm a fresh (replace) take / stop (@AL=)
+  audioLoopOverdub(on: boolean): void;                // layer onto the playing loop / stop (@ALDUB=)
+  audioLoopPlay(on: boolean): void;                   // resume a stopped loop / stop (@ALPLAY=)
+  audioLoopClear(): void;                             // wipe the selected loop (@ALCLR)
+  audioLoopSave(name: string): void;                  // save as /loops/<name>.wav (@ALSAVE=)
   espPair(): void;
   espReconnect(): void;      // (re)connect A2DP audio to the last paired source
   espDisconnect(): void;     // drop the current A2DP audio source

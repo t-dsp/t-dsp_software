@@ -181,6 +181,10 @@ export class WebSerialTransport implements Transport {
   stopSong() { this.send('@SONG=stop'); }
   songVol(pct: number) { this.send('@SONGVOL=' + Math.max(0, Math.min(150, Math.round(pct)))); }
   songLoop(on: boolean) { this.send('@LOOP=' + (on ? 1 : 0)); }
+  song2Play(arg: string) { this.send('@SONG2F=' + arg); }
+  song2Restart(arg: string) { this.send('@SONG2RESTART=' + arg); }
+  stopSong2() { this.send('@SONG2=stop'); }
+  song2Loop(on: boolean) { this.send('@LOOP2=' + (on ? 1 : 0)); }
   launchQuantize(on: boolean) { this.send('@QUANTIZE=' + (on ? 1 : 0)); }
   metronome(on: boolean) { this.send('@METRO=' + (on ? 1 : 0)); }
   metronomeSig(bpb: number) { this.send('@METROSIG=' + Math.max(1, Math.min(16, Math.round(bpb)))); }
@@ -210,6 +214,25 @@ export class WebSerialTransport implements Transport {
   arp2Latch(on: boolean) { this.send('@ARP2LATCH=' + (on ? 1 : 0)); }
   arp2Sequence(steps: SeqStep[]) { this.send('@ARP2SEQ=' + encodeSequence(steps)); }
   arp2Preset(params: ArpWireParams) { this.send('@ARP2PRESET=' + encodeArpParams(params)); }
+  // ---- Loop recorder ----
+  recVoice(v: number) { this.send('@RECV=' + (v === 2 ? 2 : 1)); }
+  recBars(n: number) { this.send('@RECBARS=' + n); }
+  recSig(bpb: number) { this.send('@RECSIG=' + Math.max(1, Math.min(16, Math.round(bpb)))); }
+  recArm(on: boolean) { this.send('@REC=' + (on ? 1 : 0)); }
+  recOverdub(on: boolean) { this.send('@RECDUB=' + (on ? 1 : 0)); }
+  recPlay(on: boolean) { this.send('@RECPLAY=' + (on ? 1 : 0)); }
+  recClear() { this.send('@RECCLR'); }
+  // ---- Audio loop recorder ----
+  audioLoopSel(i: number) { this.send('@ALSEL=' + Math.max(0, Math.round(i))); }
+  audioLoopBars(n: number) { this.send('@ALBARS=' + n); }
+  audioLoopMono(on: boolean) { this.send('@ALMONO=' + (on ? 1 : 0)); }
+  audioLoopFollow(on: boolean) { this.send('@ALFOLLOW=' + (on ? 1 : 0)); }
+  audioLoopLevel(pct: number) { this.send('@ALLEVEL=' + Math.max(0, Math.min(100, Math.round(pct)))); }
+  audioLoopArm(on: boolean) { this.send('@AL=' + (on ? 1 : 0)); }
+  audioLoopOverdub(on: boolean) { this.send('@ALDUB=' + (on ? 1 : 0)); }
+  audioLoopPlay(on: boolean) { this.send('@ALPLAY=' + (on ? 1 : 0)); }
+  audioLoopClear() { this.send('@ALCLR'); }
+  audioLoopSave(name: string) { this.send('@ALSAVE=' + name); }
   espPair() { this.send('P'); }
   espReconnect() { this.send('r'); }
   espDisconnect() { this.send('X'); }   // Teensy relays 'X' -> ESP32 'x' (A2DP disconnect)

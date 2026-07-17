@@ -22,6 +22,20 @@ const grooveFile = (g: { path: string; name: string }) => g.path.split('/').pop(
 const kb = (n: number) => (n / 1024).toFixed(1);   // bytes -> "12.3" KB, for the load progress readout
 
 const C = { bg: '#0d1117', card: '#161b22', card2: '#0e131a', border: '#30363d', text: '#e6edf3', muted: '#8b949e', accent: '#3fb950', accent2: '#a371f7', sel: 'rgba(31,111,235,0.28)', chip: '#21262d' };
+// Per-section theme: a title/border accent + a translucent card background (over the dark app bg),
+// so each area reads as its own color and a submenu's sub-cards inherit the parent's tint. Each is
+// { accent, tint } — accent tints the title/left-border; tint is the see-through card fill.
+const th = (accent: string, a: number) => ({ accent, tint: accent + Math.round(a * 255).toString(16).padStart(2, '0') });
+const THEME = {
+  synthA:   th('#3fb950', 0.14),   // green
+  synthB:   th('#a371f7', 0.15),   // purple
+  tempo:    th('#e3b341', 0.14),   // amber
+  bt:       th('#58a6ff', 0.14),   // blue
+  settings: th('#ff7b72', 0.13),   // coral
+  recorder:  th('#f85149', 0.14),  // red (MIDI record)
+  audioloop: th('#f778ba', 0.14),  // pink (audio loop)
+};
+const HDR_H = 38;   // shared height for page-header control buttons (back / keyboard / transport) so they line up
 // TAC5212 DAC high-pass filter presets (@HPF mode). 0 = off (all-pass); the rest are
 // sub-audio cutoffs that block DC/rumble. Index === the firmware mode number.
 const HPF_MODES = [
@@ -45,10 +59,14 @@ const END_MODES: { key: EndMode; icon: string; label: string }[] = [
   { key: 'stop',     icon: '◻',  label: 'Stop after' },  // hollow square → stop when it ends (default)
 ];
 
+// Loop-recorder states, indexed by the firmware's 0..4 state code (@RECP / @STATE rec.st*).
+// Module scope so both the per-player record rows and the standalone Loop Recorder card use one list.
+const REC_STATES = ['Idle', 'Armed — play a note', 'Recording', 'Overdubbing', 'Looping'];
+
 // The opaque app-owned state we persist on the device (@APP=) so a reload/reconnect restores
 // it. Keep it small (device RAM buffer is fixed) and JSON-serializable; grow it as more
 // firmware-invisible UI settings need to survive a reconnect.
-type AppState = { end: EndMode; groove?: string };   // groove = last-selected drum groove path (the device only reports the kit, not the picked groove)
+type AppState = { end: EndMode; end2?: EndMode; groove?: string };   // end2 = MIDI Player 2's end-of-song mode; groove = last-selected drum groove path (the device only reports the kit, not the picked groove)
 const isEndMode = (v: any): v is EndMode => END_MODES.some(m => m.key === v);
 
 function notify(msg: string) { if (Platform.OS === 'web') (globalThis as any).alert?.(msg); else Alert.alert('T-DSP', msg); }
@@ -109,10 +127,10 @@ function BeatStrip({ sig, bpm, active, live }: { sig: number; bpm: number; activ
 // the bottom (a card is far narrower than the window, so they never share the title's
 // line). Only the › chevron opens the section — the card body itself is inert, so the
 // header controls (nested Pressables) never risk a stray navigation.
-function Card({ title, value, status, subtitle, actions, progress, onPress, style, accent, topRight }:
-  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onPress: () => void; style?: any; accent?: string; topRight?: React.ReactNode }) {
+function Card({ title, value, status, subtitle, actions, progress, onPress, style, accent, tint, topRight }:
+  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onPress: () => void; style?: any; accent?: string; tint?: string; topRight?: React.ReactNode }) {
   return (
-    <View style={[s.card, style, accent && { borderLeftColor: accent, borderLeftWidth: 3 }]}>
+    <View style={[s.card, style, tint && { backgroundColor: tint }, accent && { borderLeftColor: accent, borderLeftWidth: 3 }]}>
       <View style={s.cardHead}>
         <View style={s.drawerLeft}>
           <Text style={[s.drawerTitle, accent && { color: accent }]} numberOfLines={1}>{title}</Text>
@@ -120,7 +138,7 @@ function Card({ title, value, status, subtitle, actions, progress, onPress, styl
           {progress != null && <ProgressBar value={progress} />}
         </View>
         {topRight}
-        <Pressable onPress={onPress} hitSlop={10} style={s.chevBtn}><Text style={s.chev}>›</Text></Pressable>
+        <Pressable onPress={onPress} hitSlop={10} style={s.chevBtn}><Text style={s.chev}>❯</Text></Pressable>
       </View>
       {!!actions && <View style={s.cardActions}>{actions}</View>}
     </View>
@@ -129,14 +147,13 @@ function Card({ title, value, status, subtitle, actions, progress, onPress, styl
 
 // Section page header: a back arrow + the section title/value, with the same controls
 // available (on the right when wide, on their own row when narrow).
-function PageHeader({ title, value, status, subtitle, actions, progress, onBack, accent, topRight }:
-  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onBack: () => void; accent?: string; topRight?: React.ReactNode }) {
+function PageHeader({ title, value, status, subtitle, actions, progress, onBack, accent, tint, topRight }:
+  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onBack: () => void; accent?: string; tint?: string; topRight?: React.ReactNode }) {
   const { width } = useWindowDimensions();
   const narrow = width < 640;
   return (
-    <View style={[s.pageHead, accent && { borderBottomColor: accent }]}>
+    <View style={[s.pageHead, tint && { backgroundColor: tint }, accent && { borderBottomColor: accent }]}>
       <View style={s.pageHeadRow}>
-        <Pressable style={s.backBtn} onPress={onBack}><Text style={s.backTxt}>‹</Text></Pressable>
         <View style={s.drawerLeft}>
           <Text style={[s.pageTitle, accent && { color: accent }]}>{title}</Text>
           {subtitle ?? <Subtitle value={value} status={status} />}
@@ -144,6 +161,8 @@ function PageHeader({ title, value, status, subtitle, actions, progress, onBack,
         </View>
         {topRight}
         {!narrow && !!actions && <View style={s.headActions}>{actions}</View>}
+        {/* Back sits at the top-right of the page header (title/value stay on the left). */}
+        <Pressable style={s.backBtn} onPress={onBack}><Text style={s.backTxt}>❮</Text></Pressable>
       </View>
       {narrow && !!actions && <View style={s.hdrActionsRow}>{actions}</View>}
     </View>
@@ -166,7 +185,7 @@ function KbdGlyph({ color }: { color: string }) {
 }
 // Keyboard-ownership control: tap a GREY keyboard to route the USB keyboard to this synth.
 const KbdBtn = ({ owned, onPress }: { owned: boolean; onPress: () => void }) => (
-  <Pressable onPress={onPress} hitSlop={10} style={{ paddingHorizontal: 6, paddingVertical: 4, alignSelf: 'flex-start' }}
+  <Pressable onPress={onPress} hitSlop={10} style={s.kbdBtn}
     accessibilityLabel={owned ? 'USB keyboard plays this synth' : 'Tap to play this synth with the USB keyboard'}>
     <KbdGlyph color={owned ? C.text : C.muted} />
   </Pressable>
@@ -191,6 +210,22 @@ const Stat = ({ label, n, sub }: { label: string; n: number; sub?: string }) => 
 const ListBtn = ({ label, sel, onPress }: any) => (
   <Pressable onPress={onPress} style={[s.listBtn, sel && s.listBtnSel]}><Text style={s.text} numberOfLines={1}>{label}</Text></Pressable>
 );
+// A submenu page: full-width cards (one per row) for a parent section's children (e.g. Settings →
+// Connection, TAC5212). Tapping a card opens that child's own existing page via onOpen(id).
+// `getItems` is a getter so it can read the sections array lazily (it isn't assigned yet when the
+// body is built).
+// `accent`/`tint`, when given, override each child's own colors so ALL sub-cards match the parent
+// tile — a quick visual cue for which section (e.g. which synthesizer) you're inside.
+function SubMenu({ getItems, onOpen, accent, tint }: { getItems: () => any[]; onOpen: (id: string) => void; accent?: string; tint?: string }) {
+  return (
+    <View style={s.submenu}>
+      {getItems().map(sec => (
+        <Card key={sec.id} title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} actions={sec.actions}
+          onPress={() => onOpen(sec.id)} style={s.cardGrid} accent={accent ?? sec.accent} tint={tint ?? sec.tint} topRight={sec.topRight} />
+      ))}
+    </View>
+  );
+}
 const ROW_H = 41;   // fixed list-row height so FlatList.scrollToIndex is reliable
 type VItem = { key: string; label: string; i: number };
 
@@ -208,6 +243,8 @@ export default function App() {
   const [loadElapsed, setLoadElapsed] = useState(0);             // seconds on the current catalog load — shows it's alive even if a read stalls
   const manualStopRef = useRef(false);                  // set on user Stop so the resulting @SONGP=-1 isn't treated as a natural song end
   const onSongEndRef = useRef<() => void>(() => {});     // latest "song finished naturally" handler (continue/shuffle); kept in a ref so the @SONGP listener never goes stale
+  const manualStop2Ref = useRef(false);                 // same guards for MIDI Player 2 (@SONG2P feed)
+  const onSong2EndRef = useRef<() => void>(() => {});
   // App-owned settings the firmware can't derive but must echo back so an app reload/reconnect
   // restores them (persisted opaque on the device via @APP=, see saveAppState). This ref is the
   // single source of what we persist — add a field here + hydrate it below to save more.
@@ -229,6 +266,11 @@ export default function App() {
   const [player, setPlayer] = useState<{ song: string; playing: boolean; name: string; prog: number }>({ song: '', playing: false, name: '', prog: 0 });
   const [songVol, setSongVol] = useState(100);        // MIDI-player level 0..150 %, independent of the master @VOL
   const [endMode, setEndMode] = useState<EndMode>('stop');   // what the player does when a song ends
+  // MIDI Player 2 (voice-2 song player, caps.voice2): a second, independent song player so two
+  // songs play at once. Its own selection/playback/end-mode; its output rides the voice-2 bus
+  // (voice2.vol / @VOICE2VOL), so there's no separate volume slider here.
+  const [player2, setPlayer2] = useState<{ song: string; playing: boolean; name: string; prog: number }>({ song: '', playing: false, name: '', prog: 0 });
+  const [endMode2, setEndMode2] = useState<EndMode>('stop');
   const [bpm, setBpm] = useState(120);
   const [beatFeed, setBeatFeed] = useState<{ i: number; n: number } | null>(null);   // live @BEAT from the device (null = fall back to the local clock)
   const beatStaleRef = useRef<any>(null);
@@ -242,8 +284,21 @@ export default function App() {
   // `caps` = which optional features the connected firmware was built with (from @STATE),
   // so the Voices 2 / Arpeggiator 2 cards SHOW only when compiled in. Each has its own
   // selection + volume + arp state; the folder browser is shared (pickVoice takes a target).
-  const [caps, setCaps] = useState({ voice2: false, arp2: false });
+  // caps.audioloop is a COUNT (how many audio loops the device actually allocated —
+  // RAM/PSRAM dependent), not a bool: 0 hides the Audio Loop card entirely.
+  const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, audioloop: 0 });
   const [voice2, setVoice2] = useState({ on: false, vol: 100, name: '', path: '' });
+  // Loop recorder (build-flag gated, shown on caps.rec): v = which voice the controls target
+  // (1|2), bars = loop length, st1/st2 = per-voice state (0 idle 1 armed 2 recording 3 overdub
+  // 4 playing), p1/p2 = 0..1000 record-fill / playback-phase permille. Time signature is the
+  // shared master meter (metro.sig), so it isn't tracked here.
+  const [rec, setRec] = useState({ v: 1, bars: 4, st1: 0, st2: 0, p1: 0, p2: 0 });
+  // Audio loop recorder (shown on caps.audioloop > 0): sel = selected loop, bars/mono/follow
+  // = the selected loop's config, st[]/p[] = per-loop state (same 0..4 codes as `rec`) and
+  // 0..1 progress, capS = the selected loop's capacity in seconds (bars that don't fit are
+  // disabled). See planning/audio-looper/DESIGN.md.
+  const [aloop, setAloop] = useState({ sel: 0, bars: 4, mono: false, follow: true, capS: 0,
+                                       st: [0, 0, 0], p: [0, 0, 0] });
   const [selVoice2, setSelVoice2] = useState('');   // voice-2 browser highlight (independent of voice 1)
   const [arp2, setArp2] = useState({ on: false, pat: 0, rate: 0, oct: 1, latch: false });
   const [seq2, setSeq2] = useState<SeqStep[]>(() => DEFAULT_SHAPE.steps.map(s => ({ ...s })));   // arp-2 User Sequence table (app-owned, mirrors seq)
@@ -294,7 +349,26 @@ export default function App() {
       else if (j.voice.i != null && j.voice.i < 320) { setSelVoice('b' + (j.voice.i | 0)); setSelVoiceName(j.voice.name || ''); setSelVoicePath('Bundled'); }
     }
     // Voices 2 / Arp 2 — build capabilities (SHOW the cards) + the keyboard half's state.
-    if (j.caps) setCaps({ voice2: !!j.caps.voice2, arp2: !!j.caps.arp2 });
+    if (j.caps) setCaps({ voice2: !!j.caps.voice2, arp2: !!j.caps.arp2, rec: !!j.caps.rec,
+                          audioloop: Math.max(0, j.caps.audioloop | 0) });
+    if (j.aloop) setAloop(a => ({
+      ...a,
+      sel: Math.max(0, j.aloop.sel | 0),
+      bars: [1, 2, 4, 8].includes(j.aloop.bars | 0) ? (j.aloop.bars | 0) : a.bars,
+      mono: !!j.aloop.mono,
+      follow: !!j.aloop.follow,
+      capS: (j.aloop.cap | 0) / 10,                       // device reports tenths of a second
+      st: a.st.map((v, i) => (i === (j.aloop.sel | 0) ? Math.max(0, Math.min(4, j.aloop.st | 0)) : v)),
+      p: a.p.map((v, i) => (i === (j.aloop.sel | 0) ? (j.aloop.p | 0) / 1000 : v)),
+    }));
+    if (j.rec) setRec(r => ({
+      v: j.rec.v === 2 ? 2 : 1,
+      bars: [1, 2, 4, 8].includes(j.rec.bars | 0) ? (j.rec.bars | 0) : r.bars,
+      st1: Math.max(0, Math.min(4, j.rec.st1 | 0)),
+      st2: Math.max(0, Math.min(4, j.rec.st2 | 0)),
+      p1: (j.rec.p1 | 0) / 1000,
+      p2: (j.rec.p2 | 0) / 1000,
+    }));
     if (j.voice2) setVoice2(v => ({
       on: !!j.voice2.on,
       vol: j.voice2.vol != null ? Math.max(0, Math.min(150, j.voice2.vol | 0)) : v.vol,
@@ -302,6 +376,9 @@ export default function App() {
       path: j.voice2.cart ? '/dexed/' + j.voice2.cart : (j.voice2.i != null ? 'Bundled' : v.path),
     }));
     if (j.arp2) setArp2({ on: !!j.arp2.on, pat: clampIdx(j.arp2.pat, ARP_PAT.length), rate: rateIndexFromFw(j.arp2.rate | 0), oct: Math.max(1, Math.min(4, j.arp2.oct | 0)) || 1, latch: !!j.arp2.latch });
+    // MIDI Player 2 (voice-2 song player): restore what's playing + its loop flag → end-mode guess.
+    if (j.song2) setPlayer2(p => ({ ...p, playing: !!j.song2.playing, song: j.song2.name || p.song, name: j.song2.name || p.name, prog: j.song2.p != null ? j.song2.p / 1000 : (j.song2.playing ? -1 : 0) }));
+    if (j.song2?.loop != null) setEndMode2(m => j.song2.loop ? 'repeat' : (m === 'repeat' ? 'stop' : m));
   }
 
   // Restore the opaque app-owned state (@APP=). This is the authoritative source for settings
@@ -311,6 +388,7 @@ export default function App() {
   function hydrateApp(a: any) {
     if (!a || typeof a !== 'object') return;
     if (isEndMode(a.end)) { appStateRef.current.end = a.end; setEndMode(a.end); tp.songLoop(a.end === 'repeat'); }
+    if (isEndMode(a.end2)) { appStateRef.current.end2 = a.end2; setEndMode2(a.end2); tp.song2Loop(a.end2 === 'repeat'); }
     // The device's @STATE reports the drum kit but not which groove is picked, so restore the
     // last-selected groove here — that way the Drums card shows it and ‹/› step from it at startup.
     if (typeof a.groove === 'string' && a.groove) { appStateRef.current.groove = a.groove; setDrums(d => ({ ...d, sel: a.groove })); }
@@ -333,6 +411,30 @@ export default function App() {
         if (manualStopRef.current) manualStopRef.current = false;   // user hit Stop → don't auto-advance
         else onSongEndRef.current();                                // natural end → Continue/Shuffle per the end-mode
       } else setPlayer(p => ({ ...p, playing: true, prog: Math.max(0, Math.min(1, v / 1000)) }));
+    } else if (line.startsWith('@SONG2P=')) {
+      // MIDI Player 2 position feed — same as @SONGP but for the voice-2 song player.
+      const v = parseInt(line.slice(8), 10);
+      if (v < 0) {
+        setPlayer2(p => ({ ...p, playing: false, prog: 0 }));
+        if (manualStop2Ref.current) manualStop2Ref.current = false;
+        else onSong2EndRef.current();
+      } else setPlayer2(p => ({ ...p, playing: true, prog: Math.max(0, Math.min(1, v / 1000)) }));
+    } else if (line.startsWith('@ALP=')) {
+      // Live audio-loop telemetry: "@ALP=<st0>,<p0>[,<st1>,<p1>...]" — one state+permille pair per loop.
+      const n = line.slice(5).split(',').map(x => parseInt(x, 10));
+      if (n.length >= 2 && n.every(x => !isNaN(x))) {
+        setAloop(a => ({
+          ...a,
+          st: a.st.map((v, i) => (n[i * 2] != null ? Math.max(0, Math.min(4, n[i * 2])) : v)),
+          p:  a.p.map((v, i) => (n[i * 2 + 1] != null ? n[i * 2 + 1] / 1000 : v)),
+        }));
+      }
+    } else if (line.startsWith('@RECP=')) {
+      // Live loop-recorder telemetry: "@RECP=<st1>,<p1>,<st2>,<p2>" (state + permille per voice).
+      const p = line.slice(6).split(',').map(x => parseInt(x, 10));
+      if (p.length >= 4 && p.every(x => !isNaN(x))) {
+        setRec(r => ({ ...r, st1: Math.max(0, Math.min(4, p[0])), p1: p[1] / 1000, st2: Math.max(0, Math.min(4, p[2])), p2: p[3] / 1000 }));
+      }
     } else if (line.startsWith('@BEAT=')) {
       // Live beat position from the master clock: "@BEAT=<beatInBar>/<beatsPerBar>".
       // Drives the header beat lights locked to the real device downbeat. If these stop
@@ -722,6 +824,23 @@ export default function App() {
   onSongEndRef.current = () => {
     if (endMode === 'continue' || endMode === 'shuffle') { const nx = pickNext(1); if (nx) playSongOf(nx); }
   };
+  // --- MIDI Player 2 (voice-2 song player) — the same handler set, targeting @SONG2* and the
+  // player2 UI state, so the second MIDI-player card is a full clone of the first. ---
+  const pickNext2 = (dir: number): Song | null => {
+    const songs = cat.songs;
+    if (!songs.length) return null;
+    const idx = songs.findIndex(sg => sg.name === player2.song);
+    if (endMode2 === 'shuffle' && songs.length > 1) { let r = idx; while (r === idx) r = Math.floor(Math.random() * songs.length); return songs[r]; }
+    const base = idx < 0 ? (dir > 0 ? -1 : 0) : idx;
+    return songs[((base + dir) % songs.length + songs.length) % songs.length];
+  };
+  const stepSong2 = (dir: number) => { const sg = pickNext2(dir); if (!sg) return; setPlayer2(p => { if (p.playing) { tp.song2Restart(songArg(sg)); return { ...p, song: sg.name, name: sg.name }; } return { ...p, song: sg.name }; }); };
+  const playSong2 = () => { const sg = cat.songs.find(x => x.name === player2.song) || cat.songs[0]; if (!sg) return; tp.song2Restart(songArg(sg)); setPlayer2(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };
+  const stopSong2 = () => { manualStop2Ref.current = true; tp.stopSong2(); setPlayer2(p => ({ ...p, playing: false, prog: 0 })); };
+  const playSong2Of = (sg: Song) => { tp.song2Play(songArg(sg)); setPlayer2(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };
+  const applyEndMode2 = (m: EndMode) => { setEndMode2(m); tp.song2Loop(m === 'repeat'); persistApp({ end2: m }); };
+  const cycleEndMode2 = () => { const i = END_MODES.findIndex(m => m.key === endMode2); applyEndMode2(END_MODES[(i + 1) % END_MODES.length].key); };
+  onSong2EndRef.current = () => { if (endMode2 === 'continue' || endMode2 === 'shuffle') { const nx = pickNext2(1); if (nx) playSong2Of(nx); } };
   const playGroove = () => { const g = cat.grooves.find(x => x.path === drums.sel); if (g) { tp.playGrooveFile(grooveFile(g)); setDrums(d => ({ ...d, playing: g.name })); } };
   const stopDrums = () => { tp.stopDrums(); setDrums(d => ({ ...d, playing: null })); };
   // Metronome transport, independent Play/Stop (mirrors the arp). Play sends @METRO=1 even
@@ -734,7 +853,9 @@ export default function App() {
 
   // ===== the sections: one entry drives both its homepage card and its page. =====
   // `value`/`status` = the subtitle; `actions` = the header controls; `body` = the page.
-  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; accent?: string; topRight?: React.ReactNode };
+  // `parent` (a section id) makes this a SUB-page reached from that parent's submenu instead of a
+  // home card — its Back button returns to the parent, not home (see the render's onBack).
+  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; accent?: string; tint?: string; topRight?: React.ReactNode; parent?: string };
 
   // The card/page subtitle: the currently-loaded instrument if one is picked, else a
   // summary of where the browser is (folder name or catalog counts).
@@ -824,10 +945,264 @@ export default function App() {
     );
   };
 
+  // ---- Per-player loop recorder ------------------------------------------------------------
+  // Each MIDI player owns its synth's looper: player 1 -> voice 1 (g_loop1), player 2 -> voice 2
+  // (g_loop2). Each looper taps its voice's arp downstream, so it captures THAT player's song +
+  // your live keys (the combined post-arp stream) and loops it back into that synth only.
+  // The firmware keeps one selected target (recSel()/@RECV), so a player's button points it at
+  // its own voice first, then acts — that way the two players' record controls never collide.
+  type RecDeckT = { st: number; prog: number; record: () => void; overdub: () => void; stop: () => void; clear: () => void };
+  const recDeck = (v: 1 | 2): RecDeckT => {
+    const st = v === 2 ? rec.st2 : rec.st1;
+    const prog = v === 2 ? rec.p2 : rec.p1;
+    // Optimistic local state (the device's @RECP push corrects it); also mirrors the voice
+    // selection so the standalone Loop Recorder card stays in step with whichever player acted.
+    const setSt = (s: number) => setRec(r => (v === 2 ? { ...r, v, st2: s } : { ...r, v, st1: s }));
+    const aim = () => tp.recVoice(v);   // always send @RECV (idempotent, cheap) — never trust stale rec.v
+    return {
+      st, prog,
+      record:  () => { aim(); tp.recArm(true);     setSt(1); },
+      overdub: () => { aim(); tp.recOverdub(true); setSt(3); },
+      stop:    () => { aim(); tp.recArm(false);    setSt(st === 2 || st === 3 ? 4 : 0); },
+      clear:   () => { aim(); tp.recClear();       setSt(0); },
+    };
+  };
+  // The record row shown inside a MIDI player's page: Record / Overdub / Stop / Clear + live state.
+  const recRow = (v: 1 | 2) => {
+    const d = recDeck(v);
+    const armed = d.st === 1, capturing = d.st === 2 || d.st === 3;
+    return (
+      <>
+        <Text style={s.sectionLbl}>Loop recorder</Text>
+        <Row>
+          <Pressable style={[s.btn, s.grow1, (armed || capturing) && s.btnRecOn]} onPress={d.record}>
+            <Text style={s.btnText}>●  Record</Text>
+          </Pressable>
+          <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={d.overdub}><Text style={s.btnText}>＋  Overdub</Text></Pressable>
+          <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={d.stop}><Text style={s.btnText}>■  Stop</Text></Pressable>
+          <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={d.clear}><Text style={s.btnText}>✕  Clear</Text></Pressable>
+        </Row>
+        <Text style={s.muted}>
+          {REC_STATES[d.st]}{d.st === 0 ? ' — captures this synth’s song + your live keys, then loops it.' : ''}
+        </Text>
+        {d.st > 0 && <ProgressBar value={d.prog} />}
+      </>
+    );
+  };
+
+  // These section bodies (+ their header transport rows) are shared: each drives its own
+  // standalone card/page AND the combined "Synthesizer" tabbed page, so there's a single
+  // source of truth for the MIDI-player, Synth/Voices, and Arpeggiator UIs (see the submenus).
+  const playerActions = (<>
+    <HdrBtn label="‹" stop onPress={() => stepSong(-1)} />
+    <HdrBtn label="›" stop onPress={() => stepSong(1)} />
+    <HdrBtn label="▶" onPress={playSong} />
+    <HdrBtn label="■" stop onPress={stopSong} />
+    <HdrBtn label={(END_MODES.find(m => m.key === endMode) || END_MODES[3]).icon} stop onPress={cycleEndMode} />
+  </>);
+  const playerBody = (
+    <>
+      <VolSlider label="Volume" value={songVol} onChange={setSongVol} onCommit={v => tp.songVol(v)} disabled={!connected} />
+      {cat.songs.length === 0 ? <Text style={s.muted}>No songs indexed.</Text> : (
+        <ScrollView style={s.list} nestedScrollEnabled>
+          {cat.songs.map(sg => <ListBtn key={sg.file || sg.name} label={(player.playing && player.song === sg.name ? '♪ ' : '') + sg.name} sel={player.song === sg.name}
+            onPress={() => setPlayer(p => ({ ...p, song: sg.name }))} />)}
+        </ScrollView>
+      )}
+      <Row><Text style={[s.muted, { flex: 1 }]}>When finished</Text>
+        {END_MODES.map(m => (
+          <Pressable key={m.key} style={[s.pill, endMode === m.key && s.pillOn]} onPress={() => applyEndMode(m.key)}>
+            <Text style={s.text}>{m.icon}  {m.label}</Text>
+          </Pressable>
+        ))}</Row>
+      {caps.rec && recRow(1)}
+    </>
+  );
+  // MIDI Player 2 — a clone of the above driving @SONG2* + player2 state. Its Volume is the
+  // voice-2 bus (@VOICE2VOL, shared with the Synth / Voices 2 card), so two songs play at once.
+  const player2Actions = (<>
+    <HdrBtn label="‹" stop onPress={() => stepSong2(-1)} />
+    <HdrBtn label="›" stop onPress={() => stepSong2(1)} />
+    <HdrBtn label="▶" onPress={playSong2} />
+    <HdrBtn label="■" stop onPress={stopSong2} />
+    <HdrBtn label={(END_MODES.find(m => m.key === endMode2) || END_MODES[3]).icon} stop onPress={cycleEndMode2} />
+  </>);
+  const player2Body = (
+    <>
+      <VolSlider label="Volume" value={voice2.vol} onChange={v => setVoice2(x => ({ ...x, vol: v }))} onCommit={v => tp.voice2Vol(v)} disabled={!connected} />
+      <Text style={s.muted}>Plays on the Synthesizer B (voice-2) side — layered with Player 1. Volume is the shared voice-2 level.</Text>
+      {cat.songs.length === 0 ? <Text style={s.muted}>No songs indexed.</Text> : (
+        <ScrollView style={s.list} nestedScrollEnabled>
+          {cat.songs.map(sg => <ListBtn key={sg.file || sg.name} label={(player2.playing && player2.song === sg.name ? '♪ ' : '') + sg.name} sel={player2.song === sg.name}
+            onPress={() => setPlayer2(p => ({ ...p, song: sg.name }))} />)}
+        </ScrollView>
+      )}
+      <Row><Text style={[s.muted, { flex: 1 }]}>When finished</Text>
+        {END_MODES.map(m => (
+          <Pressable key={m.key} style={[s.pill, endMode2 === m.key && s.pillOn]} onPress={() => applyEndMode2(m.key)}>
+            <Text style={s.text}>{m.icon}  {m.label}</Text>
+          </Pressable>
+        ))}</Row>
+      {caps.rec && caps.voice2 && recRow(2)}
+    </>
+  );
+  const synthActions = (<>
+    <HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1)} />
+    <HdrBtn label="Next ›" stop onPress={() => stepVoice(1)} />
+  </>);
+  const synthBody = (
+    <View style={s.synthWrap}>
+      {/* Synth output level — the same control as the MIDI Player's Volume (both drive
+          @SONGVOL, the synth mix-bus fader), surfaced here since this is the synth page. */}
+      <VolSlider label="Volume" value={songVol} onChange={setSongVol} onCommit={v => tp.songVol(v)} disabled={!connected} />
+      {voiceBrowserBody(1)}
+    </View>
+  );
+  // Voices-2 (keyboard-split) body/actions — shared by the standalone Synth/Voices 2 card and
+  // the Synthesizer B tabbed page.
+  const synth2Actions = (<>
+    <HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1, 2)} />
+    <HdrBtn label="Next ›" stop onPress={() => stepVoice(1, 2)} />
+  </>);
+  const synth2Body = (
+    <View style={s.synthWrap}>
+      {/* Enable the split: engines 0-3 keep voice 1 (song/arp/drums), engines 4-7 become
+          this voice, played live by a USB-host keyboard. Off = one unified 16-voice pool. */}
+      <Row><View style={{ flex: 1 }}>
+          <Text style={s.text}>Enable Voices 2 (keyboard split)</Text>
+          <Text style={s.muted}>Breaks a USB keyboard off to this voice. Each side drops to 8-voice polyphony.</Text>
+        </View>
+        <Switch value={voice2.on} onValueChange={v => { setVoice2(x => ({ ...x, on: v })); tp.voice2Enable(v); }} /></Row>
+      <VolSlider label="Volume" value={voice2.vol} onChange={v => setVoice2(x => ({ ...x, vol: v }))} onCommit={v => tp.voice2Vol(v)} disabled={!connected || !voice2.on} />
+      {voiceBrowserBody(2)}
+    </View>
+  );
+  // Tempo / Drums / Metronome bodies + actions — shared by the standalone cards (if shown) and
+  // the unified "Tempo" tabbed page (single source of truth).
+  const tempoActions = (<>
+    <HdrBtn label="−" stop onPress={() => stepBpm(-1)} />
+    <HdrBtn label="＋" onPress={() => stepBpm(1)} />
+  </>);
+  const tempoBody = (
+    <>
+      <Text style={{ color: C.text, textAlign: 'center', fontSize: 30, fontWeight: '800' }}>{Math.round(bpm)} <Text style={{ fontSize: 15, color: C.muted }}>BPM</Text></Text>
+      <View style={s.volRow}>
+        <Pressable style={s.pill} onPress={() => stepBpm(-1)}><Text style={s.text}>−</Text></Pressable>
+        <Slider style={{ flex: 1, height: 34 }} minimumValue={40} maximumValue={240} step={1} value={bpm}
+          minimumTrackTintColor={C.accent} maximumTrackTintColor={C.border} thumbTintColor={C.accent}
+          onValueChange={setBpm} onSlidingComplete={b => tp.masterBpm(b)} />
+        <Pressable style={s.pill} onPress={() => stepBpm(1)}><Text style={s.text}>＋</Text></Pressable>
+      </View>
+      <Pressable style={[s.btn, s.btnGhost]} onPress={() => { const b = player.playing ? songBpm : 120; setBpm(b); tp.masterBpm(b); }}>
+        <Text style={s.btnText}>Reset → {player.playing ? songBpm + ' (playing song)' : '120'} BPM</Text></Pressable>
+      <Text style={s.muted}>Master tempo — the MIDI song player and drum grooves lock to this. It auto-follows a song's detected tempo on play.</Text>
+      <Row><View style={{ flex: 1 }}>
+          <Text style={s.text}>Launch quantize</Text>
+          <Text style={s.muted}>Start songs & grooves on the next bar so they lock together.</Text>
+        </View>
+        <Switch value={quant} onValueChange={v => { setQuant(v); tp.launchQuantize(v); }} /></Row>
+    </>
+  );
+  const metroActions = (<>
+    <HdrBtn label="▶" onPress={playMetro} />
+    <HdrBtn label="■" stop onPress={stopMetro} />
+  </>);
+  const metroBody = (
+    <>
+      {/* Independent Play/Stop (not a toggle): Play re-triggers the count from beat 1
+          even while running; Stop silences it. Active state = which button is lit. */}
+      <Row>
+        <Pressable style={[s.btn, s.grow1, metro.on && s.btnOn]} onPress={playMetro}>
+          <Text style={s.btnText}>▶  {metro.on ? 'Restart' : 'Play'}</Text>
+        </Pressable>
+        <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={stopMetro}>
+          <Text style={s.btnText}>■  Stop</Text>
+        </Pressable>
+      </Row>
+      <Text style={s.muted}>Play starts on the downbeat — the beat lights light beat 1 and count forward from there. Runs at the master tempo ({Math.round(bpm)} BPM); set it on the Tempo tab.</Text>
+      <Text style={[s.text, { marginTop: 6 }]}>Click volume</Text>
+      <VolSlider label="Volume" value={metro.vol} onChange={v => setMetro(m => ({ ...m, vol: v }))} onCommit={v => tp.metronomeVol(v)} disabled={!connected} />
+      <Text style={[s.text, { marginTop: 6 }]}>Time signature</Text>
+      <Text style={s.muted}>Beats per bar — the click accents beat 1 of each bar. The metronome runs on its own clock, so this is independent of any song or groove that's playing.</Text>
+      <Row>
+        {[2, 3, 4, 5, 6, 7].map(n => (
+          <Pressable key={n} style={[s.pill, metro.sig === n && s.pillOn]}
+            onPress={() => { setMetro(m => ({ ...m, sig: n })); tp.metronomeSig(n); }}>
+            <Text style={s.text}>{n}/4</Text>
+          </Pressable>
+        ))}
+      </Row>
+    </>
+  );
+  const drumsActions = (<>
+    <HdrBtn label="‹" stop onPress={() => stepGroove(-1)} />
+    <HdrBtn label="›" stop onPress={() => stepGroove(1)} />
+    <HdrBtn label="▶" onPress={playGroove} />
+    <HdrBtn label="■" stop onPress={stopDrums} />
+  </>);
+  const drumsBody = (
+    <>
+      <VolSlider label="Volume" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />
+      <Row><Text style={[s.muted, { flex: 1 }]}>Kit: {cat.drumkits[drums.kit]?.name || '—'}</Text>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+          {cat.drumkits.map((k, i) => <Pressable key={i} style={[s.pill, drums.kit === i && s.pillOn]} onPress={() => { setDrums(d => ({ ...d, kit: i })); tp.drumKit(i); }}><Text style={s.text}>{k.name}</Text></Pressable>)}
+        </ScrollView></Row>
+      <TextInput style={s.input} placeholder="Search grooves…" placeholderTextColor={C.muted}
+        value={q.groove} onChangeText={t => setQ(x => ({ ...x, groove: t }))} />
+      {cat.grooves.length === 0 ? <Text style={s.muted}>No grooves indexed.</Text> : (
+        <ScrollView style={s.list} nestedScrollEnabled>
+          {grooves.map(g => <ListBtn key={g.path} label={(drums.playing === g.name ? '♪ ' : '') + g.name} sel={drums.sel === g.path}
+            onPress={() => { setDrums(d => ({ ...d, sel: g.path })); persistApp({ groove: g.path }); }} />)}
+        </ScrollView>
+      )}
+      <Row>
+        <Pressable style={[s.btn, s.grow1]} disabled={!drums.sel} onPress={playGroove}><Text style={s.btnText}>▶ Play</Text></Pressable>
+        <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={stopDrums}><Text style={s.btnText}>■ Stop</Text></Pressable>
+      </Row>
+    </>
+  );
+
+  // ---- Audio loop controls (see planning/audio-looper/DESIGN.md) --------------
+  // N independent audio loops record the MASTER MIX (not MIDI). aloop.sel is the loop the
+  // buttons act on. Recording starts on the next bar downbeat (no "play a note" wait —
+  // audio has no note-on), so the armed label differs from the MIDI recorder's.
+  const AL_STATES = ['Empty', 'Armed — starts on the next bar', 'Recording', 'Overdubbing', 'Looping'];
+  const alSt = () => aloop.st[aloop.sel] ?? 0;
+  const alProg = () => aloop.p[aloop.sel] ?? 0;
+  const setAlSt = (st: number) => setAloop(a => ({ ...a, st: a.st.map((v, i) => (i === a.sel ? st : v)) }));
+  const setAlSel = (i: number) => { setAloop(a => ({ ...a, sel: i })); tp.audioLoopSel(i); };
+  const setAlBars = (n: number) => { setAloop(a => ({ ...a, bars: n })); tp.audioLoopBars(n); };
+  const setAlMono = (on: boolean) => { setAloop(a => ({ ...a, mono: on })); tp.audioLoopMono(on); };
+  const setAlFollow = (on: boolean) => { setAloop(a => ({ ...a, follow: on })); tp.audioLoopFollow(on); };
+  const alRecord = () => { tp.audioLoopArm(true); setAlSt(1); };
+  const alOverdub = () => { tp.audioLoopOverdub(true); setAlSt(3); };
+  const alStopBtn = () => { const st = alSt(); tp.audioLoopArm(false); setAlSt(st === 2 || st === 3 ? 4 : 0); };
+  const alClearBtn = () => { tp.audioLoopClear(); setAlSt(0); };
+  const alSaveBtn = () => tp.audioLoopSave('loop' + (aloop.sel + 1));
+  // How long `bars` will be at the current tempo/meter — used to grey out lengths that
+  // exceed this loop's buffer (the no-PSRAM board only fits ~1 s).
+  const alBarsSecs = (n: number) => (n * metro.sig * 60) / Math.max(1, bpm);
+  const alFits = (n: number) => aloop.capS <= 0 || alBarsSecs(n) <= aloop.capS + 0.01;
+
+  // ---- Loop recorder controls (see project_midi_loop_recorder) ----------------
+  // Per-voice state; the selected voice (rec.v) is what the transport buttons act on.
+  // Local state is updated optimistically on tap so the card feels instant on every
+  // transport; the device's @RECP push then corrects it (live over USB).
+  const recSt = () => (rec.v === 2 ? rec.st2 : rec.st1);
+  const recProg = () => (rec.v === 2 ? rec.p2 : rec.p1);
+  const setRecSt = (st: number) => setRec(r => (r.v === 2 ? { ...r, st2: st } : { ...r, st1: st }));
+  const setRecVoice = (v: 1 | 2) => { setRec(r => ({ ...r, v })); tp.recVoice(v); };
+  const setRecBars = (n: number) => { setRec(r => ({ ...r, bars: n })); tp.recBars(n); };
+  const setRecSig = (n: number) => { setMetro(m => ({ ...m, sig: n })); tp.recSig(n); };   // record sig == master meter
+  const recRecord = () => { tp.recArm(true); setRecSt(1); };                                 // arm a fresh (replace) take
+  const recOverdub = () => { tp.recOverdub(true); setRecSt(3); };                            // layer onto the existing loop
+  const recStopBtn = () => { const st = recSt(); tp.recArm(false); setRecSt(st === 2 || st === 3 ? 4 : 0); };  // capturing -> loop; else stop
+  const recClearBtn = () => { tp.recClear(); setRecSt(0); };
+
   const sections: Section[] = [
-    // CONNECTION — catalog stats
+    // CONNECTION — catalog stats. A Settings sub-page (reached from the Settings submenu).
     {
-      id: 'conn', title: 'Connection', show: true, status: cat.engine || 'connected',
+      id: 'conn', title: 'Connection', show: false, parent: 'settings', status: cat.engine || 'connected',
       body: (
         <>
           <Text style={s.muted}>Synth: <Text style={s.text}>{cat.engine || '—'}</Text>   ·   Transport: {tp.name}</Text>
@@ -849,7 +1224,7 @@ export default function App() {
     },
     // BLUETOOTH
     {
-      id: 'bt', title: 'Bluetooth', show: cat.hasBt, status: bt.conn ? 'connected' + (bt.peer ? ': ' + bt.peer : '') : 'off',
+      id: 'bt', title: 'Bluetooth', show: cat.hasBt, accent: THEME.bt.accent, tint: THEME.bt.tint, status: bt.conn ? 'connected' + (bt.peer ? ': ' + bt.peer : '') : 'off',
       body: (
         <>
           <Text style={s.muted}>{bt.conn ? 'Connected: ' + (bt.peer || 'source') : 'No audio source connected'}</Text>
@@ -866,93 +1241,38 @@ export default function App() {
         </>
       ),
     },
-    // TEMPO / BPM — master tempo; song + drums lock to it (@BPM=)
+    // UNIFIED TEMPO — a submenu grouping Tempo, Drums, and Metronome. Its page lists them as the
+    // original cards (keeping their quick-action shortcuts); tapping one opens that child's own
+    // existing page (Back returns here). The children are gated the same as before: Drums on a
+    // drum-capable build, Metronome on a @METRO-capable build.
     {
-      id: 'bpm', title: 'Tempo', show: true, value: Math.round(bpm) + ' BPM',
-      actions: (<>
-        <HdrBtn label="−" stop onPress={() => stepBpm(-1)} />
-        <HdrBtn label="＋" onPress={() => stepBpm(1)} />
-      </>),
-      body: (
-        <>
-          <Text style={{ color: C.text, textAlign: 'center', fontSize: 30, fontWeight: '800' }}>{Math.round(bpm)} <Text style={{ fontSize: 15, color: C.muted }}>BPM</Text></Text>
-          <View style={s.volRow}>
-            <Pressable style={s.pill} onPress={() => stepBpm(-1)}><Text style={s.text}>−</Text></Pressable>
-            <Slider style={{ flex: 1, height: 34 }} minimumValue={40} maximumValue={240} step={1} value={bpm}
-              minimumTrackTintColor={C.accent} maximumTrackTintColor={C.border} thumbTintColor={C.accent}
-              onValueChange={setBpm} onSlidingComplete={b => tp.masterBpm(b)} />
-            <Pressable style={s.pill} onPress={() => stepBpm(1)}><Text style={s.text}>＋</Text></Pressable>
-          </View>
-          <Pressable style={[s.btn, s.btnGhost]} onPress={() => { const b = player.playing ? songBpm : 120; setBpm(b); tp.masterBpm(b); }}>
-            <Text style={s.btnText}>Reset → {player.playing ? songBpm + ' (playing song)' : '120'} BPM</Text></Pressable>
-          <Text style={s.muted}>Master tempo — the MIDI song player and drum grooves lock to this. It auto-follows a song's detected tempo on play.</Text>
-          <Row><View style={{ flex: 1 }}>
-              <Text style={s.text}>Launch quantize</Text>
-              <Text style={s.muted}>Start songs & grooves on the next bar so they lock together.</Text>
-            </View>
-            <Switch value={quant} onValueChange={v => { setQuant(v); tp.launchQuantize(v); }} /></Row>
-        </>
-      ),
+      id: 'tempo', title: 'Tempo', show: true, value: Math.round(bpm) + ' BPM', accent: THEME.tempo.accent, tint: THEME.tempo.tint,
+      body: <SubMenu getItems={() => sections.filter(x => x.parent === 'tempo').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.tempo.accent} tint={THEME.tempo.tint} />,
     },
-    // METRONOME — on-beat click locked to the master clock. Shown only on builds that
-    // report @METRO support (metro.cap, set from @STATE). Follows the master BPM + the
-    // playing content's meter automatically — it's a pure clock consumer, no own tempo.
+    // TEMPO / BPM — master tempo; song + drums lock to it (@BPM=). A Tempo sub-page.
     {
-      id: 'metro', title: 'Metronome', show: metro.cap, value: metro.on ? 'Playing' : 'Paused',
-      actions: (<>
-        <HdrBtn label="▶" onPress={playMetro} />
-        <HdrBtn label="■" stop onPress={stopMetro} />
-      </>),
-      body: (
-        <>
-          {/* Independent Play/Stop (not a toggle): Play re-triggers the count from beat 1
-              even while running; Stop silences it. Active state = which button is lit. */}
-          <Row>
-            <Pressable style={[s.btn, s.grow1, metro.on && s.btnOn]} onPress={playMetro}>
-              <Text style={s.btnText}>▶  {metro.on ? 'Restart' : 'Play'}</Text>
-            </Pressable>
-            <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={stopMetro}>
-              <Text style={s.btnText}>■  Stop</Text>
-            </Pressable>
-          </Row>
-          <Text style={s.muted}>Play starts on the downbeat — the beat lights light beat 1 and count forward from there. Runs at the master tempo ({Math.round(bpm)} BPM); set it on the Tempo card.</Text>
-          <Text style={[s.text, { marginTop: 6 }]}>Click volume</Text>
-          <VolSlider label="Volume" value={metro.vol} onChange={v => setMetro(m => ({ ...m, vol: v }))} onCommit={v => tp.metronomeVol(v)} disabled={!connected} />
-          <Text style={[s.text, { marginTop: 6 }]}>Time signature</Text>
-          <Text style={s.muted}>Beats per bar — the click accents beat 1 of each bar. The metronome runs on its own clock, so this is independent of any song or groove that's playing.</Text>
-          <Row>
-            {[2, 3, 4, 5, 6, 7].map(n => (
-              <Pressable key={n} style={[s.pill, metro.sig === n && s.pillOn]}
-                onPress={() => { setMetro(m => ({ ...m, sig: n })); tp.metronomeSig(n); }}>
-                <Text style={s.text}>{n}/4</Text>
-              </Pressable>
-            ))}
-          </Row>
-        </>
-      ),
+      id: 'bpm', title: 'Tempo', show: false, parent: 'tempo', value: Math.round(bpm) + ' BPM',
+      actions: tempoActions,
+      body: tempoBody,
+    },
+    // METRONOME — on-beat click locked to the master clock. A Tempo sub-page (metro.cap builds).
+    {
+      id: 'metro', title: 'Metronome', show: false, parent: metro.cap ? 'tempo' : undefined, value: metro.on ? 'Playing' : 'Paused',
+      actions: metroActions,
+      body: metroBody,
     },
     // SYNTH / VOICES — folder browser over bundled voices + the whole /dexed library
     {
-      id: 'synth', title: 'Synth / Voices', show: true, value: synthValue, subtitle: synthSubtitle, fullHeight: true,
+      id: 'synth', title: 'Synth / Voices', show: false, parent: 'synthesizer', accent: THEME.synthA.accent, tint: THEME.synthA.tint, value: synthValue, subtitle: synthSubtitle, fullHeight: true,   // Synthesizer A sub-page
       topRight: kbdBtn(1),
-      actions: (<>
-        <HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1)} />
-        <HdrBtn label="Next ›" stop onPress={() => stepVoice(1)} />
-      </>),
-      body: (
-        <View style={s.synthWrap}>
-          {/* Synth output level — the same control as the MIDI Player's Volume (both drive
-              @SONGVOL, the synth mix-bus fader), surfaced here since this is the synth page. */}
-          <VolSlider label="Volume" value={songVol} onChange={setSongVol} onCommit={v => tp.songVol(v)} disabled={!connected} />
-          {voiceBrowserBody(1)}
-        </View>
-      ),
+      actions: synthActions,
+      body: synthBody,
     },
     // SYNTH / VOICES 2 — build-flag gated (caps.voice2). A full clone of the Synth/Voices
     // page (same folder browser) plus an on/off split toggle: engines 0-3 keep voice 1
     // (song/arp/drums), engines 4-7 are this voice, played live by a USB-host keyboard.
     {
-      id: 'synth2', title: 'Synth / Voices 2', show: caps.voice2, fullHeight: true, accent: C.accent2,
+      id: 'synth2', title: 'Synth / Voices 2', show: false, parent: 'synthesizerB', fullHeight: true, accent: THEME.synthB.accent, tint: THEME.synthB.tint,   // Synthesizer B sub-page
       topRight: kbdBtn(2),
       value: (voice2.on ? '' : '(off)  ') + (voice2.name || 'None'),
       subtitle: voice2.name ? (
@@ -961,102 +1281,166 @@ export default function App() {
           {!!voice2.path && <Text style={s.pathLine} numberOfLines={1} ellipsizeMode="head">{voice2.path}</Text>}
         </>
       ) : undefined,
-      actions: (<>
-        <HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1, 2)} />
-        <HdrBtn label="Next ›" stop onPress={() => stepVoice(1, 2)} />
-      </>),
-      body: (
-        <View style={s.synthWrap}>
-          {/* Enable the split: engines 0-3 keep voice 1 (song/arp/drums), engines 4-7 become
-              this voice, played live by a USB-host keyboard. Off = one unified 16-voice pool. */}
-          <Row><View style={{ flex: 1 }}>
-              <Text style={s.text}>Enable Voices 2 (keyboard split)</Text>
-              <Text style={s.muted}>Breaks a USB keyboard off to this voice. Each side drops to 8-voice polyphony.</Text>
-            </View>
-            <Switch value={voice2.on} onValueChange={v => { setVoice2(x => ({ ...x, on: v })); tp.voice2Enable(v); }} /></Row>
-          <VolSlider label="Volume" value={voice2.vol} onChange={v => setVoice2(x => ({ ...x, vol: v }))} onCommit={v => tp.voice2Vol(v)} disabled={!connected || !voice2.on} />
-          {voiceBrowserBody(2)}
-        </View>
-      ),
+      actions: synth2Actions,
+      body: synth2Body,
     },
-    // MIDI PLAYER — select a song; Play/Stop in the header (works collapsed); loop toggle
+    // SYNTHESIZER A — a submenu grouping the main voice-1 side: MIDI Player, Synth/Voices, and
+    // Arpeggiator. Its page lists them as the original cards (keeping their quick-action shortcuts);
+    // tapping one opens that child's own existing page (Back returns here).
     {
-      id: 'player', title: 'MIDI Player', show: true,
-      value: (player.playing ? '♪ ' : '') + (player.song || '—'),
-      progress: player.playing && player.prog >= 0 ? player.prog : undefined,   // bar shows only once the device reports a position
-      actions: (<>
-        <HdrBtn label="‹" stop onPress={() => stepSong(-1)} />
-        <HdrBtn label="›" stop onPress={() => stepSong(1)} />
-        <HdrBtn label="▶" onPress={playSong} />
-        <HdrBtn label="■" stop onPress={stopSong} />
-        <HdrBtn label={(END_MODES.find(m => m.key === endMode) || END_MODES[3]).icon} stop onPress={cycleEndMode} />
-      </>),
-      body: (
+      id: 'synthesizer', title: 'Synthesizer A', show: true, value: synthValue, subtitle: synthSubtitle,
+      accent: THEME.synthA.accent, tint: THEME.synthA.tint,
+      topRight: kbdBtn(1),   // keyboard-ownership icon: tap to route the USB MIDI controller to this (voice-1) synth
+      body: <SubMenu getItems={() => sections.filter(x => x.parent === 'synthesizer').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.synthA.accent} tint={THEME.synthA.tint} />,
+    },
+    // SYNTHESIZER B — the keyboard-split voice-2 side as a submenu: Synth/Voices 2 and Arpeggiator 2.
+    // No MIDI (single song player). Card shows on caps.voice2; the Arpeggiator 2 child only joins the
+    // submenu when caps.arp2 is compiled in (its parent is set conditionally below).
+    {
+      id: 'synthesizerB', title: 'Synthesizer B', show: caps.voice2, accent: THEME.synthB.accent, tint: THEME.synthB.tint,
+      topRight: kbdBtn(2),
+      value: (voice2.on ? '' : '(off)  ') + (voice2.name || 'None'),
+      subtitle: voice2.name ? (
         <>
-          <VolSlider label="Volume" value={songVol} onChange={setSongVol} onCommit={v => tp.songVol(v)} disabled={!connected} />
-          {cat.songs.length === 0 ? <Text style={s.muted}>No songs indexed.</Text> : (
-            <ScrollView style={s.list} nestedScrollEnabled>
-              {cat.songs.map(sg => <ListBtn key={sg.file || sg.name} label={(player.playing && player.song === sg.name ? '♪ ' : '') + sg.name} sel={player.song === sg.name}
-                onPress={() => setPlayer(p => ({ ...p, song: sg.name }))} />)}
-            </ScrollView>
-          )}
-          <Row><Text style={[s.muted, { flex: 1 }]}>When finished</Text>
-            {END_MODES.map(m => (
-              <Pressable key={m.key} style={[s.pill, endMode === m.key && s.pillOn]} onPress={() => applyEndMode(m.key)}>
-                <Text style={s.text}>{m.icon}  {m.label}</Text>
-              </Pressable>
-            ))}</Row>
+          <Text style={s.drawerValue} numberOfLines={1}>{voice2.name}</Text>
+          {!!voice2.path && <Text style={s.pathLine} numberOfLines={1} ellipsizeMode="head">{voice2.path}</Text>}
         </>
-      ),
+      ) : undefined,
+      body: <SubMenu getItems={() => sections.filter(x => x.parent === 'synthesizerB').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.synthB.accent} tint={THEME.synthB.tint} />,
     },
-    // ARPEGGIATOR
+    // AUDIO LOOP — gated on caps.audioloop (the COUNT of loops the device could allocate;
+    // 0 on a board with no spare RAM). Records the MASTER MIX as audio (not MIDI) into
+    // bar-locked, crossfaded loops. See planning/audio-looper/DESIGN.md.
     {
-      id: 'arp', title: 'Arpeggiator', show: true,
-      value: arpValue(arpSlot1), actions: arpActions(arpSlot1),
-      body: arpBody(arpSlot1),
-    },
-    // ARPEGGIATOR 2 — build-flag gated (caps.arp2). A full clone of the arp, on the Voices-2
-    // keyboard voice only (@ARP2*); the main arp is untouched.
-    {
-      id: 'arp2', title: 'Arpeggiator 2', show: caps.arp2, accent: C.accent2,
-      value: arpValue(arpSlot2), actions: arpActions(arpSlot2),
-      body: arpBody(arpSlot2),
-    },
-    // DRUMS — only if the built engine renders ch10 drums (hidden e.g. on a no-PSRAM TSF build)
-    {
-      id: 'drums', title: 'Drums', show: cat.hasDrums,
-      value: drums.playing ? '♪ ' + drums.playing : (cat.grooves.find(g => g.path === drums.sel)?.name || cat.drumkits[drums.kit]?.name || '—'),
+      id: 'audioloop', title: 'Audio Loop', show: caps.audioloop > 0,
+      accent: THEME.audioloop.accent, tint: THEME.audioloop.tint,
+      value: (caps.audioloop > 1 ? 'Loop ' + (aloop.sel + 1) + ' · ' : '') + AL_STATES[alSt()]
+             + '  ·  ' + aloop.bars + ' bar' + (aloop.bars > 1 ? 's' : '') + (aloop.mono ? ' · mono' : ''),
+      progress: alSt() >= 2 ? alProg() : undefined,
       actions: (<>
-        <HdrBtn label="‹" stop onPress={() => stepGroove(-1)} />
-        <HdrBtn label="›" stop onPress={() => stepGroove(1)} />
-        <HdrBtn label="▶" onPress={playGroove} />
-        <HdrBtn label="■" stop onPress={stopDrums} />
+        <HdrBtn label="●" onPress={alRecord} />
+        <HdrBtn label="■" stop onPress={alStopBtn} />
       </>),
       body: (
         <>
-          <VolSlider label="Volume" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />
-          <Row><Text style={[s.muted, { flex: 1 }]}>Kit: {cat.drumkits[drums.kit]?.name || '—'}</Text>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              {cat.drumkits.map((k, i) => <Pressable key={i} style={[s.pill, drums.kit === i && s.pillOn]} onPress={() => { setDrums(d => ({ ...d, kit: i })); tp.drumKit(i); }}><Text style={s.text}>{k.name}</Text></Pressable>)}
-            </ScrollView></Row>
-          <TextInput style={s.input} placeholder="Search grooves…" placeholderTextColor={C.muted}
-            value={q.groove} onChangeText={t => setQ(x => ({ ...x, groove: t }))} />
-          {cat.grooves.length === 0 ? <Text style={s.muted}>No grooves indexed.</Text> : (
-            <ScrollView style={s.list} nestedScrollEnabled>
-              {grooves.map(g => <ListBtn key={g.path} label={(drums.playing === g.name ? '♪ ' : '') + g.name} sel={drums.sel === g.path}
-                onPress={() => { setDrums(d => ({ ...d, sel: g.path })); persistApp({ groove: g.path }); }} />)}
-            </ScrollView>
+          <Text style={s.muted}>Records the actual audio coming out of the device — everything in the mix. Hit Record and it starts capturing on the next bar downbeat, then loops seamlessly. Overdub layers more on top.</Text>
+          {caps.audioloop > 1 && (
+            <Row><Text style={[s.muted, { flex: 1 }]}>Loop</Text>
+              {Array.from({ length: caps.audioloop }, (_, i) => (
+                <Pressable key={i} style={[s.pill, aloop.sel === i && s.pillOn]} onPress={() => setAlSel(i)}>
+                  <Text style={s.text}>{i + 1}{aloop.st[i] >= 2 ? ' ♪' : ''}</Text>
+                </Pressable>))}
+            </Row>
           )}
+          <Row><Text style={[s.muted, { flex: 1 }]}>Bars</Text>
+            {[1, 2, 4, 8].map(n => (
+              <Pressable key={n} style={[s.pill, aloop.bars === n && s.pillOn, !alFits(n) && { opacity: 0.35 }]}
+                disabled={!alFits(n)} onPress={() => setAlBars(n)}>
+                <Text style={s.text}>{n}</Text>
+              </Pressable>))}
+          </Row>
+          <Text style={s.muted}>
+            {aloop.bars} bar{aloop.bars > 1 ? 's' : ''} ≈ {alBarsSecs(aloop.bars).toFixed(1)}s
+            {aloop.capS > 0 ? '  ·  room for ' + aloop.capS.toFixed(1) + 's' + (aloop.mono ? ' (mono)' : '') : ''}
+          </Text>
+          <Row><View style={{ flex: 1 }}>
+              <Text style={s.text}>Mono</Text>
+              <Text style={s.muted}>Half the memory — twice the loop length.</Text>
+            </View>
+            <Switch value={aloop.mono} onValueChange={setAlMono} /></Row>
+          <Row><View style={{ flex: 1 }}>
+              <Text style={s.text}>Follow tempo</Text>
+              <Text style={s.muted}>Keeps the loop locked to the master BPM; pitch shifts with tempo.</Text>
+            </View>
+            <Switch value={aloop.follow} onValueChange={setAlFollow} /></Row>
           <Row>
-            <Pressable style={[s.btn, s.grow1]} disabled={!drums.sel} onPress={playGroove}><Text style={s.btnText}>▶ Play</Text></Pressable>
-            <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={stopDrums}><Text style={s.btnText}>■ Stop</Text></Pressable>
+            <Pressable style={[s.btn, s.grow1, alSt() === 2 && s.btnOn]} onPress={alRecord}><Text style={s.btnText}>●  Record</Text></Pressable>
+            <Pressable style={[s.btn, s.grow1, alSt() === 3 && s.btnOn]} onPress={alOverdub}><Text style={s.btnText}>⊕  Overdub</Text></Pressable>
+            <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={alStopBtn}><Text style={s.btnText}>■  Stop</Text></Pressable>
+          </Row>
+          <Row>
+            <Text style={[s.text, { flex: 1 }]}>{AL_STATES[alSt()]}</Text>
+            <Pressable style={[s.btn, s.btnGhost]} onPress={alSaveBtn}><Text style={s.btnText}>Save .wav</Text></Pressable>
+            <Pressable style={[s.btn, s.btnGhost]} onPress={alClearBtn}><Text style={s.btnText}>Clear</Text></Pressable>
           </Row>
         </>
       ),
     },
-    // TAC5212 — codec output level + DAC high-pass filter
+    // LOOP RECORDER — build-flag gated (caps.rec). Records the active keyboard's baked arp
+    // output into a beat-locked 1/2/4/8-bar loop, per voice; loops it back immediately while
+    // the last-held notes ring out. A top-level performance card. See project_midi_loop_recorder.
     {
-      id: 'codec', title: 'TAC5212', show: true,
+      id: 'recorder', title: 'Loop Recorder', show: caps.rec, accent: THEME.recorder.accent, tint: THEME.recorder.tint,
+      value: (caps.voice2 ? (rec.v === 2 ? 'Synth B · ' : 'Synth A · ') : '') + REC_STATES[recSt()] + '  ·  ' + rec.bars + ' bar' + (rec.bars > 1 ? 's' : ''),
+      progress: recSt() >= 2 ? recProg() : undefined,   // fill while recording / phase while looping
+      actions: (<>
+        <HdrBtn label="●" onPress={recRecord} />
+        <HdrBtn label="■" stop onPress={recStopBtn} />
+      </>),
+      body: (
+        <>
+          <Text style={s.muted}>Records what the active keyboard plays — with the arpeggiator baked in — into a loop locked to the beat. Hit Record, then play: capture starts on your first note (preserving where it lands in the bar), and at the end the loop starts playing immediately while your last notes ring out.</Text>
+          {caps.voice2 && (
+            <Row><Text style={[s.muted, { flex: 1 }]}>Voice</Text>
+              {([1, 2] as const).map(v => <Pressable key={v} style={[s.pill, rec.v === v && s.pillOn]} onPress={() => setRecVoice(v)}><Text style={s.text}>Synth {v === 1 ? 'A' : 'B'}</Text></Pressable>)}</Row>
+          )}
+          <Row><Text style={[s.muted, { flex: 1 }]}>Bars</Text>
+            {[1, 2, 4, 8].map(n => <Pressable key={n} style={[s.pill, rec.bars === n && s.pillOn]} onPress={() => setRecBars(n)}><Text style={s.text}>{n}</Text></Pressable>)}</Row>
+          <Row><Text style={[s.muted, { flex: 1 }]}>Time signature</Text>
+            {[2, 3, 4, 5, 6, 7].map(n => <Pressable key={n} style={[s.pill, metro.sig === n && s.pillOn]} onPress={() => setRecSig(n)}><Text style={s.text}>{n}/4</Text></Pressable>)}</Row>
+          <Row>
+            <Pressable style={[s.btn, s.grow1, recSt() === 2 && s.btnOn]} onPress={recRecord}><Text style={s.btnText}>●  Record</Text></Pressable>
+            <Pressable style={[s.btn, s.grow1, recSt() === 3 && s.btnOn]} onPress={recOverdub}><Text style={s.btnText}>⊕  Overdub</Text></Pressable>
+            <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={recStopBtn}><Text style={s.btnText}>■  Stop</Text></Pressable>
+          </Row>
+          <Row>
+            <Text style={[s.text, { flex: 1 }]}>{REC_STATES[recSt()]}</Text>
+            <Pressable style={[s.btn, s.btnGhost]} onPress={recClearBtn}><Text style={s.btnText}>Clear</Text></Pressable>
+          </Row>
+          {caps.voice2 && <Text style={s.muted}>Synth A: {REC_STATES[rec.st1]}   ·   Synth B: {REC_STATES[rec.st2]}</Text>}
+        </>
+      ),
+    },
+    // MIDI PLAYER — select a song; Play/Stop in the header. A Synthesizer A sub-page.
+    {
+      id: 'player', title: 'MIDI Player', show: false, parent: 'synthesizer',
+      value: (player.playing ? '♪ ' : '') + (player.song || '—'),
+      progress: player.playing && player.prog >= 0 ? player.prog : undefined,   // bar shows only once the device reports a position
+      actions: playerActions,
+      body: playerBody,
+    },
+    // ARPEGGIATOR — a Synthesizer A sub-page.
+    {
+      id: 'arp', title: 'Arpeggiator', show: false, parent: 'synthesizer',
+      value: arpValue(arpSlot1), actions: arpActions(arpSlot1),
+      body: arpBody(arpSlot1),
+    },
+    // MIDI PLAYER 2 — the voice-2 song player (@SONG2*), so two songs play at once. A Synthesizer
+    // B sub-page; caps.voice2 gates the parent card, so this only appears on voice-2 builds.
+    {
+      id: 'player2', title: 'MIDI Player 2', show: false, parent: caps.voice2 ? 'synthesizerB' : undefined, accent: C.accent2,
+      value: (player2.playing ? '♪ ' : '') + (player2.song || '—'),
+      progress: player2.playing && player2.prog >= 0 ? player2.prog : undefined,
+      actions: player2Actions,
+      body: player2Body,
+    },
+    // ARPEGGIATOR 2 — build-flag gated (caps.arp2). A full clone of the arp, on the Voices-2
+    // keyboard voice only (@ARP2*); the main arp is untouched.
+    {
+      id: 'arp2', title: 'Arpeggiator 2', show: false, parent: caps.arp2 ? 'synthesizerB' : undefined, accent: C.accent2,   // Synthesizer B sub-page
+      value: arpValue(arpSlot2), actions: arpActions(arpSlot2),
+      body: arpBody(arpSlot2),
+    },
+    // DRUMS — only if the built engine renders ch10 drums. A Tempo sub-page (cat.hasDrums builds).
+    {
+      id: 'drums', title: 'Drums', show: false, parent: cat.hasDrums ? 'tempo' : undefined,
+      value: drums.playing ? '♪ ' + drums.playing : (cat.grooves.find(g => g.path === drums.sel)?.name || cat.drumkits[drums.kit]?.name || '—'),
+      actions: drumsActions,
+      body: drumsBody,
+    },
+    // TAC5212 — codec output level + DAC high-pass filter. A Settings sub-page (Settings submenu).
+    {
+      id: 'codec', title: 'TAC5212', show: false, parent: 'settings',
       value: (vol <= 0 ? 'Muted' : Math.round(vol) + ' / 100') + '  ·  HPF ' + HPF_MODES[hpf].label,
       actions: (<>
         <HdrBtn label="−" stop onPress={() => stepVol(-1)} />
@@ -1084,16 +1468,29 @@ export default function App() {
         </>
       ),
     },
+    // SETTINGS — a submenu grouping the system pages (Connection, TAC5212). Its page lists those
+    // as cards; tapping one opens that child's own existing page (Back returns here, per parent).
+    {
+      id: 'settings', title: 'Settings', show: true, status: 'system', accent: THEME.settings.accent, tint: THEME.settings.tint,
+      body: <SubMenu getItems={() => sections.filter(x => x.parent === 'settings')} onOpen={setRoute} accent={THEME.settings.accent} tint={THEME.settings.tint} />,
+    },
   ];
 
   // Display order (homepage cards + page routing). Performance sections first
   // (play → pick a voice → tempo → arp → drums), then system (connection, BT, codec).
   // Unlisted ids fall to the end in their definition order (stable sort).
-  const SECTION_ORDER = ['player', 'synth', 'synth2', 'bpm', 'metro', 'arp', 'arp2', 'drums', 'conn', 'bt', 'codec'];
+  // Order for the home grid AND for each submenu's children (SubMenu sorts by this too).
+  const SECTION_ORDER = ['synthesizer', 'synthesizerB', 'recorder', 'audioloop', 'tempo', 'bt', 'settings',
+    'player', 'synth', 'arp', 'synth2', 'player2', 'arp2', 'bpm', 'drums', 'metro', 'conn', 'codec'];
   const ord = (id: string) => { const i = SECTION_ORDER.indexOf(id); return i < 0 ? 999 : i; };
   const visible = sections.filter(x => x.show).sort((a, b) => ord(a.id) - ord(b.id));
-  const cur = route === 'home' ? null : visible.find(x => x.id === route);
-  const fullPages = visible.filter(x => x.fullHeight);   // kept mounted so their scroll/folder position survives navigation
+  // A routed page may be a home card OR a submenu sub-page (parent set, not in `visible`), so
+  // resolve it against ALL sections.
+  const cur = route === 'home' ? null : sections.find(x => x.id === route);
+  // Full-height pages stay mounted so their scroll/folder position survives navigation. Include
+  // routable sub-pages (parent set) too, not just home cards, so e.g. the Synth/Voices browser
+  // reached via a submenu still persists.
+  const fullPages = sections.filter(x => (x.show || x.parent) && x.fullHeight);
 
   return (
     <View style={s.app}>
@@ -1174,7 +1571,7 @@ export default function App() {
           {cur && !cur.fullHeight && (
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 400 }}>
               <View style={s.page}>
-                <PageHeader title={cur.title} value={cur.value} status={cur.status} subtitle={cur.subtitle} progress={cur.progress} actions={cur.actions} onBack={() => setRoute('home')} accent={cur.accent} topRight={cur.topRight} />
+                <PageHeader title={cur.title} value={cur.value} status={cur.status} subtitle={cur.subtitle} progress={cur.progress} actions={cur.actions} onBack={() => setRoute(cur.parent || 'home')} accent={cur.accent} topRight={cur.topRight} />
                 <View style={s.pageBody}>{cur.body}</View>
               </View>
             </ScrollView>
@@ -1184,7 +1581,7 @@ export default function App() {
                   selected folder AND the picker's scroll position persist across nav ===== */}
           {fullPages.map(sec => (
             <View key={sec.id} style={[s.page, { flex: 1 }, route !== sec.id && s.hidden]}>
-              <PageHeader title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions} onBack={() => setRoute('home')} accent={sec.accent} topRight={sec.topRight} />
+              <PageHeader title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions} onBack={() => setRoute(sec.parent || 'home')} accent={sec.accent} topRight={sec.topRight} />
               <View style={[s.pageBody, { flex: 1 }]}>{sec.body}</View>
             </View>
           ))}
@@ -1215,6 +1612,7 @@ const s = StyleSheet.create({
   home: { flexDirection: 'row', flexWrap: 'wrap', padding: 5, maxWidth: 1040, width: '100%', alignSelf: 'center' },
   cell: { padding: 5 },                                  // grid gutter (width % set inline per column count)
   cardGrid: { marginHorizontal: 0, marginTop: 0, height: 152 },      // fixed → every card is the same size
+  submenu: { gap: 10 },                                  // submenu pages stack their cards full-width, one per row
   card: { backgroundColor: C.card, borderWidth: 1, borderColor: C.border, borderRadius: 10, marginHorizontal: 10, marginTop: 8, overflow: 'hidden' },
   cardHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingHorizontal: 14, paddingTop: 12 },
   cardActions: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingBottom: 12, marginTop: 'auto' },   // pinned to the card bottom
@@ -1226,14 +1624,18 @@ const s = StyleSheet.create({
   tag: { color: C.muted, fontSize: 12, backgroundColor: C.chip, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10, overflow: 'hidden', alignSelf: 'flex-start' },
   progTrack: { height: 4, borderRadius: 2, backgroundColor: C.chip, marginTop: 6, overflow: 'hidden' },
   progFill: { height: '100%', borderRadius: 2, backgroundColor: C.accent },
-  chevBtn: { marginLeft: 'auto', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 6 },
-  chev: { color: C.muted, fontSize: 22, lineHeight: 22 },
+  // A tappable "open" button on each card: bordered chip with generous L/R padding so it's an
+  // easy target. The ❯ glyph reads as a modern chevron.
+  chevBtn: { marginLeft: 'auto', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 9, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
+  chev: { color: C.text, fontSize: 16, lineHeight: 18, fontWeight: '700' },
+  // Keyboard-ownership toggle in a bordered chip button (matches the ❯/❮ nav buttons).
+  kbdBtn: { height: HDR_H, paddingHorizontal: 12, borderRadius: 8, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
   // section page
   page: { maxWidth: 720, width: '100%', alignSelf: 'center' },
   pageHead: { paddingHorizontal: 14, paddingTop: 12, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: C.border },
   pageHeadRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  backBtn: { width: 40, height: 40, borderRadius: 8, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
-  backTxt: { color: C.text, fontSize: 24, fontWeight: '700', lineHeight: 26 },
+  backBtn: { height: HDR_H, paddingHorizontal: 18, borderRadius: 8, borderWidth: 1, borderColor: C.border, backgroundColor: C.chip, alignItems: 'center', justifyContent: 'center' },
+  backTxt: { color: C.text, fontSize: 18, fontWeight: '700', lineHeight: 20 },
   pageTitle: { color: C.text, fontWeight: '800', fontSize: 20 },
   pageBody: { paddingHorizontal: 14, paddingTop: 14, gap: 8 },
   // Synth/Voices: fill-height picker with a breadcrumb nav bar above it
@@ -1269,11 +1671,12 @@ const s = StyleSheet.create({
   grow1: { flex: 1 },
   headActions: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0 },   // content-sized → buttons keep natural width on the page header
   hdrActionsRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, paddingHorizontal: 14, paddingBottom: 12, marginTop: -2 },
-  hdrBtn: { backgroundColor: '#238636', paddingVertical: 9, paddingHorizontal: 10, borderRadius: 6, flexGrow: 1, flexBasis: 0, minWidth: 44, alignItems: 'center' },
+  hdrBtn: { backgroundColor: '#238636', height: HDR_H, paddingHorizontal: 12, borderRadius: 8, flexGrow: 1, flexBasis: 0, minWidth: 44, alignItems: 'center', justifyContent: 'center' },
   hdrBtnStop: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
   hdrBtnText: { color: C.text, fontSize: 15, fontWeight: '700' },
   btnGhost: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
   btnOn: { borderWidth: 2, borderColor: C.accent },   // active-transport highlight (arp running)
+  btnRecOn: { borderWidth: 2, borderColor: THEME.recorder.accent },   // armed / capturing (red)
   btnText: { color: C.text, fontSize: 13, fontWeight: '600' },
   input: { backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 7, color: C.text, paddingHorizontal: 10, paddingVertical: 8, fontSize: 14 },
   list: { maxHeight: 300, borderWidth: 1, borderColor: C.border, borderRadius: 7 },
