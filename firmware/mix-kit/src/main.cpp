@@ -1831,8 +1831,10 @@ static void streamDir(Print& out, const char* path, const char* ext) {
         const char* nm = f.name();
         const bool dir = f.isDirectory();
         if (nm && nm[0] != '.' && strcmp(nm, "System Volume Information") != 0) {
-            if (dir) { out.printf("@LD=%u\x1fD\x1f%s\n", id, nm); ++count; }
-            else if (endsWithExt(nm, ext)) { out.printf("@LD=%u\x1fF\x1f%s\n", id, nm); ++count; }
+            // NB: split the string literals around the D/F — a "\x1fD" would parse as the greedy
+            // hex escape \x1FD (0xFD), swallowing the marker. Adjacent literals end the escape at \x1f.
+            if (dir) { out.printf("@LD=%u\x1f" "D" "\x1f%s\n", id, nm); ++count; }
+            else if (endsWithExt(nm, ext)) { out.printf("@LD=%u\x1f" "F" "\x1f%s\n", id, nm); ++count; }
             // Pace the ESP32/BLE link (as streamFile does); USB CDC is flow-controlled.
             if (&out != &Serial) delay(4);
         }
