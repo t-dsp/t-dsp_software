@@ -810,6 +810,19 @@ ControlTransport &controlTransport() { static BleControlTransport t; return t; }
 
 static WebSocketsServer g_ws(TDSP_WS_PORT);
 
+// ---- FlasherX flash-bridge -------------------------------------------------
+// A PC can reflash the Teensy over WiFi by making the ESP32 a TRANSPARENT tunnel
+// between one WS client and UART0 (Serial <-> Teensy Serial7). On "!fxflash" we
+// send "@FXUP\n" to put the Teensy into FlasherX mode (reading Intel-hex from
+// Serial7), then loop() pipes raw bytes both ways until "!fxend" or an idle
+// timeout. The UART is fixed 115200, and Serial.write() blocks when its TX FIFO is
+// full, so the tunnel self-paces to the line rate -- the Teensy never overruns.
+// PC-side client: tools/fxflash_wifi.py. See lib/FlasherX + firmware/mix-kit @FXUP.
+static bool     g_fxBridge   = false;   // tunnel active
+static uint8_t  g_fxClient   = 0;       // the WS client that owns the tunnel
+static uint32_t g_fxLastByte = 0;       // last tunnel activity (ms), for idle timeout
+static const uint32_t kFxIdleMs = 10000;  // no traffic this long -> drop the tunnel
+
 // Send one logical line to a client (num >= 0) or to all (num < 0), '\n'-terminated and
 // split into bounded chunks.
 //
@@ -853,6 +866,21 @@ static void wsHandleText(uint8_t num, const char *msg) {
     else if (!strcmp(msg, "!forget"))     { Serial.println("[ws] cmd: FORGET");     ctrlForget(); }
     else if (!strcmp(msg, "!disconnect")) { Serial.println("[ws] cmd: DISCONNECT"); ctrlDisconnect(); }
     else if (!strcmp(msg, "!status"))     { char b[96]; buildStatus(b, sizeof(b)); wsSendLine(num, b); }
+    else if (!strcmp(msg, "!fxflash")) {
+      // Enter the FlasherX tunnel: hand this client raw UART0 access and put the
+      // Teensy into @FXUP mode. From here, hex bytes arrive as WS BIN frames.
+      // IMPORTANT: once bridging, UART0 belongs to the transfer -- the ONLY thing
+      // we may write to Serial is @FXUP and the tunneled hex. Any stray debug
+      // print would be read by FlasherX as a bad hex line and abort the flash. So
+      // status goes to the WS client, never to Serial.
+      g_fxClient = num; g_fxBridge = true; g_fxLastByte = millis();
+      Serial.print("@FXUP\n");        // Teensy enters fxRunUpdate() on Serial7
+      wsSendLine(num, "!fxbridge=on");  // ack to the PC over WS, not the UART
+    }
+    else if (!strcmp(msg, "!fxend")) {
+      g_fxBridge = false;
+      wsSendLine(num, "!fxbridge=off");
+    }
     else Serial.printf("[ws] unknown local cmd: %s\n", msg);
     return;
   }
@@ -890,8 +918,18 @@ static void onWsEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t lengt
       wsHandleText(num, msg);
       break;
     }
+    case WStype_BIN:
+      // Raw firmware bytes for the FlasherX tunnel -> straight out UART0 to the
+      // Teensy. Serial.write() blocks on a full TX FIFO, pacing us to 115200 so
+      // the Teensy's hex parser never overruns. Ignored unless this client owns
+      // an active tunnel.
+      if (g_fxBridge && num == g_fxClient) {
+        Serial.write(payload, length);
+        g_fxLastByte = millis();
+      }
+      break;
     default:
-      break;   // BIN/PING/PONG/FRAGMENT not used
+      break;   // PING/PONG/FRAGMENT not used
   }
 }
 
@@ -1126,6 +1164,29 @@ void loop() {
   // Service the active control transport (WiFi needs webSocket.loop() + reconnect;
   // BLE is a no-op -- it runs in its own tasks).
   controlTransport().loop();
+
+#if defined(TDSP_CTRL_WIFI)
+  // FlasherX tunnel: while active, UART0 is dedicated to the flash transfer. Pipe
+  // everything the Teensy emits (FlasherX status + the "enter N to flash" prompt)
+  // back to the owning WS client as BIN, and DON'T let the normal @-line parser
+  // below eat those bytes. PC->Teensy hex arrives via WStype_BIN (see onWsEvent).
+  if (g_fxBridge) {
+    uint8_t buf[512];
+    int n = 0;
+    while (Serial.available() && n < (int)sizeof(buf)) buf[n++] = (uint8_t)Serial.read();
+    if (n > 0) { g_ws.sendBIN(g_fxClient, buf, n); g_fxLastByte = millis(); }
+    // The Teensy reboots (or aborts) at the end of a flash -> UART0 goes quiet.
+    // Drop the tunnel on idle so normal control resumes without needing !fxend.
+    if (millis() - g_fxLastByte > kFxIdleMs) {
+      // Teensy rebooted (or aborted) -> UART0 quiet. Resume normal control. No
+      // Serial print here: if the Teensy is mid-reboot a stray byte is harmless,
+      // but keeping UART0 clean during the handoff is the safe habit.
+      g_fxBridge = false;
+    }
+    delay(2);
+    return;   // skip the normal single-char / @-line UART parser while tunneling
+  }
+#endif
 
   // Two framings share this UART: bare single-char commands (p/f/x/s from the
   // Teensy's P/F relay + pairing) and '@'-framed lines (e.g. @SONGS=/@INSTR=

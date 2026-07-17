@@ -2134,10 +2134,13 @@ FLASHMEM static bool handleArpLine(const char* line, Print& reply, tdsp::ArpFilt
     return true;
 }
 
-FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
+// `reply` is the stream the command arrived on (USB Serial or the ESP32 UART,
+// Serial7). Typed as Stream (not just Print) so commands that need to READ back
+// on the same link — e.g. @FXUP handing the stream to FlasherX — can do so.
+FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     if      (strncmp(line, "@VOL=", 5) == 0)      setMasterVolumePct(atoi(line + 5));
 #ifdef TDSP_FLASHERX
-    else if (strncmp(line, "@FXUP", 5) == 0)      fxRunUpdate(Serial);   // OTA self-update over USB (blocks, reboots)
+    else if (strncmp(line, "@FXUP", 5) == 0)      fxRunUpdate(reply);    // OTA self-update on the arriving link (USB or ESP32/Serial7); blocks, reboots
 #endif
 #if defined(TDSP_HAS_REPLAYGAIN) && TDSP_DIAGNOSTICS
     else if (strncmp(line, "@GAIN=", 6) == 0)     runGainSweep(atoi(line + 6));   // resume sweep from index
