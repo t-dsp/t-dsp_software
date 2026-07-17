@@ -9,7 +9,7 @@ import { base64ToBytes } from './loopXfer';
 import type { SeqStep, ArpWireParams } from './arpSeq';
 import type { Transport, LineHandler, DirPage } from './transport';
 
-interface FilePending { path: string; parts: Record<number, string>; resolve: (t: any) => void; reject: (e: any) => void; timer: any; onProgress?: (r: number, t: number) => void; total: number; received: number; bytes?: boolean; }
+interface FilePending { path: string; id?: string; parts: Record<number, string>; resolve: (t: any) => void; reject: (e: any) => void; timer: any; onProgress?: (r: number, t: number) => void; total: number; received: number; bytes?: boolean; }
 // Decoded byte count of a base64 chunk (for streaming progress; avoids decoding mid-stream).
 const b64bytes = (s: string) => Math.max(0, Math.floor(s.replace(/=+$/, '').length * 3 / 4));
 interface DirPending { path: string; resolve: (d: DirPage) => void; reject: (e: any) => void; timer: any; }
@@ -90,29 +90,45 @@ export class WebSerialTransport implements Transport {
 
   private onDeviceLine(line: string) {
     // @READ frame transport. @FB=<id>\x1f<path>\x1f<bytes> begins a file; the byte total
-    // lets us report a live progress fraction as @FD chunks arrive.
+    // lets us report a live progress fraction as @FD chunks arrive. The <id> is matched on
+    // every subsequent frame so that leftover frames from a PREVIOUS, aborted transfer (one
+    // the watchdog gave up on while the Teensy was still mid-streamFile) can't bleed into the
+    // next read — that cross-contamination was the intermittent load hang (see CATALOG_TRANSPORT.md).
     if (line.startsWith('@FB=')) {
-      if (this.file) { const p = line.slice(4).split('\x1f'); this.file.parts = {}; this.file.total = +p[2] || 0; this.file.received = 0; this.armFileTimer(this.file); this.file.onProgress?.(0, this.file.total); }
+      if (this.file) { const p = line.slice(4).split('\x1f'); this.file.id = p[0]; this.file.parts = {}; this.file.total = +p[2] || 0; this.file.received = 0; this.armFileTimer(this.file); this.file.onProgress?.(0, this.file.total); }
       return;
     }
     if (line.startsWith('@FD=')) {
       const p = line.slice(4).split('\x1f');
-      if (this.file && p.length === 3) { this.file.parts[+p[1]] = p[2]; this.file.received += b64bytes(p[2]); this.armFileTimer(this.file); this.file.onProgress?.(this.file.received, this.file.total); }
+      const f = this.file;
+      if (f && p.length === 3 && f.id !== undefined && p[0] === f.id) {
+        if (!(p[1] in f.parts)) f.received += b64bytes(p[2]);   // don't double-count a resent seq
+        f.parts[+p[1]] = p[2]; this.armFileTimer(f); f.onProgress?.(f.received, f.total);
+      }
       return;
     }
     if (line.startsWith('@FE=')) {
+      const p = line.slice(4).split('\x1f');
       const f = this.file;
-      if (f) {
-        const b64 = Object.keys(f.parts).map(Number).sort((a, b) => a - b).map(k => f.parts[k]).join('');
+      if (f && f.id !== undefined && p[0] === f.id) {
+        // Verify completeness: every seq 0..count-1 must be present. A gap means a dropped
+        // frame — reject so the caller retries the whole file rather than silently decoding
+        // a truncated catalog (which reads as "half the grooves are missing").
+        const count = +p[1] || 0;
+        let b64 = '', ok = true;
+        for (let i = 0; i < count; i++) { const c = f.parts[i]; if (c == null) { ok = false; break; } b64 += c; }
         clearTimeout(f.timer); this.file = null;
+        if (!ok) { f.reject('missing chunk'); return; }
         if (f.bytes) { f.resolve(base64ToBytes(b64)); return; }   // @RECDUMP path: raw clip bytes
+        const raw = atob(b64);
+        if (f.total > 0 && raw.length !== f.total) { f.reject('length mismatch'); return; }   // decoded size must match @FB
         let txt: string;
-        try { txt = decodeURIComponent(escape(atob(b64))); } catch { txt = atob(b64); }
+        try { txt = decodeURIComponent(escape(raw)); } catch { txt = raw; }
         f.resolve(txt);
       }
       return;
     }
-    if (line.startsWith('@FERR=')) { const f = this.file; if (f) { clearTimeout(f.timer); this.file = null; f.reject(line.slice(6)); } return; }
+    if (line.startsWith('@FERR=')) { const p = line.slice(6).split('\x1f'); const f = this.file; if (f && (f.id === undefined || p[0] === f.id)) { clearTimeout(f.timer); this.file = null; f.reject(p.slice(1).join('\x1f') || 'read error'); } return; }
     // Lazy /dexed browse replies. Match the echoed path so a stale reply for a folder
     // we've navigated away from is ignored (the newer request has its own pending slot).
     if (line.startsWith('@DXLS=')) {

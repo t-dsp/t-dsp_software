@@ -113,6 +113,21 @@ export async function loadCatalog(t: Transport, onProgress?: (p: LoadProgress) =
   const det = totalBytes > 0;
   const total = det ? totalBytes : fetch.length;
 
+  // Read a file, retrying the WHOLE transfer on a transient failure (timeout / dropped frame /
+  // length mismatch — see CATALOG_TRANSPORT.md "whole-file retry"). A retry starts from a clean
+  // transfer id, so it can't inherit stale frames from the aborted attempt. Don't retry a
+  // genuinely-absent file ("not found") — that just wastes three round-trips.
+  const readWithRetry = async (path: string, onRecv: (recv: number) => void): Promise<string> => {
+    for (let attempt = 0; ; attempt++) {
+      try { return await t.readFile(path, (recv) => onRecv(recv)); }
+      catch (e) {
+        const msg = String((e as any)?.message ?? e ?? '');
+        if (attempt >= 2 || /not found/i.test(msg)) throw e;
+        await new Promise(r => setTimeout(r, 300));
+      }
+    }
+  };
+
   // The transport allows ONE @READ in flight at a time, so fetch sequentially (Promise.all
   // would make 4 of 5 reads reject with "read in progress" and come back empty).
   const out: Partial<Record<keyof Catalog, any[]>> = {};
@@ -125,7 +140,7 @@ export async function loadCatalog(t: Transport, onProgress?: (p: LoadProgress) =
     try {
       // Live intra-file progress (throttled): add THIS file's received bytes to the running
       // base so the bar keeps moving during a big/slow read (e.g. grooves), not just between files.
-      txt = await t.readFile(f.path, (recv) => {
+      txt = await readWithRetry(f.path, (recv) => {
         if (det) emit({ done: Math.min(total, base + recv), total, label: f.label, index: k + 1, count: fetch.length, det });
       });
     } catch { txt = ''; }
