@@ -14,6 +14,8 @@ import { createDiscovery } from './src/discoveryFactory';
 import type { TdspDevice } from './src/discovery';
 import { Catalog, EMPTY_CATALOG, loadCatalog, LoadProgress, Song, songArg } from './src/catalog';
 import type { Transport, DirPage, TransportKind } from './src/transport';
+import { sortEntries } from './src/browse';
+import type { BrowseEntry } from './src/browse';
 import ArpStepGrid from './src/ui/ArpStepGrid';
 import PianoRoll from './src/ui/PianoRoll';
 import ArpPresetBrowser from './src/ui/ArpPresetBrowser';
@@ -302,6 +304,105 @@ function SubMenu({ getItems, onOpen, accent, tint }: { getItems: () => any[]; on
 const ROW_H = 41;   // fixed list-row height so FlatList.scrollToIndex is reliable
 type VItem = { key: string; label: string; i: number };
 
+// ---- <FolderBrowser> : the generic recursive SD file/folder browser (the @LS client) -------
+// One reusable component behind the MIDI-player and Drums file pickers (and, later, any SD tree
+// — samples/soundfonts). Drills folder-by-folder from `root` via transport.browse() (@LS), lists
+// files filtered by `ext` (sorted client-side by ./browse.sortEntries), and calls onSelectFile
+// with the FULL SD path + a display name. Mirrors the Voices browser's breadcrumb + up-button UX
+// and reuses ListBtn. `injectFolders` adds synthetic folders at the ROOT level whose leaves play
+// by their own arg (used for the baked "tests" songs, which live in flash, not on the card).
+// `enabled` gates the live fetch (connected + catalog loaded). `selected`/`playing` are the
+// currently-chosen / currently-playing arg (full path or a baked name) for row highlighting.
+type InjectFolder = { name: string; leaves: { name: string; arg: string }[] };
+const stripExt = (name: string, ext?: string) => {
+  const suf = ext ? '.' + ext : '.mid';
+  return name.toLowerCase().endsWith(suf.toLowerCase()) ? name.slice(0, -suf.length) : name;
+};
+function FolderBrowser({ tp, root, ext, enabled, selected, playing, onSelectFile, injectFolders }: {
+  tp: Transport; root: string; ext?: string; enabled: boolean;
+  selected?: string; playing?: string;
+  onSelectFile: (fullPath: string, displayName: string) => void;
+  injectFolders?: InjectFolder[];
+}) {
+  const [path, setPath] = useState(root);                        // current REAL folder (absolute SD path)
+  const [virt, setVirt] = useState<InjectFolder | null>(null);   // inside an injected virtual folder
+  const [entries, setEntries] = useState<BrowseEntry[] | null>(null);   // null = loading
+  const [err, setErr] = useState('');
+
+  // Reset to the root when the root prop changes (component reused across cards).
+  useEffect(() => { setPath(root); setVirt(null); }, [root]);
+
+  // Live @LS fetch whenever the real path changes (skip while inside a virtual folder). The
+  // `alive` gate drops a stale reply when the user navigates away mid-fetch.
+  useEffect(() => {
+    if (!enabled || virt) { if (!enabled) setEntries(null); return; }
+    let alive = true;
+    setEntries(null); setErr('');
+    tp.browse(path, ext)
+      .then(r => { if (alive) setEntries(sortEntries(r.entries)); })
+      .catch(e => { if (alive) { setEntries([]); setErr(String((e as any)?.message || e || 'browse failed')); } });
+    return () => { alive = false; };
+  }, [path, ext, enabled, virt, tp]);
+
+  const atRoot = path === root && !virt;
+  const goUp = () => {
+    if (virt) { setVirt(null); return; }
+    if (path !== root) setPath(path.split('/').slice(0, -1).join('/') || '/');
+  };
+  // Breadcrumb: the root label, each folder segment below it, then the virtual folder (if any).
+  const rootName = root.split('/').pop() || root;
+  const rel = path.startsWith(root) ? path.slice(root.length).replace(/^\//, '') : '';
+  const segs = rel ? rel.split('/') : [];
+  const crumbs: { label: string; go: () => void }[] = [{ label: rootName, go: () => { setVirt(null); setPath(root); } }];
+  { let acc = root; for (const seg of segs) { acc += '/' + seg; const p = acc; crumbs.push({ label: seg, go: () => { setVirt(null); setPath(p); } }); } }
+  if (virt) crumbs.push({ label: virt.name, go: () => {} });
+
+  // One file/leaf row: mark `sel` when it's the chosen arg, prefix ♪ when it's playing.
+  const fileRow = (rowArg: string, disp: string) => (
+    <ListBtn key={rowArg} label={(playing === rowArg ? '♪ ' : '') + disp} sel={selected === rowArg}
+      onPress={() => onSelectFile(rowArg, disp)} />
+  );
+
+  return (
+    <>
+      <View style={s.navBar}>
+        <Pressable style={[s.upBtn, atRoot && s.upBtnOff]} onPress={goUp} disabled={atRoot}>
+          <Text style={s.upTxt}>‹</Text>
+        </Pressable>
+        <ScrollView horizontal style={s.crumbs} showsHorizontalScrollIndicator={false} contentContainerStyle={s.crumbsInner}>
+          {crumbs.map((c, i) => {
+            const last = i === crumbs.length - 1;
+            return (
+              <View key={i} style={s.crumbItem}>
+                {i > 0 && <Text style={s.crumbSep}>›</Text>}
+                <Pressable onPress={c.go} disabled={last}>
+                  <Text style={last ? s.crumbLast : s.crumbTxt} numberOfLines={1}>{c.label}</Text>
+                </Pressable>
+              </View>
+            );
+          })}
+        </ScrollView>
+      </View>
+      {!enabled ? <Text style={s.muted}>Connect to browse files.</Text> : virt ? (
+        <ScrollView style={s.picker} nestedScrollEnabled>
+          {virt.leaves.length === 0 ? <Text style={s.muted}>(empty)</Text>
+            : virt.leaves.map(lf => fileRow(lf.arg, lf.name))}
+        </ScrollView>
+      ) : entries === null ? (
+        <View style={{ padding: 20, alignItems: 'center' }}><ActivityIndicator color={C.accent} /><Text style={[s.muted, { marginTop: 8 }]}>Loading…</Text></View>
+      ) : (
+        <ScrollView style={s.picker} nestedScrollEnabled>
+          {atRoot && (injectFolders || []).map(f => <ListBtn key={'@' + f.name} label={'📁 ' + f.name} onPress={() => setVirt(f)} />)}
+          {entries.filter(e => e.type === 'D').map(e => <ListBtn key={'d/' + e.name} label={'📁 ' + e.name} onPress={() => setPath(path + '/' + e.name)} />)}
+          {entries.filter(e => e.type === 'F').map(e => fileRow(path + '/' + e.name, stripExt(e.name, ext)))}
+          {!!err && <Text style={[s.muted, { padding: 12 }]}>⚠ {err}</Text>}
+          {!err && entries.length === 0 && (!atRoot || !(injectFolders || []).length) && <Text style={s.muted}>(empty folder)</Text>}
+        </ScrollView>
+      )}
+    </>
+  );
+}
+
 export default function App() {
   // Transport selection (session-only — the app has no local persistence, so this resets
   // on reload). 'default' = the platform's built-in (Web Serial on desktop, BLE on native);
@@ -435,6 +536,10 @@ export default function App() {
   // as-is; everything the firmware tracks (vol/bpm/arp/loop/voice/kit/what's playing) is
   // restored. Sets state only — no echo back to the device.
   const clampIdx = (v: any, n: number) => Math.max(0, Math.min(n - 1, (v | 0)));
+  // @STATE reports only a song's DISPLAY name; song identity is the play arg (full SD path).
+  // Resolve the arg from the catalog by name so ‹ › / Play round-trip correctly after a reconnect;
+  // fall back to the name itself if the catalog isn't loaded yet (best effort — see tracks note).
+  const songArgByName = (nm: string) => { const r = cat.songs.find(s => s.name === nm); return r ? songArg(r) : nm; };
   function hydrate(j: any) {
     if (j.vol != null) setVol(j.vol);
     if (j.hpf != null) { const m = clampIdx(j.hpf, HPF_MODES.length); setHpf(m); if (m) lastHpfRef.current = m; }
@@ -449,7 +554,7 @@ export default function App() {
     if (j.metrosig != null) setMetro(m => ({ ...m, sig: Math.max(1, Math.min(16, j.metrosig | 0)) || 4 }));
     if (j.metrovol != null) setMetro(m => ({ ...m, vol: Math.max(0, Math.min(150, j.metrovol | 0)) }));
     if (j.arp) setArp({ on: !!j.arp.on, pat: clampIdx(j.arp.pat, ARP_PAT.length), rate: rateIndexFromFw(j.arp.rate | 0), oct: Math.max(1, Math.min(4, j.arp.oct | 0)) || 1, latch: !!j.arp.latch });
-    if (j.song) setPlayer(p => ({ ...p, playing: !!j.song.playing, song: j.song.name || p.song, name: j.song.name || p.name, prog: j.song.p != null ? j.song.p / 1000 : (j.song.playing ? -1 : 0) }));
+    if (j.song) setPlayer(p => ({ ...p, playing: !!j.song.playing, song: j.song.name ? songArgByName(j.song.name) : p.song, name: j.song.name || p.name, prog: j.song.p != null ? j.song.p / 1000 : (j.song.playing ? -1 : 0) }));
     if (j.song?.vol != null) setSongVol(Math.max(0, Math.min(150, j.song.vol | 0)));
     if (j.drums) setDrums(d => ({ ...d, kit: j.drums.kit | 0, playing: j.drums.playing ? d.playing : null }));
     if (j.drums?.vol != null) setDrumVol(Math.max(0, Math.min(150, j.drums.vol | 0)));
@@ -497,7 +602,7 @@ export default function App() {
     }));
     if (j.arp2) setArp2({ on: !!j.arp2.on, pat: clampIdx(j.arp2.pat, ARP_PAT.length), rate: rateIndexFromFw(j.arp2.rate | 0), oct: Math.max(1, Math.min(4, j.arp2.oct | 0)) || 1, latch: !!j.arp2.latch });
     // MIDI Player 2 (voice-2 song player): restore what's playing + its loop flag → end-mode guess.
-    if (j.song2) setPlayer2(p => ({ ...p, playing: !!j.song2.playing, song: j.song2.name || p.song, name: j.song2.name || p.name, prog: j.song2.p != null ? j.song2.p / 1000 : (j.song2.playing ? -1 : 0) }));
+    if (j.song2) setPlayer2(p => ({ ...p, playing: !!j.song2.playing, song: j.song2.name ? songArgByName(j.song2.name) : p.song, name: j.song2.name || p.name, prog: j.song2.p != null ? j.song2.p / 1000 : (j.song2.playing ? -1 : 0) }));
     if (j.song2?.loop != null) setEndMode2(m => j.song2.loop ? 'repeat' : (m === 'repeat' ? 'stop' : m));
   }
 
@@ -931,6 +1036,7 @@ export default function App() {
     player: PlayerT; endMode: EndMode;
     vol: number; onVol: (n: number) => void; commitVol: (n: number) => void; volNote?: string;
     setSong: (name: string) => void;
+    playFile: (arg: string, disp: string) => void;   // FolderBrowser tap: restart this file/baked song now (arg = full SD path or baked name)
     play: () => void; stop: () => void; step: (dir: number) => void;
     applyEnd: (m: EndMode) => void; cycleEnd: () => void;
     onNaturalEnd: () => void;   // wired into the device's position feed (@SONGP=-1 / @SONG2P=-1)
@@ -947,10 +1053,14 @@ export default function App() {
     // The shared "continue rules": which song a skip (‹ ›) or a natural end advances to, per the
     // end-mode. Shuffle → a random *other* song; every other mode → the linear neighbour, wrapping
     // both ways. Both the transport buttons and the auto-advance route through this.
+    // Song identity is the play ARG (full SD path for an SD song, the bare name for a baked one) —
+    // i.e. songArg(row) — so it round-trips through wire.restart and matches the FolderBrowser's
+    // fullPath. Auto-advance / ‹ › still step through the whole flat catalog (cat.songs); the
+    // browser's per-folder view is a separate, richer picker (see note in playerSongBody).
     const pickNext = (dir: number): Song | null => {
       const songs = cat.songs;
       if (!songs.length) return null;
-      const idx = songs.findIndex(sg => sg.name === P.song);
+      const idx = songs.findIndex(sg => songArg(sg) === P.song);
       if (em === 'shuffle' && songs.length > 1) {
         let r = idx; while (r === idx) r = Math.floor(Math.random() * songs.length);   // never repeat the current song
         return songs[r];
@@ -958,7 +1068,7 @@ export default function App() {
       const base = idx < 0 ? (dir > 0 ? -1 : 0) : idx;
       return songs[((base + dir) % songs.length + songs.length) % songs.length];       // wrap both ways
     };
-    const playOf = (sg: Song) => { wire.play(songArg(sg)); setP(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };
+    const playOf = (sg: Song) => { wire.play(songArg(sg)); setP(p => ({ ...p, song: songArg(sg), playing: true, name: sg.name, prog: -1 })); };
     // End-of-song mode. Only 'repeat' arms the firmware's seamless loop; the rest let the song end
     // (the device emits its <player>P=-1) and we advance app-side. Persisted on the device.
     const applyEnd = (m: EndMode) => { cfg.setEndMode(m); wire.loop(m === 'repeat'); persistApp({ [cfg.persistKey]: m } as Partial<AppState>); };
@@ -966,10 +1076,12 @@ export default function App() {
       v: cfg.v, player: P, endMode: em,
       vol: cfg.vol, onVol: cfg.onVol, commitVol: cfg.commitVol, volNote: cfg.volNote,
       setSong: (name: string) => setP(p => ({ ...p, song: name })),
+      // FolderBrowser tap: restart THIS file/baked song now (arg = full SD path, or a baked name).
+      playFile: (arg: string, disp: string) => { wire.restart(arg); setP(p => ({ ...p, song: arg, playing: true, name: disp, prog: -1 })); },
       // Play = restart from the top on a fresh downbeat; prog -1 until the device reports position.
-      play: () => { const sg = cat.songs.find(x => x.name === P.song) || cat.songs[0]; if (!sg) return; wire.restart(songArg(sg)); setP(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); },
+      play: () => { const sg = cat.songs.find(x => songArg(x) === P.song) || cat.songs[0]; if (!sg) return; wire.restart(songArg(sg)); setP(p => ({ ...p, song: songArg(sg), playing: true, name: sg.name, prog: -1 })); },
       stop: () => { cfg.manualStopRef.current = true; wire.stop(); setP(p => ({ ...p, playing: false, prog: 0 })); },
-      step: (dir: number) => { const sg = pickNext(dir); if (!sg) return; setP(p => { if (p.playing) { wire.restart(songArg(sg)); return { ...p, song: sg.name, name: sg.name }; } return { ...p, song: sg.name }; }); },
+      step: (dir: number) => { const sg = pickNext(dir); if (!sg) return; setP(p => { if (p.playing) { wire.restart(songArg(sg)); return { ...p, song: songArg(sg), name: sg.name }; } return { ...p, song: songArg(sg), name: sg.name }; }); },
       applyEnd, cycleEnd: () => { const i = END_MODES.findIndex(m => m.key === em); applyEnd(END_MODES[(i + 1) % END_MODES.length].key); },
       // Runs when a song finishes on its own (not a manual Stop). 'stop' does nothing; 'repeat'
       // loops in firmware; continue/shuffle advance per the same pickNext rules.
@@ -1185,18 +1297,23 @@ export default function App() {
     <HdrBtn label="■" stop onPress={D.stop} />
     <HdrBtn label={(END_MODES.find(m => m.key === D.endMode) || END_MODES[3]).icon} stop onPress={D.cycleEnd} />
   </>);
-  // The song half: pick a song, set the player's level, choose what happens when it ends.
+  // Baked test/demo songs live in flash (no `file` field — they play by NAME on the firmware's
+  // non-.mid branch). Surface them as a synthetic "tests" folder injected into the /midi/songs
+  // root, so the browser shows real card folders (songs subfolders) PLUS the baked tests.
+  const bakedSongLeaves = cat.songs.filter(s => !s.file).map(s => ({ name: s.name, arg: s.name }));
+  const songInjectFolders = bakedSongLeaves.length ? [{ name: 'tests', leaves: bakedSongLeaves }] : [];
+  // The song half: pick a song via the recursive folder browser, set the player's level, choose
+  // what happens when it ends. A tap plays the file immediately (restart on a fresh downbeat).
   const playerSongBody = (D: SongDeckT) => (
     <>
       {D.v === 2 && !voice2.on && <Text style={s.muted}>Synth B is off — this player is silent until you enable it (● / ○ in the Synthesizer B header).</Text>}
       <VolSlider label="Volume" value={D.vol} onChange={D.onVol} onCommit={D.commitVol} disabled={!connected} />
       {!!D.volNote && <Text style={s.muted}>{D.volNote}</Text>}
-      {cat.songs.length === 0 ? <Text style={s.muted}>No songs indexed.</Text> : (
-        <ScrollView style={s.list} nestedScrollEnabled>
-          {cat.songs.map(sg => <ListBtn key={sg.file || sg.name} label={(D.player.playing && D.player.song === sg.name ? '♪ ' : '') + sg.name} sel={D.player.song === sg.name}
-            onPress={() => D.setSong(sg.name)} />)}
-        </ScrollView>
-      )}
+      <View style={s.browseBox}>
+        <FolderBrowser tp={tp} root="/midi/songs" ext="mid" enabled={connected && loaded}
+          selected={D.player.song} playing={D.player.playing ? D.player.song : undefined}
+          onSelectFile={(full, disp) => D.playFile(full, disp)} injectFolders={songInjectFolders} />
+      </View>
       <Row><Text style={[s.muted, { flex: 1 }]}>When finished</Text>
         {END_MODES.map(m => (
           <Pressable key={m.key} style={[s.pill, D.endMode === m.key && s.pillOn]} onPress={() => D.applyEnd(m.key)}>
@@ -1216,7 +1333,7 @@ export default function App() {
     ]} />
   );
   // Card/page subtitle + progress bar (the bar only once the device reports a position).
-  const playerValue = (D: SongDeckT) => (D.player.playing ? '♪ ' : '') + (D.player.song || '—');
+  const playerValue = (D: SongDeckT) => (D.player.playing ? '♪ ' : '') + (D.player.name || '—');
   const playerProgress = (D: SongDeckT) => (D.player.playing && D.player.prog >= 0 ? D.player.prog : undefined);
 
   const synthActions = (<>
@@ -1324,12 +1441,13 @@ export default function App() {
         </ScrollView></Row>
       <TextInput style={s.input} placeholder="Search grooves…" placeholderTextColor={C.muted}
         value={q.groove} onChangeText={t => setQ(x => ({ ...x, groove: t }))} />
-      {cat.grooves.length === 0 ? <Text style={s.muted}>No grooves indexed.</Text> : (
-        <ScrollView style={s.list} nestedScrollEnabled>
-          {grooves.map(g => <ListBtn key={g.path} label={(drums.playing === g.name ? '♪ ' : '') + g.name} sel={drums.sel === g.path}
-            onPress={() => { setDrums(d => ({ ...d, sel: g.path })); persistApp({ groove: g.path }); }} />)}
-        </ScrollView>
-      )}
+      {/* Recursive /midi/drums file picker (the @LS browser). A tap plays the groove now via
+          @DRUMF with the FULL SD path; drums.sel/playing keep the header ‹ › ▶ ■ + Stop working. */}
+      <View style={s.browseBox}>
+        <FolderBrowser tp={tp} root="/midi/drums" ext="mid" enabled={connected && loaded}
+          selected={drums.sel ?? undefined} playing={drums.playing ? (drums.sel ?? undefined) : undefined}
+          onSelectFile={(full, disp) => { tp.playGrooveFile(full); setDrums(d => ({ ...d, sel: full, playing: disp })); persistApp({ groove: full }); }} />
+      </View>
       <Row>
         <Pressable style={[s.btn, s.grow1]} disabled={!drums.sel} onPress={playGroove}><Text style={s.btnText}>▶ Play</Text></Pressable>
         <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={stopDrums}><Text style={s.btnText}>■ Stop</Text></Pressable>
@@ -1883,6 +2001,7 @@ const s = StyleSheet.create({
   btnText: { color: C.text, fontSize: 13, fontWeight: '600' },
   input: { backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 7, color: C.text, paddingHorizontal: 10, paddingVertical: 8, fontSize: 14 },
   list: { maxHeight: 300, borderWidth: 1, borderColor: C.border, borderRadius: 7 },
+  browseBox: { height: 340 },   // fixed height so <FolderBrowser>'s flex picker lays out inside a card body
   listBtn: { paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.border },
   listBtnSel: { backgroundColor: C.sel },
   // Pattern picker: a wrapping GRID so every one of the 26 patterns is reachable at once

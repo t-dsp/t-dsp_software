@@ -3,10 +3,12 @@
 // control.html. Chromium-only; requires a secure context (localhost / https).
 
 import { parseDxls } from './dxls';
+import { parseLb, parseLd, parseLe, parseLerr } from './browse';
 import { encodeSequence, encodeArpParams } from './arpSeq';
 import { rdFrames } from './loopXfer';
 import { base64ToBytes } from './loopXfer';
 import type { SeqStep, ArpWireParams } from './arpSeq';
+import type { BrowseEntry, BrowseResult } from './browse';
 import type { Transport, LineHandler, DirPage } from './transport';
 
 interface FilePending { path: string; id?: string; parts: Record<number, string>; resolve: (t: any) => void; reject: (e: any) => void; timer: any; onProgress?: (r: number, t: number) => void; total: number; received: number; bytes?: boolean; }
@@ -14,6 +16,8 @@ interface FilePending { path: string; id?: string; parts: Record<number, string>
 const b64bytes = (s: string) => Math.max(0, Math.floor(s.replace(/=+$/, '').length * 3 / 4));
 interface DirPending { path: string; resolve: (d: DirPage) => void; reject: (e: any) => void; timer: any; }
 interface VoicesPending { rel: string; resolve: (v: string[]) => void; reject: (e: any) => void; timer: any; }
+// One in-flight @LS: matched by echoed path (@LB), then id for the @LD/@LE stream.
+interface BrowsePending { path: string; id: number; entries: BrowseEntry[]; resolve: (r: BrowseResult) => void; reject: (e: any) => void; timer: any; }
 
 export class WebSerialTransport implements Transport {
   readonly name = 'USB' as const;
@@ -25,6 +29,7 @@ export class WebSerialTransport implements Transport {
   private file: FilePending | null = null;
   private dir: DirPending | null = null;
   private voices: VoicesPending | null = null;
+  private ls: BrowsePending | null = null;
   private enc = new TextEncoder();
   private dec = new TextDecoder();
 
@@ -52,6 +57,7 @@ export class WebSerialTransport implements Transport {
     if (this.file) { clearTimeout(this.file.timer); this.file.reject('disconnected'); this.file = null; }  // don't leave a read "in progress"
     if (this.dir) { clearTimeout(this.dir.timer); this.dir.reject('disconnected'); this.dir = null; }
     if (this.voices) { clearTimeout(this.voices.timer); this.voices.reject('disconnected'); this.voices = null; }
+    if (this.ls) { clearTimeout(this.ls.timer); this.ls.reject('disconnected'); this.ls = null; }
     try { await this.reader?.cancel(); this.reader?.releaseLock(); } catch {}
     try { await this.writer?.close(); this.writer?.releaseLock(); } catch {}
     try { await this.port?.close(); } catch {}
@@ -86,6 +92,11 @@ export class WebSerialTransport implements Transport {
   private armFileTimer(f: FilePending) {
     clearTimeout(f.timer);
     f.timer = setTimeout(() => { if (this.file === f) { this.file = null; f.reject('timeout'); } }, 15000);
+  }
+  // Idle watchdog for an @LS browse — re-armed on every @LB/@LD so a big folder completes.
+  private armLsTimer(s: BrowsePending) {
+    clearTimeout(s.timer);
+    s.timer = setTimeout(() => { if (this.ls === s) { this.ls = null; s.reject('timeout'); } }, 12000);
   }
 
   private onDeviceLine(line: string) {
@@ -139,6 +150,28 @@ export class WebSerialTransport implements Transport {
       const v = this.voices; if (v) { const p = line.slice(6).split('|'); const rc = p.shift(); if (rc === v.rel) { clearTimeout(v.timer); this.voices = null; v.resolve(p); } }
       return;
     }
+    // Generic @LS folder browse. Match @LB by echoed path (stale reply for a folder we've
+    // navigated away from is ignored); then accumulate @LD by id, resolve on @LE / reject on @LERR.
+    if (line.startsWith('@LB=')) {
+      const b = parseLb(line.slice(4)); const s = this.ls;
+      if (s && b.path === s.path) { s.id = b.id; s.entries = []; this.armLsTimer(s); }
+      return;
+    }
+    if (line.startsWith('@LD=')) {
+      const e = parseLd(line.slice(4)); const s = this.ls;
+      if (s && e && e.id === s.id) { s.entries.push({ type: e.type, name: e.name }); this.armLsTimer(s); }
+      return;
+    }
+    if (line.startsWith('@LE=')) {
+      const e = parseLe(line.slice(4)); const s = this.ls;
+      if (s && e.id === s.id) { clearTimeout(s.timer); this.ls = null; s.resolve({ path: s.path, entries: s.entries }); }
+      return;
+    }
+    if (line.startsWith('@LERR=')) {
+      const e = parseLerr(line.slice(6)); const s = this.ls;
+      if (s && (e.id === s.id || s.id < 0)) { clearTimeout(s.timer); this.ls = null; s.reject(e.reason); }
+      return;
+    }
     // everything else -> subscribers (heartbeats, BT status, etc.)
     this.handlers.forEach(h => h(line));
   }
@@ -170,6 +203,16 @@ export class WebSerialTransport implements Transport {
       this.voices = v;
       v.timer = setTimeout(() => { if (this.voices === v) { this.voices = null; reject('timeout'); } }, 8000);
       this.send('@DXVL=' + cartRel);
+    });
+  }
+
+  browse(path: string, ext?: string): Promise<BrowseResult> {
+    return new Promise((resolve, reject) => {
+      if (this.ls) { clearTimeout(this.ls.timer); this.ls.reject('superseded'); }
+      const s: BrowsePending = { path, id: -1, entries: [], resolve, reject, timer: null };
+      this.ls = s;
+      this.armLsTimer(s);
+      this.send('@LS=' + path + (ext ? '\x1f' + ext : ''));
     });
   }
 
