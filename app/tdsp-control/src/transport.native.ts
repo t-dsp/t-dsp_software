@@ -25,6 +25,7 @@ import { encodeSequence, encodeArpParams } from './arpSeq';
 import type { SeqStep, ArpWireParams } from './arpSeq';
 import type { Transport, LineHandler, DirPage } from './transport';
 import { CMD, TDSP_SVC_UUID, TDSP_CMD_UUID, TDSP_STAT_UUID, TDSP_FILE_UUID } from './tdspBle';
+import { rdFrames, base64ToBytes } from './loopXfer';
 
 const FUS = '\x1f';   // field separator inside @FD/@FE frames (matches the firmware)
 const RS = '\x1e';    // record separator for chunked browse replies (matches ESP32 setCatalog)
@@ -69,7 +70,7 @@ async function ensurePermissions(): Promise<boolean> {
   } catch { return false; }
 }
 
-interface FilePending { resolve: (t: string) => void; reject: (e: any) => void; timer: any; onProgress?: (r: number, t: number) => void; total: number; received: number; }
+interface FilePending { resolve: (t: any) => void; reject: (e: any) => void; timer: any; onProgress?: (r: number, t: number) => void; total: number; received: number; bytes?: boolean; }
 // Decoded byte count of a base64 chunk (for streaming progress; avoids decoding mid-stream).
 const b64bytes = (s: string) => Math.max(0, Math.floor(s.replace(/=+$/, '').length * 3 / 4));
 interface DirPending { path: string; resolve: (d: DirPage) => void; reject: (e: any) => void; timer: any; }
@@ -215,7 +216,8 @@ export class BleTransport implements Transport {
         const count = parseInt(f[1], 10); let b64 = '', ok = true;
         for (let i = 0; i < count; i++) { if (a.chunks[i] == null) { ok = false; break; } b64 += a.chunks[i]; }
         clearTimeout(p.timer); this.filePending = null; this.fileAsm = null;
-        if (ok) { try { p.resolve(decodeURIComponent(escape(base64ToString(b64)))); } catch { p.resolve(base64ToString(b64)); } }
+        if (ok && p.bytes) { p.resolve(base64ToBytes(b64)); }              // @RECDUMP path: raw clip bytes
+        else if (ok) { try { p.resolve(decodeURIComponent(escape(base64ToString(b64)))); } catch { p.resolve(base64ToString(b64)); } }
         else p.reject(new Error('missing file chunk'));
       }
       return;
@@ -339,6 +341,35 @@ export class BleTransport implements Transport {
   recOverdub(on: boolean) { this.relay('@RECDUB=' + (on ? 1 : 0)); }
   recPlay(on: boolean) { this.relay('@RECPLAY=' + (on ? 1 : 0)); }
   recClear() { this.relay('@RECCLR'); }
+  // ---- Note editor: clip dump / load (@STATE caps.recedit) ----
+  recDump(v: number): Promise<Uint8Array> {
+    return new Promise((resolve, reject) => {
+      if (!this.device) { reject(new Error('not connected')); return; }
+      if (this.filePending) { reject(new Error('a file read is in progress')); return; }
+      const p: FilePending = { resolve, reject, timer: null, total: 0, received: 0, bytes: true };
+      this.filePending = p;
+      this.fileAsm = { id: undefined, chunks: [] };
+      this.armFileTimer(p);
+      this.relay('@RECDUMP=' + (v === 2 ? 2 : 1)).catch(e => { clearTimeout(p.timer); this.filePending = null; reject(e); });
+    });
+  }
+  async recLoad(v: number, bytes: Uint8Array): Promise<void> {
+    v = v === 2 ? 2 : 1;
+    await this.awaitReply('@RECLOAD=' + v + '\x1f' + bytes.length, '@RECOK=' + v, '@RECERR=' + v);
+    for (const fr of rdFrames(v, bytes)) { await this.relay(fr); await new Promise(r => setTimeout(r, 30)); }  // pace the BLE relay (bridge throttle)
+    await this.awaitReply('@RECEND=' + v, '@RECE=' + v, '@RECERR=' + v);
+  }
+  // Send a line via the relay, resolve on the next device line with okPrefix / reject on errPrefix.
+  private awaitReply(send: string, okPrefix: string, errPrefix: string, timeoutMs = 12000): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      const off = this.onLine(l => {
+        if (l.startsWith(okPrefix)) { clearTimeout(t); off(); resolve(l); }
+        else if (l.startsWith(errPrefix)) { clearTimeout(t); off(); reject(new Error(l)); }
+      });
+      const t = setTimeout(() => { off(); reject(new Error(send + ' timed out')); }, timeoutMs);
+      this.relay(send).catch(e => { clearTimeout(t); off(); reject(e); });
+    });
+  }
   // ---- Audio loop recorder (identical @-lines over the relay) ----
   audioLoopSel(i: number) { this.relay('@ALSEL=' + Math.max(0, Math.round(i))); }
   audioLoopBars(n: number) { this.relay('@ALBARS=' + n); }

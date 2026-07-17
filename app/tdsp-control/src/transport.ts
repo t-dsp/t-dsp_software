@@ -131,6 +131,10 @@ export interface Transport {
   recOverdub(on: boolean): void;                      // arm an overdub onto the existing clip / stop (@RECDUB=)
   recPlay(on: boolean): void;                         // resume a stopped clip / stop (@RECPLAY=)
   recClear(): void;                                   // wipe the selected voice's clip (@RECCLR)
+  // ---- Note editor (build-flag gated; shown only when @STATE caps.recedit). See
+  // planning/midi-editor/DESIGN.md. Round-trips a recorded loop as raw LoopClip bytes. ----
+  recDump(v: number): Promise<Uint8Array>;            // fetch voice v's clip (@RECDUMP -> @FB/@FD/@FE)
+  recLoad(v: number, bytes: Uint8Array): Promise<void>; // stream an edited clip back (@RECLOAD/@RD/@RECEND)
   // ---- Audio loop recorder (records the MASTER MIX as looping audio; N independent
   // loops. Shown only when @STATE caps.audioloop > 0 — it reports how many loops actually
   // allocated, which is RAM/PSRAM dependent). See planning/audio-looper/DESIGN.md. ----
