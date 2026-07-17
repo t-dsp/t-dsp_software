@@ -1283,6 +1283,11 @@ static void trackFire(Track &t, bool anchorNow) {
     t.player->play(t.preEv, t.preCount);
     g_syncAnchorNow = anchorNow;
     songApplySync(t, t.preLoopBeats);   // grid-lock (exact length from the parse, else derived from ms)
+    // Loop SEAMLESSLY when loop is on: the player wraps itself on the exact bar boundary (tickSynced),
+    // so there is NO stop/re-arm/re-zero at the seam. That re-arm re-zeroed the grid + resynced the arp
+    // every loop, racing the re-armed song's first-note dispatch -> the arp missed its downbeat step
+    // (the dropped-first-beat bug). Seamless keeps the grid continuous so the arp steps through the seam.
+    t.player->setLooping(*t.loop);
     if (t.caps.ownsMeter) { applyMeter(); g_songBarClock = 0; }   // meter master (voice 1 / a groove while it plays)
 }
 
@@ -2118,6 +2123,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     else if (strncmp(line, "@SONG2F=", 8) == 0)   trackStartArg(g_tracks[1], line + 8);        // @SONG2F=<filename|name>
     else if (strncmp(line, "@SONG2=", 7) == 0)  { if (strcmp(line + 7, "stop") == 0) songStop(g_tracks[1]); }
     else if (strncmp(line, "@LOOP2=", 7) == 0)  { g_song2Loop = (atoi(line + 7) != 0);
+                                 g_player2.setLooping(g_song2Loop);   // seamless self-loop (no re-arm) — takes effect mid-play
                                  Serial.printf("[song2] loop %s\n", g_song2Loop ? "ON" : "off"); }
 #endif
     else if (strcmp(line, "@GETCAT") == 0)        refreshCatalog(reply);   // re-scan SD + send catalog
@@ -2156,6 +2162,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     }
     else if (strncmp(line, "@HPF=", 5) == 0)      setDacHpfMode(atoi(line + 5));
     else if (strncmp(line, "@LOOP=", 6) == 0)   { g_loop = (atoi(line + 6) != 0);
+                                 g_player.setLooping(g_loop);   // seamless self-loop (no re-arm) — takes effect mid-play
                                  Serial.printf("[song] loop %s\n", g_loop ? "ON" : "off"); }
     else if (strncmp(line, "@SYNCPROBE=", 11) == 0) {   // 1 Hz drift probe: master beat vs each synced player's cursor
         g_syncProbe = (atoi(line + 11) != 0); g_syncProbeClock = 0;
@@ -3066,7 +3073,7 @@ void loop() {
             else if (c == 'B') { runPitchBendTest(); }         // audible pitch-bend sweep on ch1
 #endif
             else if (c == 'E') { applyMidiMode(!g_mpeMode); }  // toggle MIDI <-> MPE mode locally
-            else if (c == 'O') { g_loop = !g_loop; Serial.printf("[song] loop %s\n", g_loop ? "ON" : "off"); }  // lOop toggle
+            else if (c == 'O') { g_loop = !g_loop; g_player.setLooping(g_loop); Serial.printf("[song] loop %s\n", g_loop ? "ON" : "off"); }  // lOop toggle
 #if TDSP_DIAGNOSTICS
             else if (c == 'A') { runMpeTest(); }               // simulate an MPE note (bend + pressure)
 #endif
