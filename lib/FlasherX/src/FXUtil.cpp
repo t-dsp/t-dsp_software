@@ -66,7 +66,15 @@ void update_firmware( Stream *in, Stream *out,
     }
 
     if (parse_hex_line( (const char*)line, hex.data, &hex.addr, &hex.num, &hex.code ) == 0) {
+      // LOCAL MOD: a blank line is a framing artifact (e.g. the stray '\n' after the
+      // '@FXUP' command, or CR/LF pairs), NOT corruption -- skip it and keep reading.
+      if (line[0] == '\0') continue;
+      // A NON-blank unparseable line means missing/garbled firmware bytes -> a
+      // silently bad image. Over the ESP32 relay a byte can still drop under load,
+      // so abort here (FATAL) and let the client retry the whole transfer (flash is
+      // write-once; a gap can't be patched in place).
       out->printf( "abort - bad hex line %s\n", line );
+      return;
     }
     else if (process_hex_record( &hex ) != 0) { // error on bad hex code
       out->printf( "abort - invalid hex code %d\n", hex.code );

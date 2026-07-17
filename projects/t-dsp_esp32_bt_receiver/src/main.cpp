@@ -873,6 +873,10 @@ static void wsHandleText(uint8_t num, const char *msg) {
       // we may write to Serial is @FXUP and the tunneled hex. Any stray debug
       // print would be read by FlasherX as a bad hex line and abort the flash. So
       // status goes to the WS client, never to Serial.
+      // NOTE: do NOT touch A2DP here -- a2dp_sink.disconnect() (and its state
+      // callback) log to Serial, which IS the UART to the Teensy, corrupting the
+      // very first hex line. The real drop was Serial.write() returning short under
+      // load; that's fixed in the WStype_BIN handler (write-all loop).
       g_fxClient = num; g_fxBridge = true; g_fxLastByte = millis();
       Serial.print("@FXUP\n");        // Teensy enters fxRunUpdate() on Serial7
       wsSendLine(num, "!fxbridge=on");  // ack to the PC over WS, not the UART
@@ -924,7 +928,17 @@ static void onWsEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t lengt
       // the Teensy's hex parser never overruns. Ignored unless this client owns
       // an active tunnel.
       if (g_fxBridge && num == g_fxClient) {
-        Serial.write(payload, length);
+        // Write EVERY byte. Arduino-ESP32 Serial.write() can return short when the
+        // UART TX FIFO is full under WiFi/BT load; ignoring the count silently drops
+        // the remainder -> a missing byte -> "bad hex line" on the Teensy (whose RX
+        // never overran). Loop until the whole frame is out, yielding if momentarily
+        // full so the FIFO can drain at 115200.
+        size_t off = 0;
+        while (off < length) {
+          size_t w = Serial.write(payload + off, length - off);
+          off += w;
+          if (off < length) delay(1);   // TX FIFO full -> let it drain
+        }
         g_fxLastByte = millis();
       }
       break;

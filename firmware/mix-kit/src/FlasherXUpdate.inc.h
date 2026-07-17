@@ -47,9 +47,22 @@ static void fxRunUpdate(Stream& io) {
             buffer_size / 1024, IN_FLASH(buffer_addr) ? "FLASH" : "RAM",
             buffer_addr, buffer_addr + buffer_size);
   io.flush();
+
+  // DIAGNOSTIC: clear the LPUART7 hardware RX overrun flag so we can tell after the
+  // transfer whether bytes were lost to a FIFO overrun (RX ISR starved) vs. some
+  // other cause (e.g. ESP-side drop). LPUART_STAT_OR is bit 19, write-1-to-clear.
+  bool uartPath = (&io == (Stream*)&Serial7);
+  if (uartPath) IMXRT_LPUART7.STAT |= (1u << 19);
+
   // Reads hex from &io, writes/verifies/moves to program flash, then REBOOTs on
   // success (does not return). On error/abort it returns here.
   update_firmware(&io, &io, buffer_addr, buffer_size);
+
+  if (uartPath) {
+    uint32_t stat = IMXRT_LPUART7.STAT;
+    io.printf("[fx] LPUART7 STAT=%08lX rx_overrun=%d (1=FIFO overflowed, bytes lost)\n",
+              (unsigned long)stat, (int)((stat >> 19) & 1u));
+  }
   io.println("[fx] update aborted — freeing buffer, rebooting");
   firmware_buffer_free(buffer_addr, buffer_size);
   io.flush();
