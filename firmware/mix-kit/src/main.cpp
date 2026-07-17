@@ -920,6 +920,7 @@ static void applyMidiMode(bool mpe);   // defined below; test songs flip mode on
 static void drumApplyKit();            // defined below; the drum Track's prep applies the GM kit
 static void muteSongDrums(bool mute);  // defined below; drum-track start/stop mutes the song's ch10
 static bool drumEngineOk();            // defined below; does the active engine render ch10 drums?
+static void trackLaunch(Track &t, const char *arg);   // defined below; launch-quantize-aware start (drum uses it)
 
 // Drum controls. g_drumSel / g_drumKit are used by the drum section further below.
 static int  g_drumSel      = 0;     // selected / currently-playing groove index
@@ -936,8 +937,7 @@ static bool g_engineHasDrums = false;// engine renders ch10 (captured once at se
 // so a loop never grows a bar-long gap. This aligns to the free grid without re-zeroing it.
 static bool g_launchQuantize   = false;
 static bool g_songLaunchPending = false;   // player 1 (@SONGF/@SONGRESTART) armed for the next bar
-static bool g_drumLaunchPending = false;
-static char g_pendingDrumFile[80] = {0};
+static bool g_drumLaunchPending = false;   // drum groove armed for the next bar (g_drumTrack.launchPending)
 #if TDSP_VOICE2
 static bool g_song2LaunchPending = false;   // player 2 (@SONG2) armed for the next bar (see trackRestart)
 #endif
@@ -970,8 +970,7 @@ static uint8_t       g_drumBpb       = 4;       // selected groove's beats-per-b
 static double        g_songLoopBeats = 0.0;     // playing/last song's exact loop length (quarter beats); 0 = unknown
 static double        g_drumLoopBeats = 0.0;     // selected groove's exact loop length (quarter beats); 0 = unknown
 static elapsedMillis g_songBarClock;            // ms since the playing song's beat 1
-static bool          g_drumArmed     = false;   // SYNCHRO: groove loaded, waiting for the first live note
-static uint32_t      g_drumArmedN    = 0;
+static bool          g_drumArmed     = false;   // SYNCHRO: groove preloaded (g_drumTrack), waiting for the first live note
 
 // Retime both players to the master BPM (call after changing BPM / native tempos).
 // This is the SINGLE tempo write path: feed the followers their native tempos,
@@ -1266,9 +1265,16 @@ FLASHMEM static bool trackPreload(Track &t, const char *arg) {
 // false joins the running grid in phase. The voice-1-only global-mode/meter effects are caps-gated.
 static void trackFire(Track &t, bool anchorNow) {
     if (!t.preEv || t.preCount == 0) return;
-    // A groove that DEFINES the downbeat (idle transport) also owns the tempo: snap the master BPM
-    // to its native BPM so it plays at its authored feel. Joining a running grid leaves tempo alone.
-    if (t.caps.tempoSourceWhenIdle && !g_conductor.running() && *t.bpm > 1.0f) g_masterBpm = *t.bpm;
+    // A groove that DEFINES the downbeat also owns the tempo: snap the master BPM to its native BPM so
+    // it plays at its authored feel. Only on an immediate/synchro start (NOT a quantized bar-join,
+    // anchorNow) with NO song holding the grid — a groove under a playing song joins the song's tempo.
+    if (t.caps.tempoSourceWhenIdle && !anchorNow && *t.bpm > 1.0f) {
+        bool songHeld = g_player.isPlaying();
+#if TDSP_VOICE2
+        songHeld = songHeld || g_player2.isPlaying();
+#endif
+        if (!songHeld) g_masterBpm = *t.bpm;
+    }
     songPrep(t);                                       // drum: applies the kit (no note panic)
     if (t.caps.ownsGlobalMode && (t.preForceMode || g_mpeMode != t.preMpe)) applyMidiMode(t.preMpe);
     if (t.caps.mutesSongDrums) muteSongDrums(true);    // the groove IS the beat -> mute the song's own ch10
@@ -1485,64 +1491,34 @@ static void drumApplyKit() {
 #endif
 }
 
-FLASHMEM // Load + start a groove by its full SD path. Shared by the legacy numeric index
-// (flat menu / serial keys) and the browser's play-by-filename (@DRUMF=), which the
-// client resolves from catalog.tsv — so playback is decoupled from firmware scan order.
-static void drumStartPath(const char* path, const char* disp, bool rezero = true) {
-    if (!drumEngineOk()) { Serial.printf("[drum] %s has no channel-10 drum map — use TSF/SF2/OPL3/OPLL\n", synthName()); return; }
-    g_drumFileBpm = 120.0f; g_drumBpb = 4; g_drumLoopBeats = 0.0;
-    int got = tdsp::smf::loadSmfFile(path, g_drumBuf, MAX_DRUM_EVENTS, &g_drumFileBpm, &g_drumBpb, &g_drumLoopBeats);
-    if (got <= 0) { Serial.printf("[drum] load FAILED: %s\n", path); return; }
-    drumApplyKit();
-    g_drumPlayer.setVelocityScale(g_drumVolPct / 100.0f);
-    // A groove starting on its own downbeat with no song running becomes the tempo
-    // source: snap the master to the groove's native BPM so it plays at its authored
-    // feel (a 95-bpm funk groove -> master 95). When joining an already-running grid
-    // (rezero=false, launch-quantize) or under a playing song, the existing tempo owns
-    // it — leave the master alone. The app picks up the new BPM on its next @STATE poll.
-    if (rezero && !g_player.isPlaying() && g_drumFileBpm > 1.0f) g_masterBpm = g_drumFileBpm;
-    applyTempos();   // groove plays at the master BPM (x fine trim)
-    // SYNCHRO START (PSS-140 style): arm the groove and let the FIRST live note kick
-    // it off on beat 1 (you pick the downbeat by when you play). Otherwise start NOW
-    // on beat 1 — immediate, right when you press Play (you time the press).
+// Launch a groove (by full SD path) through the drum Track — the SAME preload->fire path the song
+// players use, so a groove lands on the bar downbeat (launch-quantize aware) instead of overtaking a
+// running player, and the (blocking) SD parse runs off the beat. The drum caps carry the specials:
+// drumGated (engine must render ch10), appliesKit (prep sets the GM kit), mutesSongDrums (mute the
+// song's ch10 while the groove plays), tempoSourceWhenIdle (a groove defining the grid sets the BPM).
+// SYNCHRO START (PSS-140): arm — preload now and let the first live note be the downbeat (maybeSynchroStart).
+static void drumLaunchPath(const char* path) {
+    g_drumArmed = false;
     if (g_drumSynchro) {
-        g_drumArmed = true; g_drumArmedN = (uint32_t)got;
-        Serial.printf("[drum] %s SYNCHRO armed @ %.0f bpm — play a note to start\n", disp, (double)g_masterBpm);
+        if (trackPreload(g_drumTrack, path)) {   // stash the groove; the first live note fires it
+            g_drumArmed = true;
+            Serial.printf("[drum] %s SYNCHRO armed @ %.0f bpm — play a note to start\n", g_curDrumName, (double)g_masterBpm);
+        }
         return;
     }
-    g_drumArmed = false;
-    muteSongDrums(true);                                        // groove is the drums now
-    // Zero the master clock to THIS downbeat only if the transport is idle (first
-    // player wins the grid); a groove joining a playing song/groove locks in phase
-    // instead. Under launch-quantize (rezero=false) we're already firing on a bar
-    // edge of the free grid, so never re-zero. Zero BEFORE play()/setSyncedMode so
-    // the synced anchor reads the fresh clock. PLAN §5.
-    if (rezero) ensureTransportStarted();
-    g_drumPlayer.play(g_drumBuf, (uint32_t)got);               // immediate: beat 1 = now
-    // Tick-sync the groove to the master clock: drift-free wrap on its EXACT loop
-    // length (fractional beats OK). If the parser couldn't derive a length, fall
-    // back to the free-running ms engine (play() left it in ms mode). PLAN §4.5.
-    if (g_drumLoopBeats > 0.0)
-        g_drumPlayer.setSyncedMode(&g_conductor.clock(), g_drumLoopBeats, g_drumFileBpm);
-    applyMeter();                                              // bar length from the groove's time-sig (unless a song owns the meter)
-    Serial.printf("[drum] %s (%d ev, %.1f bpm, %u beats/bar, loop=%.2f beats %s) kit=%s @ master %.0f bpm vol=%d%%\n",
-                  disp, got, (double)g_drumFileBpm, (unsigned)g_drumBpb, g_drumLoopBeats,
-                  g_drumPlayer.isSynced() ? "SYNCED" : "ms", kDrumKits[g_drumKit].name, (double)g_masterBpm, g_drumVolPct);
+    trackLaunch(g_drumTrack, path);              // launch-quantize aware: preload+arm on the next bar, else immediate
 }
 static void drumStart(int idx) {   // legacy numeric index (flat menu / serial C/D keys)
     if (g_numDrums == 0) { Serial.println("[drum] no grooves on SD (/drums) — run tools/fetch_drums.py"); return; }
     if (idx < 0) idx = 0;
     if (idx >= g_numDrums) idx = g_numDrums - 1;
     g_drumSel = idx;
-    drumStartPath(g_drums[idx].path, g_drums[idx].name);
+    drumLaunchPath(g_drums[idx].path);
 }
-static void drumStartFile(const char* fname, bool rezero = true) {   // by filename — the browser's play path
+static void drumStartFile(const char* fname) {   // @DRUMF: by filename (or a full /path from the browser)
+    if (fname[0] == '/') { drumLaunchPath(fname); return; }
     char path[128]; snprintf(path, sizeof(path), "/drums/%s", fname);
-    char disp[64]; size_t c = strlen(fname);
-    if (c > 4 && strcasecmp(fname + c - 4, ".mid") == 0) c -= 4;   // strip .mid for the log
-    if (c > sizeof(disp) - 1) c = sizeof(disp) - 1;
-    memcpy(disp, fname, c); disp[c] = 0;
-    drumStartPath(path, disp, rezero);
+    drumLaunchPath(path);
 }
 static void drumStop() {
     g_drumArmed = false;                 // cancel a synchro-armed groove (not a Track concern yet)
@@ -1628,15 +1604,9 @@ static void trackRestart(Track &t, const char* arg) {
     trackStartArg(t, arg);
     g_forceTransportZero = false;  // safety: clear if trackStartArg bailed before consuming it
 }
-static void drumLaunchFile(const char* fname) {
-    if (g_launchQuantize && g_conductor.running()) {
-        snprintf(g_pendingDrumFile, sizeof g_pendingDrumFile, "%s", fname);
-        g_drumLaunchPending = true; g_launchSched.barHit = false;
-        Serial.printf("[sync] drum launch armed: %s -> next bar\n", fname);
-        return;
-    }
-    drumStartFile(fname);
-}
+// @DRUMF entry: the drum Track's trackLaunch (inside drumStartFile) is already launch-quantize
+// aware (preload+arm on the bar, else immediate), so this is just the filename->path hop.
+static void drumLaunchFile(const char* fname) { drumStartFile(fname); }
 // Master tempo (BPM) — one knob retimes BOTH the song and the drum groove, live.
 static void setMasterBpm(int bpm) {
     if (bpm < 40) bpm = 40;
@@ -1928,14 +1898,10 @@ static RecLoadReceiver g_recLoad;
 // and USB-host note-on callbacks so a keyboard press starts the groove either way.
 static void maybeSynchroStart(byte vel) {
     if (g_drumArmed && vel > 0) {
-        muteSongDrums(true);
-        g_conductor.start();                        // this note IS the intentional downbeat: zero here
-        g_arpFilter.resyncToGrid();                 // re-lock a held arp chord to the new downbeat
-        g_drumPlayer.play(g_drumBuf, g_drumArmedN);
-        if (g_drumLoopBeats > 0.0)                  // lock the groove to the just-zeroed grid
-            g_drumPlayer.setSyncedMode(&g_conductor.clock(), g_drumLoopBeats, g_drumFileBpm);
-        applyMeter();                               // bar length from the groove's time-sig
         g_drumArmed = false;
+        g_forceTransportZero = true;    // this note IS the intentional downbeat: define the grid here
+        trackFire(g_drumTrack, /*anchorNow=*/false);   // groove was preloaded at arm; fire from the just-zeroed grid
+        g_forceTransportZero = false;
         Serial.println("[drum] SYNCHRO start (first note)");
     }
 }
@@ -2803,7 +2769,7 @@ FLASHMEM void setup() {
     // Dedicated drum-groove player (still hand-wired — P2 folds it into a Track): channel 10 only,
     // loops, ignores the file's program changes (we own the kit via @DRUMKIT). Feeds the GM sink
     // DIRECTLY, bypassing the arp, so a groove backs the melodic voice but is never arpeggiated.
-    g_drumPlayer.setSink(g_synthSink);
+    g_drumPlayer.setSink(g_synthSink); g_drumTrack.sink = g_synthSink;   // default; a dedicated drum engine overrides below
     g_drumPlayer.setChannelMask((uint16_t)(1u << 9));   // MIDI channel 10 (index 9)
     g_drumPlayer.setProgramChangeEnabled(false);
     g_drumPlayer.setLooping(true);
@@ -2842,14 +2808,14 @@ FLASHMEM void setup() {
     // player's channel 10 to it (instead of the melodic sink), and mark drums available
     // regardless of the melodic engine's own no-drum song mask.
     if (drumTsfBegin()) {
-        g_drumPlayer.setSink(&g_drumTsfSink);
+        g_drumPlayer.setSink(&g_drumTsfSink); g_drumTrack.sink = &g_drumTsfSink;
         g_engineHasDrums = true;
     }
 #endif
 #ifdef TDSP_DRUM_VOICE
     // Same idea with the OPLL rhythm voice (no PSRAM): route ch10 to it + mark drums OK.
     if (drumVoiceBegin()) {
-        g_drumPlayer.setSink(&g_drumVoiceSink);
+        g_drumPlayer.setSink(&g_drumVoiceSink); g_drumTrack.sink = &g_drumVoiceSink;
         g_engineHasDrums = true;
     }
 #endif
@@ -2937,7 +2903,7 @@ void loop() {
         // Every voice fires from its PRELOADED stash (trackFire = play()+sync, no SD parse) so a launch
         // can never stall loop() on the beat. anchorNow=true starts it from the top at this downbeat.
         if (*g_tracks[0].launchPending) { *g_tracks[0].launchPending = false; trackFire(g_tracks[0], /*anchorNow=*/true); }
-        if (g_drumLaunchPending)        { g_drumLaunchPending        = false; drumStartFile(g_pendingDrumFile, /*rezero=*/false); }
+        if (*g_drumTrack.launchPending) { *g_drumTrack.launchPending = false; trackFire(g_drumTrack, /*anchorNow=*/true); }
 #if TDSP_VOICE2
         if (*g_tracks[1].launchPending) { *g_tracks[1].launchPending = false; trackFire(g_tracks[1], /*anchorNow=*/true); }
 #endif
