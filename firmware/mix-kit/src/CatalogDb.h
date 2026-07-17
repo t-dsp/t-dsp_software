@@ -7,8 +7,8 @@
 // voice, play a groove).
 //
 //   /tdsp/dexed.ndjson       one line per .syx cart, voice names INLINE
-//   /tdsp/grooves.ndjson     one line per /drums/*.mid
-//   /tdsp/songs.ndjson       one line per /songs/*.mid
+//   /tdsp/grooves.ndjson     one line per /midi/drums/*.mid
+//   /tdsp/songs.ndjson       one line per /midi/songs/*.mid
 //   /tdsp/soundfonts.ndjson  one line per /sf2/*.sf2  (+ bytes)
 //   /tdsp/samples.ndjson     one line per /samples/<bank> subfolder
 //   /tdsp/index.ndjson       manifest: version, build time, engine, per-type counts
@@ -277,11 +277,11 @@ FLASHMEM static bool buildCatalog(const EngineCaps &caps, BundledFn buildBundled
     // reports it absent. (walkDexed is kept, unused, so this can be re-enabled if ever needed.)
     long dexed = -1;
     SD.remove("/tdsp/dexed.ndjson");
-    long grooves = buildSource("grooves", "/tdsp/grooves.ndjson", "/drums", ".mid", sig,
-        [](Print &o) -> long { return (long)flatScan(o, "/drums", ".mid", "groove", false); });
+    long grooves = buildSource("grooves", "/tdsp/grooves.ndjson", "/midi/drums", ".mid", sig,
+        [](Print &o) -> long { return (long)flatScan(o, "/midi/drums", ".mid", "groove", false); });
     // songs.ndjson is written by the bundled hook from the firmware's g_songs play registry
     // (built-ins + SD), so its row index == the @SONG=<i> the player must send. A bare
-    // flatScan(/songs) would mis-index (extra built-ins, different order).
+    // flatScan(/midi/songs) would mis-index (extra built-ins, different order).
     long songs = -1;
     long sf2 = buildSource("soundfonts", "/tdsp/soundfonts.ndjson", "/sf2", ".sf2", sig,
         [](Print &o) -> long { return (long)flatScan(o, "/sf2", ".sf2", "soundfont", true); });

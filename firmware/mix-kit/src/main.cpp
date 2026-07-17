@@ -783,7 +783,7 @@ static const BuiltinSong kBuiltinSongs[] = {
 };
 static const int kNumBuiltin = sizeof(kBuiltinSongs) / sizeof(kBuiltinSongs[0]);
 
-// Songs live on the SD card (/songs/*.mid) plus a handful of baked demo/test
+// Songs live on the SD card (/midi/songs/**.mid) plus a handful of baked demo/test
 // sequences in flash. Nothing but the ONE currently-playing song is held in RAM
 // (parsed into g_buf on play) — exactly like the drum grooves. The browsable list is
 // the catalog (/tdsp/songs.ndjson, built by @REINDEX); the app plays a song by NAME
@@ -791,7 +791,7 @@ static const int kNumBuiltin = sizeof(kBuiltinSongs) / sizeof(kBuiltinSongs[0]);
 // registry and therefore NO song-count cap.
 //   built-in test seq : baked MidiFileEvent[] (mev), flips MPE mode via `mpe`
 //   built-in demo     : baked legacy SongEv[] (ev), tempo estimate
-//   SD song           : /songs/<name>.mid, parsed on play (real tempo)
+//   SD song           : /midi/songs/<path>.mid, parsed on play (real tempo)
 // g_sdReady is declared earlier (before the synth backend include).
 
 static const int MAX_EVENTS = 24000;                 // longest playable song (baked or SD)
@@ -809,20 +809,30 @@ static bool endsWithMid(const char *s) {
     size_t n = strlen(s);
     return n > 4 && strcasecmp(s + n - 4, ".mid") == 0;
 }
-// strip a trailing ".mid" from a filename into `out` (the display name)
+// Generic case-insensitive ".<ext>" suffix test for the @LS lister. `ext` carries NO dot
+// (e.g. "mid"); an empty/null ext matches every file. Sibling of endsWithMid.
+static bool endsWithExt(const char *name, const char *ext) {
+    if (!ext || !*ext) return true;
+    size_t n = strlen(name), e = strlen(ext);
+    if (n < e + 1 || name[n - e - 1] != '.') return false;
+    return strcasecmp(name + n - e, ext) == 0;
+}
+// Display name for a song path: take the BASENAME (strip any directory) then drop a
+// trailing ".mid". Handles both a bare filename and a full "/midi/songs/Foo.mid" path.
 static void songDisp(char *out, size_t n, const char *fname) {
-    size_t c = strlen(fname);
-    if (c > 4 && strcasecmp(fname + c - 4, ".mid") == 0) c -= 4;
+    const char *base = strrchr(fname, '/');
+    base = base ? base + 1 : fname;
+    size_t c = strlen(base);
+    if (c > 4 && strcasecmp(base + c - 4, ".mid") == 0) c -= 4;
     if (c > n - 1) c = n - 1;
-    memcpy(out, fname, c); out[c] = 0;
+    memcpy(out, base, c); out[c] = 0;
 }
 // True if an SD .mid with this display name exists (so a baked built-in defers to the
 // tempo-bearing SD copy). Checked against the card, not a RAM list.
 static bool sdSongExists(const char *disp) {
     if (!::g_sdReady) return false;
     char p[128];
-    snprintf(p, sizeof p, "/songs/%s.mid", disp); if (SD.exists(p)) return true;
-    snprintf(p, sizeof p, "/%s.mid", disp);        return SD.exists(p);
+    snprintf(p, sizeof p, "/midi/songs/%s.mid", disp); return SD.exists(p);
 }
 // Extract a JSON string field ("<key>":"<val>") from one songs.ndjson line into `out`.
 // Minimal (handles a leading backslash-escape); song names/filenames carry no exotic
@@ -863,17 +873,23 @@ static bool songByIndex(int idx, char *argOut, size_t argN, char *nameOut, size_
     }
     f.close(); return ok;
 }
-// Write one directory's *.mid rows to songs.ndjson ({name, file}). Used by the catalog
-// builder (catdbWriteBundled) — a direct SD scan, so the catalog is uncapped.
+// Write a directory tree's *.mid rows to songs.ndjson ({name, file}). RECURSIVE: walks
+// subdirs so /midi/songs/<genre>/Foo.mid is indexed too. `file` is the FULL SD path
+// (e.g. "/midi/songs/Foo.mid") so @SONG=<index>/trackPreload resolve it verbatim; `name`
+// is the basename display. Used by the catalog builder — a direct SD scan, uncapped.
 static void writeSongDir(Print &so, const char *dir) {
     File d = SD.open(dir);
     if (!d || !d.isDirectory()) { if (d) d.close(); return; }
     for (File f = d.openNextFile(); f; f = d.openNextFile()) {
         const char *nm = f.name();
-        if (!f.isDirectory() && nm && endsWithMid(nm)) {
-            char disp[64]; songDisp(disp, sizeof disp, nm);
-            so.print("{\"name\":"); tdsp::catdb::jsonStr(so, disp);
-            so.print(",\"file\":"); tdsp::catdb::jsonStr(so, nm); so.print("}\n");
+        if (nm && nm[0] != '.') {
+            char full[160]; snprintf(full, sizeof full, "%s/%s", dir, nm);
+            if (f.isDirectory()) { f.close(); writeSongDir(so, full); continue; }   // recurse into subfolders
+            if (endsWithMid(nm)) {
+                char disp[64]; songDisp(disp, sizeof disp, nm);
+                so.print("{\"name\":"); tdsp::catdb::jsonStr(so, disp);
+                so.print(",\"file\":"); tdsp::catdb::jsonStr(so, full); so.print("}\n");
+            }
         }
         f.close();
     }
@@ -1201,9 +1217,11 @@ FLASHMEM static bool trackPreload(Track &t, const char *arg) {
     t.preEv = nullptr; t.preCount = 0; t.preLoopBeats = 0.0;
     t.preForceMode = false; t.preMpe = false;   // default (SD / legacy): force normal MIDI only if currently MPE
     if (endsWithMid(arg)) {
-        char path[128]; char disp[64]; songDisp(disp, sizeof disp, arg);
-        snprintf(path, sizeof path, "/songs/%s", arg);
-        if (!SD.exists(path)) snprintf(path, sizeof path, "/%s", arg);
+        // Hard cut to /midi paths: the app sends a full SD path ("/midi/songs/Foo.mid").
+        // A leading '/' is used verbatim; a bare name is rooted at '/' (no /songs fallback).
+        char path[160]; char disp[64]; songDisp(disp, sizeof disp, arg);
+        if (arg[0] == '/') snprintf(path, sizeof path, "%s", arg);
+        else               snprintf(path, sizeof path, "/%s", arg);
         double plb = 0.0;
         int got = tdsp::smf::loadSmfFile(path, t.buf, t.bufCap, t.bpm, t.bpb, &plb);   // + exact loop length
         if (got <= 0) { Serial.printf("[%s] SD load FAILED: %s\n", t.tag, path); return false; }
@@ -1385,9 +1403,8 @@ FLASHMEM static void catdbWriteBundled() {
             so.print(",\"builtin\":true}\n");
         }
         if (::g_sdReady) {
-            if (!SD.exists("/songs")) SD.mkdir("/songs");
-            writeSongDir(so, "/songs");
-            writeSongDir(so, "/");                              // also list .mid at the card root
+            if (!SD.exists("/midi/songs")) SD.mkdir("/midi/songs");
+            writeSongDir(so, "/midi/songs");                    // recursive (walks /midi/songs/<genre>/…)
         }
         for (int i = 0; i < kNumBuiltin; ++i) {
             if (sdSongExists(kBuiltinSongs[i].name)) continue;  // SD copy wins (tempo-bearing)
@@ -1403,15 +1420,15 @@ FLASHMEM static void catdbWriteBundled() {
 static void buildDrumList() {
     g_numDrums = 0;
     if (!g_sdReady) return;
-    if (!SD.exists("/drums")) SD.mkdir("/drums");
-    File d = SD.open("/drums");
+    if (!SD.exists("/midi/drums")) SD.mkdir("/midi/drums");
+    File d = SD.open("/midi/drums");
     if (!d || !d.isDirectory()) { if (d) d.close(); return; }
     const int cap = (int)(sizeof(g_drums) / sizeof(g_drums[0]));
     for (File f = d.openNextFile(); f && g_numDrums < cap; f = d.openNextFile()) {
         const char *nm = f.name();
         if (!f.isDirectory() && nm && endsWithMid(nm)) {
             DrumRef &r = g_drums[g_numDrums++];
-            snprintf(r.path, sizeof(r.path), "/drums/%s", nm);
+            snprintf(r.path, sizeof(r.path), "/midi/drums/%s", nm);
             size_t copy = strlen(nm) - 4;                   // display name = filename minus ".mid"
             if (copy > sizeof(r.name) - 1) copy = sizeof(r.name) - 1;
             memcpy(r.name, nm, copy); r.name[copy] = 0;
@@ -1506,12 +1523,13 @@ static void drumStart(int idx) {   // legacy numeric index (flat menu / serial C
     g_drumSel = idx;
     drumStartPath(g_drums[idx].path, g_drums[idx].name);
 }
-static void drumStartFile(const char* fname, bool rezero = true) {   // by filename — the browser's play path
-    char path[128]; snprintf(path, sizeof(path), "/drums/%s", fname);
-    char disp[64]; size_t c = strlen(fname);
-    if (c > 4 && strcasecmp(fname + c - 4, ".mid") == 0) c -= 4;   // strip .mid for the log
-    if (c > sizeof(disp) - 1) c = sizeof(disp) - 1;
-    memcpy(disp, fname, c); disp[c] = 0;
+static void drumStartFile(const char* fname, bool rezero = true) {   // by filename/path — the browser's play path
+    // @DRUMF accepts a full SD path (leading '/', e.g. "/midi/drums/Foo.mid") verbatim, or a
+    // bare filename rooted at /midi/drums. (Path resolution only — playback wiring is unchanged.)
+    char path[160];
+    if (fname[0] == '/') snprintf(path, sizeof(path), "%s", fname);
+    else                 snprintf(path, sizeof(path), "/midi/drums/%s", fname);
+    char disp[64]; songDisp(disp, sizeof disp, path);   // basename minus .mid, for the log
     drumStartPath(path, disp, rezero);
 }
 static void drumStop() {
@@ -1708,7 +1726,7 @@ FLASHMEM static void sendCatalog(Print& out) {
     // synth changes the client re-points at the right manifest with NO hardcoded
     // per-engine paths — this is how each surface "knows which manifest to use".
     out.print("@MANIFESTS=");
-    out.print("drums\x1f");  out.print(g_sdReady ? "file:/drums/catalog.tsv" : "none");
+    out.print("drums\x1f");  out.print(g_sdReady ? "file:/midi/drums/catalog.tsv" : "none");
     out.print("|drumkit\x1fbundled:gmkits");
     out.print("|instr\x1f"); out.print(synthIsGM() ? "bundled:gm128" : "engine");
     out.print('\n');
@@ -1787,6 +1805,40 @@ static void streamFile(Print& out, const char* path) {
     }
     f.close();
     out.printf("@FE=%u\x1f%lu\n", id, (unsigned long)seq);
+}
+
+// --- Generic recursive SD directory list (@LS) -------------------------------
+// One small framed line per entry, modeled on streamFile's @FB/@FD/@FE. The CLIENT
+// drills folder-by-folder and sorts; the firmware only lists ONE level in filesystem
+// order (openNextFile), never buffering or sorting. Subdirs are always listed (D);
+// files (F) only when `ext` is empty OR the name ends ".<ext>" (case-insensitive).
+// Dotfiles + "System Volume Information" are skipped. Jailed to the card: any path
+// containing ".." is rejected. Reusable for future /samples, /sf2, /dexed browsing.
+//     @LB=<id>\x1f<path>            begin (id = ++counter)
+//     @LD=<id>\x1f<D|F>\x1f<name>   one entry (bare name, not a full path)
+//     @LE=<id>\x1f<count>           end (number of @LD emitted)
+//     @LERR=<id>\x1f<reason>        error
+static uint8_t g_lsId = 0;
+static void streamDir(Print& out, const char* path, const char* ext) {
+    const uint8_t id = ++g_lsId;
+    if (!path || !*path || strstr(path, "..")) { out.printf("@LERR=%u\x1f%s\n", id, "bad path"); return; }
+    File d = SD.open(path);
+    if (!d || !d.isDirectory()) { if (d) d.close(); out.printf("@LERR=%u\x1f%s\n", id, "not a dir"); return; }
+    out.printf("@LB=%u\x1f%s\n", id, path);
+    uint32_t count = 0;
+    for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+        const char* nm = f.name();
+        const bool dir = f.isDirectory();
+        if (nm && nm[0] != '.' && strcmp(nm, "System Volume Information") != 0) {
+            if (dir) { out.printf("@LD=%u\x1fD\x1f%s\n", id, nm); ++count; }
+            else if (endsWithExt(nm, ext)) { out.printf("@LD=%u\x1fF\x1f%s\n", id, nm); ++count; }
+            // Pace the ESP32/BLE link (as streamFile does); USB CDC is flow-controlled.
+            if (&out != &Serial) delay(4);
+        }
+        f.close();
+    }
+    d.close();
+    out.printf("@LE=%u\x1f%lu\n", id, (unsigned long)count);
 }
 
 #if TDSP_RECORDER_EDIT
@@ -2130,6 +2182,13 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     else if (strcmp(line, "@GETCAT") == 0)        refreshCatalog(reply);   // re-scan SD + send catalog
     else if (strcmp(line, "@REINDEX") == 0)       { tdsp::catdb::buildCatalog(engineCaps(), catdbWriteBundled, millis()); reply.println("@REINDEXED"); }  // rebuild /tdsp/*.ndjson DB (upsert)
     else if (strncmp(line, "@READ=", 6) == 0)     streamFile(reply, line + 6);  // generic file fetch (catalog transport)
+    else if (strncmp(line, "@LS=", 4) == 0) {                                    // generic recursive dir list: @LS=<path>[\x1f<ext>]
+        char buf[160]; strncpy(buf, line + 4, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+        const char* ext = "";
+        char* us = strchr(buf, '\x1f');
+        if (us) { *us = 0; ext = us + 1; }
+        streamDir(reply, buf, ext);
+    }
     else if (strncmp(line, "@WB=", 4) == 0) {                                    // host->SD file write; raw payload follows. USB CDC only.
         if (&reply != &Serial) reply.println("@WERR=0\x1fusb only");
         else g_sdWrite.begin(line + 4, reply);
@@ -2676,7 +2735,7 @@ FLASHMEM void setup() {
         Serial.println("[setup] codec init done"); Serial.flush();
     }
 
-    // SD card (Teensy 4.1 built-in slot): scan /songs/*.mid so songs can be added
+    // SD card (Teensy 4.1 built-in slot): scan /midi/songs/**.mid so songs can be added
     // by copying files to the card. Falls back to the built-in songs if no card.
 #if TDSP_HAS_SDCARD
     // Retry SD.begin a few times: a card can need a moment after power-up, so a single
@@ -2684,6 +2743,16 @@ FLASHMEM void setup() {
     // mounts on a later @GETCAT/Refresh). Looping here mounts it at boot instead.
     for (int i = 0; i < 10 && !g_sdReady; ++i) { g_sdReady = SD.begin(BUILTIN_SDCARD); if (!g_sdReady) delay(40); }
     Serial.printf("[sd] card %s\n", g_sdReady ? "ready" : "not present");
+    // Nested MIDI layout: /midi/{songs,drums,loops,tests}. Create the tree at boot so a
+    // fresh card + the @WB push / MTP drop / @LS browser all have a home. (/midi first,
+    // then children — some SD.mkdir impls don't auto-create parents.)
+    if (g_sdReady) {
+        if (!SD.exists("/midi"))       SD.mkdir("/midi");
+        if (!SD.exists("/midi/songs")) SD.mkdir("/midi/songs");
+        if (!SD.exists("/midi/drums")) SD.mkdir("/midi/drums");
+        if (!SD.exists("/midi/loops")) SD.mkdir("/midi/loops");
+        if (!SD.exists("/midi/tests")) SD.mkdir("/midi/tests");
+    }
     // MTP: present the SD to the host over USB so songs can be dropped into /songs
     // without pulling the card. Serial (debug + ESP32 flash bridge) is unaffected.
     // Only in the Serial+MTP USB build. A plain USB_SERIAL build (e.g. the Linux
