@@ -1338,6 +1338,17 @@ static int     g_numDrums = 0;
 static const int MAX_DRUM_EVENTS = 4096;                    // grooves are tiny (a bar or two)
 DMAMEM static tdsp::MidiFileEvent g_drumBuf[MAX_DRUM_EVENTS];
 
+// Drum-track state (Phase 2): the drum groove becomes g_drumTrack, a Track peer of the two synth
+// voices, so it runs the ONE quantized launch/stop/sync path instead of the special drumStart*.
+// These mirror the g_curSong{,2}* / g_song{,2}* state the synth tracks bind. g_drumTrack is bound
+// in tracksInit() and (Phase 2) routed through trackPreload/trackFire. Loop is always on (a groove
+// is a loop); wasPlaying feeds trackLoopTick (a no-op while loopsSeamless keeps the player running).
+static char g_curDrumName[64] = "";     // current groove display name
+static char g_curDrumArg[100] = "";     // current groove replay arg (SD path / filename)
+static bool g_drumWasPlaying  = false;
+static bool g_drumLoop        = true;   // a groove always loops (pinned; the drum Track's *loop)
+static Track g_drumTrack;               // bound in tracksInit(); NOT in g_tracks[] yet (own tick/@STATE until P2.4)
+
 // GM drum kits — the "instrument" the Drums menu picks. Selecting one sends a
 // program change on channel 10; GM engines (TSF/SF2) switch kit, others ignore.
 struct DrumKit { const char *name; uint8_t prog; };
@@ -2576,7 +2587,8 @@ FLASHMEM static void tracksInit() {
 #else
     t0.looper = nullptr;
 #endif
-    t0.sink = g_synthSink; t0.buf = g_buf; t0.bufCap = MAX_EVENTS; t0.setLevel = setSongVol; t0.tag = "song";
+    t0.sink = g_synthSink; t0.buf = g_buf; t0.bufCap = MAX_EVENTS; t0.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
+    t0.setLevel = setSongVol; t0.tag = "song";
     t0.caps = { /*ownsGlobalMode*/true, /*ownsMeter*/true, /*prepSpecial*/true, /*splitGuarded*/false };
     t0.name = g_curSongName; t0.arg = g_curSongArg; t0.loop = &g_loop; t0.wasPlaying = &g_songWasPlaying;
     t0.bpm = &g_songBpm; t0.bpb = &g_songBpb; t0.loopBeats = &g_songLoopBeats; t0.launchPending = &g_songLaunchPending;
@@ -2594,11 +2606,25 @@ FLASHMEM static void tracksInit() {
 #else
     t1.looper = nullptr;
 #endif
-    t1.sink = g_synthSinkB; t1.buf = g_buf2; t1.bufCap = MAX_EVENTS2; t1.setLevel = synthSetVoice2Vol; t1.tag = "song2";
+    t1.sink = g_synthSinkB; t1.buf = g_buf2; t1.bufCap = MAX_EVENTS2; t1.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
+    t1.setLevel = synthSetVoice2Vol; t1.tag = "song2";
     t1.caps = { false, false, false, /*splitGuarded*/true };
     t1.name = g_curSong2Name; t1.arg = g_curSong2Arg; t1.loop = &g_song2Loop; t1.wasPlaying = &g_song2WasPlaying;
     t1.bpm = &g_song2Bpm; t1.bpb = &g_song2Bpb; t1.loopBeats = &g_song2LoopBeats; t1.launchPending = &g_song2LaunchPending;
 #endif
+
+    // Drum track (Phase 2): a Track peer of the voices, bound to the looping ch10 groove player.
+    // sink is set to the real drum sink (g_drumTsfSink/g_drumVoiceSink/g_synthSink) in setup() where
+    // the drum engine is brought up. arp/router/looper are null (a groove has no live input or arp).
+    Track &td = g_drumTrack;
+    td.player = &g_drumPlayer; td.arp = nullptr; td.router = nullptr; td.follow = &g_drumFollow; td.looper = nullptr;
+    td.sink = g_synthSink; td.buf = g_drumBuf; td.bufCap = MAX_DRUM_EVENTS; td.chMask = (uint16_t)(1u << 9);
+    td.setLevel = setDrumVol; td.tag = "drum";
+    td.caps = { /*ownsGlobalMode*/false, /*ownsMeter*/true, /*prepSpecial*/false, /*splitGuarded*/false,
+                /*loopsSeamless*/true, /*ownsPatch*/true, /*drumGated*/true, /*appliesKit*/true,
+                /*mutesSongDrums*/true, /*tempoSourceWhenIdle*/true };
+    td.name = g_curDrumName; td.arg = g_curDrumArg; td.loop = &g_drumLoop; td.wasPlaying = &g_drumWasPlaying;
+    td.bpm = &g_drumFileBpm; td.bpb = &g_drumBpb; td.loopBeats = &g_drumLoopBeats; td.launchPending = &g_drumLaunchPending;
 }
 
 // Wire one track's MIDI graph (unified — replaces the parallel voice-1/voice-2 hookup blocks in
