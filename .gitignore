@@ -3,6 +3,11 @@
 .pioenvs/
 .piolibdeps/
 
+# Local secrets (WiFi creds etc.) injected at build time by tools/load_env.py.
+# NEVER commit these -- keep the committed .env.example as the documented template.
+.env
+!.env.example
+
 # Reference materials (third-party drivers, datasheets, etc.)
 temp/
 

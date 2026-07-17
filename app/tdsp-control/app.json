@@ -11,7 +11,12 @@
       "supportsTablet": true,
       "bundleIdentifier": "com.tdsp.control",
       "infoPlist": {
-        "NSBluetoothAlwaysUsageDescription": "T-DSP Control connects to your T-DSP audio device over Bluetooth LE to put it in pairing mode and read its status."
+        "NSBluetoothAlwaysUsageDescription": "T-DSP Control connects to your T-DSP audio device over Bluetooth LE to put it in pairing mode and read its status.",
+        "NSLocalNetworkUsageDescription": "T-DSP Control finds your T-DSP on the local network so you can connect over Wi-Fi without typing an IP address.",
+        "NSBonjourServices": [
+          "_tdsp._tcp",
+          "_ws._tcp"
+        ]
       }
     },
     "android": {
@@ -26,13 +31,25 @@
       "permissions": [
         "android.permission.BLUETOOTH",
         "android.permission.BLUETOOTH_ADMIN",
-        "android.permission.BLUETOOTH_CONNECT"
+        "android.permission.BLUETOOTH_CONNECT",
+        "android.permission.INTERNET",
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.ACCESS_WIFI_STATE",
+        "android.permission.CHANGE_WIFI_MULTICAST_STATE"
       ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
     },
     "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ],
       [
         "react-native-ble-plx",
         {

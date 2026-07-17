@@ -10,8 +10,10 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { View, Text, Pressable, ScrollView, FlatList, TextInput, Switch, StyleSheet, ActivityIndicator, Platform, Alert, useWindowDimensions } from 'react-native';
 import Slider from '@react-native-community/slider';
 import { createTransport } from './src/transportFactory';
+import { createDiscovery } from './src/discoveryFactory';
+import type { TdspDevice } from './src/discovery';
 import { Catalog, EMPTY_CATALOG, loadCatalog, LoadProgress, Song, songArg } from './src/catalog';
-import type { Transport, DirPage } from './src/transport';
+import type { Transport, DirPage, TransportKind } from './src/transport';
 import ArpStepGrid from './src/ui/ArpStepGrid';
 import ArpPresetBrowser from './src/ui/ArpPresetBrowser';
 import { ARP_PATTERNS as ARP_PAT, ARP_RATES, rateIndexFromFw, PAT_USER_SEQUENCE, DEFAULT_SHAPE, SeqStep } from './src/arpSeq';
@@ -36,6 +38,11 @@ const THEME = {
   audioloop: th('#f778ba', 0.14),  // pink (audio loop)
 };
 const HDR_H = 38;   // shared height for page-header control buttons (back / keyboard / transport) so they line up
+// Friendly names for Transport.name (the wire values are 'USB' | 'BLE' | 'WIFI').
+const TP_LABEL: Record<string, string> = { USB: 'USB', BLE: 'Bluetooth', WIFI: 'Wi-Fi' };
+// What the 'default' transport actually is on this platform — Metro picks the factory
+// (Web Serial on desktop, BLE on native), so the picker label has to match.
+const DEFAULT_TP_LABEL = Platform.OS === 'web' ? 'USB' : 'Bluetooth';
 // TAC5212 DAC high-pass filter presets (@HPF mode). 0 = off (all-pass); the rest are
 // sub-audio cutoffs that block DC/rumble. Index === the firmware mode number.
 const HPF_MODES = [
@@ -249,8 +256,30 @@ const ROW_H = 41;   // fixed list-row height so FlatList.scrollToIndex is reliab
 type VItem = { key: string; label: string; i: number };
 
 export default function App() {
-  const tpRef = useRef<Transport | null>(null); if (!tpRef.current) tpRef.current = createTransport();
-  const tp = tpRef.current;
+  // Transport selection (session-only — the app has no local persistence, so this resets
+  // on reload). 'default' = the platform's built-in (Web Serial on desktop, BLE on native);
+  // 'wifi' = LAN WebSocket to the ESP32 (firmware built with -D TDSP_CTRL_WIFI).
+  const [tkind, setTkind] = useState<TransportKind>('default');
+  const [wifiHost, setWifiHost] = useState('');   // '' = the firmware's mDNS name (tdsp.local)
+  // The built-in transport is cached and reused: BleTransport owns a native BleManager, so
+  // rebuilding it on every toggle would leak. The WiFi one is just a URL holder (it opens
+  // nothing until connect()), so it's cheap to rebuild as the host box is typed into —
+  // which is exactly what keeps `tp` in sync with what's on screen, with no commit/blur
+  // dance before tapping Connect. The picker is disabled unless disconnected+idle, so this
+  // can never swap a live link out from under us.
+  const defTpRef = useRef<Transport | null>(null);
+  const tp = useMemo<Transport>(() => {
+    if (tkind === 'wifi') return createTransport('wifi', wifiHost.trim() || undefined);
+    if (!defTpRef.current) defTpRef.current = createTransport('default');
+    return defTpRef.current;
+  }, [tkind, wifiHost]);
+
+  // mDNS discovery state. The browse effect lives further down — it depends on
+  // connected/connecting, which are declared below (referencing them here would be a TDZ
+  // error, since const bindings aren't usable before their declaration).
+  const discoRef = useRef(createDiscovery());
+  const [found, setFound] = useState<TdspDevice[]>([]);
+  const [scanning, setScanning] = useState(false);
   const { width } = useWindowDimensions();
   const cols = width < 560 ? 1 : width < 900 ? 2 : 3;   // responsive homepage grid columns
   const [connected, setConnected] = useState(false);
@@ -258,6 +287,20 @@ export default function App() {
   const [userDisc, setUserDisc] = useState(false);      // user tapped Disconnect App → suppress auto-reconnect
   const userDiscRef = useRef(false);                    // synchronous mirror of userDisc so an in-flight connect() can see a cancel immediately
   const connectingRef = useRef(false);                  // synchronous guard so the auto-poll can't double-connect
+
+  // mDNS discovery: browse _tdsp._tcp while the Wi-Fi picker is open and disconnected, so
+  // you tap a device instead of hunting for its IP. Each hit carries its RESOLVED address,
+  // so connecting never depends on the platform resolving a .local name — and several
+  // T-DSPs on one LAN all show up. Web has no mDNS (supported === false) → host box only.
+  useEffect(() => {
+    const d = discoRef.current;
+    // Only scan when it's actually usable: Wi-Fi selected, disconnected, not mid-connect.
+    if (!d.supported || tkind !== 'wifi' || connected || connecting) { d.stop(); setScanning(false); return; }
+    setScanning(true); setFound([]);
+    d.start(setFound);
+    return () => { d.stop(); setScanning(false); };
+  }, [tkind, connected, connecting]);
+  useEffect(() => () => discoRef.current.stop(), []);   // release the scanner on unmount
   const [prog, setProg] = useState<LoadProgress | null>(null);   // catalog load progress (drives the loading screen); null when not loading
   const [loadElapsed, setLoadElapsed] = useState(0);             // seconds on the current catalog load — shows it's alive even if a read stalls
   const manualStopRef = useRef(false);                  // set on user Stop so the resulting @SONGP=-1 isn't treated as a natural song end
@@ -476,7 +519,9 @@ export default function App() {
       // Follow the song's detected tempo: set master BPM to it (song + drums lock to that).
       const m = line.match(/([\d.]+)\s*bpm/); if (m) { const b = Math.round(parseFloat(m[1])); if (b >= 20 && b <= 300) { setSongBpm(b); setBpm(b); tp.masterBpm(b); } }
     }
-  }), []);
+    // [tp]: the transport picker can swap the instance, so this must re-bind to the new one
+    // (an []-dep here would leave the subscription stranded on the dead transport).
+  }), [tp]);
 
   async function connect(auto = false) {
     if (connectingRef.current || tp.isConnected()) return;   // live check (state may be stale) — no double-connect
@@ -492,7 +537,9 @@ export default function App() {
       tp.requestState();   // pull the device's real current settings → hydrate every card (see @STATE handler)
     }
     // A user cancel can surface as a connect rejection (port/scan aborted) — don't toast that.
-    catch (e: any) { if (!auto && !userDiscRef.current) notify('Connect failed: ' + e + (Platform.OS === 'web' ? '\n\nClose any control.html tab (one page owns the port), then retry.' : '')); }
+    // The "one page owns the port" hint is Web-Serial-specific — over WiFi nothing owns a
+    // port, so it would just be misleading noise.
+    catch (e: any) { if (!auto && !userDiscRef.current) notify('Connect failed: ' + e + (Platform.OS === 'web' && tkind !== 'wifi' ? '\n\nClose any control.html tab (one page owns the port), then retry.' : '')); }
     finally { connectingRef.current = false; setConnecting(false); }
   }
   async function disconnect() { try { await tp.disconnect(); } catch {} setConnected(false); setConnecting(false); setLoaded(false); setProg(null); setRoute('home'); }
@@ -506,15 +553,20 @@ export default function App() {
   // Connecting is EXPLICIT: no auto-connect and no auto-reconnect. This poll only reflects
   // a DROPPED link into the UI (flip to "Not connected") — it never opens a connection. You
   // tap Connect App to connect, and once disconnected the app stays put until you do.
+  // [tp]: re-arm against the CURRENT transport — the picker can swap it, and an []-dep would
+  // leave this polling the dead instance forever (reporting a stale "connected").
   useEffect(() => {
-    if (Platform.OS === 'web') return;   // web can't auto-open either (needs a user gesture)
+    // Web Serial reports drops through its own read loop, so the poll was skipped on web.
+    // A WiFi socket still needs it though (a dropped WS would otherwise leave the UI
+    // claiming it's connected), so run it there regardless of platform.
+    if (Platform.OS === 'web' && tkind !== 'wifi') return;
     let cancelled = false;
     const id = setInterval(() => {
       if (cancelled) return;
       if (!tp.isConnected()) { setConnected(false); setLoaded(false); }   // no-op if already false
     }, 4000);
     return () => { cancelled = true; clearInterval(id); };
-  }, []);
+  }, [tp, tkind]);
   // Tick an elapsed-seconds counter while the catalog is loading, so the load screen
   // reads as "working" even if a single @READ stalls (a frozen bar looks broken).
   useEffect(() => {
@@ -898,7 +950,7 @@ export default function App() {
   const stopMetro = () => { setMetro(m => ({ ...m, on: false })); tp.metronome(false); };
 
   const headerStatus = !connected ? 'Not connected' :
-    [cat.engine || 'synth', cat.drumEngine ? cat.drumEngine + ' drums' : '', '♩ ' + Math.round(bpm) + ' BPM', tp.name, bt.conn ? 'BT:' + (bt.peer || 'on') : '', drums.playing ? '♪ ' + drums.playing : ''].filter(Boolean).join('  ·  ');
+    [cat.engine || 'synth', cat.drumEngine ? cat.drumEngine + ' drums' : '', '♩ ' + Math.round(bpm) + ' BPM', TP_LABEL[tp.name], bt.conn ? 'BT:' + (bt.peer || 'on') : '', drums.playing ? '♪ ' + drums.playing : ''].filter(Boolean).join('  ·  ');
 
   // ===== the sections: one entry drives both its homepage card and its page. =====
   // `value`/`status` = the subtitle; `actions` = the header controls; `body` = the page.
@@ -1243,7 +1295,7 @@ export default function App() {
       id: 'conn', title: 'Connection', show: false, parent: 'settings', status: cat.engine || 'connected',
       body: (
         <>
-          <Text style={s.muted}>Synth: <Text style={s.text}>{cat.engine || '—'}</Text>   ·   Transport: {tp.name}</Text>
+          <Text style={s.muted}>Synth: <Text style={s.text}>{cat.engine || '—'}</Text>   ·   Transport: {TP_LABEL[tp.name]}{tp.name === 'WIFI' ? ` (${wifiHost.trim() || 'tdsp.local'})` : ''}</Text>
           {!loaded && <Text style={s.muted}>{connected ? 'Loading catalog…' : 'Connect to load the catalog.'}</Text>}
           {loaded && (
             <View style={s.statGrid}>
@@ -1518,6 +1570,51 @@ export default function App() {
 
       {!connected && (
         <View style={s.connectHome}>
+          {/* Transport picker. Only offered while disconnected, and frozen mid-connect:
+              switching rebuilds `tp`, which must never happen under a live/opening link. */}
+          <View style={s.segRow}>
+            <Pressable style={[s.seg, tkind === 'default' && s.segOn]} disabled={connecting}
+                       onPress={() => setTkind('default')}>
+              <Text style={[s.segText, tkind === 'default' && s.segTextOn]}>{DEFAULT_TP_LABEL}</Text>
+            </Pressable>
+            <Pressable style={[s.seg, tkind === 'wifi' && s.segOn]} disabled={connecting}
+                       onPress={() => setTkind('wifi')}>
+              <Text style={[s.segText, tkind === 'wifi' && s.segTextOn]}>Wi-Fi</Text>
+            </Pressable>
+          </View>
+          {tkind === 'wifi' && (
+            <>
+              {/* Discovered devices (mDNS _tdsp._tcp). Tapping one fills in its resolved
+                  address, so you never hunt for an IP — and several T-DSPs on one LAN each
+                  get a row. Hidden on web, which can't browse mDNS. */}
+              {discoRef.current.supported && (
+                <View style={s.devWrap}>
+                  <View style={s.devHead}>
+                    <Text style={s.muted}>{found.length ? `Found ${found.length} device${found.length > 1 ? 's' : ''}` : scanning ? 'Scanning for T-DSP devices…' : 'No devices found'}</Text>
+                    {scanning && <ActivityIndicator color={C.accent} size="small" />}
+                  </View>
+                  {found.map(d => {
+                    const sel = wifiHost.trim() === d.host;
+                    return (
+                      <Pressable key={d.id} style={[s.devRow, sel && s.devRowOn]} disabled={connecting}
+                                 onPress={() => setWifiHost(d.host)}>
+                        <Text style={s.devName}>{d.name}</Text>
+                        <Text style={s.devAddr}>{d.host}:{d.port}{d.a2dp === false ? '  ·  no BT audio' : ''}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              )}
+              <TextInput style={[s.input, s.hostInput]} value={wifiHost} onChangeText={setWifiHost}
+                         editable={!connecting} placeholder="tdsp.local" placeholderTextColor={C.muted}
+                         autoCapitalize="none" autoCorrect={false} keyboardType="url" />
+              <Text style={s.hostHint}>
+                {discoRef.current.supported
+                  ? 'Tap a device above, or type a host — blank uses tdsp.local. An IP or host:port works too.'
+                  : 'Blank uses tdsp.local. An IP or host:port works too.'}
+              </Text>
+            </>
+          )}
           {/* While connecting, this big button cancels the attempt (and suppresses auto-reconnect)
               so you can stop it from the connecting state, not just once connected. */}
           <Pressable style={[s.btn, s.connectBig, connecting && s.btnGhost]} onPress={() => (connecting ? userDisconnect() : userConnect())}>
@@ -1525,8 +1622,9 @@ export default function App() {
           </Pressable>
           <Text style={[s.muted, { textAlign: 'center', marginTop: 14 }]}>
             {connecting
-              ? (Platform.OS === 'web' ? 'Opening the serial port…' : 'Searching for your T-DSP over Bluetooth…')
-                : `Connect the app to your T-DSP over ${tp.name} to begin.`}
+              ? (tkind === 'wifi' ? `Connecting to ${wifiHost.trim() || 'tdsp.local'}…`
+                 : Platform.OS === 'web' ? 'Opening the serial port…' : 'Searching for your T-DSP over Bluetooth…')
+                : `Connect the app to your T-DSP over ${TP_LABEL[tp.name]} to begin.`}
           </Text>
         </View>
       )}
@@ -1548,7 +1646,7 @@ export default function App() {
             // Reading the index, or old firmware with no sizes: name the step instead.
             <Text style={s.loadSub}>{prog && prog.index > 0 ? `${prog.label} · ${prog.index}/${prog.count}` : 'Reading catalog index…'}</Text>
           )}
-          <Text style={s.loadHint}>{loadElapsed}s elapsed{loadElapsed >= 6 ? ` · streaming over ${tp.name}…` : ''}</Text>
+          <Text style={s.loadHint}>{loadElapsed}s elapsed{loadElapsed >= 6 ? ` · streaming over ${TP_LABEL[tp.name]}…` : ''}</Text>
         </View>
       )}
 
@@ -1662,6 +1760,21 @@ const s = StyleSheet.create({
   connectHome: { marginTop: 56, paddingHorizontal: 24, alignItems: 'center' },
   connectBig: { paddingVertical: 16, paddingHorizontal: 44, minWidth: 240 },
   connectBigText: { color: C.text, fontSize: 17, fontWeight: '700' },
+  // Transport picker (connect screen): segmented USB/Bluetooth | Wi-Fi + optional host box.
+  segRow: { flexDirection: 'row', borderWidth: 1, borderColor: C.border, borderRadius: 8, overflow: 'hidden', marginBottom: 14 },
+  seg: { paddingVertical: 9, paddingHorizontal: 22, backgroundColor: C.card2, minWidth: 104, alignItems: 'center' },
+  segOn: { backgroundColor: C.sel },
+  segText: { color: C.muted, fontSize: 13, fontWeight: '600' },
+  segTextOn: { color: C.text },
+  hostInput: { width: 260, marginBottom: 6, textAlign: 'center' },
+  hostHint: { color: C.muted, fontSize: 11, textAlign: 'center', maxWidth: 300, marginBottom: 16 },
+  // Discovered-device list (mDNS)
+  devWrap: { width: 280, marginBottom: 12 },
+  devHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginBottom: 8 },
+  devRow: { backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 7, paddingVertical: 8, paddingHorizontal: 12, marginBottom: 6 },
+  devRowOn: { borderColor: C.accent, backgroundColor: C.sel },
+  devName: { color: C.text, fontSize: 14, fontWeight: '600' },
+  devAddr: { color: C.muted, fontSize: 11, marginTop: 2 },
   // catalog loading screen (connected, not yet loaded)
   loadWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, gap: 14 },
   loadTitle: { color: C.text, fontSize: 17, fontWeight: '700' },
