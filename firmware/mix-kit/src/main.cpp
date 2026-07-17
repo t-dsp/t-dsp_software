@@ -69,6 +69,12 @@
 // 24-PPQN onClock() — which the Conductor's tick hook drives at the master BPM,
 // so arp rates lock to the same tempo as the drums + song. See project_arp.
 #include <TDspArp.h>
+// Beat-aware MIDI loop recorder (lib/TDspMidiLoop): a MidiSink placed DOWNSTREAM
+// of the arp so it captures the arp's BAKED note stream; plays the loop back into
+// the synth sink directly (bypassing the arp -> no double-arp). One per voice.
+// Build-flag gated (TDSP_RECORDER); the app hides the card without it. See
+// project_midi_loop_recorder.
+#include <TDspMidiLoop.h>
 
 // Developer bench diagnostics (self-tests, MPE/axis proofs, capture probes, the
 // ReplayGain sweep) are opt-in and live in Diagnostics.inc.h. Default ON so every
@@ -156,6 +162,12 @@ tdsp::MidiRouter       g_router;
 #ifndef TDSP_ARP2
 #define TDSP_ARP2 0
 #endif
+// Beat-aware MIDI loop recorder. Voice-1 recorder is always available on a
+// recorder build; the voice-2 recorder additionally needs TDSP_VOICE2 (its
+// playback target g_synthSinkB only exists on the split-pool build).
+#ifndef TDSP_RECORDER
+#define TDSP_RECORDER 0
+#endif
 #if TDSP_VOICE2
 tdsp::MidiRouter       g_kbdRouter;          // USB-host keyboard -> (arp2 ->) g_synthSinkB
 static bool            g_voice2On = false;   // runtime split enable (@VOICE2=1)
@@ -175,6 +187,18 @@ tdsp::PlayerFollower   g_drumFollow{g_drumPlayer};  // declared above (lines ~92
 tdsp::ClockSink        g_clockSink{&g_conductor.clock()};
 tdsp::ArpFilter        g_arpFilter;                 // live MIDI -> arp -> synth (bypass by default)
 static bool            g_mpeMode = false;    // false = normal MIDI (bend +-2, ch10 drums), true = MPE
+
+// --- MIDI loop recorder (build-flag gated) --------------------------------------
+// Each MidiLooper taps its voice's arp downstream (captures the BAKED note stream)
+// and plays the loop back into that voice's synth sink. begin() is wired in setup()
+// once the sinks exist. g_recVoice picks which voice the app's record controls hit.
+#if TDSP_RECORDER
+tdsp::MidiLooper       g_loop1;              // voice-1 loop recorder
+#if TDSP_VOICE2
+tdsp::MidiLooper       g_loop2;              // voice-2 loop recorder (pool split only)
+#endif
+static uint8_t         g_recVoice = 1;       // 1 or 2: target of @REC/@RECDUB/@RECCLR
+#endif
 
 AudioMixer4_F32        outL, outR;           // F32 mix: 0=BT, 1=local tone, 2=S/PDIF-in, 3=synth
 AudioAnalyzePeak_F32   peakSpdif, peakOut;
@@ -906,6 +930,26 @@ static void ensureTransportStarted() {
     g_forceTransportZero = false;
 }
 
+#if TDSP_RECORDER
+// The looper the app's record controls currently target (voice 1 or 2).
+static tdsp::MidiLooper *recSel() {
+#if TDSP_VOICE2
+    if (g_recVoice == 2) return &g_loop2;
+#endif
+    return &g_loop1;
+}
+// Arming a recording needs a running beat grid to anchor to; when nothing else
+// is playing, also strike the metronome so the player has a click to play against
+// (recording still begins on the first note press). See project_midi_loop_recorder.
+static void recArmTransport() {
+    applyMeter();                 // bars-up the clock on the current (record) signature
+    ensureTransportStarted();     // define the downbeat if the transport is idle
+#ifdef TDSP_METRONOME
+    if (!g_player.isPlaying() && !g_drumPlayer.isPlaying()) metroSetEnabled(true);
+#endif
+}
+#endif
+
 // Lock a LOOPING song to the master beat grid (like the drums + arp) so it wraps
 // drift-free and stays in phase with everything else. Call right AFTER
 // g_player.play(). Only looping songs sync — full / tempo-map songs keep the ms
@@ -1514,8 +1558,26 @@ static void midiPressure(byte ch, byte pressure)       { g_router.handleChannelP
 // split is on they steer to the keyboard router (g_kbdRouter -> g_synthSinkB) instead of
 // the main path. With the split off they behave exactly like the shared callbacks above.
 static inline tdsp::MidiRouter& usbRouter() { return g_voice2On ? g_kbdRouter : g_router; }
-static void usbNoteOn  (byte ch, byte note, byte vel) { maybeSynchroStart(vel); usbRouter().handleNoteOn(ch, note, vel); }
-static void usbNoteOff (byte ch, byte note, byte vel) { usbRouter().handleNoteOff(ch, note, vel); }
+// Track the USB keyboard's currently-held notes so an owner switch can release them on the
+// sink the keyboard is LEAVING (individual note-offs — never a panic, which would cut voice 1's
+// song). Without this, a note held across a switch would hang (its key-up goes to the new sink).
+static uint8_t g_usbHeldN = 0;
+static struct { uint8_t ch, note; } g_usbHeld[24];
+static void usbHeldAdd(uint8_t ch, uint8_t note) {
+    for (uint8_t i = 0; i < g_usbHeldN; ++i) if (g_usbHeld[i].ch == ch && g_usbHeld[i].note == note) return;
+    if (g_usbHeldN < 24) { g_usbHeld[g_usbHeldN].ch = ch; g_usbHeld[g_usbHeldN].note = note; g_usbHeldN++; }
+}
+static void usbHeldRemove(uint8_t ch, uint8_t note) {
+    for (uint8_t i = 0; i < g_usbHeldN; ++i) if (g_usbHeld[i].ch == ch && g_usbHeld[i].note == note) { g_usbHeld[i] = g_usbHeld[--g_usbHeldN]; return; }
+}
+// Release every held keyboard note on the CURRENT owner's router, then clear. Call BEFORE
+// flipping g_voice2On so the note-offs land on the sink being left (no hung notes, no song cut).
+static void usbFlushHeld() {
+    for (uint8_t i = 0; i < g_usbHeldN; ++i) usbRouter().handleNoteOff(g_usbHeld[i].ch, g_usbHeld[i].note, 0);
+    g_usbHeldN = 0;
+}
+static void usbNoteOn  (byte ch, byte note, byte vel) { maybeSynchroStart(vel); if (vel) usbHeldAdd(ch, note); else usbHeldRemove(ch, note); usbRouter().handleNoteOn(ch, note, vel); }
+static void usbNoteOff (byte ch, byte note, byte vel) { usbHeldRemove(ch, note); usbRouter().handleNoteOff(ch, note, vel); }
 static void usbCC      (byte ch, byte cc,   byte val) { usbRouter().handleControlChange(ch, cc, val); }
 static void usbPitch   (byte ch, int bend)            { usbRouter().handlePitchBend(ch, (int16_t)bend); }
 static void usbPressure(byte ch, byte pressure)       { usbRouter().handleChannelPressure(ch, pressure); }
@@ -1529,6 +1591,11 @@ static void applyMidiMode(bool mpe) {
     g_mpeMode = mpe;
     float range = mpe ? tdsp::MidiRouter::kDefaultPitchBendRange : 2.0f;   // 48 (MPE) vs 2
     for (uint8_t ch = 1; ch <= 16; ch++) g_router.setPitchBendRange(ch, range);
+#if TDSP_VOICE2
+    // The USB-host keyboard (e.g. LinnStrument) rides its own router. Track the same
+    // range so per-note slides aren't clamped to +-2 semis in MPE — see g_kbdRouter setup.
+    for (uint8_t ch = 1; ch <= 16; ch++) g_kbdRouter.setPitchBendRange(ch, range);
+#endif
     // MPE is single-timbre: a song's per-channel program changes shouldn't apply, so the
     // whole performance (and the MPE test song) uses the SELECTED instrument, not the file's.
     g_player.setProgramChangeEnabled(!mpe);
@@ -1738,6 +1805,50 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         Serial.printf("[metro] volume = %d%%\n", g_metroVolPct);
     }
 #endif
+#if TDSP_RECORDER
+    // Beat-aware MIDI loop recorder. @RECV picks the voice; @RECBARS/@RECSIG set the
+    // loop length + time signature; @REC arms (replace) / stops; @RECDUB overdubs;
+    // @RECCLR wipes the clip; @RECPLAY resumes a stopped clip. Recording begins on the
+    // first note press and locks to the bar downbeat (see project_midi_loop_recorder).
+    else if (strncmp(line, "@RECV=", 6) == 0) {                 // select target voice (1|2)
+        int v = atoi(line + 6); if (v != 2) v = 1;
+        g_recVoice = (uint8_t)v;
+        reply.printf("@RECV=%d\n", g_recVoice);
+    }
+    else if (strncmp(line, "@RECBARS=", 9) == 0) {              // loop length: 1,2,4,8 bars (both voices)
+        int b = atoi(line + 9);
+        g_loop1.setBars((uint8_t)b);
+#if TDSP_VOICE2
+        g_loop2.setBars((uint8_t)b);
+#endif
+        reply.printf("@RECBARS=%d\n", recSel()->bars());
+    }
+    else if (strncmp(line, "@RECSIG=", 8) == 0) {               // time signature N/4 -> drives the master meter
+        int n = atoi(line + 8); if (n < 1) n = 1; if (n > 16) n = 16;
+        g_metroBpb = (uint8_t)n;                                // the record grid rides the metronome meter
+        applyMeter();                                           // so the clock bars-up on N/4 while idle
+        reply.printf("@RECSIG=%d\n", g_metroBpb);
+    }
+    else if (strncmp(line, "@REC=", 5) == 0) {                  // 1 = arm (replace), 0 = stop
+        if (atoi(line + 5) != 0) { recArmTransport(); recSel()->armRecord(); }
+        else recSel()->stop();
+        reply.printf("@REC=%d\n", (int)recSel()->state());
+    }
+    else if (strncmp(line, "@RECDUB=", 8) == 0) {               // 1 = arm overdub onto the existing clip
+        if (atoi(line + 8) != 0) { recArmTransport(); recSel()->armOverdub(); }
+        else recSel()->stop();
+        reply.printf("@REC=%d\n", (int)recSel()->state());
+    }
+    else if (strcmp(line, "@RECCLR") == 0) {                    // wipe the selected voice's clip
+        recSel()->clear();
+        reply.printf("@REC=%d\n", (int)recSel()->state());
+    }
+    else if (strncmp(line, "@RECPLAY=", 9) == 0) {             // 1 = resume a stopped clip, 0 = stop
+        if (atoi(line + 9) != 0) { recArmTransport(); recSel()->resume(); }
+        else recSel()->stop();
+        reply.printf("@REC=%d\n", (int)recSel()->state());
+    }
+#endif
     else if (strncmp(line, "@APP=", 5) == 0) {   // store the opaque app-owned state blob (see g_appState)
         strncpy(g_appState, line + 5, sizeof(g_appState) - 1);
         g_appState[sizeof(g_appState) - 1] = 0;
@@ -1821,9 +1932,15 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     else if (handleArpLine(line, reply, g_arpFilter, "@ARP")) { /* handled */ }
 #if TDSP_VOICE2
     // --- Voices 2: a second Dexed voice on the keyboard half of the pool (engines 4..7) ---
-    else if (strncmp(line, "@VOICE2=", 8) == 0) {          // enable/disable the 4/4 split
-        g_voice2On = (atoi(line + 8) != 0);
-        synthSetVoice2Enabled(g_voice2On);
+    else if (strncmp(line, "@VOICE2=", 8) == 0) {          // move the USB keyboard's owner (seamless)
+        bool on = (atoi(line + 8) != 0);
+        if (on != g_voice2On) {
+#if TDSP_HAS_USB_MIDI_HOST
+            usbFlushHeld();          // release held keyboard notes on the sink being LEFT (no hang, no song cut)
+#endif
+            g_voice2On = on;         // usbRouter() now steers the keyboard to the new voice
+            synthSetVoice2Enabled(on);   // clear the keyboard voice's engines (never touches voice 1)
+        }
         reply.printf("@VOICE2=%d\n", g_voice2On ? 1 : 0);
     }
     else if (strncmp(line, "@VOICE2VOL=", 11) == 0) {      // Voices-2 level 0..150 %
@@ -1863,6 +1980,16 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
           reply.printf("\"clock\":{\"beat\":%d,\"bpb\":%d,\"barp\":%d,\"run\":%d},",
                        clk.beatInBar() + 1, clk.beatsPerBar(),
                        (int)(clk.barPhase() * 1000.0f + 0.5f), clk.running() ? 1 : 0); }
+#if TDSP_RECORDER
+        // Loop recorder: selected voice, loop length (bars), and per-voice state
+        // (0=idle 1=armed 2=recording 3=overdub 4=playing) + progress permille.
+        reply.printf("\"rec\":{\"v\":%d,\"bars\":%d,\"st1\":%d,\"p1\":%d",
+                     g_recVoice, recSel()->bars(), (int)g_loop1.state(), g_loop1.positionPermille());
+#if TDSP_VOICE2
+        reply.printf(",\"st2\":%d,\"p2\":%d", (int)g_loop2.state(), g_loop2.positionPermille());
+#endif
+        reply.print("},");
+#endif
         reply.print("\"voice\":{");
 #if defined(TDSP_SYNTH_DEXED) || defined(TDSP_SYNTH_DEXED_POOL)
         if (g_curCartRel[0]) {   // last pick was a /dexed cart voice (@DXPICK)
@@ -1891,7 +2018,7 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
 #endif
         // Build-time capabilities so the app SHOWS the Voices-2 / arp-2 cards only on builds
         // that have them compiled in (both are pool-only, build-flag gated).
-        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d}", TDSP_VOICE2 ? 1 : 0, (TDSP_VOICE2 && TDSP_ARP2) ? 1 : 0);
+        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d}", TDSP_VOICE2 ? 1 : 0, (TDSP_VOICE2 && TDSP_ARP2) ? 1 : 0, TDSP_RECORDER ? 1 : 0);
         reply.print("}\n");   // close root object
         reply.printf("@APP=%s\n", g_appState);   // opaque app-owned state, emitted with @STATE so one connect rehydrates both
     }
@@ -2016,20 +2143,37 @@ FLASHMEM void setup() {
     g_arpFilter.setClock(&g_conductor.clock());
     g_arpFilter.addDownstream(g_synthSink);
     g_router.addSink(&g_arpFilter);
+#if TDSP_RECORDER
+    // Voice-1 loop recorder: tap the arp downstream (captures the BAKED note stream
+    // the synth hears) and play the loop back into the synth sink directly.
+    g_loop1.begin(&g_conductor.clock(), g_synthSink);
+    g_arpFilter.addDownstream(&g_loop1);
+#endif
 
 #if TDSP_VOICE2
     // Voices 2: the USB-host keyboard's own router -> its own synth sink (engines 4..7),
-    // separate from the main path so the song/arp/drums keep running on voice 1. A plain
-    // keyboard uses a +-2 semitone bend range. With TDSP_ARP2, an independent arp sits in
-    // front of the keyboard sink (bypassed by default, so still a live instrument until
+    // separate from the main path so the song/arp/drums keep running on voice 1. The
+    // per-channel bend range is owned by applyMidiMode() (2 normal / 48 MPE, matching
+    // g_router) so an MPE controller's per-note slides aren't clamped to +-2 semis; the
+    // startup applyMidiMode() call below sets it. With TDSP_ARP2, an independent arp sits
+    // in front of the keyboard sink (bypassed by default, so still a live instrument until
     // @ARP2ON=1); it steps on the keyboard router's onClock (driven by the same Conductor).
-    for (uint8_t ch = 1; ch <= 16; ch++) g_kbdRouter.setPitchBendRange(ch, 2.0f);
 #if TDSP_ARP2
     g_arpFilter2.setClock(&g_conductor.clock());
     g_arpFilter2.addDownstream(g_synthSinkB);
     g_kbdRouter.addSink(&g_arpFilter2);
 #else
     g_kbdRouter.addSink(g_synthSinkB);
+#endif
+#if TDSP_RECORDER
+    // Voice-2 loop recorder: tap wherever the keyboard's baked output lands (arp2
+    // downstream when TDSP_ARP2, else the keyboard router directly).
+    g_loop2.begin(&g_conductor.clock(), g_synthSinkB);
+#if TDSP_ARP2
+    g_arpFilter2.addDownstream(&g_loop2);
+#else
+    g_kbdRouter.addSink(&g_loop2);
+#endif
 #endif
 #endif
 
@@ -2175,6 +2319,12 @@ void loop() {
 #if TDSP_VOICE2 && TDSP_ARP2
     g_arpFilter2.tick(micros());  // same for the keyboard-path arp
 #endif
+#if TDSP_RECORDER
+    g_loop1.poll(); g_loop1.tick();   // close the record window on the beat + advance loop playback
+#if TDSP_VOICE2
+    g_loop2.poll(); g_loop2.tick();
+#endif
+#endif
     songLoopTick();   // auto-restart the song if loop mode is on and it just ended
 
     // @SYNCPROBE: once/second, print the master beat next to each synced player's
@@ -2203,6 +2353,27 @@ void loop() {
         }
         songPosPrev = songPosNow;
     }
+
+#if TDSP_RECORDER
+    // Live loop-recorder telemetry: "@RECP=<st1>,<p1>,<st2>,<p2>" (state 0=idle 1=armed
+    // 2=recording 3=overdub 4=playing; p = permille) ~4x/sec while any looper is active,
+    // plus one edge frame when it goes idle. Same USB-only push as @SONGP/@BEAT (the app
+    // reflects taps optimistically, so BLE stays responsive without an ESP32 relay case).
+    {
+        static elapsedMillis recPosClock;
+        static bool          recPrev = false;
+        int st1 = (int)g_loop1.state(), p1 = g_loop1.positionPermille(), st2 = 0, p2 = 0;
+#if TDSP_VOICE2
+        st2 = (int)g_loop2.state(); p2 = g_loop2.positionPermille();
+#endif
+        const bool recNow = (st1 != (int)tdsp::MidiLooper::Idle) || (st2 != (int)tdsp::MidiLooper::Idle);
+        if ((recNow && recPosClock >= 250) || (recNow != recPrev)) {
+            recPosClock = 0;
+            Serial.printf("@RECP=%d,%d,%d,%d\n", st1, p1, st2, p2);
+        }
+        recPrev = recNow;
+    }
+#endif
 
     g_sdWrite.tick(Serial, millis());   // abort a stalled @WB transfer (watchdog)
 

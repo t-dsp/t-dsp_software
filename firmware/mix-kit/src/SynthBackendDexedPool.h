@@ -240,7 +240,11 @@ tdsp::MidiSink  *g_synthSink = &g_poolSink;
 static const int kPoolSplitN = kPoolN / 2;   // 4 engines each half
 DexedPoolSink    g_poolSinkB(&g_pool[kPoolSplitN], kPoolSplitN, kPoolVpe);
 tdsp::MidiSink  *g_synthSinkB = &g_poolSinkB;
-static bool      g_voice2Split   = false;    // true = pool is split (main uses engines 0..kPoolSplitN)
+// PERMANENT 4/4 split on Voices-2 builds: engines 0..3 = voice 1, 4..7 = voice 2, fixed from
+// boot. Static so switching the keyboard's owner is a pure MIDI re-route (main.cpp) that never
+// resizes/reloads the pool — voice 1 (song/arp/drums) never drops out on a switch. The cost is
+// voice 1 runs at 8-voice poly (4 engines) always, instead of 16 when voice 2 is idle.
+static bool      g_voice2Split   = true;     // true = pool is split (main uses engines 0..kPoolSplitN)
 static int       g_voice2VolPct  = 100;      // Voices-2 level, 0..150 % (scales the engines-4..7 mix)
 #endif
 
@@ -433,21 +437,13 @@ static void synthSetVoice2Vol(int pct) {
     applyVoice2Vol();
 }
 
-// Enable/disable the 4/4 split. When enabled the main sink shrinks to engines 0..3 and the
-// keyboard half (4..7) becomes an independent voice; when disabled the pool reunifies to
-// all 8 engines on voice 1. Panics both halves so no note carries across the reshape.
+// Switch the keyboard's owner. The pool is PERMANENTLY split (synthBegin), so this never
+// resizes the main window or reloads voice 1 — voice 1's song/arp/drums keep sounding through
+// the switch. All we do is clear the keyboard's own engines (4..7) so its notes start/stop
+// cleanly; the actual re-route (and releasing held notes on the sink being left) is in main.cpp.
 FLASHMEM static void synthSetVoice2Enabled(bool on) {
-    g_voice2Split = on;
     g_poolSinkB.panic();
-    g_poolSink.setEngineCount(on ? kPoolSplitN : kPoolN);   // panics the main window
-    if (g_curCartRel[0]) synthPickCartVoice(g_curCartRel, g_curCartVoice);   // reload voice 1 across the new window
-    else                 synthSetInstrument(g_synthInstrument);
-    if (on) {                                               // load voice 2 into the freed top half
-        if (g_curCart2Rel[0]) synthPickCartVoice2(g_curCart2Rel, g_curCart2Voice);
-        else                  synthSetInstrument2(g_synthInstrument2);
-    }
-    applyVoice2Vol();
-    Serial.printf("[synth] Voices 2 split %s\n", on ? "ON (keyboard = engines 4..7)" : "off (unified pool)");
+    Serial.printf("[synth] keyboard -> %s\n", on ? "Voices 2 (engines 4..7)" : "Voices 1 (main)");
 }
 #endif  // TDSP_VOICE2
 
@@ -470,7 +466,14 @@ FLASHMEM static void synthBegin() {
     // Unity sum across the pool; the mix-slot-3 make-up gain in setup() restores level.
     for (int i = 0; i < 4; ++i) { dxpMixA.gain(i, 1.0f); dxpMixB.gain(i, 1.0f); }
     dxpSum.gain(0, 1.0f); dxpSum.gain(1, 1.0f); dxpSum.gain(2, 0.0f); dxpSum.gain(3, 0.0f);
-    synthSetInstrument(g_synthInstrument);
+    synthSetInstrument(g_synthInstrument);   // voice 1 -> engines 0..poolMainCount()
+#if TDSP_VOICE2
+    // Arm the permanent split: cap the main sink to engines 0..3 and preload voice 2 into 4..7
+    // so the keyboard voice is ready instantly and switching its owner never reshapes the pool.
+    g_poolSink.setEngineCount(kPoolSplitN);
+    synthSetInstrument2(g_synthInstrument2);
+    applyVoice2Vol();
+#endif
 }
 
 // --- ReplayGain hooks (see REPLAYGAIN.md) ------------------------------------
