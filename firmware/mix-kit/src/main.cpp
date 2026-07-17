@@ -663,11 +663,13 @@ static void emitBeat(uint8_t i, uint8_t n) {
 }
 
 // Metronome (opt-in: -D TDSP_METRONOME) — a SELF-TIMED on-beat click, deliberately
-// NOT locked to the master-clock grid. It takes only the TEMPO from the Conductor
-// (g_conductor.bpm()) and keeps its OWN micros-based beat schedule + bar counter, so
-// it is immune to the grid re-zeroing, the content meter, and the clock's catch-up
-// ticks — and stays precise no matter what else runs. On Play the first click fires
-// immediately (= the downbeat); the accent lands on beat 1 of its own g_metroBpb bar.
+// Keeps its OWN micros-based beat schedule + bar counter once running, so it is immune to
+// the content meter and the clock's catch-up ticks — and stays precise no matter what else
+// runs. It takes the TEMPO from the Conductor (g_conductor.bpm()), and on ENABLE it takes the
+// PHASE too when the transport is already running (see metroSetEnabled): the click joins the
+// grid rather than declaring a new downbeat, so starting it never moves the bar. Only from an
+// idle transport does the first click fire immediately (= this Play defines the downbeat).
+// The accent lands on beat 1 of its own g_metroBpb bar.
 // It emits its own @BEAT (non-blocking) so the app's amber downbeat light counts
 // forward with it. Slot-free: reuses the local test-tone oscillator (testTone, mix
 // slot 1). v1 clicks the quarter-note beat; compound "in-2" pulses are a phase-2 item.
@@ -695,8 +697,26 @@ static uint32_t metroBeatUs() {
 static void metroSetEnabled(bool on) {
     g_metroOn = on;
     if (on) {
-        g_metroBeatIdx = 0;             // next click is beat 1 (the downbeat)...
-        g_metroNextUs  = micros();      // ...and it fires immediately on Play
+        // Starting the click must never MOVE the downbeat. When the transport is already running,
+        // JOIN its grid in phase: schedule the next click on the clock's next beat edge and
+        // continue the real bar count, so the accent stays on the true downbeat and the @BEAT
+        // lights don't jump. This matters because arming a loop recorder auto-starts the click:
+        // declaring a fresh beat 1 here made the bar appear to restart, and worse, left the click
+        // disagreeing with latchAnchor() (which anchors to the Conductor's bar) — so a note played
+        // "on the click's one" got recorded against a different downbeat.
+        // Only when the transport is IDLE does Play define a fresh downbeat.
+        const uint8_t bpb = g_metroBpb ? g_metroBpb : 1;
+        tdsp::Clock &clk = g_conductor.clock();
+        if (clk.running()) {
+            const double  pos  = clk.positionBeats();
+            const double  frac = pos - floor(pos);                 // how far into the current beat
+            const int64_t nb   = (int64_t)floor(pos) + 1;          // the beat the next click lands on
+            g_metroBeatIdx = (uint8_t)(((nb % bpb) + bpb) % bpb);  // continue the bar as it stands
+            g_metroNextUs  = micros() + (uint32_t)((1.0 - frac) * (double)metroBeatUs());
+        } else {
+            g_metroBeatIdx = 0;             // next click is beat 1 (the downbeat)...
+            g_metroNextUs  = micros();      // ...and it fires immediately on Play
+        }
         outL.gain(1, metroSlotGain()); outR.gain(1, metroSlotGain());   // open slot 1 for the click
     } else {
         g_metroPeak = 0.0f;
@@ -1000,10 +1020,28 @@ static bool g_forceTransportZero = false;
 // is set, i.e. the user explicitly asked to restart the song from the top (see songRestart).
 // PLAN §5. Call this BEFORE the new player's play()/setSyncedMode(), so the anchor reads the
 // (possibly re-zeroed) clock.
+#if TDSP_RECORDER
+// A looper mid-capture or looping OWNS the grid just as much as a song does: its clip is
+// anchored to an absolute beat, so re-zeroing the clock under it restarts/jumps its loop.
+static inline bool loopHoldsGrid(const tdsp::MidiLooper &L) {
+    const tdsp::MidiLooper::State st = L.state();
+    return st == tdsp::MidiLooper::Recording || st == tdsp::MidiLooper::Overdub || st == tdsp::MidiLooper::Playing;
+}
+#endif
 static void ensureTransportStarted() {
     bool anyPlaying = g_player.isPlaying() || g_drumPlayer.isPlaying();
 #if TDSP_VOICE2
     anyPlaying = anyPlaying || g_player2.isPlaying();   // player 2 also holds the grid
+#endif
+#if TDSP_RECORDER
+    // ...and so does a running loop. Without this, arming synth B's recorder while only synth
+    // A's loop is going looks "idle" here and re-zeroes the clock — restarting A's loop. Each
+    // recorder anchors to the bar of its own first note, so the two loops may sit out of phase
+    // with each other; that's fine and intended. They still share the one bar grid.
+    anyPlaying = anyPlaying || loopHoldsGrid(g_loop1);
+#if TDSP_VOICE2
+    anyPlaying = anyPlaying || loopHoldsGrid(g_loop2);
+#endif
 #endif
     if (g_forceTransportZero || !anyPlaying) {
         g_conductor.start();
