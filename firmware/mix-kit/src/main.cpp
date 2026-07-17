@@ -175,6 +175,11 @@ tdsp::MidiRouter       g_router;
 #ifndef TDSP_RECORDER
 #define TDSP_RECORDER 0
 #endif
+// Note-editor clip dump/load (@RECDUMP/@RECLOAD). Ships with the recorder by default, but is a
+// separable surface so a board can have the recorder without the editor (DESIGN §9.8).
+#ifndef TDSP_RECORDER_EDIT
+#define TDSP_RECORDER_EDIT TDSP_RECORDER
+#endif
 // Audio loop recorder (record the master mix as looping audio). Independent of the
 // MIDI recorder. Buffers are allocated at runtime from PSRAM (big) or OCRAM (small);
 // loops that can't allocate are dropped, so a no-PSRAM board degrades gracefully.
@@ -1815,6 +1820,105 @@ static void streamFile(Print& out, const char* path) {
     out.printf("@FE=%u\x1f%lu\n", id, (unsigned long)seq);
 }
 
+#if TDSP_RECORDER_EDIT
+// Stream an in-memory LoopClip using the SAME @FB/@FD/@FE base64 framing as streamFile,
+// but sourced from the clip byte-by-byte (LoopClipIo) with no whole-clip scratch buffer —
+// the note-editor @RECDUMP path (planning/midi-editor/DESIGN.md §4.1). `name` is a synthetic
+// path (e.g. "mem:/loop1") so the app's file reassembler can match the transfer.
+static void streamClip(Print& out, const char* name, const tdsp::LoopClip& c) {
+    const uint32_t total = tdsp::loopClipBytes(c);
+    const uint8_t  id    = ++g_xferId;
+    out.printf("@FB=%u\x1f%s\x1f%lu\n", id, name, (unsigned long)total);
+    uint8_t raw[360];   // same window as streamFile: mult of 3, @FD line fits one BLE MTU
+    char b64[4 * (sizeof(raw) / 3) + 1];
+    uint32_t seq = 0, pos = 0;
+    while (pos < total) {
+        int n = 0;
+        while (n < (int)sizeof(raw) && pos < total) raw[n++] = tdsp::loopClipByteAt(c, pos++);
+        int o = 0, i = 0;
+        for (; i + 3 <= n; i += 3) {
+            uint32_t v = ((uint32_t)raw[i] << 16) | ((uint32_t)raw[i + 1] << 8) | raw[i + 2];
+            b64[o++] = kB64[(v >> 18) & 63]; b64[o++] = kB64[(v >> 12) & 63];
+            b64[o++] = kB64[(v >> 6) & 63];  b64[o++] = kB64[v & 63];
+        }
+        if (n - i == 1) {
+            uint32_t v = (uint32_t)raw[i] << 16;
+            b64[o++] = kB64[(v >> 18) & 63]; b64[o++] = kB64[(v >> 12) & 63]; b64[o++] = '='; b64[o++] = '=';
+        } else if (n - i == 2) {
+            uint32_t v = ((uint32_t)raw[i] << 16) | ((uint32_t)raw[i + 1] << 8);
+            b64[o++] = kB64[(v >> 18) & 63]; b64[o++] = kB64[(v >> 12) & 63];
+            b64[o++] = kB64[(v >> 6) & 63];  b64[o++] = '=';
+        }
+        b64[o] = 0;
+        out.printf("@FD=%u\x1f%lu\x1f%s\n", id, (unsigned long)seq++, b64);
+        if (&out != &Serial) delay(6);   // pace the ESP32/BLE relay (USB is flow-controlled)
+    }
+    out.printf("@FE=%u\x1f%lu\n", id, (unsigned long)seq);
+}
+
+// --- Editor clip LOAD receiver (@RECLOAD/@RD/@RECEND) --------------------------
+// The upstream mirror of streamClip: @WB can't be relayed over BLE (raw bytes), so the
+// editor streams a replacement clip back as base64 @RD frames (DESIGN §4.2). We decode
+// straight into the target MidiLooper's clip via its beginClipLoad/pushLoadEvent/endClipLoad
+// API — no second 8 KB LoopClip staged. Bytes are consumed as a flat stream: first the
+// 12-byte LoopClipIo header, then packed 8-byte events, reassembled across frame boundaries.
+static inline int recB64Val(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;   // '=' padding or stray char
+}
+
+struct RecLoadReceiver {
+    bool     active   = false;
+    bool     err      = false;
+    uint8_t  voice    = 1;
+    tdsp::MidiLooper* target = nullptr;
+    uint32_t expected = 0;      // total bytes announced by @RECLOAD
+    uint32_t got      = 0;      // raw bytes consumed so far
+    uint32_t nextSeq  = 0;      // expected @RD seq (gap detection)
+    uint8_t  hdr[12]; uint8_t hdrFill = 0; bool hdrDone = false;
+    uint8_t  evb[8];  uint8_t evFill  = 0;
+
+    void reset() { active = false; err = false; got = 0; nextSeq = 0;
+                   hdrFill = 0; hdrDone = false; evFill = 0; target = nullptr; }
+
+    // One decoded raw byte of the clip stream.
+    void feed(uint8_t b) {
+        if (err) return;
+        got++;
+        if (!hdrDone) {
+            hdr[hdrFill++] = b;
+            if (hdrFill == 12) {
+                uint16_t count, loopTicks; uint8_t bpb, bars;
+                if (!tdsp::readLoopClipHdr(hdr, count, loopTicks, bpb, bars)) { err = true; return; }
+                target->beginClipLoad(loopTicks, bpb, bars);
+                hdrDone = true;
+            }
+            return;
+        }
+        evb[evFill++] = b;
+        if (evFill == 8) {
+            if (!target->pushLoadEvent(tdsp::readLoopEvent(evb))) err = true;   // clip full
+            evFill = 0;
+        }
+    }
+    // Decode a base64 payload straight into feed().
+    void feedB64(const char* s) {
+        uint32_t acc = 0; int bits = 0;
+        for (; *s; ++s) {
+            int v = recB64Val(*s);
+            if (v < 0) continue;            // skip '=' / whitespace
+            acc = (acc << 6) | (uint32_t)v; bits += 6;
+            if (bits >= 8) { bits -= 8; feed((uint8_t)((acc >> bits) & 0xff)); }
+        }
+    }
+};
+static RecLoadReceiver g_recLoad;
+#endif  // TDSP_RECORDER_EDIT
+
 // --- Live MIDI IN (DIN on Serial1 + USB host) -> MPE-aware router -> synth ----
 // Both physical sources feed one MidiRouter, which normalizes pitch bend to
 // semitones (per-channel range: 2 in MIDI mode, 48 in MPE / RPN), CC74 -> timbre,
@@ -2150,6 +2254,75 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         else recSel()->stop();
         reply.printf("@REC=%d\n", (int)recSel()->state());
     }
+#if TDSP_RECORDER_EDIT
+    // Note editor round trip (planning/midi-editor/DESIGN.md §4). @RECDUMP streams voice v's
+    // clip out (same @FB/@FD/@FE framing as @READ); @RECLOAD/@RD/@RECEND stream an edited
+    // clip back in. The load decodes straight into the clip (no staging buffer) and, on
+    // commit, re-anchors playback to the retained grid phase.
+    else if (strncmp(line, "@RECDUMP=", 9) == 0) {             // stream voice v's clip to the app
+        int v = atoi(line + 9); if (v != 2) v = 1;
+        tdsp::MidiLooper *L =
+#if TDSP_VOICE2
+            (v == 2) ? &g_loop2 :
+#endif
+            &g_loop1;
+        char name[16]; snprintf(name, sizeof(name), "mem:/loop%d", v);
+        streamClip(reply, name, L->clip());
+    }
+    else if (strncmp(line, "@RECLOAD=", 9) == 0) {             // begin load: <v>\x1f<bytes>[\x1f<crc>]
+        const char *p = line + 9;
+        int  v  = atoi(p); if (v != 2) v = 1;
+        const char *us = strchr(p, '\x1f');
+        long bytes = us ? atol(us + 1) : 0;
+        tdsp::MidiLooper *L =
+#if TDSP_VOICE2
+            (v == 2) ? &g_loop2 :
+#endif
+            &g_loop1;
+        const tdsp::MidiLooper::State st = L->state();
+        const long maxBytes = (long)(tdsp::kLoopClipHdrBytes + (uint32_t)L->maxEvents() * tdsp::kLoopEventBytes);
+        if (st == tdsp::MidiLooper::Armed || st == tdsp::MidiLooper::Recording || st == tdsp::MidiLooper::Overdub) {
+            reply.printf("@RECERR=%d\x1fbusy\n", v);          // never mutate a clip mid-capture
+        } else if (bytes < (long)tdsp::kLoopClipHdrBytes || bytes > maxBytes) {
+            reply.printf("@RECERR=%d\x1fsize\n", v);
+        } else {
+            g_recLoad.reset();
+            g_recLoad.active   = true;
+            g_recLoad.voice    = (uint8_t)v;
+            g_recLoad.target   = L;
+            g_recLoad.expected = (uint32_t)bytes;
+            reply.printf("@RECOK=%d\x1f%ld\n", v, bytes);
+        }
+    }
+    else if (strncmp(line, "@RD=", 4) == 0) {                  // one data frame: <v>\x1f<seq>\x1f<b64>
+        const char *p  = line + 4;
+        int         v  = atoi(p);
+        const char *s1 = strchr(p, '\x1f');
+        const char *s2 = s1 ? strchr(s1 + 1, '\x1f') : nullptr;
+        if (g_recLoad.active && s2 && v == (int)g_recLoad.voice) {
+            uint32_t seq = (uint32_t)atol(s1 + 1);
+            if (seq != g_recLoad.nextSeq) g_recLoad.err = true;   // gap -> whole-load retry at @RECEND
+            else { g_recLoad.feedB64(s2 + 1); g_recLoad.nextSeq++; }
+        }
+        // else: stray/duplicate frame from an aborted transfer — ignore silently.
+    }
+    else if (strncmp(line, "@RECEND=", 8) == 0) {              // commit the load
+        int v = atoi(line + 8); if (v != 2) v = 1;
+        if (!g_recLoad.active || v != (int)g_recLoad.voice) {
+            reply.printf("@RECERR=%d\x1fnoload\n", v);
+        } else if (g_recLoad.err || !g_recLoad.hdrDone || g_recLoad.evFill != 0 ||
+                   g_recLoad.got != g_recLoad.expected) {
+            g_recLoad.target->endClipLoad(false);             // finalize the partial clip, stay stopped
+            g_recLoad.reset();
+            reply.printf("@RECERR=%d\x1fbad\n", v);           // app re-sends (DESIGN §4.2)
+        } else {
+            g_recLoad.target->endClipLoad(true);              // re-anchor + resume in phase
+            uint16_t n = g_recLoad.target->eventCount();
+            g_recLoad.reset();
+            reply.printf("@RECE=%d\x1f%u\n", v, n);
+        }
+    }
+#endif  // TDSP_RECORDER_EDIT
 #endif
 #if TDSP_AUDIOLOOP
     // Audio loop recorder. @ALSEL picks the loop; @ALBARS/@ALMONO/@ALFOLLOW/@ALLEVEL
@@ -2328,11 +2501,14 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         // 3=overdub 4=playing) and progress permille. Each synth's MIDI player owns its own
         // recorder, so every field is per-voice; `v` is just which one the @REC* commands
         // currently target (each player aims it at its own voice before acting).
-        reply.printf("\"rec\":{\"v\":%d,\"bars1\":%d,\"st1\":%d,\"p1\":%d",
-                     g_recVoice, g_loop1.bars(), (int)g_loop1.state(), g_loop1.positionPermille());
+        // n1/n2 = event count per clip, max = the per-clip cap, so the editor can show
+        // headroom (n/max) and disable Add near the limit (DESIGN §2.5).
+        reply.printf("\"rec\":{\"v\":%d,\"bars1\":%d,\"st1\":%d,\"p1\":%d,\"n1\":%d,\"max\":%d",
+                     g_recVoice, g_loop1.bars(), (int)g_loop1.state(), g_loop1.positionPermille(),
+                     g_loop1.eventCount(), g_loop1.maxEvents());
 #if TDSP_VOICE2
-        reply.printf(",\"bars2\":%d,\"st2\":%d,\"p2\":%d",
-                     g_loop2.bars(), (int)g_loop2.state(), g_loop2.positionPermille());
+        reply.printf(",\"bars2\":%d,\"st2\":%d,\"p2\":%d,\"n2\":%d",
+                     g_loop2.bars(), (int)g_loop2.state(), g_loop2.positionPermille(), g_loop2.eventCount());
 #endif
         reply.print("},");
 #endif
@@ -2380,8 +2556,9 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         // that have them compiled in (both are pool-only, build-flag gated).
         // caps.audioloop = the number of audio loops that ACTUALLY allocated (0 = the board
         // couldn't spare the RAM -> the app hides the card), not just the build flag.
-        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"audioloop\":%d}",
+        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"audioloop\":%d}",
                      TDSP_VOICE2 ? 1 : 0, (TDSP_VOICE2 && TDSP_ARP2) ? 1 : 0, TDSP_RECORDER ? 1 : 0,
+                     TDSP_RECORDER_EDIT ? 1 : 0,
 #if TDSP_AUDIOLOOP
                      (int)g_aloopN
 #else

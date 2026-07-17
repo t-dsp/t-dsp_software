@@ -56,6 +56,36 @@ public:
     State    state()       const { return state_; }
     bool     hasClip()     const { return clip_.hasData(); }
     uint16_t eventCount()  const { return clip_.count; }
+    uint16_t maxEvents()   const { return LoopClip::kMaxEvents; }
+
+    // ---- Editor read/replace (the note-editor round trip, see LoopClipIo.h) ----
+    // Read-only view for @RECDUMP (streamed out event-by-event, no copy).
+    const LoopClip &clip() const { return clip_; }
+
+    // Replace the whole clip from a streamed byte load (@RECLOAD/@RD/@RECEND). We rebuild
+    // the clip in place — no second 8 KB LoopClip staged (DTCM is tight; DESIGN §9.3):
+    //   beginClipLoad()  stops playback but KEEPS clipAnchor_ (so the swap resumes in phase),
+    //                    clears the clip, and sets the meta from the stream header.
+    //   pushLoadEvent()  appends one event; insert() keeps the (tick,rank) sort invariant even
+    //                    if the client streamed them unsorted.
+    //   endClipLoad()    re-anchors playback to the retained grid phase (or leaves it Idle).
+    // Only call from Idle or Playing — never mid-Recording/Overdub (the caller guards that).
+    // A load that aborts mid-stream just leaves a shorter clip; the app re-sends (DESIGN §4.2).
+    void beginClipLoad(uint16_t loopTicks, uint8_t beatsPerBar, uint8_t bars) {
+        player_.stop();                 // keep clipAnchor_ for phase-correct resume
+        clip_.clear();
+        clip_.loopTicks   = loopTicks;
+        clip_.beatsPerBar = beatsPerBar;
+        clip_.bars        = bars;
+        if (bars == 1 || bars == 2 || bars == 4 || bars == 8) bars_ = bars;  // keep @RECBARS consistent
+        resetPass();
+        state_ = Idle;
+    }
+    bool pushLoadEvent(const LoopEvent &e) { return clip_.insert(e); }   // false if the clip is full
+    void endClipLoad(bool resumePlay) {
+        if (resumePlay && clip_.hasData()) { player_.play(&clip_, clipAnchor_); state_ = Playing; }
+        else state_ = Idle;
+    }
 
     // ---- Transport ----
     void armRecord() {                            // replace

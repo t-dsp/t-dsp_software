@@ -7,3 +7,4 @@
 #include "LoopEvent.h"
 #include "LoopPlayer.h"
 #include "MidiLooper.h"
+#include "LoopClipIo.h"   // clip <-> wire-bytes codec for the note editor (@RECDUMP/@RECLOAD)
