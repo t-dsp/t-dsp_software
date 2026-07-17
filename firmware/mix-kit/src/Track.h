@@ -21,13 +21,21 @@ class  MidiSink;         // the engine binding (g_synthSink / g_synthSinkB); nev
 struct MidiFileEvent;    // one parsed MIDI event (the player's event stream)
 }
 
-// Which of the deliberately voice-1-ONLY behaviors this track performs. Default all-false =
-// today's voice-2 behavior (touches no global mode/meter, bare prep). Voice 1 sets them true.
+// Which of the deliberately per-role behaviors this track performs. Default all-false =
+// voice-2 behavior (touches no global mode/meter, bare prep). Voice 1 sets the first three; the
+// drum track (Phase 2) sets the drum-* group. Adding a role = a flag here + a check at the caps site.
 struct TrackCaps {
-    bool ownsGlobalMode;   // applies the global MPE mode on start (applyMidiMode)
-    bool ownsMeter;        // owns the master meter — applyMeter() on start/stop/natural-end
-    bool prepSpecial;      // prep spares ch10 while drums loop + resets the multitimbral audition trim
-    bool splitGuarded;     // start is a no-op unless the pool split is enabled (voice 2 on a split build)
+    bool ownsGlobalMode;   // applies the global MPE mode on start (applyMidiMode)          [voice 1]
+    bool ownsMeter;        // owns the master meter — applyMeter() on start/stop/natural-end [voice 1]
+    bool prepSpecial;      // prep spares ch10 while drums loop + resets the multitimbral audition trim [voice 1]
+    bool splitGuarded;     // start is a no-op unless the pool split is enabled              [voice 2]
+    // --- drum-track group (Phase 2); all false for the synth voices -------------------------------
+    bool loopsSeamless;       // player.setLooping(true): a groove loops seamlessly (no re-arm, drum tails ring)
+    bool ownsPatch;           // the track owns its patch (drum kit) -> ignore the file's program changes
+    bool drumGated;           // start is a no-op unless the engine renders ch10 drums (drumEngineOk())
+    bool appliesKit;          // prep applies the selected GM drum kit (program change on ch10)
+    bool mutesSongDrums;      // while playing, mute the melodic song's own ch10 so the groove IS the beat
+    bool tempoSourceWhenIdle; // starting on an idle transport snaps the master BPM to this content's native BPM
 };
 
 struct Track {
@@ -39,7 +47,8 @@ struct Track {
     tdsp::MidiSink       *sink;      // the engine binding; fixed for the life of the build
     tdsp::MidiFileEvent  *buf;       // this track's event buffer (SD parse target)
     uint32_t              bufCap;
-    void (*setLevel)(int pct);       // backend hook: voice 1 -> synthSetSongVol, voice 2 -> synthSetVoice2Vol
+    uint16_t              chMask;     // channels the player emits: kMaskNoDrums (melodic voices) / 1<<9 (drum ch10)
+    void (*setLevel)(int pct);       // backend hook: voice 1 -> synthSetSongVol, voice 2 -> synthSetVoice2Vol, drum -> vol%
     const char *tag;                 // log/serial tag: "song" (voice 1) / "song2" (voice 2). Voice 1's
                                      // "[song] <n> bpm" print is the one the app parses (Reset->song bpm).
     TrackCaps  caps;
