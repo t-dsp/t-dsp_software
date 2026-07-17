@@ -1589,27 +1589,26 @@ export default function App() {
         </View>
         <Text style={s.statline}>{headerStatus}</Text>
         <BeatStrip sig={metro.sig} bpm={bpm} active={connected && (metro.on || player.playing || !!drums.playing)} live={beatFeed} />
-        {/* ===== MASTER TRANSPORT: the metronome is the app-wide clock. Play defines the downbeat
-            and runs the grid everything (players, drums, arps) locks to; Stop clears the stage.
-            Mute toggles only whether you HEAR the click — the clock runs either way. ===== */}
-        {metro.cap && (
-          <View style={s.transportRow}>
-            <Pressable style={[s.tBtn, metro.on && s.tBtnOn]} onPress={playMetro} disabled={!connected}
-              accessibilityLabel={metro.on ? 'Transport running — restart the downbeat' : 'Start the transport'}>
-              <Text style={[s.tBtnText, metro.on && s.tBtnOnText]}>▶</Text></Pressable>
-            <Pressable style={[s.tBtn, s.tBtnGhost]} onPress={stopMetro} disabled={!connected}
-              accessibilityLabel="Stop everything">
-              <Text style={s.tBtnText}>■</Text></Pressable>
-            <Pressable style={[s.tBtn, s.tBtnGhost]} disabled={!connected}
-              onPress={() => { const muted = !metro.muted; setMetro(m => ({ ...m, muted })); tp.metronomeMute(muted); }}
-              accessibilityLabel={metro.muted ? 'Click muted — tap to hear it' : 'Click audible — tap to mute'}>
-              <Text style={s.tBtnText}>{metro.muted ? '🔇' : '🔊'}</Text></Pressable>
-            <View style={{ flex: 1 }} />
-            <Pressable style={s.tBtn} onPress={() => stepBpm(-1)} disabled={!connected}><Text style={s.tBtnText}>−</Text></Pressable>
-            <Text style={s.tBpm}>{Math.round(bpm)}<Text style={s.tBpmUnit}> BPM</Text></Text>
-            <Pressable style={s.tBtn} onPress={() => stepBpm(1)} disabled={!connected}><Text style={s.tBtnText}>＋</Text></Pressable>
-          </View>
-        )}
+        {/* ===== MASTER TRANSPORT (always in the header): the metronome is the app-wide clock.
+            Play defines the downbeat and runs the grid everything (players, drums, arps) locks to;
+            Stop clears the stage. Mute toggles only whether you HEAR the click — the clock runs
+            either way. Buttons disable when not connected (like the VOL row). ===== */}
+        <View style={s.transportRow}>
+          <Pressable style={[s.tBtn, metro.on && s.tBtnOn]} onPress={playMetro} disabled={!connected}
+            accessibilityLabel={metro.on ? 'Transport running — restart the downbeat' : 'Start the transport'}>
+            <Text style={[s.tBtnText, metro.on && s.tBtnOnText]}>▶</Text></Pressable>
+          <Pressable style={[s.tBtn, s.tBtnGhost]} onPress={stopMetro} disabled={!connected}
+            accessibilityLabel="Stop everything">
+            <Text style={s.tBtnText}>■</Text></Pressable>
+          <Pressable style={[s.tBtn, s.tBtnGhost, !metro.muted && s.tBtnOn]} disabled={!connected}
+            onPress={() => { const muted = !metro.muted; setMetro(m => ({ ...m, muted })); tp.metronomeMute(muted); }}
+            accessibilityLabel={metro.muted ? 'Click muted — tap to hear it' : 'Click audible — tap to mute'}>
+            <Text style={[s.tBtnText, !metro.muted && s.tBtnOnText]}>{metro.muted ? '🔇' : '🔊'}</Text></Pressable>
+          <View style={{ flex: 1 }} />
+          <Pressable style={s.tBtn} onPress={() => stepBpm(-1)} disabled={!connected}><Text style={s.tBtnText}>−</Text></Pressable>
+          <Text style={s.tBpm}>{Math.round(bpm)}<Text style={s.tBpmUnit}> BPM</Text></Text>
+          <Pressable style={s.tBtn} onPress={() => stepBpm(1)} disabled={!connected}><Text style={s.tBtnText}>＋</Text></Pressable>
+        </View>
         <View style={s.volRow}>
           <Text style={s.volLbl}>VOL</Text>
           <Slider style={{ flex: 1, height: 34 }} minimumValue={0} maximumValue={100} step={1}

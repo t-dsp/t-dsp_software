@@ -913,6 +913,18 @@ static bool g_songLaunchPending = false;
 static char g_pendingSongArg[64] = {0};
 static bool g_drumLaunchPending = false;
 static char g_pendingDrumFile[80] = {0};
+#if TDSP_VOICE2
+static bool g_song2LaunchPending = false;   // player 2 (@SONG2) armed for the next bar (see song2Restart)
+// PRE-LOADED player-2 launch: the (blocking) SD parse runs when the launch is ARMED, not on the
+// downbeat — so firing on the bar edge is just play()+sync and never stalls loop() right when both
+// players need to hit their downbeat note (that stall was dropping notes). See song2Preload().
+static const tdsp::MidiFileEvent *g_song2PreEv = nullptr;
+static uint32_t g_song2PreCount     = 0;
+static double   g_song2PreLoopBeats = 0.0;
+#endif
+// Set true just before a bar-quantized launch fires, so songApplySync/song2ApplySync anchor the
+// player at the downbeat FROM ITS TOP (never re-zeroing the shared clock under a running player).
+static bool g_syncAnchorNow = false;
 // A tiny tempo follower that just flags each bar edge so loop() can fire pending launches
 // OUTSIDE the conductor's follower fan-out (keeps the heavy SD-load start off the callback).
 struct LaunchScheduler : tdsp::ITempoFollower { volatile bool barHit = false; void onBarEdge() override { barHit = true; } };
@@ -1123,8 +1135,9 @@ static void songApplySync(double parsedLoopBeats) {
         lb = tdsp::smf::snapLoopBeatsHalf((double)g_player.totalMs() * (double)g_songBpm / 60000.0);
     if (lb <= 0.0) return;
     g_songLoopBeats = lb;
-    g_player.setSyncedMode(&g_conductor.clock(), lb, g_songBpm);
-    Serial.printf("[song] grid-locked: len=%.2f beats @ %.1f bpm (%s)\n", lb, (double)g_songBpm, g_loop ? "loop" : "one-shot");
+    const bool anchorNow = g_syncAnchorNow; g_syncAnchorNow = false;
+    g_player.setSyncedMode(&g_conductor.clock(), lb, g_songBpm, anchorNow);
+    Serial.printf("[song] grid-locked: len=%.2f beats @ %.1f bpm (%s%s)\n", lb, (double)g_songBpm, g_loop ? "loop" : "one-shot", anchorNow ? ", from top" : "");
 }
 
 // Clean slate before starting ANY song: silence sounding notes + clear latched
@@ -1281,68 +1294,68 @@ static void song2ApplySync(double parsedLoopBeats) {
         lb = tdsp::smf::snapLoopBeatsHalf((double)g_player2.totalMs() * (double)g_song2Bpm / 60000.0);
     if (lb <= 0.0) return;
     g_song2LoopBeats = lb;
-    g_player2.setSyncedMode(&g_conductor.clock(), lb, g_song2Bpm);
-    Serial.printf("[song2] grid-locked: len=%.2f beats @ %.1f bpm (%s)\n", lb, (double)g_song2Bpm, g_song2Loop ? "loop" : "one-shot");
+    const bool anchorNow = g_syncAnchorNow; g_syncAnchorNow = false;
+    g_player2.setSyncedMode(&g_conductor.clock(), lb, g_song2Bpm, anchorNow);
+    Serial.printf("[song2] grid-locked: len=%.2f beats @ %.1f bpm (%s%s)\n", lb, (double)g_song2Bpm, g_song2Loop ? "loop" : "one-shot", anchorNow ? ", from top" : "");
 }
-FLASHMEM static bool song2StartSd(const char *path, const char *disp, const char *arg) {
-    song2Prep();
-    g_song2Bpm = 120.0f; g_song2Bpb = 4; double parsedLoopBeats = 0.0;
-    int got = tdsp::smf::loadSmfFile(path, g_buf2, MAX_EVENTS2, &g_song2Bpm, &g_song2Bpb, &parsedLoopBeats);
-    if (got <= 0) { Serial.printf("[song2] SD load FAILED: %s\n", path); return false; }
-    snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", disp);
-    snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", arg);
-    Serial.printf("[song2] %s (SD, %lu events, %.1f bpm) -> voice 2 (start)\n", disp, (unsigned long)got, (double)g_song2Bpm);
-    applyTempos();
-    ensureTransportStarted();   // auto-start: join the running grid in phase (or define it if idle)
-    g_player2.play(g_buf2, (uint32_t)got);
-    song2ApplySync(parsedLoopBeats);
-    return true;
-}
-FLASHMEM static bool song2StartBuiltin(const char *name) {
-    // Baked test sequences (played verbatim; we do NOT flip the global MPE mode — that belongs to
-    // voice 1). An MPE test song is an edge case on voice 2 and may render as plain multitimbral.
-    for (int i = 0; i < testsong::kNumTestSongs; ++i) {
-        if (strcasecmp(name, testsong::kTestSongs[i].name) != 0) continue;
-        song2Prep();
-        g_song2Bpm = testsong::kTestSongs[i].bpm; g_song2Bpb = 4; applyTempos();
-        snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", testsong::kTestSongs[i].name);
-        snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", testsong::kTestSongs[i].name);
-        ensureTransportStarted();
-        g_player2.play(testsong::kTestSongs[i].ev, testsong::kTestSongs[i].count);
-        song2ApplySync(0.0);
-        return true;
-    }
-    for (int i = 0; i < kNumBuiltin; ++i) {   // baked legacy demos (expand into g_buf2)
-        if (strcasecmp(name, kBuiltinSongs[i].name) != 0) continue;
-        song2Prep();
-        g_song2Bpm = kBuiltinSongs[i].bpm; g_song2Bpb = 4;
-        uint32_t n = tdsp::expandLegacyNotes(kBuiltinSongs[i].ev, kBuiltinSongs[i].count, g_buf2, MAX_EVENTS2);
-        snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", kBuiltinSongs[i].name);
-        snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", kBuiltinSongs[i].name);
-        if (n) {
-            applyTempos();
-            ensureTransportStarted();
-            g_player2.play(g_buf2, n);
-            song2ApplySync(0.0);
-        }
-        return true;
-    }
-    return false;
-}
-FLASHMEM static void song2StartArg(const char *arg) {
-    if (!arg || !*arg) return;
-    if (!g_voice2Split) {   // Synth B off -> engines 4..7 belong to Synth A; playing here would collide
-        Serial.println("[song2] ignored: enable Synth B (@VOICE2=1) first");
-        return;
-    }
+// LOAD (the slow, blocking part) a player-2 song into memory + stash where to play it from.
+// No sink/clock side effects — safe to call while other players run, off the downbeat. Returns
+// false if not found / load failed. song2FirePreloaded() then starts it instantly.
+FLASHMEM static bool song2Preload(const char *arg) {
+    if (!arg || !*arg) return false;
+    g_song2Bpm = 120.0f; g_song2Bpb = 4;
+    g_song2PreEv = nullptr; g_song2PreCount = 0; g_song2PreLoopBeats = 0.0;
     if (endsWithMid(arg)) {
         char path[128]; char disp[64]; songDisp(disp, sizeof disp, arg);
         snprintf(path, sizeof path, "/songs/%s", arg);
         if (!SD.exists(path)) snprintf(path, sizeof path, "/%s", arg);
-        song2StartSd(path, disp, arg);
-    } else if (!song2StartBuiltin(arg)) {
-        Serial.printf("[song2] not found: %s\n", arg);
+        double plb = 0.0;
+        int got = tdsp::smf::loadSmfFile(path, g_buf2, MAX_EVENTS2, &g_song2Bpm, &g_song2Bpb, &plb);
+        if (got <= 0) { Serial.printf("[song2] SD load FAILED: %s\n", path); return false; }
+        snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", disp);
+        snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", arg);
+        g_song2PreEv = g_buf2; g_song2PreCount = (uint32_t)got; g_song2PreLoopBeats = plb;
+        Serial.printf("[song2] preloaded %s (SD, %lu events, %.1f bpm)\n", disp, (unsigned long)got, (double)g_song2Bpm);
+        return true;
     }
+    for (int i = 0; i < testsong::kNumTestSongs; ++i) {   // baked test sequences (play from flash)
+        if (strcasecmp(arg, testsong::kTestSongs[i].name) != 0) continue;
+        g_song2Bpm = testsong::kTestSongs[i].bpm; g_song2Bpb = 4;
+        snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", testsong::kTestSongs[i].name);
+        snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", testsong::kTestSongs[i].name);
+        g_song2PreEv = testsong::kTestSongs[i].ev; g_song2PreCount = testsong::kTestSongs[i].count;
+        return true;
+    }
+    for (int i = 0; i < kNumBuiltin; ++i) {   // baked legacy demos (expand into g_buf2)
+        if (strcasecmp(arg, kBuiltinSongs[i].name) != 0) continue;
+        g_song2Bpm = kBuiltinSongs[i].bpm; g_song2Bpb = 4;
+        uint32_t n = tdsp::expandLegacyNotes(kBuiltinSongs[i].ev, kBuiltinSongs[i].count, g_buf2, MAX_EVENTS2);
+        if (!n) return false;
+        snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", kBuiltinSongs[i].name);
+        snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", kBuiltinSongs[i].name);
+        g_song2PreEv = g_buf2; g_song2PreCount = n;
+        return true;
+    }
+    Serial.printf("[song2] not found: %s\n", arg);
+    return false;
+}
+// PLAY the preloaded song — fast + non-blocking, so it can fire ON the downbeat without stalling
+// loop(). anchorNow=true starts it from its top at the current beat (a quantized bar launch).
+static void song2FirePreloaded(bool anchorNow) {
+    if (!g_song2PreEv || g_song2PreCount == 0) return;
+    song2Prep();
+    applyTempos();
+    ensureTransportStarted();   // join the running grid in phase (or define it if idle)
+    g_player2.play(g_song2PreEv, g_song2PreCount);
+    g_syncAnchorNow = anchorNow;
+    song2ApplySync(g_song2PreLoopBeats);
+}
+FLASHMEM static void song2StartArg(const char *arg) {
+    if (!g_voice2Split) {   // Synth B off -> engines 4..7 belong to Synth A; playing here would collide
+        Serial.println("[song2] ignored: enable Synth B (@VOICE2=1) first");
+        return;
+    }
+    if (song2Preload(arg)) song2FirePreloaded(false);   // immediate start (in phase with the grid)
 }
 static void song2Stop() {
     g_song2WasPlaying = false;   // a manual stop must NOT trigger the loop-restart
@@ -1354,7 +1367,21 @@ static void song2Stop() {
 // Hard restart player 2 from the top on a fresh downbeat (mirrors songRestart for voice 1).
 static void song2Restart(const char *arg) {
     if (!arg || !*arg) return;
-    g_forceTransportZero = true;
+    if (!g_voice2Split) {   // Synth B off -> nothing to launch on voice 2
+        Serial.println("[song2] ignored: enable Synth B (@VOICE2=1) first");
+        return;
+    }
+    // If the master clock is already running (a player, a groove, or just the metronome owns the
+    // grid), DON'T re-zero it — that would strand whatever's running. PRE-LOAD the song now (off the
+    // downbeat, so the SD parse never stalls loop() on the beat) and fire it on the NEXT bar edge,
+    // from its top, while everything else keeps running. Only an idle transport defines the downbeat.
+    if (g_conductor.running()) {
+        if (!song2Preload(arg)) return;
+        g_song2LaunchPending = true; g_launchSched.barHit = false;   // fire on the next bar edge
+        Serial.printf("[sync] song2 launch armed (preloaded): %s -> next bar (from top)\n", arg);
+        return;
+    }
+    g_forceTransportZero = true;   // idle: define the downbeat now and start from the top
     song2StartArg(arg);
     g_forceTransportZero = false;
 }
@@ -1623,9 +1650,17 @@ static void songLaunch(const char* arg) {
 // fresh downbeat, so everything restarts in phase. The app's MIDI-player Play / ‹ › use this.
 static void songRestart(const char* arg) {
     if (!arg || !*arg) return;
-    g_forceTransportZero = true;   // ensureTransportStarted() (called right before play()) re-zeroes even mid-playback
+    // Symmetric to song2Restart: if the master clock is already running, quantize player 1 onto the
+    // next bar (from top) instead of re-zeroing the clock under whatever else is playing.
+    if (g_conductor.running()) {
+        snprintf(g_pendingSongArg, sizeof g_pendingSongArg, "%s", arg);
+        g_songLaunchPending = true; g_launchSched.barHit = false;
+        Serial.printf("[sync] song launch armed: %s -> next bar (from top)\n", arg);
+        return;
+    }
+    g_forceTransportZero = true;   // idle: define the downbeat now and start from the top
     songStartArg(arg);
-    g_forceTransportZero = false;  // safety: clear if songStartArg bailed before consuming it (non-looping / not found)
+    g_forceTransportZero = false;  // safety: clear if songStartArg bailed before consuming it
 }
 static void drumLaunchFile(const char* fname) {
     if (g_launchQuantize && g_conductor.running()) {
@@ -2074,7 +2109,11 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
                                  Serial.printf("[drum] synchro start %s\n", g_drumSynchro ? "ON (play a note to start)" : "off (start on Play)"); }
     else if (strncmp(line, "@QUANTIZE=", 10) == 0) {   // launch quantize: defer song/groove start to the next bar edge
         g_launchQuantize = (atoi(line + 10) != 0);
-        if (!g_launchQuantize) { g_songLaunchPending = g_drumLaunchPending = false; }   // dropping the mode cancels any armed launch
+        if (!g_launchQuantize) { g_songLaunchPending = g_drumLaunchPending = false;
+#if TDSP_VOICE2
+                                 g_song2LaunchPending = false;
+#endif
+                               }   // dropping the mode cancels any armed launch
         reply.printf("@QUANTIZE=%d\n", g_launchQuantize ? 1 : 0);
         Serial.printf("[sync] launch quantize %s\n", g_launchQuantize ? "ON (starts land on the next bar)" : "off (start now)");
     }
@@ -2705,15 +2744,6 @@ void loop() {
 
     beatEmitPoll();   // @BEAT=<beatInBar>/<beatsPerBar> once per beat, for the app's beat lights
 
-    // Launch quantize: fire any armed song/groove exactly on a bar edge (flagged by
-    // g_launchSched during the update() above), so they land on the shared downbeat. The
-    // groove fires with rezero=false so it aligns to the free grid instead of resetting it.
-    if (g_launchSched.barHit) {
-        g_launchSched.barHit = false;
-        if (g_songLaunchPending) { g_songLaunchPending = false; songStartArg(g_pendingSongArg); }
-        if (g_drumLaunchPending) { g_drumLaunchPending = false; drumStartFile(g_pendingDrumFile, /*rezero=*/false); }
-    }
-
     // Live MIDI: drain DIN + USB-host controllers, then advance the (non-blocking) song.
 #if TDSP_HAS_DIN_MIDI
     while (MIDI.read()) { /* handlers fire per message */ }
@@ -2727,6 +2757,26 @@ void loop() {
     g_player2.tick();      // advance the second (voice-2) song player
 #endif
     g_drumPlayer.tick();   // loops internally (setLooping), so no external re-arm needed
+
+    // Launch quantize: fire armed launches (song / groove / player 2) on the bar edge — but ONLY
+    // AFTER the already-running players ticked this beat's notes above, so a launch (and its
+    // blocking SD load) can NEVER preempt or drop another player's downbeat. That was the bug:
+    // starting the drums / player 2 on a downbeat stole player 1 & 2's first note. Then re-tick the
+    // players so a JUST-launched one still lands its own downbeat in this same iteration.
+    if (g_launchSched.barHit) {
+        g_launchSched.barHit = false;
+        if (g_songLaunchPending)  { g_songLaunchPending  = false; g_syncAnchorNow = true; songStartArg(g_pendingSongArg); }
+        if (g_drumLaunchPending)  { g_drumLaunchPending  = false; drumStartFile(g_pendingDrumFile, /*rezero=*/false); }
+#if TDSP_VOICE2
+        if (g_song2LaunchPending) { g_song2LaunchPending = false; song2FirePreloaded(/*anchorNow=*/true); }   // preloaded -> instant
+#endif
+        g_syncAnchorNow = false;   // defensive: a not-found launch never leaves it armed
+        g_player.tick();           // a just-launched player hits its downbeat now (already-running ones no-op)
+#if TDSP_VOICE2
+        g_player2.tick();
+#endif
+        g_drumPlayer.tick();
+    }
     g_arpFilter.tick(micros());   // drain the arp's gate-off queue (note steps fire on onClock)
 #if TDSP_VOICE2 && TDSP_ARP2
     g_arpFilter2.tick(micros());  // same for the keyboard-path arp
