@@ -49,6 +49,16 @@
 #error "No control transport selected: define -D TDSP_CTRL_BLE or -D TDSP_CTRL_WIFI in build_flags."
 #endif
 
+// ---- A2DP gate (-D TDSP_A2DP=0 to build WITHOUT Bluetooth audio) -----------
+// Default 1 = normal product build. 0 = Bluetooth is never started, so WiFi owns the
+// radio: no coexistence arbitration and no mandatory modem sleep. That combination is
+// what makes the WiFi link slow+jittery when A2DP is up (measured: ping avg 59 ms /
+// max 121 ms with BT on, on a quiet LAN), so this gate exists to A/B it and separate
+// "our code is wrong" from "the radio is shared". env:esp32dev_wifi_noa2dp sets it.
+#ifndef TDSP_A2DP
+#define TDSP_A2DP 1
+#endif
+
 #include <Arduino.h>
 
 #include "BluetoothA2DPSink.h"
@@ -894,18 +904,30 @@ class WifiControlTransport : public ControlTransport {
     WiFi.persistent(false);            // don't wear flash writing creds every boot
     WiFi.mode(WIFI_STA);
     WiFi.setHostname(TDSP_MDNS_HOST);  // DHCP hostname (mDNS name set separately)
-    // WiFi modem sleep MUST stay ENABLED here. A2DP (Bluetooth Classic) and WiFi share the
-    // one 2.4 GHz radio, and the coexistence arbiter time-slices them using the modem-sleep
-    // windows. With sleep disabled, IDF hard-abort()s the instant WiFi starts:
+#if TDSP_A2DP
+    // WiFi modem sleep MUST stay ENABLED while Bluetooth is up. A2DP (Bluetooth Classic)
+    // and WiFi share the one 2.4 GHz radio, and the coexistence arbiter time-slices them
+    // using the modem-sleep windows. With sleep disabled, IDF hard-abort()s the instant
+    // WiFi starts:
     //   "E wifi: Should enable WiFi modem sleep when both WiFi and Bluetooth are enabled"
     //   abort() ... Rebooting...
-    // -> a boot-loop, verified on hardware. Do NOT "optimize" this to setSleep(false) for
-    // WS latency; it is non-negotiable while Bluetooth is up. (true = WIFI_PS_MIN_MODEM,
-    // which is also the arduino-esp32 default; set explicitly so the reason is on record.)
+    // -> a boot-loop, verified on hardware. Do NOT "optimize" this away; it is
+    // non-negotiable while Bluetooth is up. (true = WIFI_PS_MIN_MODEM, also the
+    // arduino-esp32 default; set explicitly so the reason is on record.)
+    //
+    // The COST is real and measured: the radio parks between beacons, so WS writes stall
+    // (ping avg ~59 ms / max ~121 ms on a quiet LAN, vs ~5 ms with BT off) and bulk @READ
+    // transfers fall behind. That is the price of WiFi+A2DP on one chip.
     WiFi.setSleep(true);
-#ifdef TDSP_HAVE_COEX
+#else
+    // A2DP gated off -> no Bluetooth, no coexistence, so nothing forces modem sleep.
+    // WiFi keeps the radio awake: lowest latency, which is the point of this build.
+    WiFi.setSleep(false);
+#endif
+#if TDSP_A2DP && defined(TDSP_HAVE_COEX)
     // Bias the WiFi/BT coexistence arbiter toward Bluetooth so A2DP audio is
     // prioritized over WiFi on the shared radio (best-effort; guarded for portability).
+    // Pointless with the A2DP gate off -- there is nothing to coexist with.
     esp_coex_preference_set(ESP_COEX_PREFER_BT);
 #endif
     Serial.printf("[wifi] connecting to \"%s\"...\n", TDSP_WIFI_SSID);
@@ -1006,6 +1028,13 @@ void setup() {
   Serial.println("T-DSP ESP32: A2DP sink + WiFi WebSocket control, starting...");
 #endif
 
+#if !TDSP_A2DP
+  // A2DP gated OFF at build time: Bluetooth is never started, so WiFi owns the radio
+  // outright (no coexistence, no mandatory modem sleep -- see WifiControlTransport::begin).
+  // Diagnostic/experimental build: proves how much of the WiFi latency is BT coexistence.
+  // There is NO Bluetooth audio in this build.
+  Serial.println("[a2dp] DISABLED at build time (-D TDSP_A2DP=0) -- WiFi has the radio to itself");
+#else
   // Bluetooth mode BEFORE start(): BTDM keeps BLE alive alongside A2DP (BLE build);
   // CLASSIC_BT frees the BLE controller RAM for the WiFi/lwIP/WebSocket stacks (WiFi build).
 #if defined(TDSP_CTRL_BLE)
@@ -1055,6 +1084,7 @@ void setup() {
   // in the app to reconnect the last phone, or "Pairing mode" to add a new one.
   goIdle("boot");
   Serial.printf("A2DP sink up (idle). Connect from the app to start Bluetooth audio.\n");
+#endif  // TDSP_A2DP
 
   // Control transport comes up AFTER A2DP: BLE attaches to the running Bluedroid
   // stack; WiFi just joins the LAN + starts the WS server. Exactly one is compiled in.
