@@ -82,6 +82,10 @@
 #include <TDspAudioLoop.h>
 #include <AudioLoopWav.h>   // @ALSAVE -> /loops/<name>.wav (pulls <SD.h>, already used)
 
+#ifdef TDSP_FLASHERX
+#include "FlasherXUpdate.inc.h"   // @FXUP -> OTA self-update (lib/FlasherX). Opt-in.
+#endif
+
 // Developer bench diagnostics (self-tests, MPE/axis proofs, capture probes, the
 // ReplayGain sweep) are opt-in and live in Diagnostics.inc.h. Default ON so every
 // existing build behaves EXACTLY as before; a lean product build sets
@@ -2132,6 +2136,9 @@ FLASHMEM static bool handleArpLine(const char* line, Print& reply, tdsp::ArpFilt
 
 FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     if      (strncmp(line, "@VOL=", 5) == 0)      setMasterVolumePct(atoi(line + 5));
+#ifdef TDSP_FLASHERX
+    else if (strncmp(line, "@FXUP", 5) == 0)      fxRunUpdate(Serial);   // OTA self-update over USB (blocks, reboots)
+#endif
 #if defined(TDSP_HAS_REPLAYGAIN) && TDSP_DIAGNOSTICS
     else if (strncmp(line, "@GAIN=", 6) == 0)     runGainSweep(atoi(line + 6));   // resume sweep from index
 #endif

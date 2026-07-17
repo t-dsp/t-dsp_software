@@ -1,0 +1,13 @@
+{
+  "name": "FlasherX",
+  "version": "2.3.0",
+  "description": "OTA firmware self-update for Teensy LC/3.x/4.x/MicroMod via Intel-hex over any Stream (Serial/UART/SD). Vendored from joepasquariello/FlasherX (public domain). Buffers new image in unused flash by default (RAM_BUFFER_SIZE=0).",
+  "keywords": ["teensy", "ota", "firmware", "flash", "update"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/joepasquariello/FlasherX"
+  },
+  "license": "Unlicense",
+  "frameworks": ["arduino"],
+  "platforms": ["teensy"]
+}
