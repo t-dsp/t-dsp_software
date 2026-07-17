@@ -338,7 +338,10 @@ export default function App() {
   const [beatFeed, setBeatFeed] = useState<{ i: number; n: number } | null>(null);   // live @BEAT from the device (null = fall back to the local clock)
   const beatStaleRef = useRef<any>(null);
   const [quant, setQuant] = useState(false);           // launch quantize: start songs/grooves on the next bar
-  const [metro, setMetro] = useState({ on: false, cap: false, sig: 4, vol: 100 });   // metronome click; cap=true once the device reports @METRO support; sig = beats/bar; vol = click level 0..150 %
+  // The metronome IS the master transport: `on` = the clock/transport is RUNNING (everything locks
+  // to it); `muted` = whether the click is audible (default muted — the transport runs silently).
+  // cap=true once the device reports metronome support; sig = beats/bar; vol = click level 0..150 %.
+  const [metro, setMetro] = useState({ on: false, muted: true, cap: false, sig: 4, vol: 100 });
   const [songBpm, setSongBpm] = useState(120);            // tempo of the last song that played
   const [selVoice, setSelVoice] = useState('');
   const [selVoiceName, setSelVoiceName] = useState('');   // last-picked instrument name (shown on the card, persists across browsing)
@@ -392,7 +395,8 @@ export default function App() {
     // present its stored value arrives right after and overrides this (see hydrateApp).
     if (j.loop != null) setEndMode(m => j.loop ? 'repeat' : (m === 'repeat' ? 'stop' : m));
     if (j.quant != null) setQuant(!!j.quant);
-    if (j.metro != null) setMetro(m => ({ ...m, on: !!j.metro, cap: true }));   // present only on metronome-capable builds
+    if (j.metro != null) setMetro(m => ({ ...m, on: !!j.metro, cap: true }));   // on = transport running (metronome-capable builds)
+    if (j.metromuted != null) setMetro(m => ({ ...m, muted: !!j.metromuted }));   // is the click audible?
     if (j.metrosig != null) setMetro(m => ({ ...m, sig: Math.max(1, Math.min(16, j.metrosig | 0)) || 4 }));
     if (j.metrovol != null) setMetro(m => ({ ...m, vol: Math.max(0, Math.min(150, j.metrovol | 0)) }));
     if (j.arp) setArp({ on: !!j.arp.on, pat: clampIdx(j.arp.pat, ARP_PAT.length), rate: rateIndexFromFw(j.arp.rate | 0), oct: Math.max(1, Math.min(4, j.arp.oct | 0)) || 1, latch: !!j.arp.latch });
@@ -518,8 +522,9 @@ export default function App() {
         beatStaleRef.current = setTimeout(() => setBeatFeed(null), 3500);
       }
     } else if (line.startsWith('[song]')) {
-      // Follow the song's detected tempo: set master BPM to it (song + drums lock to that).
-      const m = line.match(/([\d.]+)\s*bpm/); if (m) { const b = Math.round(parseFloat(m[1])); if (b >= 20 && b <= 300) { setSongBpm(b); setBpm(b); tp.masterBpm(b); } }
+      // Record the song's detected tempo (for the "Reset → song bpm" affordance), but DON'T touch
+      // the master: the metronome is the tempo authority now, and songs lock to IT (not the reverse).
+      const m = line.match(/([\d.]+)\s*bpm/); if (m) { const b = Math.round(parseFloat(m[1])); if (b >= 20 && b <= 300) setSongBpm(b); }
     }
     // [tp]: the transport picker can swap the instance, so this must re-bind to the new one
     // (an []-dep here would leave the subscription stranded on the dead transport).
@@ -946,10 +951,20 @@ export default function App() {
   onSong2EndRef.current = songDeck2.onNaturalEnd;
   const playGroove = () => { const g = cat.grooves.find(x => x.path === drums.sel); if (g) { tp.playGrooveFile(grooveFile(g)); setDrums(d => ({ ...d, playing: g.name })); } };
   const stopDrums = () => { tp.stopDrums(); setDrums(d => ({ ...d, playing: null })); };
-  // Metronome transport, independent Play/Stop (mirrors the arp). Play sends @METRO=1 even
-  // when already running — the firmware restarts the bar from beat 1 — so it re-triggers.
+  // Master transport Play/Stop. Play (@METRO=1) starts the clock + defines the downbeat if idle
+  // (idempotent while running); everything locks to it. Stop (@METRO=0) halts + clears the stage.
   const playMetro = () => { setMetro(m => ({ ...m, on: true })); tp.metronome(true); };
-  const stopMetro = () => { setMetro(m => ({ ...m, on: false })); tp.metronome(false); };
+  // Global Stop halts the whole transport in firmware — both players + drums. Flag the resulting
+  // @SONGP=-1 / @SONG2P=-1 as manual stops so they don't auto-advance to the next song, and clear
+  // the player/drum UI optimistically (the device position feed confirms).
+  const stopMetro = () => {
+    manualStopRef.current = true; manualStop2Ref.current = true;
+    setMetro(m => ({ ...m, on: false }));
+    setPlayer(p => ({ ...p, playing: false, prog: 0 }));
+    setPlayer2(p => ({ ...p, playing: false, prog: 0 }));
+    setDrums(d => ({ ...d, playing: null }));
+    tp.metronome(false);
+  };
 
   const headerStatus = !connected ? 'Not connected' :
     [cat.engine || 'synth', cat.drumEngine ? cat.drumEngine + ' drums' : '', '♩ ' + Math.round(bpm) + ' BPM', TP_LABEL[tp.name], bt.conn ? 'BT:' + (bt.peer || 'on') : '', drums.playing ? '♪ ' + drums.playing : ''].filter(Boolean).join('  ·  ');
@@ -994,6 +1009,17 @@ export default function App() {
   const kbdBtn = (owner: 1 | 2) => caps.voice2
     ? <KbdBtn owned={owner === 2 ? voice2.on : !voice2.on} onPress={() => takeKeyboard(owner)} />
     : undefined;
+  // Synth B master enable — the single on/off for the whole voice-2 side (the 4/4 pool split +
+  // Player 2 + Arp 2 + the keyboard). Lives in the Synthesizer B header, where you'd look for it.
+  // ON  = split 4/4 (Synth A drops to 8-voice, Synth B gets its own 8). OFF = all 8 engines back
+  // to Synth A (16-voice); the B side is idle. Same @VOICE2 the keyboard-owner icon toggles.
+  const synthBEnableBtn = (
+    <Pressable onPress={() => { const on = !voice2.on; setVoice2(v => ({ ...v, on })); tp.voice2Enable(on); }}
+      style={[s.hdrBtn, !voice2.on && s.hdrBtnStop]} disabled={!connected}
+      accessibilityLabel={voice2.on ? 'Synth B enabled — tap to disable' : 'Synth B disabled — tap to enable'}>
+      <Text style={s.hdrBtnText}>{voice2.on ? '● On' : '○ Off'}</Text>
+    </Pressable>
+  );
 
   // The folder browser (nav bar + picker), shared by the Synth and Synth/Voices 2 pages.
   // Both share the browse position (cart/folder) but keep their own selection + list ref, and
@@ -1119,6 +1145,7 @@ export default function App() {
   // The song half: pick a song, set the player's level, choose what happens when it ends.
   const playerSongBody = (D: SongDeckT) => (
     <>
+      {D.v === 2 && !voice2.on && <Text style={s.muted}>Synth B is off — this player is silent until you enable it (● / ○ in the Synthesizer B header).</Text>}
       <VolSlider label="Volume" value={D.vol} onChange={D.onVol} onCommit={D.commitVol} disabled={!connected} />
       {!!D.volNote && <Text style={s.muted}>{D.volNote}</Text>}
       {cat.songs.length === 0 ? <Text style={s.muted}>No songs indexed.</Text> : (
@@ -1169,13 +1196,10 @@ export default function App() {
   </>);
   const synth2Body = (
     <View style={s.synthWrap}>
-      {/* Enable the split: engines 0-3 keep voice 1 (song/arp/drums), engines 4-7 become
-          this voice, played live by a USB-host keyboard. Off = one unified 16-voice pool. */}
-      <Row><View style={{ flex: 1 }}>
-          <Text style={s.text}>Enable Voices 2 (keyboard split)</Text>
-          <Text style={s.muted}>Breaks a USB keyboard off to this voice. Each side drops to 8-voice polyphony.</Text>
-        </View>
-        <Switch value={voice2.on} onValueChange={v => { setVoice2(x => ({ ...x, on: v })); tp.voice2Enable(v); }} /></Row>
+      {/* The master on/off for Synth B now lives in the Synthesizer B header (● On / ○ Off).
+          Enabling it splits the pool 4/4 (engines 4-7 become this voice); off hands all 8 back
+          to Synth A. This page just picks the voice + its level. */}
+      {!voice2.on && <Text style={s.muted}>Synth B is off — turn it on with the ● / ○ button in the Synthesizer B header. Both sides then drop to 8-voice polyphony.</Text>}
       <VolSlider label="Volume" value={voice2.vol} onChange={v => setVoice2(x => ({ ...x, vol: v }))} onCommit={v => tp.voice2Vol(v)} disabled={!connected || !voice2.on} />
       {voiceBrowserBody(2)}
     </View>
@@ -1198,7 +1222,7 @@ export default function App() {
       </View>
       <Pressable style={[s.btn, s.btnGhost]} onPress={() => { const b = player.playing ? songBpm : 120; setBpm(b); tp.masterBpm(b); }}>
         <Text style={s.btnText}>Reset → {player.playing ? songBpm + ' (playing song)' : '120'} BPM</Text></Pressable>
-      <Text style={s.muted}>Master tempo — the MIDI song player and drum grooves lock to this. It auto-follows a song's detected tempo on play.</Text>
+      <Text style={s.muted}>Master tempo — the metronome clock every MIDI player, drum groove, and arp locks to. Songs play at THIS tempo (they no longer change it); set it here or on the top transport bar.</Text>
       <Row><View style={{ flex: 1 }}>
           <Text style={s.text}>Launch quantize</Text>
           <Text style={s.muted}>Start songs & grooves on the next bar so they lock together.</Text>
@@ -1212,17 +1236,22 @@ export default function App() {
   </>);
   const metroBody = (
     <>
-      {/* Independent Play/Stop (not a toggle): Play re-triggers the count from beat 1
-          even while running; Stop silences it. Active state = which button is lit. */}
+      {/* Play/Stop here are the SAME master transport as the top bar (this is the app-wide clock);
+          Mute toggles only whether you hear the click. Active state = which button is lit. */}
       <Row>
         <Pressable style={[s.btn, s.grow1, metro.on && s.btnOn]} onPress={playMetro}>
-          <Text style={s.btnText}>▶  {metro.on ? 'Restart' : 'Play'}</Text>
+          <Text style={s.btnText}>▶  {metro.on ? 'Running' : 'Play'}</Text>
         </Pressable>
         <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={stopMetro}>
           <Text style={s.btnText}>■  Stop</Text>
         </Pressable>
       </Row>
-      <Text style={s.muted}>Play starts on the downbeat — the beat lights light beat 1 and count forward from there. Runs at the master tempo ({Math.round(bpm)} BPM); set it on the Tempo tab.</Text>
+      <Row><View style={{ flex: 1 }}>
+          <Text style={s.text}>Hear the click</Text>
+          <Text style={s.muted}>The transport clock runs either way — this just plays the click out the speakers. Off by default.</Text>
+        </View>
+        <Switch value={!metro.muted} onValueChange={v => { setMetro(m => ({ ...m, muted: !v })); tp.metronomeMute(!v); }} /></Row>
+      <Text style={s.muted}>Play defines the downbeat and starts the master clock — both MIDI players, the drums, and the arps lock to it. Runs at the master tempo ({Math.round(bpm)} BPM); set it on the top bar or the Tempo tab. Stop clears everything.</Text>
       <Text style={[s.text, { marginTop: 6 }]}>Click volume</Text>
       <VolSlider label="Volume" value={metro.vol} onChange={v => setMetro(m => ({ ...m, vol: v }))} onCommit={v => tp.metronomeVol(v)} disabled={!connected} />
       <Text style={[s.text, { marginTop: 6 }]}>Time signature</Text>
@@ -1399,6 +1428,7 @@ export default function App() {
           {!!voice2.path && <Text style={s.pathLine} numberOfLines={1} ellipsizeMode="head">{voice2.path}</Text>}
         </>
       ) : undefined,
+      actions: synthBEnableBtn,   // master on/off for the whole voice-2 side, in the header
       body: <SubMenu getItems={() => sections.filter(x => x.parent === 'synthesizerB').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.synthB.accent} tint={THEME.synthB.tint} />,
     },
     // AUDIO LOOP — gated on caps.audioloop (the COUNT of loops the device could allocate;
@@ -1562,6 +1592,26 @@ export default function App() {
         </View>
         <Text style={s.statline}>{headerStatus}</Text>
         <BeatStrip sig={metro.sig} bpm={bpm} active={connected && (metro.on || player.playing || !!drums.playing)} live={beatFeed} />
+        {/* ===== MASTER TRANSPORT (always in the header): the metronome is the app-wide clock.
+            Play defines the downbeat and runs the grid everything (players, drums, arps) locks to;
+            Stop clears the stage. Mute toggles only whether you HEAR the click — the clock runs
+            either way. Buttons disable when not connected (like the VOL row). ===== */}
+        <View style={s.transportRow}>
+          <Pressable style={[s.tBtn, metro.on && s.tBtnOn]} onPress={playMetro} disabled={!connected}
+            accessibilityLabel={metro.on ? 'Transport running — restart the downbeat' : 'Start the transport'}>
+            <Text style={[s.tBtnText, metro.on && s.tBtnOnText]}>▶</Text></Pressable>
+          <Pressable style={[s.tBtn, s.tBtnGhost]} onPress={stopMetro} disabled={!connected}
+            accessibilityLabel="Stop everything">
+            <Text style={s.tBtnText}>■</Text></Pressable>
+          <Pressable style={[s.tBtn, s.tBtnGhost, !metro.muted && s.tBtnOn]} disabled={!connected}
+            onPress={() => { const muted = !metro.muted; setMetro(m => ({ ...m, muted })); tp.metronomeMute(muted); }}
+            accessibilityLabel={metro.muted ? 'Click muted — tap to hear it' : 'Click audible — tap to mute'}>
+            <Text style={[s.tBtnText, !metro.muted && s.tBtnOnText]}>{metro.muted ? '🔇' : '🔊'}</Text></Pressable>
+          <View style={{ flex: 1 }} />
+          <Pressable style={s.tBtn} onPress={() => stepBpm(-1)} disabled={!connected}><Text style={s.tBtnText}>−</Text></Pressable>
+          <Text style={s.tBpm}>{Math.round(bpm)}<Text style={s.tBpmUnit}> BPM</Text></Text>
+          <Pressable style={s.tBtn} onPress={() => stepBpm(1)} disabled={!connected}><Text style={s.tBtnText}>＋</Text></Pressable>
+        </View>
         <View style={s.volRow}>
           <Text style={s.volLbl}>VOL</Text>
           <Slider style={{ flex: 1, height: 34 }} minimumValue={0} maximumValue={100} step={1}
@@ -1710,6 +1760,15 @@ const s = StyleSheet.create({
   volRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
   volLbl: { color: C.muted, fontSize: 11, width: 26 },
   volVal: { color: C.text, fontSize: 13, width: 28, textAlign: 'right' },
+  // Master transport bar (metronome = the clock): Play / Stop / Mute on the left, BPM on the right.
+  transportRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 },
+  tBtn: { minWidth: 40, height: 34, paddingHorizontal: 10, borderRadius: 8, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
+  tBtnGhost: { backgroundColor: 'transparent' },
+  tBtnOn: { backgroundColor: '#238636', borderColor: '#238636' },   // transport running = lit green
+  tBtnText: { color: C.text, fontSize: 16, fontWeight: '700' },
+  tBtnOnText: { color: '#fff' },
+  tBpm: { color: C.text, fontSize: 18, fontWeight: '800', minWidth: 74, textAlign: 'center' },
+  tBpmUnit: { color: C.muted, fontSize: 11, fontWeight: '600' },
   // homepage grid of cards; capped width so it reads well on a wide desktop window too
   home: { flexDirection: 'row', flexWrap: 'wrap', padding: 5, maxWidth: 1040, width: '100%', alignSelf: 'center' },
   cell: { padding: 5 },                                  // grid gutter (width % set inline per column count)

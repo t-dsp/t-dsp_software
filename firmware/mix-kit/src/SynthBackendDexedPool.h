@@ -257,11 +257,12 @@ tdsp::MidiSink  *g_synthSink = &g_poolSink;
 static const int kPoolSplitN = kPoolN / 2;   // 4 engines each half
 DexedPoolSink    g_poolSinkB(&g_pool[kPoolSplitN], kPoolSplitN, kPoolVpe);
 tdsp::MidiSink  *g_synthSinkB = &g_poolSinkB;
-// PERMANENT 4/4 split on Voices-2 builds: engines 0..3 = voice 1, 4..7 = voice 2, fixed from
-// boot. Static so switching the keyboard's owner is a pure MIDI re-route (main.cpp) that never
-// resizes/reloads the pool — voice 1 (song/arp/drums) never drops out on a switch. The cost is
-// voice 1 runs at 8-voice poly (4 engines) always, instead of 16 when voice 2 is idle.
-static bool      g_voice2Split   = true;     // true = pool is split (main uses engines 0..kPoolSplitN)
+// DYNAMIC 4/4 split, gated by the "Synth B" enable (@VOICE2). Synth B starts OFF: the pool is
+// unified — all 8 engines are voice 1 (16-voice poly). Enabling B splits it 4/4 (engines 0..3 =
+// voice 1, 4..7 = voice 2); disabling it hands all 8 back to voice 1. Toggling repatches engines
+// (a brief reload glitch), so it's a setup control, not a live per-note switch. See
+// synthSetVoice2Enabled() for the reconfiguration.
+static bool      g_voice2Split   = false;    // true = pool is split (main uses engines 0..kPoolSplitN)
 static int       g_voice2VolPct  = 100;      // Voices-2 level, 0..150 % (scales the engines-4..7 mix)
 #endif
 
@@ -464,19 +465,66 @@ static void synthReapplyVoice2Trim() {
     dxpTrimB.setGain(tdsp::auditionTrim(t));
 }
 
+// Voice 1's Tier-1 ReplayGain trim (a /dexed cart ships at unity; a bundled voice uses the
+// baked table). Used to re-fit the trims when the pool topology changes on a split toggle.
+static float voice1AuditionTrim() {
+    const float t = g_curCartRel[0]                    ? 1.0f
+                  : (g_synthInstrument < kNumBundled)  ? dexedVoiceTrim(g_synthInstrument)
+                                                       : 1.0f;
+    return tdsp::auditionTrim(t);
+}
+
 static void synthSetVoice2Vol(int pct) {
     if (pct < 0) pct = 0; if (pct > 150) pct = 150;
     g_voice2VolPct = pct;
     applyVoice2Vol();
 }
 
-// Switch the keyboard's owner. The pool is PERMANENTLY split (synthBegin), so this never
-// resizes the main window or reloads voice 1 — voice 1's song/arp/drums keep sounding through
-// the switch. All we do is clear the keyboard's own engines (4..7) so its notes start/stop
-// cleanly; the actual re-route (and releasing held notes on the sink being left) is in main.cpp.
+// Reload the CURRENT voice-1 selection (a picked /dexed cart or a bundled voice) across the
+// current main window [0, poolMainCount()). Used when the window resizes on a split toggle:
+// the voice is unchanged, so trim/selection state is left alone — only the engine patches move.
+FLASHMEM static void reloadVoice1Window() {
+    if (g_curCartRel[0]) pickCartVoiceRange(g_curCartRel, g_curCartVoice, 0, poolMainCount());
+    else                 loadInstrumentRange(g_synthInstrument, 0, poolMainCount());
+    g_poolSink.applyExprConfig();
+}
+// Reload the current voice-2 selection into the keyboard half (engines 4..7). Mirrors above.
+FLASHMEM static void reloadVoice2Window() {
+    if (g_curCart2Rel[0]) pickCartVoiceRange(g_curCart2Rel, g_curCart2Voice, kPoolSplitN, kPoolSplitN);
+    else                  loadInstrumentRange(g_synthInstrument2, kPoolSplitN, kPoolSplitN);
+    g_poolSinkB.applyExprConfig();
+}
+
+// Enable/disable Synth B by reshaping the pool at runtime:
+//   * ON  -> split 4/4: cap Synth A to engines 0..3, load voice 2 into 4..7. The keyboard
+//            (routed in main.cpp), Player 2 and Arp 2 all drive the B sink.
+//   * OFF -> unified: Synth A reclaims all 8 engines (16-voice poly); the B sink is idle.
+// Both sinks panic first so no note hangs while engines change owner. Toggling repatches
+// engines (loadVoice per engine) — a brief dropout — so this is a setup action, not a live one.
+// main.cpp is responsible for re-routing the keyboard and stopping Player 2 / Arp 2 on OFF.
 FLASHMEM static void synthSetVoice2Enabled(bool on) {
+    if (on == g_voice2Split) { g_poolSinkB.panic(); return; }   // already in that state
     g_poolSinkB.panic();
-    Serial.printf("[synth] keyboard -> %s\n", on ? "Voices 2 (engines 4..7)" : "Voices 1 (main)");
+    g_poolSink.panic();
+    g_voice2Split = on;                          // poolMainCount() now reflects the new layout
+    if (on) {
+        g_poolSink.setEngineCount(kPoolSplitN);  // Synth A -> engines 0..3
+        reloadVoice1Window();                    // re-fit voice 1 into the smaller window
+        reloadVoice2Window();                    // voice 2 -> engines 4..7
+        // Per-half trims: voice 1 on dxpTrim (0..3), voice 2 on dxpTrimB (4..7).
+        dxpTrim.setGain(voice1AuditionTrim());
+        synthReapplyVoice2Trim();
+    } else {
+        g_poolSink.setEngineCount(kPoolN);       // Synth A -> all 8 engines (16-voice)
+        reloadVoice1Window();                    // voice 1 reclaims the whole pool
+        // Voice 1 now spans engines that feed BOTH trims, so both must carry ITS trim or
+        // notes landing on engines 4..7 (dxpTrimB) would use voice 2's ReplayGain.
+        const float t = voice1AuditionTrim();
+        dxpTrim.setGain(t);
+        dxpTrimB.setGain(t);
+    }
+    applyPoolVols();
+    Serial.printf("[synth] Synth B %s\n", on ? "ENABLED (4/4 split)" : "disabled (unified 8-engine pool)");
 }
 #endif  // TDSP_VOICE2
 
@@ -499,13 +547,19 @@ FLASHMEM static void synthBegin() {
     // Unity sum across the pool; the mix-slot-3 make-up gain in setup() restores level.
     for (int i = 0; i < 4; ++i) { dxpMixA.gain(i, 1.0f); dxpMixB.gain(i, 1.0f); }
     dxpSum.gain(0, 1.0f); dxpSum.gain(1, 1.0f); dxpSum.gain(2, 0.0f); dxpSum.gain(3, 0.0f);
-    synthSetInstrument(g_synthInstrument);   // voice 1 -> engines 0..poolMainCount()
 #if TDSP_VOICE2
-    // Arm the permanent split: cap the main sink to engines 0..3 and preload voice 2 into 4..7
-    // so the keyboard voice is ready instantly and switching its owner never reshapes the pool.
-    g_poolSink.setEngineCount(kPoolSplitN);
-    synthSetInstrument2(g_synthInstrument2);
-    applyVoice2Vol();
+    // Synth B starts OFF: the pool is unified, so voice 1 owns all 8 engines (16-voice poly).
+    // Enabling B (@VOICE2=1 -> synthSetVoice2Enabled) splits it 4/4 at runtime.
+    g_voice2Split = false;
+    g_poolSink.setEngineCount(kPoolN);
+#endif
+    synthSetInstrument(g_synthInstrument);   // voice 1 -> engines 0..poolMainCount()  (sets dxpTrim)
+#if TDSP_VOICE2
+    // B off at boot: voice 1 spans all 8 engines, which feed BOTH trims, so dxpTrimB must carry
+    // voice 1's trim too (else engines 4..7 render at the wrong ReplayGain). synthSetVoice2Enabled
+    // re-fits both trims on every later toggle.
+    dxpTrimB.setGain(voice1AuditionTrim());
+    applyVoice2Vol();   // unified-pool gains (mixers unity, song level on slot 3)
 #endif
 }
 
