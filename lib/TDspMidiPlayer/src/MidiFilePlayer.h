@@ -118,6 +118,7 @@ public:
         beatsPerMs_ = (nativeBpm > 0.0f) ? (double)nativeBpm / 60000.0 : 0.0;
         synced_ = (clk != nullptr && loopBeats_ > 0.0 && beatsPerMs_ > 0.0 &&
                    ev_ != nullptr && count_ > 0);
+        nPendOff_ = 0;               // fresh sync: no carried loop-tail releases
         if (!synced_) return;
         // Anchor to the global grid: this loop iteration's beat-0 sits at the
         // largest multiple of loopBeats <= now (so downbeats of all synced
@@ -158,6 +159,7 @@ public:
         playing_ = false;
         ev_ = nullptr; count_ = 0; idx_ = 0;
         totalMs_ = 0; elapsedMs_ = 0;
+        nPendOff_ = 0;                // drop any carried loop-tail releases
         if (was && sink_) {
             if (panicMask_ == 0xFFFF) sink_->onAllNotesOff(0);   // 0 = panic all channels
             else for (uint8_t ch = 1; ch <= 16; ++ch)
@@ -240,6 +242,7 @@ private:
         if (!clock_ptr_ || loopBeats_ <= 0.0) return;
         const double songBeat = clock_ptr_->positionBeats();
         lastMasterBeat_ = songBeat;
+        firePendingOffs(songBeat);                       // release loop-tail notes whose time has come
         uint32_t guard = 0;
         const uint32_t guardMax = count_ * 2u + 32u;   // > one loop's catch-up; self-heals next tick
         while (playing_) {
@@ -252,15 +255,42 @@ private:
                     evCursorBeat_ += (double)ev_[idx_].deltaMs * beatsPerMs_;
                 // idx_ == count_ -> haveEvent goes false; the boundary wrap below runs.
             } else if (songBeat >= boundaryAbs) {
+                // LOOP TAIL: any events left undispatched at/after the boundary are the loop's
+                // tail (data authored longer than loopBeats_). Carry their note-OFFs into the
+                // next iteration at their real time so a note held ACROSS the seam — played near
+                // the loop end and released past it — turns off correctly instead of sticking.
+                // Their absolute release beat = old loopBaseBeat_ + the event's own cursor.
+                double cur = evCursorBeat_;
+                for (uint32_t j = idx_; j < count_ && nPendOff_ < kMaxPendingOff; ++j) {
+                    if (j > idx_) cur += (double)ev_[j].deltaMs * beatsPerMs_;
+                    if (ev_[j].kind == kNoteOff && (chMask_ & (uint16_t)(1u << ev_[j].channel)))
+                        pendOff_[nPendOff_++] = { (uint8_t)(ev_[j].channel + 1), ev_[j].data1,
+                                                  ev_[j].data2, loopBaseBeat_ + cur };
+                }
                 idx_          = 0;                       // seam: wrap to the loop top
                 loopBaseBeat_ += loopBeats_;             // exact musical length (no round)
                 evCursorBeat_ = (double)ev_[0].deltaMs * beatsPerMs_;
                 tookLoop_     = true;                    // downbeat signal (consumeLooped)
+                firePendingOffs(songBeat);               // any tail already due (e.g. a boundary OFF)
             } else {
                 break;                                   // level with the clock; nothing due
             }
             if (++guard >= guardMax) break;              // runaway guard (pathological jump)
         }
+    }
+
+    // Fire carried loop-tail note-offs (see tickSynced) whose absolute release beat has passed.
+    // Kept-vs-fired compaction in place; no allocation. Applies to song AND drum loopers alike.
+    void firePendingOffs(double songBeat) {
+        uint8_t w = 0;
+        for (uint8_t r = 0; r < nPendOff_; ++r) {
+            if (songBeat >= pendOff_[r].beat) {
+                if (sink_) sink_->onNoteOff(pendOff_[r].ch, pendOff_[r].note, pendOff_[r].vel);
+            } else {
+                pendOff_[w++] = pendOff_[r];
+            }
+        }
+        nPendOff_ = w;
     }
 
     void dispatch(const MidiFileEvent &e) {
@@ -342,6 +372,12 @@ private:
     double       loopBaseBeat_  = 0.0;        // absolute beat of this iteration's beat-0
     double       evCursorBeat_  = 0.0;        // loop-relative beat of ev_[idx_]
     double       lastMasterBeat_= 0.0;        // last clock position seen (progress/telemetry)
+    // Loop-tail carry: note-OFFs authored past loopBeats_ (data longer than the loop),
+    // scheduled by ABSOLUTE release beat so a note held across the seam still turns off.
+    struct PendingOff { uint8_t ch; uint8_t note; uint8_t vel; double beat; };
+    static constexpr uint8_t kMaxPendingOff = 24;
+    PendingOff   pendOff_[kMaxPendingOff];
+    uint8_t      nPendOff_      = 0;
 };
 
 // Expand a legacy {deltaMs,note,velocity} note stream (the old SongEv format)
