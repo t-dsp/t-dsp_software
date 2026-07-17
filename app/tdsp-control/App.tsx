@@ -24,6 +24,8 @@ import { applyArpPreset, ArpPreset, ARP_LIBRARY } from './src/arpLibrary';
 
 const EMPTY_DIR: DirPage = { path: '', page: 0, npages: 1, folders: [], carts: [] };
 const grooveFile = (g: { path: string; name: string }) => g.path.split('/').pop() || (g.name + '.mid');   // @DRUMF wants filename WITH .mid
+// Display name for a groove SD path (basename minus .mid) — the drum-track card's "value".
+const grooveDisp = (p: string | null | undefined) => (p ? (p.split('/').pop() || '').replace(/\.mid$/i, '') : '');
 const kb = (n: number) => (n / 1024).toFixed(1);   // bytes -> "12.3" KB, for the load progress readout
 
 const C = { bg: '#0d1117', card: '#161b22', card2: '#0e131a', border: '#30363d', text: '#e6edf3', muted: '#8b949e', accent: '#3fb950', accent2: '#a371f7', sel: 'rgba(31,111,235,0.28)', chip: '#21262d' };
@@ -39,6 +41,7 @@ const THEME = {
   settings: th('#ff7b72', 0.13),   // coral
   recorder:  th('#f85149', 0.14),  // red (MIDI record)
   audioloop: th('#f778ba', 0.14),  // pink (audio loop)
+  drums:     th('#f0883e', 0.14),  // orange (drum track)
 };
 const HDR_H = 38;   // shared height for page-header control buttons (back / keyboard / transport) so they line up
 // Friendly names for Transport.name (the wire values are 'USB' | 'BLE' | 'WIFI').
@@ -455,6 +458,7 @@ export default function App() {
   const busRef = useRef<ProgressBus | null>(null);
   const progBus = (busRef.current ??= new ProgressBus());
   const manualStopRef = useRef(false);                  // set on user Stop so the resulting @SONGP=-1 isn't treated as a natural song end
+  const drumStopRef = useRef(false);                    // drum-deck manual-stop flag (drums have no position feed, so inert — kept for the shared deck API)
   const onSongEndRef = useRef<() => void>(() => {});     // latest "song finished naturally" handler (continue/shuffle); kept in a ref so the @SONGP listener never goes stale
   const manualStop2Ref = useRef(false);                 // same guards for MIDI Player 2 (@SONG2P feed)
   const onSong2EndRef = useRef<() => void>(() => {});
@@ -1031,6 +1035,7 @@ export default function App() {
   // call + one section entry — no cloned UI, no cloned transport logic.
   type PlayerT = { song: string; playing: boolean; name: string; prog: number };
   type SongWire = { play: (arg: string) => void; restart: (arg: string) => void; stop: () => void; loop: (on: boolean) => void };
+  type InjFolder = { name: string; leaves: { name: string; arg: string }[] };
   type SongDeckT = {
     v: 1 | 2;
     player: PlayerT; endMode: EndMode;
@@ -1040,6 +1045,10 @@ export default function App() {
     play: () => void; stop: () => void; step: (dir: number) => void;
     applyEnd: (m: EndMode) => void; cycleEnd: () => void;
     onNaturalEnd: () => void;   // wired into the device's position feed (@SONGP=-1 / @SONG2P=-1)
+    // Per-track browse target, so the SAME player component serves any track (voice 1/2 -> /midi/songs,
+    // drums -> /midi/drums). undefined = the /midi/songs defaults. noEndMode hides the end-mode row
+    // (a drum groove always loops). This is what makes the deck replicable across tracks.
+    browseRoot?: string; injectFolders?: InjFolder[]; noEndMode?: boolean;
   };
   const makeSongDeck = (cfg: {
     v: 1 | 2;
@@ -1048,8 +1057,11 @@ export default function App() {
     manualStopRef: React.MutableRefObject<boolean>;
     vol: number; onVol: (n: number) => void; commitVol: (n: number) => void; volNote?: string;
     wire: SongWire;
+    // Per-track browse target + step catalog, so the SAME deck serves any track. Default = songs.
+    catalog?: Song[]; browseRoot?: string; injectFolders?: InjFolder[]; noEndMode?: boolean;
   }): SongDeckT => {
     const { player: P, setPlayer: setP, endMode: em, wire } = cfg;
+    const catalog = cfg.catalog ?? cat.songs;   // the list ‹ ›/auto-advance step through (songs or grooves)
     // The shared "continue rules": which song a skip (‹ ›) or a natural end advances to, per the
     // end-mode. Shuffle → a random *other* song; every other mode → the linear neighbour, wrapping
     // both ways. Both the transport buttons and the auto-advance route through this.
@@ -1058,7 +1070,7 @@ export default function App() {
     // fullPath. Auto-advance / ‹ › still step through the whole flat catalog (cat.songs); the
     // browser's per-folder view is a separate, richer picker (see note in playerSongBody).
     const pickNext = (dir: number): Song | null => {
-      const songs = cat.songs;
+      const songs = catalog;
       if (!songs.length) return null;
       const idx = songs.findIndex(sg => songArg(sg) === P.song);
       if (em === 'shuffle' && songs.length > 1) {
@@ -1079,13 +1091,14 @@ export default function App() {
       // FolderBrowser tap: restart THIS file/baked song now (arg = full SD path, or a baked name).
       playFile: (arg: string, disp: string) => { wire.restart(arg); setP(p => ({ ...p, song: arg, playing: true, name: disp, prog: -1 })); },
       // Play = restart from the top on a fresh downbeat; prog -1 until the device reports position.
-      play: () => { const sg = cat.songs.find(x => songArg(x) === P.song) || cat.songs[0]; if (!sg) return; wire.restart(songArg(sg)); setP(p => ({ ...p, song: songArg(sg), playing: true, name: sg.name, prog: -1 })); },
+      play: () => { const sg = catalog.find(x => songArg(x) === P.song) || catalog[0]; if (!sg) return; wire.restart(songArg(sg)); setP(p => ({ ...p, song: songArg(sg), playing: true, name: sg.name, prog: -1 })); },
       stop: () => { cfg.manualStopRef.current = true; wire.stop(); setP(p => ({ ...p, playing: false, prog: 0 })); },
       step: (dir: number) => { const sg = pickNext(dir); if (!sg) return; setP(p => { if (p.playing) { wire.restart(songArg(sg)); return { ...p, song: songArg(sg), name: sg.name }; } return { ...p, song: songArg(sg), name: sg.name }; }); },
       applyEnd, cycleEnd: () => { const i = END_MODES.findIndex(m => m.key === em); applyEnd(END_MODES[(i + 1) % END_MODES.length].key); },
       // Runs when a song finishes on its own (not a manual Stop). 'stop' does nothing; 'repeat'
       // loops in firmware; continue/shuffle advance per the same pickNext rules.
       onNaturalEnd: () => { if (em === 'continue' || em === 'shuffle') { const nx = pickNext(1); if (nx) playOf(nx); } },
+      browseRoot: cfg.browseRoot, injectFolders: cfg.injectFolders, noEndMode: cfg.noEndMode,
     };
   };
   const songDeck1 = makeSongDeck({
@@ -1104,8 +1117,24 @@ export default function App() {
   // Kept fresh in refs so the one-time position listeners never see a stale mode/song/catalog.
   onSongEndRef.current = songDeck1.onNaturalEnd;
   onSong2EndRef.current = songDeck2.onNaturalEnd;
-  const playGroove = () => { const g = cat.grooves.find(x => x.path === drums.sel); if (g) { tp.playGrooveFile(grooveFile(g)); setDrums(d => ({ ...d, playing: g.name })); } };
   const stopDrums = () => { tp.stopDrums(); setDrums(d => ({ ...d, playing: null })); };
+  // ---- DRUM DECK — the groove player as the SAME reusable deck the synths use, so Drums is a
+  // Track peer: it browses /midi/drums, plays via @DRUMF, always loops. A thin PlayerT VIEW over the
+  // drums {sel,playing} state gives the shared deck API without a parallel state store. This is the
+  // whole point — a drum track is just another synth with props (root, catalog, always-loop).
+  const drumPlayerView: PlayerT = { song: drums.sel ?? '', playing: !!drums.playing, name: drums.playing || grooveDisp(drums.sel) || '—', prog: -1 };
+  const setDrumPlayerView: React.Dispatch<React.SetStateAction<PlayerT>> = upd => setDrums(d => {
+    const cur: PlayerT = { song: d.sel ?? '', playing: !!d.playing, name: d.playing || grooveDisp(d.sel) || '—', prog: -1 };
+    const nx = typeof upd === 'function' ? (upd as (p: PlayerT) => PlayerT)(cur) : upd;
+    return { ...d, sel: nx.song || null, playing: nx.playing ? (nx.name || grooveDisp(nx.song)) : null };
+  });
+  const drumSongs: Song[] = cat.grooves.map(g => ({ name: g.name, file: g.path }));   // grooves as the deck catalog
+  const drumDeck = makeSongDeck({
+    v: 1, player: drumPlayerView, setPlayer: setDrumPlayerView, endMode: 'repeat', setEndMode: () => {}, persistKey: 'end', manualStopRef: drumStopRef,
+    vol: drumVol, onVol: setDrumVol, commitVol: v => tp.drumVol(v),
+    wire: { play: a => { tp.playGrooveFile(a); persistApp({ groove: a }); }, restart: a => { tp.playGrooveFile(a); persistApp({ groove: a }); }, stop: () => tp.stopDrums(), loop: () => {} },
+    catalog: drumSongs, browseRoot: '/midi/drums', injectFolders: [], noEndMode: true,   // a groove always loops
+  });
   // Master transport Play/Stop. Play (@METRO=1) starts the clock + defines the downbeat if idle
   // (idempotent while running); everything locks to it. Stop (@METRO=0) halts + clears the stage.
   const playMetro = () => { setMetro(m => ({ ...m, on: true })); tp.metronome(true); };
@@ -1295,7 +1324,7 @@ export default function App() {
     <HdrBtn label="›" stop onPress={() => D.step(1)} />
     <HdrBtn label="▶" onPress={D.play} />
     <HdrBtn label="■" stop onPress={D.stop} />
-    <HdrBtn label={(END_MODES.find(m => m.key === D.endMode) || END_MODES[3]).icon} stop onPress={D.cycleEnd} />
+    {!D.noEndMode && <HdrBtn label={(END_MODES.find(m => m.key === D.endMode) || END_MODES[3]).icon} stop onPress={D.cycleEnd} />}
   </>);
   // Baked test/demo songs live in flash (no `file` field — they play by NAME on the firmware's
   // non-.mid branch). Surface them as a synthetic "tests" folder injected into the /midi/songs
@@ -1310,16 +1339,16 @@ export default function App() {
       <VolSlider label="Volume" value={D.vol} onChange={D.onVol} onCommit={D.commitVol} disabled={!connected} />
       {!!D.volNote && <Text style={s.muted}>{D.volNote}</Text>}
       <View style={s.browseBox}>
-        <FolderBrowser tp={tp} root="/midi/songs" ext="mid" enabled={connected && loaded}
+        <FolderBrowser tp={tp} root={D.browseRoot ?? '/midi/songs'} ext="mid" enabled={connected && loaded}
           selected={D.player.song} playing={D.player.playing ? D.player.song : undefined}
-          onSelectFile={(full, disp) => D.playFile(full, disp)} injectFolders={songInjectFolders} />
+          onSelectFile={(full, disp) => D.playFile(full, disp)} injectFolders={D.injectFolders ?? songInjectFolders} />
       </View>
-      <Row><Text style={[s.muted, { flex: 1 }]}>When finished</Text>
+      {!D.noEndMode && <Row><Text style={[s.muted, { flex: 1 }]}>When finished</Text>
         {END_MODES.map(m => (
           <Pressable key={m.key} style={[s.pill, D.endMode === m.key && s.pillOn]} onPress={() => D.applyEnd(m.key)}>
             <Text style={s.text}>{m.icon}  {m.label}</Text>
           </Pressable>
-        ))}</Row>
+        ))}</Row>}
     </>
   );
   // The player page splits in two: the song selector, and THIS synth's own loop recorder. The
@@ -1426,32 +1455,17 @@ export default function App() {
       </Row>
     </>
   );
-  const drumsActions = (<>
-    <HdrBtn label="‹" stop onPress={() => stepGroove(-1)} />
-    <HdrBtn label="›" stop onPress={() => stepGroove(1)} />
-    <HdrBtn label="▶" onPress={playGroove} />
-    <HdrBtn label="■" stop onPress={stopDrums} />
-  </>);
-  const drumsBody = (
+  // The Drums card's "Loops" page + header transport REUSE the synth deck component: playerSongBody
+  // (drumDeck) / playerActions(drumDeck) / playerValue(drumDeck). No bespoke drum player — a drum
+  // track is just another synth (see drumDeck above). Only the KIT page is drum-specific:
+  // KIT page — mirrors the synth's Synth / Voices: pick the GM drum kit (the drum "instrument") + level.
+  const drumKitBody = (
     <>
       <VolSlider label="Volume" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />
-      <Row><Text style={[s.muted, { flex: 1 }]}>Kit: {cat.drumkits[drums.kit]?.name || '—'}</Text>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false}>
+      <Text style={[s.muted, { marginTop: 8 }]}>Kit: {cat.drumkits[drums.kit]?.name || '—'}</Text>
+      <Row><ScrollView horizontal showsHorizontalScrollIndicator={false}>
           {cat.drumkits.map((k, i) => <Pressable key={i} style={[s.pill, drums.kit === i && s.pillOn]} onPress={() => { setDrums(d => ({ ...d, kit: i })); tp.drumKit(i); }}><Text style={s.text}>{k.name}</Text></Pressable>)}
-        </ScrollView></Row>
-      <TextInput style={s.input} placeholder="Search grooves…" placeholderTextColor={C.muted}
-        value={q.groove} onChangeText={t => setQ(x => ({ ...x, groove: t }))} />
-      {/* Recursive /midi/drums file picker (the @LS browser). A tap plays the groove now via
-          @DRUMF with the FULL SD path; drums.sel/playing keep the header ‹ › ▶ ■ + Stop working. */}
-      <View style={s.browseBox}>
-        <FolderBrowser tp={tp} root="/midi/drums" ext="mid" enabled={connected && loaded}
-          selected={drums.sel ?? undefined} playing={drums.playing ? (drums.sel ?? undefined) : undefined}
-          onSelectFile={(full, disp) => { tp.playGrooveFile(full); setDrums(d => ({ ...d, sel: full, playing: disp })); persistApp({ groove: full }); }} />
-      </View>
-      <Row>
-        <Pressable style={[s.btn, s.grow1]} disabled={!drums.sel} onPress={playGroove}><Text style={s.btnText}>▶ Play</Text></Pressable>
-        <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={stopDrums}><Text style={s.btnText}>■ Stop</Text></Pressable>
-      </Row>
+      </ScrollView></Row>
     </>
   );
 
@@ -1678,12 +1692,24 @@ export default function App() {
       value: arpValue(arpSlot2), actions: arpActions(arpSlot2),
       body: arpBody(arpSlot2),
     },
-    // DRUMS — only if the built engine renders ch10 drums. A Tempo sub-page (cat.hasDrums builds).
+    // DRUMS — a TOP-LEVEL Track card, built EXACTLY like a synth: a submenu (Drum Loops + Kit),
+    // adapted to browse drum loops instead of a melodic voice. Shown on drum-capable builds
+    // (cat.hasDrums). The header ▶ ■ transport plays/stops the selected groove, like a synth's player.
     {
-      id: 'drums', title: 'Drums', show: false, parent: cat.hasDrums ? 'tempo' : undefined,
-      value: drums.playing ? '♪ ' + drums.playing : (cat.grooves.find(g => g.path === drums.sel)?.name || cat.drumkits[drums.kit]?.name || '—'),
-      actions: drumsActions,
-      body: drumsBody,
+      id: 'drumtrack', title: 'Drums', show: cat.hasDrums, accent: THEME.drums.accent, tint: THEME.drums.tint,
+      value: playerValue(drumDeck), progress: playerProgress(drumDeck), actions: playerActions(drumDeck),
+      body: <SubMenu getItems={() => sections.filter(x => x.parent === 'drumtrack').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.drums.accent} tint={THEME.drums.tint} />,
+    },
+    // DRUM LOOPS — mirrors the synth's MIDI Player (playerSongBody(drumDeck)): browse /midi/drums +
+    // Play/Stop. Same reusable deck component as the synths — a Drums sub-page.
+    {
+      id: 'drumloops', title: 'Drum Loops', show: false, parent: 'drumtrack', accent: THEME.drums.accent, tint: THEME.drums.tint,
+      value: playerValue(drumDeck), actions: playerActions(drumDeck), body: playerSongBody(drumDeck),
+    },
+    // KIT — mirrors the synth's Synth / Voices: the drum instrument (GM kit) + level. A Drums sub-page.
+    {
+      id: 'drumkit', title: 'Kit', show: false, parent: 'drumtrack', accent: THEME.drums.accent, tint: THEME.drums.tint,
+      value: cat.drumkits[drums.kit]?.name || '—', body: drumKitBody,
     },
     // TAC5212 — codec output level + DAC high-pass filter. A Settings sub-page (Settings submenu).
     {
@@ -1727,8 +1753,8 @@ export default function App() {
   // (play → pick a voice → tempo → arp → drums), then system (connection, BT, codec).
   // Unlisted ids fall to the end in their definition order (stable sort).
   // Order for the home grid AND for each submenu's children (SubMenu sorts by this too).
-  const SECTION_ORDER = ['synthesizer', 'synthesizerB', 'audioloop', 'tempo', 'bt', 'settings',
-    'player', 'synth', 'arp', 'synth2', 'player2', 'arp2', 'bpm', 'drums', 'metro', 'conn', 'codec'];
+  const SECTION_ORDER = ['synthesizer', 'synthesizerB', 'drumtrack', 'audioloop', 'tempo', 'bt', 'settings',
+    'player', 'synth', 'arp', 'synth2', 'player2', 'arp2', 'drumloops', 'drumkit', 'bpm', 'metro', 'conn', 'codec'];
   const ord = (id: string) => { const i = SECTION_ORDER.indexOf(id); return i < 0 ? 999 : i; };
   const visible = sections.filter(x => x.show).sort((a, b) => ord(a.id) - ord(b.id));
   // A routed page may be a home card OR a submenu sub-page (parent set, not in `visible`), so
