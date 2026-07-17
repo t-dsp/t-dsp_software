@@ -1309,6 +1309,17 @@ static void trackLoopTick(Track &t) {
     *t.wasPlaying = now;
 }
 
+// Push a track's playback position to the app (@SONGP / @SONG2P), ~2.5x/sec while playing + one
+// "=-1" edge frame when it stops (resets the app's bar + clears the ♪). Unified from the twin
+// per-voice feeds; the caller owns the throttle clock + edge state (block-static, per track). Call
+// AFTER trackLoopTick() so a loop re-arm keeps us "playing" (no spurious -1 at the loop seam).
+static void emitTrackPos(Track &t, const char *cmd, elapsedMillis &clk, bool &prev) {
+    const bool now = t.player->isPlaying();
+    if (now) { if (clk >= 400) { clk = 0; Serial.printf("%s=%u\n", cmd, t.player->positionPermille()); } }
+    else if (prev) { Serial.printf("%s=-1\n", cmd); }
+    prev = now;
+}
+
 // --- Drum grooves (channel-10 GM percussion) --------------------------------
 // A groove is a short, LOOPABLE, channel-10-only .mid on the SD card under
 // /drums. A dedicated looping player (g_drumPlayer) streams it into the SAME
@@ -2449,12 +2460,13 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     else if (strcmp(line, "@STATE") == 0) {
         int volPct = g_appMasterPct;   // app-facing master is the digital gain
         if (volPct < 0) volPct = 0; if (volPct > 100) volPct = 100;
-        reply.printf("@STATE={\"vol\":%d,\"hpf\":%d,\"bpm\":%d,\"loop\":%d,\"quant\":%d,", volPct, g_hpf, (int)(g_masterBpm + 0.5f), g_loop ? 1 : 0, g_launchQuantize ? 1 : 0);
+        reply.printf("@STATE={\"vol\":%d,\"hpf\":%d,\"bpm\":%d,\"loop\":%d,\"quant\":%d,", volPct, g_hpf, (int)(g_masterBpm + 0.5f), *g_tracks[0].loop ? 1 : 0, g_launchQuantize ? 1 : 0);
         reply.printf("\"arp\":{\"on\":%d,\"pat\":%d,\"rate\":%d,\"oct\":%d,\"latch\":%d},",
                      g_arpFilter.enabled() ? 1 : 0, (int)g_arpFilter.pattern(), (int)g_arpFilter.rate(),
                      g_arpFilter.octaveRange(), g_arpFilter.latch() ? 1 : 0);
-        reply.printf("\"song\":{\"playing\":%d,\"p\":%d,\"sync\":%d,\"vol\":%d,\"name\":", g_player.isPlaying() ? 1 : 0, g_player.positionPermille(), g_player.isSynced() ? 1 : 0, g_songVolPct);
-        tdsp::catdb::jsonStr(reply, g_curSongName); reply.print("},");
+        { Track &t = g_tracks[0];
+          reply.printf("\"song\":{\"playing\":%d,\"p\":%d,\"sync\":%d,\"vol\":%d,\"name\":", t.player->isPlaying() ? 1 : 0, t.player->positionPermille(), t.player->isSynced() ? 1 : 0, g_songVolPct);
+          tdsp::catdb::jsonStr(reply, t.name); reply.print("},"); }
         reply.printf("\"drums\":{\"kit\":%d,\"playing\":%d,\"sync\":%d,\"vol\":%d},", g_drumKit, g_drumPlayer.isPlaying() ? 1 : 0, g_drumPlayer.isSynced() ? 1 : 0, g_drumVolPct);
 #ifdef TDSP_METRONOME
         reply.printf("\"metro\":%d,\"metromuted\":%d,\"metrosig\":%d,\"metrovol\":%d,", g_conductor.running() ? 1 : 0, g_metroMuted ? 1 : 0, g_metroBpb, g_metroVolPct);   // transport running + click mute + time sig + click level
@@ -2518,9 +2530,10 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
 #endif
         // Player 2 (voice-2 song player): playing/position/loop + name, so the app rehydrates the
         // second MIDI-player card. Its level shares the voice-2 bus (voice2.vol above).
-        reply.printf(",\"song2\":{\"playing\":%d,\"p\":%d,\"sync\":%d,\"loop\":%d,\"name\":",
-                     g_player2.isPlaying() ? 1 : 0, g_player2.positionPermille(), g_player2.isSynced() ? 1 : 0, g_song2Loop ? 1 : 0);
-        tdsp::catdb::jsonStr(reply, g_curSong2Name); reply.print("}");
+        { Track &t = g_tracks[1];
+          reply.printf(",\"song2\":{\"playing\":%d,\"p\":%d,\"sync\":%d,\"loop\":%d,\"name\":",
+                       t.player->isPlaying() ? 1 : 0, t.player->positionPermille(), t.player->isSynced() ? 1 : 0, *t.loop ? 1 : 0);
+          tdsp::catdb::jsonStr(reply, t.name); reply.print("}"); }
 #endif
         // Build-time capabilities so the app SHOWS the Voices-2 / arp-2 cards only on builds
         // that have them compiled in (both are pool-only, build-flag gated).
@@ -2576,6 +2589,39 @@ FLASHMEM static void tracksInit() {
     t1.name = g_curSong2Name; t1.arg = g_curSong2Arg; t1.loop = &g_song2Loop; t1.wasPlaying = &g_song2WasPlaying;
     t1.bpm = &g_song2Bpm; t1.bpb = &g_song2Bpb; t1.loopBeats = &g_song2LoopBeats; t1.launchPending = &g_song2LaunchPending;
 #endif
+}
+
+// Wire one track's MIDI graph (unified — replaces the parallel voice-1/voice-2 hookup blocks in
+// setup()). Uniform routing for every track:  live-MIDI router ─┐
+//                                                   song player ─┴→ [arp] ─→ sink  (+ looper tap)
+// The arp forwards verbatim in bypass, so with it the router+player feed the arp and the arp fans to
+// the sink; without one (no TDSP_ARP2 on voice 2) they feed the sink directly. The looper taps the
+// baked post-arp stream (arp downstream when present, else the router). Call BEFORE synthBegin (which
+// then overrides voice 1's channel mask for a drum-capable engine) — so both players start at the
+// no-drums default here, matching today's per-voice code. Followers are registered separately, after
+// g_conductor.begin(). Drums are NOT a track yet (P2 folds g_drumPlayer in here).
+FLASHMEM static void trackWireSetup(Track &t) {
+    if (t.arp) {
+        t.arp->setClock(&g_conductor.clock());
+        t.arp->addDownstream(t.sink);
+        t.router->addSink(t.arp);
+    } else {
+        t.router->addSink(t.sink);
+    }
+#if TDSP_RECORDER
+    if (t.looper) {
+        t.looper->begin(&g_conductor.clock(), t.sink);   // play the loop back into the sink directly
+        if (t.arp) t.arp->addDownstream(t.looper);        // capture the BAKED (post-arp) stream
+        else       t.router->addSink(t.looper);
+    }
+#endif
+    // The song player goes THROUGH the arp too (parity; bypassed = normal playback), which also lands
+    // its notes on the arp downstream where the looper taps — else straight to the sink.
+    t.player->setSink(t.arp ? static_cast<tdsp::MidiSink*>(t.arp) : t.sink);
+    // Melodic voice: skip ch10 and never panic it (so a song stop/restart never cuts a ch10 groove).
+    // synthBegin() re-opens voice 1's mask to kMaskAll on a drum-capable engine (voice 2 stays melodic).
+    t.player->setChannelMask(tdsp::MidiFilePlayer::kMaskNoDrums);
+    t.player->setPanicMask(tdsp::MidiFilePlayer::kMaskNoDrums);
 }
 
 FLASHMEM void setup() {
@@ -2693,82 +2739,26 @@ FLASHMEM void setup() {
 #endif
 #endif
 
-    // Live MIDI -> arp -> synth. The arp is a router sink; in bypass (default) it
-    // forwards every event verbatim to its downstream synth sink, so behaviour is
-    // identical until @ARPON=1. It steps on the router's onClock() (fed by the
-    // Conductor's 24-PPQN tick hook), so its rate divisions lock to the master BPM.
-    // The song + drum players call g_synthSink DIRECTLY (below), bypassing the arp,
-    // so only LIVE keyboard/app notes are arpeggiated — never the backing groove.
-    g_arpFilter.setClock(&g_conductor.clock());
-    g_arpFilter.addDownstream(g_synthSink);
-    g_router.addSink(&g_arpFilter);
+    // Uniform per-track MIDI graph (trackWireSetup): each track's router + song player feed [arp] ->
+    // sink, with the looper tapping the baked post-arp stream. The arp is bypassed by default (verbatim
+    // forward) so behaviour is identical until @ARP*ON=1; it steps on its router's onClock (fed by the
+    // Conductor's 24-PPQN tick hook) so rate divisions lock to the master BPM. Voice 1 first; voice 2
+    // (keyboard router -> engines 4..7) is independent so the song/arp/drums keep running on voice 1.
+    trackWireSetup(g_tracks[0]);
 #if TDSP_AUDIOLOOP
     audioLoopSetup();   // allocate the audio-loop buffers (PSRAM else OCRAM) + final-mix gains
 #endif
-#if TDSP_RECORDER
-    // Voice-1 loop recorder: tap the arp downstream (captures the BAKED note stream
-    // the synth hears) and play the loop back into the synth sink directly.
-    g_loop1.begin(&g_conductor.clock(), g_synthSink);
-    g_arpFilter.addDownstream(&g_loop1);
-#endif
-
-#if TDSP_VOICE2
-    // Voices 2: the USB-host keyboard's own router -> its own synth sink (engines 4..7),
-    // separate from the main path so the song/arp/drums keep running on voice 1. The
-    // per-channel bend range is owned by applyMidiMode() (2 normal / 48 MPE, matching
-    // g_router) so an MPE controller's per-note slides aren't clamped to +-2 semis; the
-    // startup applyMidiMode() call below sets it. With TDSP_ARP2, an independent arp sits
-    // in front of the keyboard sink (bypassed by default, so still a live instrument until
-    // @ARP2ON=1); it steps on the keyboard router's onClock (driven by the same Conductor).
-#if TDSP_ARP2
-    g_arpFilter2.setClock(&g_conductor.clock());
-    g_arpFilter2.addDownstream(g_synthSinkB);
-    g_kbdRouter.addSink(&g_arpFilter2);
-#else
-    g_kbdRouter.addSink(g_synthSinkB);
-#endif
-#if TDSP_RECORDER
-    // Voice-2 loop recorder: tap wherever the keyboard's baked output lands (arp2
-    // downstream when TDSP_ARP2, else the keyboard router directly).
-    g_loop2.begin(&g_conductor.clock(), g_synthSinkB);
-#if TDSP_ARP2
-    g_arpFilter2.addDownstream(&g_loop2);
-#else
-    g_kbdRouter.addSink(&g_loop2);
-#endif
-#endif
-#endif
-
-    // Route the song player into the build-selected synth via its shared sink.
-    // Omni so every song channel (and live MIDI on any channel) reaches the one
-    // patch; the player's default mask still skips channel 10 (drums), matching
-    // a single melodic engine. synthBegin() sets gain + loads the default patch.
-    g_player.setSink(&g_arpFilter);   // song notes go through the arp too (bypassed when arp off = normal playback)
-    // Dedicated drum-groove player: channel 10 only, loops, and ignores the file's
-    // program changes (we own the kit via @DRUMKIT). Feeds the same GM sink so a
-    // groove backs whatever the melodic voice/keyboard plays.
+    // Dedicated drum-groove player (still hand-wired — P2 folds it into a Track): channel 10 only,
+    // loops, ignores the file's program changes (we own the kit via @DRUMKIT). Feeds the GM sink
+    // DIRECTLY, bypassing the arp, so a groove backs the melodic voice but is never arpeggiated.
     g_drumPlayer.setSink(g_synthSink);
     g_drumPlayer.setChannelMask((uint16_t)(1u << 9));   // MIDI channel 10 (index 9)
     g_drumPlayer.setProgramChangeEnabled(false);
     g_drumPlayer.setLooping(true);
-    // The song player must NEVER panic ch10 on stop/restart, or it cuts a looping
-    // groove for a beat when you press Play/Stop on a song. (Drums are the groove's.)
-    g_player.setPanicMask(tdsp::MidiFilePlayer::kMaskNoDrums);
 #if TDSP_VOICE2
-    // Player 2 -> voice 2 (engines 4..7), THROUGH arp-2 when present — mirroring voice 1's
-    // g_player -> g_arpFilter. Two reasons: parity (the arp treats a song the same on both
-    // synths, and is bypassed when off), and it puts player 2's song on the arp downstream where
-    // g_loop2 taps — so voice 2's loop recorder captures the SAME combined post-arp stream as
-    // voice 1 (song + live keyboard) instead of the keyboard alone. Without arp-2 compiled in
-    // there's no filter to pass through, so go straight to the sink.
-#if TDSP_ARP2
-    g_player2.setSink(&g_arpFilter2);
-#else
-    g_player2.setSink(g_synthSinkB);
-#endif
-    // Melodic voice: skip ch10, never panic it.
-    g_player2.setChannelMask(tdsp::MidiFilePlayer::kMaskNoDrums);
-    g_player2.setPanicMask(tdsp::MidiFilePlayer::kMaskNoDrums);
+    // Voice 2's per-channel bend range is owned by applyMidiMode() (2 normal / 48 MPE); the startup
+    // applyMidiMode() call below sets it, so an MPE controller's per-note slides aren't clamped.
+    trackWireSetup(g_tracks[1]);
 #endif
 
     // --- Master clock wiring --------------------------------------------------
@@ -2780,11 +2770,8 @@ FLASHMEM void setup() {
     // real-time (0xF8/Start/Stop) handlers are added and the source is switched
     // to Clock::External (see lib/TDspTempo/README.md §6).
     g_conductor.begin(g_masterBpm);
-    g_conductor.addFollower(&g_songFollow);
+    for (Track &t : g_tracks) if (t.follow) g_conductor.addFollower(t.follow);   // each track's player retimes to master BPM
     g_conductor.addFollower(&g_drumFollow);
-#if TDSP_VOICE2
-    g_conductor.addFollower(&g_songFollow2);   // player 2 retimes with the master BPM too
-#endif
     g_conductor.addFollower(&g_launchSched);   // flags bar edges so loop() can fire quantized launches
     g_router.addSink(&g_clockSink);
     g_conductor.setTickHook(+[](void*){
@@ -2885,10 +2872,7 @@ void loop() {
     g_usbHost.Task();
     while (g_usbMidi.read()) { /* USB-host MIDI handlers fire per message */ }
 #endif
-    g_player.tick();
-#if TDSP_VOICE2
-    g_player2.tick();      // advance the second (voice-2) song player
-#endif
+    for (Track &t : g_tracks) t.player->tick();   // advance every track's song player
     g_drumPlayer.tick();   // loops internally (setLooping), so no external re-arm needed
 
     // Launch quantize: fire armed launches (song / groove / player 2) on the bar edge — but ONLY
@@ -2906,10 +2890,7 @@ void loop() {
         if (*g_tracks[1].launchPending) { *g_tracks[1].launchPending = false; trackFire(g_tracks[1], /*anchorNow=*/true); }
 #endif
         g_syncAnchorNow = false;   // defensive: a not-found launch never leaves it armed
-        g_player.tick();           // a just-launched player hits its downbeat now (already-running ones no-op)
-#if TDSP_VOICE2
-        g_player2.tick();
-#endif
+        for (Track &t : g_tracks) t.player->tick();   // a just-launched player hits its downbeat now (already-running ones no-op)
         g_drumPlayer.tick();
     }
     g_arpFilter.tick(micros());   // drain the arp's gate-off queue (note steps fire on onClock)
@@ -2944,34 +2925,11 @@ void loop() {
                       g_player.isSynced() ? 1 : 0, g_player.syncCursorBeat(), g_player.syncLoopBeats());
     }
 
-    // Push song-playback position to the app (drives the MIDI Player progress bar).
-    // ~2.5x/sec while playing; one "@SONGP=-1" on the falling edge resets the bar and
-    // clears the ♪ flag. Runs AFTER trackLoopTick() so a loop re-arm keeps us "playing"
-    // (no spurious -1 at the loop seam).
-    {
-        static elapsedMillis songPosClock;
-        static bool          songPosPrev = false;
-        const bool songPosNow = g_player.isPlaying();
-        if (songPosNow) {
-            if (songPosClock >= 400) { songPosClock = 0; Serial.printf("@SONGP=%u\n", g_player.positionPermille()); }
-        } else if (songPosPrev) {
-            Serial.println("@SONGP=-1");
-        }
-        songPosPrev = songPosNow;
-    }
+    // Push each track's playback position to the app (drives the MIDI Player progress bars): @SONGP
+    // for voice 1, @SONG2P for voice 2. Block-static throttle/edge state per track.
+    { static elapsedMillis clk; static bool prev = false; emitTrackPos(g_tracks[0], "@SONGP", clk, prev); }
 #if TDSP_VOICE2
-    // Same position feed for player 2 (@SONG2P=), driving the second MIDI-player card's bar.
-    {
-        static elapsedMillis song2PosClock;
-        static bool          song2PosPrev = false;
-        const bool song2PosNow = g_player2.isPlaying();
-        if (song2PosNow) {
-            if (song2PosClock >= 400) { song2PosClock = 0; Serial.printf("@SONG2P=%u\n", g_player2.positionPermille()); }
-        } else if (song2PosPrev) {
-            Serial.println("@SONG2P=-1");
-        }
-        song2PosPrev = song2PosNow;
-    }
+    { static elapsedMillis clk; static bool prev = false; emitTrackPos(g_tracks[1], "@SONG2P", clk, prev); }
 #endif
 
 #if TDSP_RECORDER
