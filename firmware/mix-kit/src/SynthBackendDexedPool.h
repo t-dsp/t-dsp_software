@@ -375,12 +375,31 @@ FLASHMEM static const char *synthPickCartVoice(const char *relCart, int voice) {
 }
 
 #if TDSP_VOICE2
-// (Re)apply the Voices-2 level to the engines-4..7 mix. Only scales when the split is on;
-// with the split off the top half is part of the main pool and must stay at unity.
-static void applyVoice2Vol() {
-    float g = g_voice2Split ? (g_voice2VolPct / 100.0f) : 1.0f;
-    for (int i = 0; i < 4; ++i) dxpMixB.gain(i, g);
+static int g_poolSongPct = 100;   // voice-1 bus level, mirrored from @SONGVOL (see synthSetSongVol)
+
+// Distribute the two independent volumes across the pool so the keyboard voice is NOT
+// gated by the main synth's level:
+//   * split ON  -> voice 1 (mixA) carries @SONGVOL, voice 2 (mixB) carries ONLY @VOICE2VOL,
+//                  and slot 3 stays at the fixed make-up. The two halves are independent.
+//   * split OFF -> both mixers unity and slot 3 carries @SONGVOL (the original whole-bus
+//                  fader), since all 8 engines are voice 1.
+static void applyPoolVols() {
+    const float M  = TDSP_DEFAULT_SYNTH_MAKEUP;
+    const float sv = g_poolSongPct  / 100.0f;
+    const float v2 = g_voice2VolPct / 100.0f;
+    if (g_voice2Split) {
+        for (int i = 0; i < 4; ++i) { dxpMixA.gain(i, sv); dxpMixB.gain(i, v2); }
+        outL.gain(3, M);      outR.gain(3, M);
+    } else {
+        for (int i = 0; i < 4; ++i) { dxpMixA.gain(i, 1.0f); dxpMixB.gain(i, 1.0f); }
+        outL.gain(3, M * sv); outR.gain(3, M * sv);
+    }
 }
+static void applyVoice2Vol() { applyPoolVols(); }   // kept for call sites; the split-aware path
+
+// @SONGVOL hook: on Voices-2 pool builds, main.cpp routes the synth-bus fader here so it can
+// be applied split-aware (voice 1 only when the pool is split) instead of the shared slot 3.
+static void synthSetSongVol(int pct) { g_poolSongPct = pct; applyPoolVols(); }
 
 // Load the Voices-2 instrument into the keyboard half (engines 4..7). Mirrors
 // synthSetInstrument but targets the top window and configures the second sink.

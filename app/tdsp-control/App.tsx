@@ -21,7 +21,7 @@ const EMPTY_DIR: DirPage = { path: '', page: 0, npages: 1, folders: [], carts: [
 const grooveFile = (g: { path: string; name: string }) => g.path.split('/').pop() || (g.name + '.mid');   // @DRUMF wants filename WITH .mid
 const kb = (n: number) => (n / 1024).toFixed(1);   // bytes -> "12.3" KB, for the load progress readout
 
-const C = { bg: '#0d1117', card: '#161b22', card2: '#0e131a', border: '#30363d', text: '#e6edf3', muted: '#8b949e', accent: '#3fb950', sel: 'rgba(31,111,235,0.28)', chip: '#21262d' };
+const C = { bg: '#0d1117', card: '#161b22', card2: '#0e131a', border: '#30363d', text: '#e6edf3', muted: '#8b949e', accent: '#3fb950', accent2: '#a371f7', sel: 'rgba(31,111,235,0.28)', chip: '#21262d' };
 // TAC5212 DAC high-pass filter presets (@HPF mode). 0 = off (all-pass); the rest are
 // sub-audio cutoffs that block DC/rumble. Index === the firmware mode number.
 const HPF_MODES = [
@@ -109,13 +109,13 @@ function BeatStrip({ sig, bpm, active, live }: { sig: number; bpm: number; activ
 // the bottom (a card is far narrower than the window, so they never share the title's
 // line). Only the › chevron opens the section — the card body itself is inert, so the
 // header controls (nested Pressables) never risk a stray navigation.
-function Card({ title, value, status, subtitle, actions, progress, onPress, style }:
-  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onPress: () => void; style?: any }) {
+function Card({ title, value, status, subtitle, actions, progress, onPress, style, accent }:
+  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onPress: () => void; style?: any; accent?: string }) {
   return (
-    <View style={[s.card, style]}>
+    <View style={[s.card, style, accent && { borderLeftColor: accent, borderLeftWidth: 3 }]}>
       <View style={s.cardHead}>
         <View style={s.drawerLeft}>
-          <Text style={s.drawerTitle} numberOfLines={1}>{title}</Text>
+          <Text style={[s.drawerTitle, accent && { color: accent }]} numberOfLines={1}>{title}</Text>
           {subtitle ?? <Subtitle value={value} status={status} />}
           {progress != null && <ProgressBar value={progress} />}
         </View>
@@ -128,16 +128,16 @@ function Card({ title, value, status, subtitle, actions, progress, onPress, styl
 
 // Section page header: a back arrow + the section title/value, with the same controls
 // available (on the right when wide, on their own row when narrow).
-function PageHeader({ title, value, status, subtitle, actions, progress, onBack }:
-  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onBack: () => void }) {
+function PageHeader({ title, value, status, subtitle, actions, progress, onBack, accent }:
+  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onBack: () => void; accent?: string }) {
   const { width } = useWindowDimensions();
   const narrow = width < 640;
   return (
-    <View style={s.pageHead}>
+    <View style={[s.pageHead, accent && { borderBottomColor: accent }]}>
       <View style={s.pageHeadRow}>
         <Pressable style={s.backBtn} onPress={onBack}><Text style={s.backTxt}>‹</Text></Pressable>
         <View style={s.drawerLeft}>
-          <Text style={s.pageTitle}>{title}</Text>
+          <Text style={[s.pageTitle, accent && { color: accent }]}>{title}</Text>
           {subtitle ?? <Subtitle value={value} status={status} />}
           {progress != null && <ProgressBar value={progress} />}
         </View>
@@ -711,7 +711,7 @@ export default function App() {
 
   // ===== the sections: one entry drives both its homepage card and its page. =====
   // `value`/`status` = the subtitle; `actions` = the header controls; `body` = the page.
-  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean };
+  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; accent?: string };
 
   // The card/page subtitle: the currently-loaded instrument if one is picked, else a
   // summary of where the browser is (folder name or catalog counts).
@@ -920,7 +920,7 @@ export default function App() {
     // page (same folder browser) plus an on/off split toggle: engines 0-3 keep voice 1
     // (song/arp/drums), engines 4-7 are this voice, played live by a USB-host keyboard.
     {
-      id: 'synth2', title: 'Synth / Voices 2', show: caps.voice2, fullHeight: true,
+      id: 'synth2', title: 'Synth / Voices 2', show: caps.voice2, fullHeight: true, accent: C.accent2,
       value: (voice2.on ? '' : '(off)  ') + (voice2.name || 'None'),
       subtitle: voice2.name ? (
         <>
@@ -985,7 +985,7 @@ export default function App() {
     // ARPEGGIATOR 2 — build-flag gated (caps.arp2). A full clone of the arp, on the Voices-2
     // keyboard voice only (@ARP2*); the main arp is untouched.
     {
-      id: 'arp2', title: 'Arpeggiator 2', show: caps.arp2,
+      id: 'arp2', title: 'Arpeggiator 2', show: caps.arp2, accent: C.accent2,
       value: arpValue(arpSlot2), actions: arpActions(arpSlot2),
       body: arpBody(arpSlot2),
     },
@@ -1130,7 +1130,7 @@ export default function App() {
                 {visible.map(sec => (
                   <View key={sec.id} style={[s.cell, { width: `${100 / cols}%` }]}>
                     <Card title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions}
-                      onPress={() => setRoute(sec.id)} style={s.cardGrid} />
+                      onPress={() => setRoute(sec.id)} style={s.cardGrid} accent={sec.accent} />
                   </View>
                 ))}
               </View>
@@ -1141,7 +1141,7 @@ export default function App() {
           {cur && !cur.fullHeight && (
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 400 }}>
               <View style={s.page}>
-                <PageHeader title={cur.title} value={cur.value} status={cur.status} subtitle={cur.subtitle} progress={cur.progress} actions={cur.actions} onBack={() => setRoute('home')} />
+                <PageHeader title={cur.title} value={cur.value} status={cur.status} subtitle={cur.subtitle} progress={cur.progress} actions={cur.actions} onBack={() => setRoute('home')} accent={cur.accent} />
                 <View style={s.pageBody}>{cur.body}</View>
               </View>
             </ScrollView>
@@ -1151,7 +1151,7 @@ export default function App() {
                   selected folder AND the picker's scroll position persist across nav ===== */}
           {fullPages.map(sec => (
             <View key={sec.id} style={[s.page, { flex: 1 }, route !== sec.id && s.hidden]}>
-              <PageHeader title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions} onBack={() => setRoute('home')} />
+              <PageHeader title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions} onBack={() => setRoute('home')} accent={sec.accent} />
               <View style={[s.pageBody, { flex: 1 }]}>{sec.body}</View>
             </View>
           ))}

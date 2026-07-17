@@ -79,7 +79,8 @@ export type AppliedArp = { pat: number; rate: number; oct: number; latch: boolea
 export function applyArpPreset(tp: Transport, p: ArpPreset, slot: 1 | 2 = 1): AppliedArp {
   const pr = p.params;
   const seq = pr.steps && pr.steps.length ? toSeqSteps(pr.steps) : undefined;
-  if (seq) (slot === 2 ? tp.arp2Sequence : tp.arpSequence)(seq);
+  // Call as a METHOD (not a detached ref) so `this` stays bound inside the transport.
+  if (seq) { if (slot === 2) tp.arp2Sequence(seq); else tp.arpSequence(seq); }
 
   const wire: ArpWireParams = {
     pat: pr.pattern, rate: pr.rate,
@@ -91,7 +92,7 @@ export function applyArpPreset(tp: Transport, p: ArpPreset, slot: 1 | 2 = 1): Ap
     outCh: pr.outputChannel, scatterBase: pr.scatterBase, scatterCount: pr.scatterCount,
     scale: pr.scale, scaleRoot: pr.scaleRoot, transpose: pr.transpose, repeat: pr.repeat,
   };
-  (slot === 2 ? tp.arp2Preset : tp.arpPreset)(wire);
+  if (slot === 2) tp.arp2Preset(wire); else tp.arpPreset(wire);
 
   const oct = Math.max(1, Math.min(4, (pr.octaveRange ?? 1) | 0));
   return { pat: pr.pattern, rate: rateIndexFromFw(pr.rate), oct, latch: !!pr.latch, seq };

@@ -1334,8 +1334,14 @@ static void setSongVol(int pct) {
     if (pct < 0) pct = 0;
     if (pct > 150) pct = 150;
     g_songVolPct = pct;
+#if defined(TDSP_SYNTH_DEXED_POOL) && TDSP_VOICE2
+    // Voices-2 pool: apply split-aware so the keyboard voice isn't gated by this fader
+    // (voice 1 -> mixA, slot 3 fixed when the pool is split). See applyPoolVols().
+    synthSetSongVol(pct);
+#else
     const float g = TDSP_DEFAULT_SYNTH_MAKEUP * (pct / 100.0f);
     outL.gain(3, g); outR.gain(3, g);
+#endif
     Serial.printf("[song] synth-bus vol -> %d%%\n", pct);
 }
 
