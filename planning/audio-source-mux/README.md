@@ -109,10 +109,59 @@ fraction of the SRC4392's price ([CS8421](https://www.cirrus.com/products/cs8421
 - Other cheap-ish dedicated ASRCs if sourcing pushes back: **ADI AD1896**, **TI SRC4192**
   (the SRC4392's ASRC core *without* the S/PDIF combo — cheaper than the 4392).
 
-### Tier 2 — **TI SRC4392** (≈ $8–13) — only if you want the S/PDIF combo too
+### Tier 2 — **TI SRC4392** (≈ $8–13) — only if you want the S/PDIF combo in hardware
 
-Verified, premium, and overkill *for A2DP alone* — you'd choose it only to also clock-
-correct an optical S/PDIF input on the same chip.
+Verified, premium, and overkill *for A2DP alone*. Its remaining edge is that its single ASRC
++ internal mux + built-in **S/PDIF receiver** can ingest **both** A2DP (I2S) *and* optical
+S/PDIF, one at a time, and clock-lock the output — freeing **both** of the Teensy's
+resamplers (see "Optical" below) with **zero S3 CPU load** and full determinism. That is what
+you're paying the ~$6–10 premium for: not "an ASRC," but "optical-RX + mux + ASRC + zero DSP
+risk in one part."
+
+## Optical S/PDIF input — and the single spike that decides the whole front-end
+
+The Teensy runs **two** resamplers today: `btIn` (~102 KB) and `spdifIn` (~85 KB) ≈ **187 KB
+of RAM1** — the boot-loop pressure. Relieving *both* means the optical path needs a home too,
+not just A2DP. Where optical can go:
+
+- **The S3 can receive S/PDIF — in software, via the RMT peripheral.** There is no hardware
+  S/PDIF RX in the S3's I2S (Standard/TDM/PDM only), but RMT captures the biphase-mark
+  transitions and self-clocks from the stream (any sample rate), demonstrated on ESP32
+  ([Hackaday, Oct 2025](https://hackaday.com/2025/10/06/esp32-decodes-s-pdif-like-a-boss-or-any-regular-piece-of-hi-fi-equipment/);
+  [ESP32-S3 SW decode, diyAudio](https://www.diyaudio.com/community/threads/esp32-s3-rtp-sink-source-via-usb-uac-and-pdif-input-output-software-decode.432392/)).
+  Cost in the author's words: it **"basically needs its own core."**
+- So the S3 can be the WHOLE front-end with **no extra decode chip**: A2DP-sink I2S and the
+  RMT-decoded optical are both **muxed via the S3's GPIO matrix** (route either into the
+  input I2S at runtime — one source at a time = the mux), the S3 software-ASRCs whichever is
+  live, and drives I2S out to the Teensy on the system clock.
+
+### The decision gate — one spike
+
+Because of the mux, only one source is ever active, so the **peak** S3 load is the
+**optical mode: RMT S/PDIF decode + software ASRC running together** (A2DP mode is lighter —
+ASRC only, no RMT). On a 240 MHz dual-core S3:
+
+> **SPIKE: can the S3 run RMT S/PDIF-decode + software ASRC simultaneously, real-time?**
+> (RMT ≈ one full core; alex6679's ASRC is heavy on a 240 MHz Xtensa — plausible but tight,
+> and unmeasured. This one experiment picks the front-end.)
+
+Escalation ladder by spike outcome:
+
+| Outcome | Front-end | Extra silicon | Frees Teensy RAM |
+|---|---|---|---|
+| **S3 does RMT-decode + ASRC together** | S3 does everything (A2DP + optical mux + ASRC) | **$0** | both (~187 KB) |
+| **S3 does ASRC, but not + RMT** | add a ~$4 S/PDIF-RX chip (WM8804 / CS8416 / DIR9001) → clean I2S → S3 ASRCs | **~$4** | both (~187 KB) |
+| **S3 can't carry the ASRC reliably** | **SRC4392** (hardware RX + mux + ASRC) | **~$8–13** | both (~187 KB) |
+
+All three free **both** resamplers — the difference is **$0 → ~$4 → ~$10** traded against
+**S3 CPU risk → determinism**. (Note: A2DP-only, no optical, is the easy case — S3 ASRC alone,
+Tier 0, frees ~102 KB and there's no optical resampler left to worry about.) The A2DP sink
+chip and the optical TORX front-end are needed in **every** path, so they're not part of this
+delta.
+
+**Recommendation:** run the spike. If it passes, the S3 is the entire front-end for ~$0 and
+the SRC4392/CS8421 are moot. If it fails, add the ~$4 S/PDIF-RX (keep the S3 ASRC) before
+reaching for the SRC4392 — pay the ~$10 only to buy zero-S3-DSP determinism.
 
 ### The hero part — hardware ASRC: **TI SRC4392** (verified; premium — see Tier 2)
 
@@ -166,17 +215,22 @@ carry the resampler in real time.
 
 ## Open questions before a board spin
 
+0. **THE GATE — the S3 DSP spike** (see "Optical" above): can the S3 run RMT S/PDIF-decode +
+   software ASRC together, real-time? Its outcome picks the front-end ($0 all-S3 / +$4
+   S/PDIF-RX / +$10 SRC4392). Do this first — the others matter only after it's answered.
 1. **Master-clock topology.** Who generates the system MCLK — the Teensy, or a dedicated
-   low-jitter oscillator feeding Teensy + SRC4392 + S3? A shared clean oscillator is the
-   audiophile-correct answer and makes the whole graph coherent. (Overlaps [[shared-clock]]
-   / [[project_master_clock]] — but that's *musical* tempo; this is the *sample* clock.
-   Don't conflate them.)
-2. **Can the ESP32-S3 I2S output slave to the external MCLK** while its streamer resamples
-   network→MCLK internally? Needs an IDF/driver check on the chosen streamer firmware.
-3. **TDM slot assignment** — which slots carry the A2DP/ASRC pair vs the S3 stream into the
+   low-jitter oscillator feeding Teensy + S3 (+ ASRC chip if used)? A shared clean oscillator
+   is the audiophile-correct answer and makes the whole graph coherent. (Overlaps
+   [[shared-clock]] / [[project_master_clock]] — but that's *musical* tempo; this is the
+   *sample* clock. Don't conflate them.)
+2. **Can the ESP32-S3 I2S output slave to the external MCLK** while (a) its streamer resamples
+   network→MCLK internally (Mode B) and (b) it software-ASRCs an input to MCLK (Mode A)?
+   Needs an IDF/driver check on the chosen streamer firmware.
+3. **TDM slot assignment** — which slots carry the ASRC'd audio vs the S3 stream into the
    Teensy, and does the S3's I2S peripheral emit the right TDM framing.
 4. **A2DP sink final selection** — CSR8675 (proven, config-tool friction) vs a cheaper
-   JieLi/BlueTrum part (BOM win, doc risk). Prototype whichever behind the SRC4392.
+   JieLi/BlueTrum part (BOM win, doc risk). Prototype it; the downstream ASRC (S3 SW or a
+   chip) makes the sink's own clock behavior largely irrelevant — it just needs clean I2S.
 
 ## RF coexistence (two 2.4 GHz radios on one board)
 
