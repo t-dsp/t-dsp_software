@@ -650,6 +650,13 @@ export default function App() {
           <Text style={s.btnText}>■  Stop</Text>
         </Pressable>
       </Row>
+      {/* Latch is always visible (both Preset and Manual modes) so it's clear whether the
+          arp keeps running after the keys release — and can always be turned back off. */}
+      <Row><View style={{ flex: 1 }}>
+          <Text style={s.text}>Latch</Text>
+          <Text style={s.muted}>Keep arpeggiating after you release the keys.</Text>
+        </View>
+        <Switch value={A.arp.latch} onValueChange={A.setLatch} /></Row>
       <View style={s.arpTabs}>
         <Pressable style={[s.arpTab, A.mode === 'preset' && s.arpTabOn]} onPress={() => A.setMode('preset')}>
           <Text style={[s.arpTabTxt, A.mode === 'preset' && s.arpTabTxtOn]}>Presets</Text>
@@ -674,8 +681,6 @@ export default function App() {
             {ARP_RATES.map((r, i) => <Pressable key={i} style={[s.pill, A.arp.rate === i && s.pillOn]} onPress={() => A.setRate(i)}><Text style={s.text}>{r.label}</Text></Pressable>)}</Row>
           <Row><Text style={[s.muted, { flex: 1 }]}>Octaves {A.arp.oct}</Text>
             {[1, 2, 3, 4].map(n => <Pressable key={n} style={[s.pill, A.arp.oct === n && s.pillOn]} onPress={() => A.setOct(n)}><Text style={s.text}>{n}</Text></Pressable>)}</Row>
-          <Row><Text style={[s.muted, { flex: 1 }]}>Latch</Text>
-            <Switch value={A.arp.latch} onValueChange={A.setLatch} /></Row>
           <Pressable style={[s.btn, s.btnGhost, s.btnWide]} onPress={A.resetManual}>
             <Text style={s.btnText}>Reset to plain arp</Text>
           </Pressable>
