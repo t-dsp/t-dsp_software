@@ -21,8 +21,10 @@
 import { PermissionsAndroid, Platform } from 'react-native';
 import { BleManager, Device, State, Subscription } from 'react-native-ble-plx';
 import { parseDxls } from './dxls';
+import { parseLb, parseLd, parseLe, parseLerr } from './browse';
 import { encodeSequence, encodeArpParams } from './arpSeq';
 import type { SeqStep, ArpWireParams } from './arpSeq';
+import type { BrowseEntry, BrowseResult } from './browse';
 import type { Transport, LineHandler, DirPage } from './transport';
 import { CMD, TDSP_SVC_UUID, TDSP_CMD_UUID, TDSP_STAT_UUID, TDSP_FILE_UUID } from './tdspBle';
 import { rdFrames, base64ToBytes } from './loopXfer';
@@ -75,6 +77,8 @@ interface FilePending { resolve: (t: any) => void; reject: (e: any) => void; tim
 const b64bytes = (s: string) => Math.max(0, Math.floor(s.replace(/=+$/, '').length * 3 / 4));
 interface DirPending { path: string; resolve: (d: DirPage) => void; reject: (e: any) => void; timer: any; }
 interface VoicesPending { rel: string; resolve: (v: string[]) => void; reject: (e: any) => void; timer: any; }
+// One in-flight @LS: matched by echoed path (@LB), then id for the @LD/@LE stream.
+interface BrowsePending { path: string; id: number; entries: BrowseEntry[]; resolve: (r: BrowseResult) => void; reject: (e: any) => void; timer: any; }
 
 export class BleTransport implements Transport {
   readonly name = 'BLE' as const;
@@ -91,6 +95,7 @@ export class BleTransport implements Transport {
   private browseAsm: { count: number; chunks: (string | undefined)[] } | null = null;
   private dirPending: DirPending | null = null;
   private voicesPending: VoicesPending | null = null;
+  private lsPending: BrowsePending | null = null;
 
   isConnected() { return !!this.device; }
 
@@ -123,6 +128,7 @@ export class BleTransport implements Transport {
     if (this.filePending) { clearTimeout(this.filePending.timer); this.filePending.reject('disconnected'); this.filePending = null; }
     if (this.dirPending) { clearTimeout(this.dirPending.timer); this.dirPending.reject(new Error('disconnected')); this.dirPending = null; }
     if (this.voicesPending) { clearTimeout(this.voicesPending.timer); this.voicesPending.reject(new Error('disconnected')); this.voicesPending = null; }
+    if (this.lsPending) { clearTimeout(this.lsPending.timer); this.lsPending.reject(new Error('disconnected')); this.lsPending = null; }
     this.fileAsm = null; this.browseAsm = null;
     if (this.reindexDone) { const r = this.reindexDone; this.reindexDone = null; r(); }
     this.device = null;
@@ -223,6 +229,19 @@ export class BleTransport implements Transport {
       return;
     }
     if (line.startsWith('@FERR=')) { const p = this.filePending; if (p) { clearTimeout(p.timer); this.filePending = null; this.fileAsm = null; p.reject(new Error(line.slice(6))); } return; }
+    // Generic @LS folder browse. Frames are small (one entry per line), so they arrive raw on
+    // the FILE characteristic like @FB/@FD/@FE. Match @LB by echoed path, accumulate @LD by id,
+    // resolve on @LE / reject on @LERR.
+    if (line.startsWith('@LB=')) { const b = parseLb(line.slice(4)); const s = this.lsPending; if (s && b.path === s.path) { s.id = b.id; s.entries = []; this.armLsTimer(s); } return; }
+    if (line.startsWith('@LD=')) { const e = parseLd(line.slice(4)); const s = this.lsPending; if (s && e && e.id === s.id) { s.entries.push({ type: e.type, name: e.name }); this.armLsTimer(s); } return; }
+    if (line.startsWith('@LE=')) { const e = parseLe(line.slice(4)); const s = this.lsPending; if (s && e.id === s.id) { clearTimeout(s.timer); this.lsPending = null; s.resolve({ path: s.path, entries: s.entries }); } return; }
+    if (line.startsWith('@LERR=')) { const e = parseLerr(line.slice(6)); const s = this.lsPending; if (s && (e.id === s.id || s.id < 0)) { clearTimeout(s.timer); this.lsPending = null; s.reject(new Error(e.reason)); } return; }
+  }
+
+  // Idle watchdog for an @LS browse — re-armed on every @LB/@LD frame.
+  private armLsTimer(s: BrowsePending) {
+    clearTimeout(s.timer);
+    s.timer = setTimeout(() => { if (this.lsPending === s) { this.lsPending = null; s.reject(new Error('timeout')); } }, 15000);
   }
 
   readFile(path: string, onProgress?: (received: number, total: number) => void): Promise<string> {
@@ -256,6 +275,17 @@ export class BleTransport implements Transport {
       this.voicesPending = v; this.browseAsm = null;
       v.timer = setTimeout(() => { if (this.voicesPending === v) { this.voicesPending = null; reject(new Error('timeout')); } }, 12000);
       this.relay('@DXVL=' + cartRel).catch(e => { clearTimeout(v.timer); this.voicesPending = null; reject(e); });
+    });
+  }
+
+  browse(path: string, ext?: string): Promise<BrowseResult> {
+    return new Promise((resolve, reject) => {
+      if (!this.device) { reject(new Error('not connected')); return; }
+      if (this.lsPending) { clearTimeout(this.lsPending.timer); this.lsPending.reject(new Error('superseded')); }
+      const s: BrowsePending = { path, id: -1, entries: [], resolve, reject, timer: null };
+      this.lsPending = s;
+      this.armLsTimer(s);
+      this.relay('@LS=' + path + (ext ? '\x1f' + ext : '')).catch(e => { clearTimeout(s.timer); this.lsPending = null; reject(e); });
     });
   }
 

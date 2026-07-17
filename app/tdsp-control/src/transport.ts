@@ -57,6 +57,12 @@ export interface Transport {
   browseDir(path: string, page?: number): Promise<DirPage>;
   cartVoices(cartRel: string): Promise<string[]>;
 
+  // Generic recursive SD folder browse (@LS): list ONE directory level — subdirs + files,
+  // the latter filtered by `ext` (e.g. 'mid', no dot; omit for all files). The device streams
+  // in filesystem order; the client sorts (see sortEntries in ./browse). Used by <FolderBrowser>
+  // for /midi/songs, /midi/drums, etc. Absolute SD path (leading '/'); '..' is rejected device-side.
+  browse(path: string, ext?: string): Promise<import('./browse').BrowseResult>;
+
   // Rebuild the on-device catalog DB (/tdsp/*.ndjson).
   reindex(): Promise<void>;
 
