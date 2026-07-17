@@ -184,20 +184,40 @@ the datasheet ([TI SRC4392](https://www.ti.com/product/SRC4392)):
   **AKM AK4137** (high-end/DSD — but AKM's 2020 fab fire left lingering supply/price
   caveats; verify stock).
 
-### The A2DP sink: **Qualcomm/CSR CSR8675** (leading candidate)
+### The A2DP sink — a cost-vs-**codec-quality** choice
 
-- BT 5.0 audio SoC, aptX / aptX HD / aptX LL, **I2S output**, on-chip DSP; ready-made
-  modules are cheap and common (e.g. Audiophonics "CSR8675 aptX-HD to I2S").
-- **Caveat found in research:** the CSR8675's I2S is normally **master-only**, so it can't
-  itself slave to the system clock — which is *fine*, because that's the SRC4392's job. The
-  CSR8675 free-runs as I2S master into the SRC4392, and the SRC4392 hands the Teensy a
-  system-locked stream.
-- Configured with Qualcomm/CSR tools (some friction, but heavily used in DIY audio).
-- Cheaper/simpler A2DP sinks exist — **JieLi AC69xx** (ubiquitous in $3 BT boards, I2S out),
-  **BlueTrum AB532x**, Actions/Realtek parts — but their datasheets/clocking flexibility are
-  thin/Chinese-only. **Do not assume their clocking; verify before committing.** The
-  SRC4392 downstream makes the sink's own clock behavior mostly irrelevant anyway (it just
-  needs a clean I2S master output), which is the beauty of the two-chip split.
+The sink only has to be a clean A2DP→I2S receiver: the downstream ASRC (S3-software or a
+chip) fixes its clock, so the sink's own clock flexibility is irrelevant (it just needs a
+clean I2S **master** output). That frees the real axis here — the **Bluetooth codec** — and
+it splits cleanly.
+
+**Quality tier — Qualcomm/CSR CSR8675** (the audiophile pick, and the *only* route to it):
+- BT 5.0 audio SoC: **SBC + AAC + aptX + aptX-HD (+ aptX-LL)**, I2S out, on-chip DSP; cheap
+  ready-made modules (e.g. Audiophonics "CSR8675 aptX-HD to I2S"), ~$5–10 at module.
+- **aptX / aptX-HD are Qualcomm proprietary + licensed — a Qualcomm-silicon EXCLUSIVE.** They
+  are NOT in ESP-IDF/Bluedroid and cannot be added to the ESP32 (there is no free aptX
+  decoder), and no cheap JieLi/BlueTrum part has them either. The CSR8675 *is* a Qualcomm
+  chip, which is exactly why it has them. **If hi-res Bluetooth matters, a licensed Qualcomm
+  part is the only path** — this is the CSR8675's real, unmatchable advantage.
+- **It takes two to aptX — mind the phone side.** aptX-HD only activates if the *source phone*
+  supports it: Android flagships do; **iPhones do NOT support aptX at all — they use AAC.**
+  The CSR8675 covers both — **AAC for iPhone, aptX-HD for Android** — so it's a genuine
+  upgrade for *every* phone; just know aptX-HD specifically only lights up on capable Android.
+  Rough codec ranking: **SBC < AAC ≈ aptX < aptX-HD** (< LDAC, a Sony/different-chip thing).
+- I2S is **master-only** — fine here (the ASRC handles the clock). Configured with
+  Qualcomm/CSR tools (some friction, but heavily used in DIY audio).
+
+**Budget tier — JieLi AC69xx / BlueTrum AB532x** (SBC-only, ~$1 chip):
+- Ubiquitous in $3 BT boards; I2S out; **SBC only** — everyone gets the baseline codec, no
+  AAC/aptX. Datasheets/config are thin and often Chinese-only — **verify before committing.**
+- The right call if "it plays over Bluetooth" is enough and BOM cost dominates.
+
+**Why NOT the ESP32 classic as the sink (for quality):** its A2DP is **SBC-only** — aptX is
+off-limits (Qualcomm-proprietary) and AAC isn't in the default sink. The ESP32 was always the
+*flexibility / open-toolchain* play (~$2.5, great docs, reflashable), **never** the quality
+one. In the mux design the S3 already owns all the smart work, so the sink needs none of the
+ESP32's flexibility — pick it by **codec quality (CSR8675)** or **raw cost (JieLi)**, not by
+reusing the ESP32.
 
 ### Net: the concrete chains (cheapest first)
 
@@ -228,9 +248,11 @@ carry the resampler in real time.
    Needs an IDF/driver check on the chosen streamer firmware.
 3. **TDM slot assignment** — which slots carry the ASRC'd audio vs the S3 stream into the
    Teensy, and does the S3's I2S peripheral emit the right TDM framing.
-4. **A2DP sink final selection** — CSR8675 (proven, config-tool friction) vs a cheaper
-   JieLi/BlueTrum part (BOM win, doc risk). Prototype it; the downstream ASRC (S3 SW or a
-   chip) makes the sink's own clock behavior largely irrelevant — it just needs clean I2S.
+4. **A2DP sink final selection = a CODEC-QUALITY vs COST call** (see "The A2DP sink" above).
+   CSR8675 (AAC + aptX-HD — the only route to hi-res BT, ~$5–10) vs cheap JieLi/BlueTrum
+   (SBC-only, ~$1, doc risk). The downstream ASRC makes the sink's clock behavior irrelevant,
+   so decide purely on codec tier + BOM. Note aptX-HD needs an aptX-HD-capable Android source;
+   iPhones get AAC. Prototype whichever behind the ASRC.
 
 ## RF coexistence (two 2.4 GHz radios on one board)
 
