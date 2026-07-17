@@ -1,18 +1,36 @@
-// T-DSP ESP32 Bluetooth Receiver + BLE Control
+// T-DSP ESP32 Bluetooth Receiver + selectable control transport (BLE | WiFi)
 // ---------------------------------------------------------------------------
 // Bluetooth Classic A2DP sink on the ESP32-DevKitC of the
 // teensy41_digital_audio_board. Decodes A2DP audio and streams it out over
 // I2S (ESP32 as I2S MASTER) into the Teensy 4.1's SAI2 slave input.
 //
-// NEW: a BLE GATT "control" service runs ALONGSIDE the A2DP audio so a phone
-// app can command the receiver (enter pairing mode, disconnect, forget device)
-// and read its status. A2DP is Bluetooth Classic and BLE is Bluetooth LE; both
-// live on the same radio only if the controller comes up in DUAL mode (BTDM).
-// The A2DP library defaults to CLASSIC-only and *releases* the BLE controller
-// RAM at start(), permanently killing BLE -- so we MUST call
-// set_default_bt_mode(ESP_BT_MODE_BTDM) BEFORE start(). Then BLEDevice::init()
-// attaches to the already-running Bluedroid stack (it detects the controller is
-// up and skips re-init), and A2DP + BLE coexist.
+// A "control" front-end runs ALONGSIDE the A2DP audio so a phone app can command
+// the receiver (enter pairing mode, disconnect, forget device, drive the Teensy's
+// @-protocol) and read its status. The control transport is chosen at BUILD TIME
+// -- exactly one of:
+//
+//   -D TDSP_CTRL_BLE   BLE GATT control (Bluedroid). A2DP is Bluetooth Classic and
+//                      BLE is Bluetooth LE; both live on the same radio only if the
+//                      controller comes up in DUAL mode (BTDM). The A2DP library
+//                      defaults to CLASSIC-only and *releases* the BLE controller
+//                      RAM at start(), permanently killing BLE -- so we MUST call
+//                      set_default_bt_mode(ESP_BT_MODE_BTDM) BEFORE start(). Then
+//                      BLEDevice::init() attaches to the already-running Bluedroid
+//                      stack (it detects the controller is up and skips re-init),
+//                      and A2DP + BLE coexist.
+//
+//   -D TDSP_CTRL_WIFI  WiFi LAN WebSocket control (NEW). The ESP32 joins your LAN
+//                      in station mode and runs a WebSocket server the app connects
+//                      to (discoverable as tdsp.local via mDNS). BLE is NOT started
+//                      in this build -- the classic-only BT mode frees the BLE
+//                      controller RAM for the WiFi/lwIP/WebSocket stacks. A2DP audio
+//                      (Bluetooth Classic) and WiFi share the one radio; we bias the
+//                      coexistence arbiter toward BT so audio stays glitch-free.
+//
+// BLE and WiFi are NEVER run at the same time -- each build has exactly one control
+// transport, plus A2DP audio always. The transport-agnostic core (A2DP + I2S setup,
+// the @-line relay to the Teensy, and the local A2DP verbs pair/forget/disconnect/
+// status) is shared; the two front-ends live behind ControlTransport.
 //
 // I2S pin map is fixed by the board's #ESP32_I2S1 header:
 //   ESP32 GPIO26 (BCK)  -> Teensy pin 4  (BCLK2)
@@ -24,10 +42,23 @@
 // A2DP is always 44.1 kHz / 16-bit stereo; the Teensy resamples to the 48 kHz
 // F32 graph. Config mirrors the proven JayShoe/esp32_T4_bt_music_receiver.
 
+// ---- Transport selection (compile-time, exactly one) ----------------------
+#if defined(TDSP_CTRL_BLE) && defined(TDSP_CTRL_WIFI)
+#error "Select exactly one control transport: -D TDSP_CTRL_BLE XOR -D TDSP_CTRL_WIFI (not both)."
+#elif !defined(TDSP_CTRL_BLE) && !defined(TDSP_CTRL_WIFI)
+#error "No control transport selected: define -D TDSP_CTRL_BLE or -D TDSP_CTRL_WIFI in build_flags."
+#endif
+
 #include <Arduino.h>
 
 #include "BluetoothA2DPSink.h"
 
+// Classic-BT bond list (enumerate paired phones) + NVS name storage so the app
+// can show a switchable list of saved sources with real names. Transport-agnostic.
+#include <esp_gap_bt_api.h>
+#include <Preferences.h>
+
+#if defined(TDSP_CTRL_BLE)
 // BLE via the Arduino-ESP32 (Bluedroid-backed) BLE library. Bluedroid-backed
 // matters: A2DP also uses Bluedroid, so a single stack serves both. (NimBLE is
 // BLE-only and could NOT coexist with the classic A2DP profile.)
@@ -35,117 +66,77 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#endif
 
-// Classic-BT bond list (enumerate paired phones) + NVS name storage so the app
-// can show a switchable list of saved sources with real names.
-#include <esp_gap_bt_api.h>
-#include <Preferences.h>
+#if defined(TDSP_CTRL_WIFI)
+// Legacy Arduino WiFi + mDNS (arduino-esp32 2.0.x / IDF 4.4). WebSocket server is
+// links2004/arduinoWebSockets (see platformio.ini lib_deps). No BLE headers here.
+#include <WiFi.h>
+#include <ESPmDNS.h>
+#include <WebSocketsServer.h>
+// esp_coexist.h (WiFi/BT coexistence arbiter) is present on IDF 4.4 but guard it so
+// the build survives if a future platform drops/renames it.
+#if __has_include(<esp_coexist.h>)
+#include <esp_coexist.h>
+#define TDSP_HAVE_COEX 1
+#endif
 
-// Discoverable Bluetooth name your phone will pair with (classic A2DP) and the
-// BLE device/advertising name the control app scans for.
+// WiFi credentials come from build flags for now (bench/dev). Set them in the
+// esp32dev_wifi env, e.g. -D TDSP_WIFI_SSID='"MyNet"' -D TDSP_WIFI_PASS='"secret"'.
+// Runtime provisioning is a later phase. Empty fallbacks + a compile warning make
+// an un-configured build obvious rather than silently failing to join.
+#ifndef TDSP_WIFI_SSID
+#define TDSP_WIFI_SSID ""
+#warning "TDSP_WIFI_SSID not defined -- set it in platformio.ini build_flags; WiFi will not join a network."
+#endif
+#ifndef TDSP_WIFI_PASS
+#define TDSP_WIFI_PASS ""
+#warning "TDSP_WIFI_PASS not defined -- set it in platformio.ini build_flags (use \"\" for an open network)."
+#endif
+// WebSocket TCP port. mDNS advertises it under _ws._tcp so the app can discover it.
+#ifndef TDSP_WS_PORT
+#define TDSP_WS_PORT 81
+#endif
+// mDNS hostname -> the device is reachable at tdsp.local on the LAN.
+#ifndef TDSP_MDNS_HOST
+#define TDSP_MDNS_HOST "tdsp"
+#endif
+#endif  // TDSP_CTRL_WIFI
+
+// Discoverable Bluetooth name your phone will pair with (classic A2DP) and, in the
+// BLE build, the BLE device/advertising name the control app scans for.
 static constexpr char BT_DEVICE_NAME[] = "T-DSP";
 
-// ---- BLE control contract -------------------------------------------------
-// Custom 128-bit UUIDs for the T-DSP control service. The app filters scans by
-// TDSP_SVC_UUID so it finds this device by capability, not by a fuzzy name.
-//   Service  7a9c0001-...  "T-DSP Control"
-//   Command  7a9c0002-...  WRITE        (1 byte: an opcode below)
-//   Status   7a9c0003-...  READ+NOTIFY  (small JSON string, see buildStatus())
-#define TDSP_SVC_UUID  "7a9c0001-4a6e-4b7d-8f1a-2d3c4e5f6a70"
-#define TDSP_CMD_UUID  "7a9c0002-4a6e-4b7d-8f1a-2d3c4e5f6a70"
-#define TDSP_STAT_UUID "7a9c0003-4a6e-4b7d-8f1a-2d3c4e5f6a70"
-// Sources list (READ+NOTIFY): JSON array of paired phones, e.g.
-//   [{"a":"aabbccddeeff","n":"Pixel 7","c":1}]  (a=addr hex, n=name, c=connected)
-// NOTIFY signals "list changed" -> the app RE-READS (the full list can exceed one
-// notification's MTU, but a READ returns the whole value via ATT read-blob).
-#define TDSP_SRC_UUID  "7a9c0004-4a6e-4b7d-8f1a-2d3c4e5f6a70"
-// Device catalog (READ+NOTIFY): '|'-delimited name lists the Teensy streams over
-// UART (@SONGS=/@INSTR=) so the app renders its Dexed pickers dynamically — no
-// app rebuild when songs/instruments change. A list longer than one BLE value
-// (512 B) is streamed as a burst of framed NOTIFY chunks ("<seq>\x1e<count>\x1e
-// <payload>") that the app reassembles — see setCatalog(). A single-chunk list is
-// just count=1. The app forces a fresh burst (CMD_REFRESH_CAT) after subscribing.
-#define TDSP_SONGS_UUID "7a9c0005-4a6e-4b7d-8f1a-2d3c4e5f6a70"
-#define TDSP_INSTR_UUID "7a9c0006-4a6e-4b7d-8f1a-2d3c4e5f6a70"
-// Drum grooves catalog (READ+NOTIFY): the '|'-delimited groove names the Teensy
-// scans off /drums (@DRUMS=), same chunked-burst contract as songs/instruments.
-#define TDSP_DRUMS_UUID "7a9c0007-4a6e-4b7d-8f1a-2d3c4e5f6a70"
-// Generic file transfer (READ+NOTIFY): the Teensy streams any SD file as base64
-// frames (@FB/@FD/@FE/@FERR) plus the manifest registry (@MANIFESTS). We forward
-// each line VERBATIM as one notification (each @FD fits a ~512 MTU) — NO reassembly
-// on the ESP32; the app reassembles the file. See CATALOG_TRANSPORT.md. This ONE
-// char is the transport for drums (catalog.tsv) and every future catalog type.
-#define TDSP_FILE_UUID  "7a9c0008-4a6e-4b7d-8f1a-2d3c4e5f6a70"
-
-// Command opcodes: the first byte of a write to the command characteristic.
-enum : uint8_t {
-  CMD_PAIRING_MODE = 0x01,  // become discoverable + connectable (accept a new phone)
-  CMD_END_PAIRING  = 0x02,  // leave pairing mode (non-discoverable)
-  CMD_DISCONNECT   = 0x03,  // drop the current A2DP source
-  CMD_FORGET       = 0x04,  // forget the last paired device (clears NVS bond)
-  CMD_RECONNECT    = 0x05,  // sink reconnects A2DP to the last paired phone
-  CMD_SET_VOLUME   = 0x10,  // 2nd byte = master volume 0..100 (%); relayed to the Teensy
-  CMD_CONNECT_ADDR = 0x11,  // + 6 bytes BD address: switch A2DP to that paired phone
-  CMD_FORGET_ADDR  = 0x12,  // + 6 bytes BD address: remove that specific bond
-  CMD_PLAY_SONG    = 0x20,  // play the built-in Dexed demo (William Tell); relayed to Teensy
-  CMD_STOP_SONG    = 0x21,  // stop the Dexed demo
-  CMD_SET_DX_VOICE = 0x22,  // 2nd byte = Dexed instrument index; relayed to the Teensy
-  CMD_REFRESH_CAT  = 0x23,  // re-scan SD + refresh song/instrument catalog (@GETCAT to Teensy)
-  CMD_SET_HPF      = 0x24,  // 2nd byte = TAC5212 DAC highpass mode 0..3; relayed to the Teensy
-  CMD_SET_MIDI_MODE= 0x25,  // 2nd byte = 0 normal MIDI / 1 MPE; relayed to the Teensy
-  CMD_SET_LOOP     = 0x26,  // 2nd byte = 0/1 loop the current song; relayed to the Teensy
-  CMD_SET_PRESSURE = 0x27,  // 2nd byte = MPE pressure routing bitmask (1=vol 2=bright 4=vib 8=trem)
-  CMD_SET_MODWHEEL = 0x28,  // 2nd byte = mod-wheel routing bitmask (2=bright 4=vib 8=trem)
-  CMD_SET_LFOMODE  = 0x29,  // 2nd byte = 0 respect patch LFO / 1 force LFO on any patch
-  CMD_SET_TIMBRE   = 0x2A,  // 2nd byte = CC74 timbre (MPE Y) routing bitmask (2=bright 4=vib 8=trem)
-  CMD_SET_REPLAYGAIN=0x2B,  // 2nd byte = 0 off / 1 on; ReplayGain loudness normalization, relayed to Teensy
-  CMD_PLAY_DRUM    = 0x30,  // + 1 byte: drum groove index; loops until stopped (relayed as @DRUM=<i>)
-  CMD_STOP_DRUM    = 0x31,  // stop the drum groove (@DRUM=stop)
-  CMD_SET_DRUM_KIT = 0x32,  // + 1 byte: GM drum-kit index ("instrument") (@DRUMKIT=<i>)
-  CMD_SET_DRUM_SPEED=0x33,  // RESERVED — drum-speed control removed (drums follow master BPM). Kept so 0x33 isn't reused.
-  CMD_SET_DRUM_VOL = 0x34,  // + 1 byte: drum level 0..150 (%) (@DRUMVOL=<pct>)
-  CMD_SET_BPM      = 0x35,  // + 1 byte: master tempo 40..240 bpm — song+drum (@BPM=<n>)
-  CMD_SET_DRUM_SYNCHRO=0x36,// + 1 byte: 0/1 synchro start (groove begins on first note) (@DRUMSYNCHRO=<0|1>)
-  CMD_SET_ARP_ON   = 0x37,  // + 1 byte: 0/1 arpeggiator enable (@ARPON=<0|1>)
-  CMD_SET_ARP_PATTERN=0x38, // + 1 byte: pattern index 0..24 (@ARPPAT=<n>)
-  CMD_SET_ARP_RATE = 0x39,  // + 1 byte: rate index 0..14 (@ARPRATE=<n>)
-  CMD_SET_ARP_OCT  = 0x3a,  // + 1 byte: octave range 1..4 (@ARPOCT=<n>)
-  CMD_SET_ARP_LATCH= 0x3b,  // + 1 byte: 0/1 latch held notes (@ARPLATCH=<0|1>)
-  CMD_READ_FILE    = 0x40,  // + N bytes: SD path string; Teensy streams it back on the FILE char (@READ=<path>)
-  CMD_PLAY_DRUM_FILE=0x41,  // + N bytes: groove filename; plays /drums/<name> (@DRUMF=<filename>)
-  CMD_RELAY_LINE   = 0x42,  // + N bytes: a literal control line (e.g. "@DXPICK=<cart>\t<v>", "@REINDEX",
-                            //   "@SONG=<i>") relayed VERBATIM to the Teensy. The generic seam the new
-                            //   catalog app uses so BLE speaks the same @-protocol as Web Serial.
-};
+// ===========================================================================
+//  Transport-agnostic core: A2DP object, shared state, @-line relays, status.
+//  Everything here is identical regardless of the selected control transport.
+// ===========================================================================
 
 BluetoothA2DPSink a2dp_sink;
 
-// BLE state shared between the GATT callbacks (BT task context) and the app-
-// visible status. Kept tiny and updated from one place (pushStatus()).
-static BLECharacteristic *g_statChar = nullptr;
-static volatile bool      g_bleClientConnected = false;
+// App-visible state, updated from one place. In the BLE build these track the
+// values pushed via opcodes; in the WiFi build the app sends @-lines verbatim, so
+// conn/disc/peer are always accurate but vol/hpf/mpe/rg reflect defaults (the app
+// owns that state over WiFi). See buildStatus().
 static bool               g_discoverable = false;  // we track this; the A2DP lib has no getter
-static uint8_t            g_volume = 50;            // master volume 0..100 (%), last set from the app
-static uint8_t            g_hpf    = 0;             // TAC5212 DAC highpass mode 0..3, last set from the app
-static uint8_t            g_midiMode = 0;           // 0 = normal MIDI, 1 = MPE; last set from the app
-static uint8_t            g_replayGain = 1;          // 0 = off, 1 = on; ReplayGain normalization (Teensy default on)
+static uint8_t            g_volume     = 50;        // master volume 0..100 (%)
+static uint8_t            g_hpf        = 0;         // TAC5212 DAC highpass mode 0..3
+static uint8_t            g_midiMode   = 0;         // 0 = normal MIDI, 1 = MPE
+static uint8_t            g_replayGain = 1;         // 0 = off, 1 = on (Teensy default on)
 
-// Relay the master volume to the Teensy over UART0 as a framed line "@VOL=<n>".
-// The Teensy owns the TAC5212 codec; it parses this line and calls setDvol() on
-// the headphone output. Distinct "@VOL=" prefix so it never collides with logs.
-static void relayVolume() {
-  Serial.printf("@VOL=%u\n", g_volume);
-}
+static Preferences        g_names;                  // NVS: BD-address(hex) -> friendly name
+static esp_bd_addr_t      g_pendingConnect;         // switch target after a willful disconnect
+static bool               g_hasPendingConnect = false;
 
-// Relay Dexed controls to the Teensy over UART0, same "@VERB=<val>" framing.
-// The Teensy plays/stops the built-in song sequencer (by song index) and
-// switches the Dexed instrument from a curated list (indices must match the app).
+// ---- @-line relays to the Teensy (over UART0/Serial) ----------------------
+// The Teensy owns the TAC5212 codec + synth engines; the ESP32 just frames these
+// "@KEY=<val>" text lines over UART. Distinct prefixes so they never collide with
+// logs. These are used by the BLE opcode dispatch; the WiFi transport instead
+// relays whole @-lines verbatim (relayLine), so the app speaks the same protocol.
+static void relayVolume(uint8_t v)    { Serial.printf("@VOL=%u\n", v); }
 static void relaySong(uint8_t idx)    { Serial.printf("@SONG=%u\n", idx); }
 static void relaySongStop()           { Serial.printf("@SONG=stop\n"); }
 static void relayDxVoice(uint8_t idx) { Serial.printf("@DXVOICE=%u\n", idx); }
-
-// Relay the TAC5212 DAC highpass mode (0=off, 1=1Hz, 2=12Hz, 3=96Hz) to the
-// Teensy, which owns the codec and calls g_codec.setDacHpf().
 static void relayHpf(uint8_t mode)    { Serial.printf("@HPF=%u\n", mode); }
 static void relayMidiMode(uint8_t m)  { Serial.printf("@MIDIMODE=%u\n", m); }
 static void relayReplayGain(uint8_t on){ Serial.printf("@RG=%u\n", on ? 1 : 0); }
@@ -154,9 +145,6 @@ static void relayPressure(uint8_t m)  { Serial.printf("@PRESSURE=%u\n", m); }
 static void relayModWheel(uint8_t m)  { Serial.printf("@MODWHEEL=%u\n", m); }
 static void relayLfoMode(uint8_t f)   { Serial.printf("@LFOMODE=%u\n", f ? 1 : 0); }
 static void relayTimbre(uint8_t m)    { Serial.printf("@TIMBRE=%u\n", m); }
-// Drum-groove controls: play/stop a looping channel-10 groove and set its GM kit,
-// speed and level. The Teensy owns playback (dedicated looping player) + the SD
-// groove list; these just frame the text commands over UART.
 static void relayDrum(uint8_t idx)    { Serial.printf("@DRUM=%u\n", idx); }
 static void relayDrumStop()           { Serial.printf("@DRUM=stop\n"); }
 static void relayDrumKit(uint8_t idx) { Serial.printf("@DRUMKIT=%u\n", idx); }
@@ -168,88 +156,19 @@ static void relayArpPattern(uint8_t p) { Serial.printf("@ARPPAT=%u\n", p); }
 static void relayArpRate(uint8_t r)    { Serial.printf("@ARPRATE=%u\n", r); }
 static void relayArpOct(uint8_t o)     { Serial.printf("@ARPOCT=%u\n", o); }
 static void relayArpLatch(uint8_t s)   { Serial.printf("@ARPLATCH=%u\n", s ? 1 : 0); }
-
-// ---- Paired-source list (multi-device switch) -----------------------------
-static BLECharacteristic *g_srcChar = nullptr;
-
-// ---- Device catalog (Dexed songs + instruments, streamed from the Teensy) --
-static BLECharacteristic *g_songsChar = nullptr;
-static BLECharacteristic *g_instrChar = nullptr;
-static BLECharacteristic *g_drumsChar = nullptr;
-static BLECharacteristic *g_fileChar  = nullptr;   // generic file-transfer frames (pass-through)
-
-// Ask the Teensy to stream an SD file / play a groove by name. Variable-length
-// string args (path / filename) — the generic catalog transport (CATALOG_TRANSPORT.md).
 static void relayReadFile(const char *path)  { Serial.printf("@READ=%s\n", path); }
 static void relayDrumFile(const char *fname) { Serial.printf("@DRUMF=%s\n", fname); }
-// Relay an arbitrary control line verbatim (the generic new-catalog seam). The app
-// sends the same @-lines it would over Web Serial; we just add the newline.
+
+// Relay an arbitrary control line verbatim (the generic seam). The app sends the
+// same @-lines it would over Web Serial; we just add the newline. This is what the
+// WiFi transport passes every inbound @-frame through, and what the BLE
+// CMD_RELAY_LINE opcode uses.
 static void relayLine(const char *line)      { Serial.print(line); Serial.print('\n'); }
 
-// Forward ONE Teensy line verbatim to the app as a single notification. Used for the
-// file-transfer stream: the Teensy already chunked each @FD to fit one MTU, so there
-// is nothing to reassemble here — just relay + pace so the BLE stack doesn't drop it.
-static void notifyRaw(BLECharacteristic *ch, const char *line) {
-  if (!ch) return;
-  ch->setValue((uint8_t *)line, strlen(line));
-  if (g_bleClientConnected) { ch->notify(); delay(12); }
-}
-
-// Store a '|'-delimited name list into a catalog characteristic and notify.
-// A BLE characteristic value caps at 512 B, so a long list (e.g. Dexed's full
-// 320-voice set, ~7 KB) can't be served in one value. We stream it as a burst of
-// framed notifications, each "<seq>\x1e<count>\x1e<payload>" (0x1e = record sep,
-// never appears in names). The app reassembles the chunks in order. Notifications
-// are unacknowledged, so we pace them so the BLE stack doesn't drop chunks.
-static const size_t kCatChunk = 400;   // payload bytes/chunk; safe under a 512 MTU
-
-static void setCatalog(BLECharacteristic *ch, const char *list) {
-  if (!ch) return;
-  size_t len   = strlen(list);
-  size_t count = len ? (len + kCatChunk - 1) / kCatChunk : 1;   // >=1 (empty = one empty chunk)
-  for (size_t seq = 0; seq < count; ++seq) {
-    size_t off = seq * kCatChunk;
-    size_t n   = (len - off < kCatChunk) ? (len - off) : kCatChunk;
-    char   frame[24 + kCatChunk];
-    int    h = snprintf(frame, sizeof(frame), "%u\x1e%u\x1e", (unsigned)seq, (unsigned)count);
-    memcpy(frame + h, list + off, n);
-    ch->setValue((uint8_t *)frame, h + n);
-    if (g_bleClientConnected) { ch->notify(); delay(25); }   // pace so chunks aren't dropped
-  }
-}
-
-// A complete '@'-framed line arrived from the Teensy over UART. The Teensy sends
-// the catalog on our @GETCAT request; store each list into its characteristic.
-static void handleTeensyLine(const char *line) {
-  if      (strncmp(line, "@SONGS=", 7) == 0) { setCatalog(g_songsChar, line + 7); Serial.println("[cat] songs updated"); }
-  else if (strncmp(line, "@INSTR=", 7) == 0) { setCatalog(g_instrChar, line + 7); Serial.println("[cat] instruments updated"); }
-  else if (strncmp(line, "@DRUMS=", 7) == 0) { setCatalog(g_drumsChar, line + 7); Serial.println("[cat] drums updated"); }
-  // Generic file transport: the manifest registry + file-read frames go straight to
-  // the FILE characteristic, one line per notification (each already fits one MTU).
-  else if (strncmp(line, "@MANIFESTS=", 11) == 0) { notifyRaw(g_fileChar, line); }
-  else if (strncmp(line, "@FB=", 4) == 0 || strncmp(line, "@FD=", 4) == 0 ||
-           strncmp(line, "@FE=", 4) == 0 || strncmp(line, "@FERR=", 6) == 0) { notifyRaw(g_fileChar, line); }
-  // @REINDEXED marks the end of a catalog rebuild — relay it so the app's reindex()
-  // (which sent @REINDEX via CMD_RELAY_LINE) knows the /tdsp DB is ready to re-read.
-  else if (strncmp(line, "@REINDEXED", 10) == 0) { notifyRaw(g_fileChar, line); }
-  // Lazy /dexed browse replies (the SD library is too big to ship in the catalog): a folder
-  // page (@DXLS) or a cart's 32 voice names (@DXVL) can exceed one 512 B MTU, so stream them
-  // chunk-framed on the FILE char — the app reassembles (digit-prefixed frames, distinct from
-  // the '@'-prefixed file frames). @DXPICKED is a fire-and-forget ack the app doesn't read.
-  else if (strncmp(line, "@DXLS=", 6) == 0 || strncmp(line, "@DXVL=", 6) == 0) { setCatalog(g_fileChar, line); }
-  // The full-state snapshot (@STATE, ~2 KB now that it carries voice2/arp2/caps) and the
-  // opaque app-state blob (@APP) also exceed one MTU, so stream them chunk-framed too. The
-  // app reassembles and routes them to its onLine() handler (hydrate). WITHOUT this the phone
-  // never receives @STATE, so build-gated cards (Synth 2 / Arp 2, via caps) stay hidden.
-  else if (strncmp(line, "@STATE=", 7) == 0 || strncmp(line, "@APP=", 5) == 0) { setCatalog(g_fileChar, line); }
-}
-
-// Ask the Teensy to (re)send its catalog over UART.
+// Ask the Teensy to (re)send its song/instrument/drum catalog over UART.
 static void requestCatalog() { Serial.print("@GETCAT\n"); }
-static Preferences        g_names;                 // NVS: BD-address(hex) -> friendly name
-static esp_bd_addr_t      g_pendingConnect;        // switch target after a willful disconnect
-static bool               g_hasPendingConnect = false;
 
+// ---- Paired-source names (NVS) + status/sources JSON builders -------------
 // 12-char lowercase hex of a BD address; doubles as the NVS key for its name.
 static void addrHex(const uint8_t *bda, char *out /*>=13*/) {
   snprintf(out, 13, "%02x%02x%02x%02x%02x%02x",
@@ -267,7 +186,7 @@ static void storeName(const uint8_t *bda, const char *name) {
 }
 
 // Build the JSON sources array: every bonded phone, its stored name, and whether
-// it is the currently connected one.
+// it is the currently connected one. Transport-agnostic (pure string builder).
 static void buildSources(char *buf, size_t n) {
   int num = esp_bt_gap_get_bond_device_num();
   if (num < 0) num = 0;
@@ -295,50 +214,21 @@ static void buildSources(char *buf, size_t n) {
   g_names.end();
 }
 
-// Refresh the sources characteristic and notify (the app re-reads the full value).
-static void pushSources() {
-  if (!g_srcChar) return;
-  static char buf[640];
-  buildSources(buf, sizeof(buf));
-  g_srcChar->setValue((uint8_t *)buf, strlen(buf));
-  if (g_bleClientConnected) g_srcChar->notify();
-  Serial.printf("[ble] sources %s\n", buf);
-}
-
-// A2DP peer name arrived (AVRCP) -> remember it for the connected address.
-static void onPeerName(char *name) {
-  const esp_bd_addr_t *a = a2dp_sink.get_current_peer_address();
-  if (a) storeName(*a, name);
-  pushSources();
-}
-
-// Build the status JSON into `buf`. Small on purpose so it fits a modest BLE
-// MTU; the app can also READ the characteristic (supports long reads) for the
-// full value if a notification is truncated on the default 23-byte MTU.
+// Build the status JSON into `buf`. Small on purpose so it fits a modest BLE MTU;
+// over WiFi it goes out as a whole WS TEXT frame.
+//   conn: A2DP source connected?  disc: discoverable (pairing)?  vol: master 0..100
+//   hpf: TAC5212 DAC highpass mode 0..3 (0=off)  mpe: 0 normal MIDI / 1 MPE
+//   rg: ReplayGain 0 off / 1 on.  peer: connected phone name.
 static void buildStatus(char *buf, size_t n) {
   bool connected = a2dp_sink.is_connected();
   const char *peer = connected ? a2dp_sink.get_peer_name() : "";
   if (!peer) peer = "";
-  // conn: A2DP source connected?  disc: discoverable (pairing)?  vol: master 0..100
-  // hpf: TAC5212 DAC highpass mode 0..3 (0=off)  mpe: 0 normal MIDI / 1 MPE
-  // rg: ReplayGain 0 off / 1 on.
   snprintf(buf, n, "{\"conn\":%d,\"disc\":%d,\"vol\":%u,\"hpf\":%u,\"mpe\":%u,\"rg\":%u,\"peer\":\"%s\"}",
            connected ? 1 : 0, g_discoverable ? 1 : 0, g_volume, g_hpf, g_midiMode, g_replayGain, peer);
 }
 
-// Refresh the status characteristic value and notify any subscribed client.
-static void pushStatus() {
-  if (!g_statChar) return;
-  char buf[96];
-  buildStatus(buf, sizeof(buf));
-  g_statChar->setValue((uint8_t *)buf, strlen(buf));
-  if (g_bleClientConnected) g_statChar->notify();
-  Serial.printf("[ble] status %s\n", buf);
-}
-
-// Force the sink back into pairing mode: connectable + generally discoverable.
-// Called at boot and on every A2DP disconnect so a phone can ALWAYS (re)connect
-// after a drop/failure without needing the BLE app or a power cycle.
+// ---- Local A2DP pairing/connection primitives -----------------------------
+// Force the sink into pairing mode: connectable + generally discoverable.
 static void enterPairingMode(const char *why) {
   a2dp_sink.set_connectable(true);
   a2dp_sink.set_discoverability(ESP_BT_GENERAL_DISCOVERABLE);
@@ -348,7 +238,7 @@ static void enterPairingMode(const char *why) {
 }
 
 // Go fully idle: NOT connectable, NOT discoverable, no auto-reconnect. Bluetooth audio is
-// explicit — it only (re)connects on an app command: "Connect Bluetooth Audio" (reconnect
+// explicit -- it only (re)connects on an app command: "Connect Bluetooth Audio" (reconnect
 // to the last bonded phone) or "Pairing mode" (accept a new phone). Used on boot and after
 // any A2DP disconnect, so a phone can't silently re-attach on its own.
 static void goIdle(const char *why) {
@@ -358,11 +248,45 @@ static void goIdle(const char *why) {
   Serial.printf("[a2dp] idle (%s) -- Bluetooth audio off until you connect it\n", why);
 }
 
-// A2DP connection state changed (called by the A2DP lib, BT task context).
-// Persistent-pairing policy: whenever NOTHING is connected we stay discoverable
-// so the phone can reconnect after any failure; while a source is connected we
-// go non-discoverable (a sink serves one source, no reason to advertise). Also
-// mirror the state out to the BLE status characteristic for the control app.
+// ===========================================================================
+//  ControlTransport: the small internal interface every front-end implements.
+//  The core calls into the ACTIVE transport (controlTransport()) for the two
+//  directions that differ per build:
+//    - sendToApp(): a line arriving FROM the Teensy is pushed out to the client(s)
+//    - pushStatus()/pushSources(): mirror A2DP state changes out to the app
+// ===========================================================================
+class ControlTransport {
+ public:
+  virtual ~ControlTransport() {}
+  virtual void begin() = 0;                          // bring the transport up
+  virtual void loop() {}                             // service the transport each loop()
+  virtual void sendToApp(const char *line) = 0;      // outbound Teensy @-line -> app
+  virtual void pushStatus() {}                       // mirror status JSON to the app
+  virtual void pushSources() {}                      // mirror the paired-sources list
+};
+
+// The active transport singleton, defined once per build below.
+ControlTransport &controlTransport();
+
+// ---- Shared local A2DP verbs (called by the serial p/f/x/s chars AND the WiFi
+// !pair/!forget/!disconnect/!status commands). The BLE build reaches the same
+// A2DP actions through its opcode dispatch, so it keeps its own richer set. ----
+static void ctrlEnterPairing() { enterPairingMode("control command"); }
+static void ctrlDisconnect()   { Serial.println("[cmd] DISCONNECT source"); a2dp_sink.disconnect(); }
+static void ctrlForget()       { Serial.println("[cmd] FORGET last device, then pairing mode");
+                                 a2dp_sink.clean_last_connection(); enterPairingMode("forget"); }
+static void ctrlStatus()       { controlTransport().pushStatus(); }
+
+// ---- A2DP callbacks (transport-agnostic) ----------------------------------
+// A2DP peer name arrived (AVRCP) -> remember it for the connected address.
+static void onPeerName(char *name) {
+  const esp_bd_addr_t *a = a2dp_sink.get_current_peer_address();
+  if (a) storeName(*a, name);
+  controlTransport().pushSources();
+}
+
+// A2DP connection state changed (A2DP lib, BT task context). Explicit-only policy:
+// nothing auto-reconnects; on any disconnect we go idle until the app connects again.
 static void onA2dpConnState(esp_a2d_connection_state_t state, void *) {
   Serial.printf("[a2dp] conn state -> %s\n", a2dp_sink.to_str(state));
   if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
@@ -380,8 +304,141 @@ static void onA2dpConnState(esp_a2d_connection_state_t state, void *) {
       goIdle("a2dp disconnected");
     }
   }
-  pushStatus();
-  pushSources();
+  controlTransport().pushStatus();
+  controlTransport().pushSources();
+}
+
+// A complete '@'-framed line arrived from the Teensy over UART -> hand it to the
+// active transport, which routes it out to the app (BLE: chunked/framed per char;
+// WiFi: broadcast verbatim).
+static void handleTeensyLine(const char *line) {
+  controlTransport().sendToApp(line);
+}
+
+// ===========================================================================
+//  BLE control transport (-D TDSP_CTRL_BLE)
+// ===========================================================================
+#if defined(TDSP_CTRL_BLE)
+
+// ---- BLE control contract -------------------------------------------------
+// Custom 128-bit UUIDs for the T-DSP control service. The app filters scans by
+// TDSP_SVC_UUID so it finds this device by capability, not by a fuzzy name.
+//   Service  7a9c0001-...  "T-DSP Control"
+//   Command  7a9c0002-...  WRITE        (1 byte opcode + optional args)
+//   Status   7a9c0003-...  READ+NOTIFY  (small JSON string, see buildStatus())
+#define TDSP_SVC_UUID  "7a9c0001-4a6e-4b7d-8f1a-2d3c4e5f6a70"
+#define TDSP_CMD_UUID  "7a9c0002-4a6e-4b7d-8f1a-2d3c4e5f6a70"
+#define TDSP_STAT_UUID "7a9c0003-4a6e-4b7d-8f1a-2d3c4e5f6a70"
+// Sources list (READ+NOTIFY): JSON array of paired phones, e.g.
+//   [{"a":"aabbccddeeff","n":"Pixel 7","c":1}]  (a=addr hex, n=name, c=connected)
+#define TDSP_SRC_UUID  "7a9c0004-4a6e-4b7d-8f1a-2d3c4e5f6a70"
+// Device catalog (READ+NOTIFY): '|'-delimited name lists the Teensy streams over
+// UART (@SONGS=/@INSTR=). A list longer than one BLE value (512 B) is streamed as a
+// burst of framed NOTIFY chunks ("<seq>\x1e<count>\x1e<payload>") that the app
+// reassembles -- see setCatalog(). A single-chunk list is just count=1.
+#define TDSP_SONGS_UUID "7a9c0005-4a6e-4b7d-8f1a-2d3c4e5f6a70"
+#define TDSP_INSTR_UUID "7a9c0006-4a6e-4b7d-8f1a-2d3c4e5f6a70"
+// Drum grooves catalog (READ+NOTIFY): @DRUMS=, same chunked-burst contract.
+#define TDSP_DRUMS_UUID "7a9c0007-4a6e-4b7d-8f1a-2d3c4e5f6a70"
+// Generic file transfer (READ+NOTIFY): the Teensy streams any SD file as base64
+// frames (@FB/@FD/@FE/@FERR) plus the manifest registry (@MANIFESTS), forwarded
+// VERBATIM one line per notification (each fits a ~512 MTU). See CATALOG_TRANSPORT.md.
+#define TDSP_FILE_UUID  "7a9c0008-4a6e-4b7d-8f1a-2d3c4e5f6a70"
+
+// Command opcodes: the first byte of a write to the command characteristic.
+enum : uint8_t {
+  CMD_PAIRING_MODE = 0x01,  // become discoverable + connectable (accept a new phone)
+  CMD_END_PAIRING  = 0x02,  // leave pairing mode (non-discoverable)
+  CMD_DISCONNECT   = 0x03,  // drop the current A2DP source
+  CMD_FORGET       = 0x04,  // forget the last paired device (clears NVS bond)
+  CMD_RECONNECT    = 0x05,  // sink reconnects A2DP to the last paired phone
+  CMD_SET_VOLUME   = 0x10,  // 2nd byte = master volume 0..100 (%); relayed to the Teensy
+  CMD_CONNECT_ADDR = 0x11,  // + 6 bytes BD address: switch A2DP to that paired phone
+  CMD_FORGET_ADDR  = 0x12,  // + 6 bytes BD address: remove that specific bond
+  CMD_PLAY_SONG    = 0x20,  // play the built-in Dexed demo (William Tell); relayed to Teensy
+  CMD_STOP_SONG    = 0x21,  // stop the Dexed demo
+  CMD_SET_DX_VOICE = 0x22,  // 2nd byte = Dexed instrument index; relayed to the Teensy
+  CMD_REFRESH_CAT  = 0x23,  // re-scan SD + refresh song/instrument catalog (@GETCAT to Teensy)
+  CMD_SET_HPF      = 0x24,  // 2nd byte = TAC5212 DAC highpass mode 0..3; relayed to the Teensy
+  CMD_SET_MIDI_MODE= 0x25,  // 2nd byte = 0 normal MIDI / 1 MPE; relayed to the Teensy
+  CMD_SET_LOOP     = 0x26,  // 2nd byte = 0/1 loop the current song; relayed to the Teensy
+  CMD_SET_PRESSURE = 0x27,  // 2nd byte = MPE pressure routing bitmask (1=vol 2=bright 4=vib 8=trem)
+  CMD_SET_MODWHEEL = 0x28,  // 2nd byte = mod-wheel routing bitmask (2=bright 4=vib 8=trem)
+  CMD_SET_LFOMODE  = 0x29,  // 2nd byte = 0 respect patch LFO / 1 force LFO on any patch
+  CMD_SET_TIMBRE   = 0x2A,  // 2nd byte = CC74 timbre (MPE Y) routing bitmask (2=bright 4=vib 8=trem)
+  CMD_SET_REPLAYGAIN=0x2B,  // 2nd byte = 0 off / 1 on; ReplayGain loudness normalization, relayed to Teensy
+  CMD_PLAY_DRUM    = 0x30,  // + 1 byte: drum groove index; loops until stopped (relayed as @DRUM=<i>)
+  CMD_STOP_DRUM    = 0x31,  // stop the drum groove (@DRUM=stop)
+  CMD_SET_DRUM_KIT = 0x32,  // + 1 byte: GM drum-kit index ("instrument") (@DRUMKIT=<i>)
+  CMD_SET_DRUM_SPEED=0x33,  // RESERVED -- drum-speed control removed (drums follow master BPM).
+  CMD_SET_DRUM_VOL = 0x34,  // + 1 byte: drum level 0..150 (%) (@DRUMVOL=<pct>)
+  CMD_SET_BPM      = 0x35,  // + 1 byte: master tempo 40..240 bpm -- song+drum (@BPM=<n>)
+  CMD_SET_DRUM_SYNCHRO=0x36,// + 1 byte: 0/1 synchro start (groove begins on first note) (@DRUMSYNCHRO=<0|1>)
+  CMD_SET_ARP_ON   = 0x37,  // + 1 byte: 0/1 arpeggiator enable (@ARPON=<0|1>)
+  CMD_SET_ARP_PATTERN=0x38, // + 1 byte: pattern index 0..24 (@ARPPAT=<n>)
+  CMD_SET_ARP_RATE = 0x39,  // + 1 byte: rate index 0..14 (@ARPRATE=<n>)
+  CMD_SET_ARP_OCT  = 0x3a,  // + 1 byte: octave range 1..4 (@ARPOCT=<n>)
+  CMD_SET_ARP_LATCH= 0x3b,  // + 1 byte: 0/1 latch held notes (@ARPLATCH=<0|1>)
+  CMD_READ_FILE    = 0x40,  // + N bytes: SD path string; Teensy streams it on the FILE char (@READ=<path>)
+  CMD_PLAY_DRUM_FILE=0x41,  // + N bytes: groove filename; plays /drums/<name> (@DRUMF=<filename>)
+  CMD_RELAY_LINE   = 0x42,  // + N bytes: a literal control line relayed VERBATIM to the Teensy.
+};
+
+static BLECharacteristic *g_statChar  = nullptr;
+static BLECharacteristic *g_srcChar   = nullptr;
+static BLECharacteristic *g_songsChar = nullptr;
+static BLECharacteristic *g_instrChar = nullptr;
+static BLECharacteristic *g_drumsChar = nullptr;
+static BLECharacteristic *g_fileChar  = nullptr;   // generic file-transfer frames (pass-through)
+static volatile bool      g_bleClientConnected = false;
+
+// Forward ONE Teensy line verbatim to the app as a single notification. Used for the
+// file-transfer stream: the Teensy already chunked each @FD to fit one MTU.
+static void notifyRaw(BLECharacteristic *ch, const char *line) {
+  if (!ch) return;
+  ch->setValue((uint8_t *)line, strlen(line));
+  if (g_bleClientConnected) { ch->notify(); delay(12); }
+}
+
+// Store a '|'-delimited name list into a catalog characteristic and notify. A BLE
+// characteristic value caps at 512 B, so a long list is streamed as a burst of framed
+// notifications, each "<seq>\x1e<count>\x1e<payload>" (0x1e = record sep). Notifications
+// are unacknowledged, so we pace them so the BLE stack doesn't drop chunks.
+static const size_t kCatChunk = 400;   // payload bytes/chunk; safe under a 512 MTU
+
+static void setCatalog(BLECharacteristic *ch, const char *list) {
+  if (!ch) return;
+  size_t len   = strlen(list);
+  size_t count = len ? (len + kCatChunk - 1) / kCatChunk : 1;   // >=1 (empty = one empty chunk)
+  for (size_t seq = 0; seq < count; ++seq) {
+    size_t off = seq * kCatChunk;
+    size_t n   = (len - off < kCatChunk) ? (len - off) : kCatChunk;
+    char   frame[24 + kCatChunk];
+    int    h = snprintf(frame, sizeof(frame), "%u\x1e%u\x1e", (unsigned)seq, (unsigned)count);
+    memcpy(frame + h, list + off, n);
+    ch->setValue((uint8_t *)frame, h + n);
+    if (g_bleClientConnected) { ch->notify(); delay(25); }   // pace so chunks aren't dropped
+  }
+}
+
+// Refresh the status characteristic value and notify any subscribed client.
+static void blePushStatus() {
+  if (!g_statChar) return;
+  char buf[96];
+  buildStatus(buf, sizeof(buf));
+  g_statChar->setValue((uint8_t *)buf, strlen(buf));
+  if (g_bleClientConnected) g_statChar->notify();
+  Serial.printf("[ble] status %s\n", buf);
+}
+
+// Refresh the sources characteristic and notify (the app re-reads the full value).
+static void blePushSources() {
+  if (!g_srcChar) return;
+  static char buf[640];
+  buildSources(buf, sizeof(buf));
+  g_srcChar->setValue((uint8_t *)buf, strlen(buf));
+  if (g_bleClientConnected) g_srcChar->notify();
+  Serial.printf("[ble] sources %s\n", buf);
 }
 
 // ---- BLE GATT callbacks ---------------------------------------------------
@@ -389,8 +446,8 @@ class ServerCallbacks : public BLEServerCallbacks {
   void onConnect(BLEServer *) override {
     g_bleClientConnected = true;
     Serial.println("[ble] control app connected");
-    pushStatus();
-    pushSources();
+    blePushStatus();
+    blePushSources();
     requestCatalog();   // pull fresh song/instrument lists from the Teensy
   }
   void onDisconnect(BLEServer *) override {
@@ -436,7 +493,7 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
           g_volume = (uint8_t)v[1];
           if (g_volume > 100) g_volume = 100;
           Serial.printf("[ble] cmd: SET VOLUME %u%%\n", g_volume);
-          relayVolume();  // -> Teensy -> TAC5212 setDvol()
+          relayVolume(g_volume);  // -> Teensy -> TAC5212 setDvol()
         }
         break;
       case CMD_CONNECT_ADDR:
@@ -493,7 +550,7 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
         if (v.size() >= 2) {
           uint8_t mode = (uint8_t)v[1];
           if (mode > 3) mode = 0;
-          g_hpf = mode;     // remember for the status readback (pushStatus below)
+          g_hpf = mode;     // remember for the status readback (blePushStatus below)
           Serial.printf("[ble] cmd: SET HPF %u\n", mode);
           relayHpf(mode);   // -> Teensy: @HPF=<mode>
         }
@@ -510,7 +567,7 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
           g_replayGain = v[1] ? 1 : 0;
           Serial.printf("[ble] cmd: SET REPLAYGAIN %s\n", g_replayGain ? "on" : "off");
           relayReplayGain(g_replayGain);   // -> Teensy: @RG=<0|1>
-          pushStatus();                    // mirror new state back to the app
+          blePushStatus();                 // mirror new state back to the app
         }
         break;
       case CMD_SET_LOOP:
@@ -614,8 +671,8 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
         Serial.printf("[ble] cmd: unknown opcode 0x%02X\n", op);
         break;
     }
-    pushStatus();
-    pushSources();
+    blePushStatus();
+    blePushSources();
   }
 };
 
@@ -638,15 +695,11 @@ static void setupBle() {
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
   g_statChar->addDescriptor(new BLE2902());  // CCCD so the app can subscribe
 
-  // Sources list: READ returns the full JSON (ATT read-blob), NOTIFY signals the
-  // app to re-read when the paired-device set or connection changes.
   g_srcChar = svc->createCharacteristic(
       TDSP_SRC_UUID,
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
   g_srcChar->addDescriptor(new BLE2902());
 
-  // Catalog: song + instrument name lists (streamed from the Teensy). READ +
-  // NOTIFY, same "re-read on change" contract as sources.
   g_songsChar = svc->createCharacteristic(
       TDSP_SONGS_UUID,
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
@@ -674,9 +727,203 @@ static void setupBle() {
   adv->setMinPreferred(0x12);
   BLEDevice::startAdvertising();
 
-  pushStatus();
+  blePushStatus();
   Serial.println("[ble] control service up + advertising");
 }
+
+// BLE front-end behind the ControlTransport seam.
+class BleControlTransport : public ControlTransport {
+ public:
+  void begin() override { setupBle(); }
+  void loop() override {}    // BLE runs in its own FreeRTOS tasks; nothing to poll
+  void pushStatus() override { blePushStatus(); }
+  void pushSources() override { blePushSources(); }
+
+  // Route a Teensy line out to the app over the appropriate characteristic. This is
+  // exactly the old handleTeensyLine() body -- catalog lists get chunk-framed, the
+  // file/manifest stream is forwarded verbatim.
+  void sendToApp(const char *line) override {
+    if      (strncmp(line, "@SONGS=", 7) == 0) { setCatalog(g_songsChar, line + 7); Serial.println("[cat] songs updated"); }
+    else if (strncmp(line, "@INSTR=", 7) == 0) { setCatalog(g_instrChar, line + 7); Serial.println("[cat] instruments updated"); }
+    else if (strncmp(line, "@DRUMS=", 7) == 0) { setCatalog(g_drumsChar, line + 7); Serial.println("[cat] drums updated"); }
+    else if (strncmp(line, "@MANIFESTS=", 11) == 0) { notifyRaw(g_fileChar, line); }
+    else if (strncmp(line, "@FB=", 4) == 0 || strncmp(line, "@FD=", 4) == 0 ||
+             strncmp(line, "@FE=", 4) == 0 || strncmp(line, "@FERR=", 6) == 0) { notifyRaw(g_fileChar, line); }
+    else if (strncmp(line, "@REINDEXED", 10) == 0) { notifyRaw(g_fileChar, line); }
+    else if (strncmp(line, "@DXLS=", 6) == 0 || strncmp(line, "@DXVL=", 6) == 0) { setCatalog(g_fileChar, line); }
+    // The full-state snapshot (@STATE, ~2 KB now that it carries voice2/arp2/caps) and the
+    // opaque app-state blob (@APP) also exceed one MTU, so stream them chunk-framed too. The
+    // app reassembles and routes them to its onLine() handler (hydrate). WITHOUT this the phone
+    // never receives @STATE, so build-gated cards (Synth 2 / Arp 2, via caps) stay hidden.
+    // (The WiFi transport needs none of this: it broadcasts every line whole.)
+    else if (strncmp(line, "@STATE=", 7) == 0 || strncmp(line, "@APP=", 5) == 0) { setCatalog(g_fileChar, line); }
+  }
+};
+
+ControlTransport &controlTransport() { static BleControlTransport t; return t; }
+
+#endif  // TDSP_CTRL_BLE
+
+// ===========================================================================
+//  WiFi LAN WebSocket control transport (-D TDSP_CTRL_WIFI)
+// ===========================================================================
+#if defined(TDSP_CTRL_WIFI)
+
+// WiFi control wire contract (see README):
+//   * Discover the device at tdsp.local; WebSocket server on TDSP_WS_PORT (81).
+//   * Inbound (app -> ESP32, WS TEXT frame):
+//       - a line starting with '@' is relayed VERBATIM to the Teensy (the same
+//         @-protocol Web Serial / BLE CMD_RELAY_LINE use), e.g. "@VOL=50", "@SONG=3".
+//       - a line starting with '!' is a LOCAL A2DP command handled on the ESP32:
+//         "!pair" | "!forget" | "!disconnect" | "!status".
+//       - anything else is ignored (logged).
+//   * Outbound (ESP32 -> app, WS TEXT frame):
+//       - every Teensy @-line is broadcast VERBATIM (no BLE 0x1e chunking; WS frames
+//         are large and the client tolerates whole lines).
+//       - status is a JSON line (buildStatus); the paired-sources JSON is broadcast
+//         as "@SOURCES=<json>".
+
+static WebSocketsServer g_ws(TDSP_WS_PORT);
+
+// One inbound WS TEXT message. '!' = local A2DP verb; '@' = verbatim to the Teensy.
+static void wsHandleText(uint8_t num, const char *msg) {
+  if (msg[0] == '!') {
+    if      (!strcmp(msg, "!pair"))       { Serial.println("[ws] cmd: PAIR");       ctrlEnterPairing(); }
+    else if (!strcmp(msg, "!forget"))     { Serial.println("[ws] cmd: FORGET");     ctrlForget(); }
+    else if (!strcmp(msg, "!disconnect")) { Serial.println("[ws] cmd: DISCONNECT"); ctrlDisconnect(); }
+    else if (!strcmp(msg, "!status"))     { char b[96]; buildStatus(b, sizeof(b)); g_ws.sendTXT(num, b); }
+    else Serial.printf("[ws] unknown local cmd: %s\n", msg);
+    return;
+  }
+  if (msg[0] == '@') { relayLine(msg); return; }   // verbatim to the Teensy
+  Serial.printf("[ws] ignored (not @/!): %s\n", msg);
+}
+
+static void onWsEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t length) {
+  switch (type) {
+    case WStype_CONNECTED: {
+      Serial.printf("[ws] client %u connected\n", num);
+      // Prime the freshly-connected app: current status + ask the Teensy to re-send
+      // its catalog (the app subscribes to the verbatim @SONGS=/@INSTR= that follow).
+      char buf[96];
+      buildStatus(buf, sizeof(buf));
+      g_ws.sendTXT(num, buf);
+      requestCatalog();
+      break;
+    }
+    case WStype_DISCONNECTED:
+      Serial.printf("[ws] client %u disconnected\n", num);
+      break;
+    case WStype_TEXT: {
+      // payload is not guaranteed null-terminated -> bounded copy. Sized for the
+      // largest inbound control line (paths / relayed lines are short).
+      static char msg[1024];
+      size_t n = length < sizeof(msg) - 1 ? length : sizeof(msg) - 1;
+      memcpy(msg, payload, n);
+      msg[n] = 0;
+      wsHandleText(num, msg);
+      break;
+    }
+    default:
+      break;   // BIN/PING/PONG/FRAGMENT not used
+  }
+}
+
+// WiFi + WebSocket + mDNS front-end behind the ControlTransport seam. WiFi shares the
+// radio with A2DP (Bluetooth Classic); the coex arbiter is biased toward BT so audio
+// stays glitch-free. BLE is intentionally NOT started (frees the BLE controller RAM).
+class WifiControlTransport : public ControlTransport {
+ public:
+  void begin() override {
+    WiFi.persistent(false);            // don't wear flash writing creds every boot
+    WiFi.mode(WIFI_STA);
+    WiFi.setHostname(TDSP_MDNS_HOST);  // DHCP hostname (mDNS name set separately)
+    WiFi.setSleep(false);              // keep WS latency low: no modem sleep
+#ifdef TDSP_HAVE_COEX
+    // Bias the WiFi/BT coexistence arbiter toward Bluetooth so A2DP audio is
+    // prioritized over WiFi on the shared radio (best-effort; guarded for portability).
+    esp_coex_preference_set(ESP_COEX_PREFER_BT);
+#endif
+    Serial.printf("[wifi] connecting to \"%s\"...\n", TDSP_WIFI_SSID);
+    WiFi.begin(TDSP_WIFI_SSID, TDSP_WIFI_PASS);   // non-blocking; loop() reports when up
+
+    g_ws.begin();
+    g_ws.onEvent(onWsEvent);
+    Serial.printf("[ws] server listening on port %u\n", (unsigned)TDSP_WS_PORT);
+  }
+
+  void loop() override {
+    g_ws.loop();
+    maintainWifi();
+    // Flush broadcasts requested from the BT task (see pushStatus/pushSources).
+    if (pendingStatus)  { pendingStatus  = false; broadcastStatus(); }
+    if (pendingSources) { pendingSources = false; broadcastSources(); }
+  }
+
+  // Called from loop() (Arduino task) via handleTeensyLine -> safe to send directly.
+  void sendToApp(const char *line) override { g_ws.broadcastTXT(line); }   // verbatim
+
+  // NOTE: these are called from the A2DP callback, which runs in the *BT task*.
+  // arduinoWebSockets is NOT thread-safe and the server is serviced on the Arduino
+  // loop task, so touching g_ws from here could corrupt its client state. Just raise
+  // a flag; loop() does the actual broadcast on the right task.
+  void pushStatus() override  { pendingStatus  = true; }
+  void pushSources() override { pendingSources = true; }
+
+ private:
+  volatile bool pendingStatus  = false;
+  volatile bool pendingSources = false;
+  bool     mdnsUp   = false;
+  bool     wasConn  = false;
+  uint32_t lastTry  = 0;
+
+  void broadcastStatus() {
+    char buf[96];
+    buildStatus(buf, sizeof(buf));
+    g_ws.broadcastTXT(buf);
+  }
+
+  void broadcastSources() {
+    char src[600];
+    buildSources(src, sizeof(src));
+    char buf[640];
+    snprintf(buf, sizeof(buf), "@SOURCES=%s", src);   // framed so the app can tell it apart
+    g_ws.broadcastTXT(buf);
+  }
+
+  void maintainWifi() {
+    if (WiFi.status() == WL_CONNECTED) {
+      if (!wasConn) {
+        wasConn = true;
+        IPAddress ip = WiFi.localIP();
+        Serial.printf("[wifi] connected: %u.%u.%u.%u\n", ip[0], ip[1], ip[2], ip[3]);
+        if (!mdnsUp) startMdns();
+      }
+    } else {
+      if (wasConn) { wasConn = false; Serial.println("[wifi] link lost -> reconnecting"); }
+      uint32_t now = millis();
+      if (now - lastTry >= 5000) { lastTry = now; WiFi.reconnect(); }   // non-blocking retry
+    }
+  }
+
+  void startMdns() {
+    if (MDNS.begin(TDSP_MDNS_HOST)) {
+      MDNS.addService("ws", "tcp", TDSP_WS_PORT);   // advertise the WS service
+      mdnsUp = true;
+      Serial.printf("[mdns] advertising %s.local (_ws._tcp:%u)\n", TDSP_MDNS_HOST, (unsigned)TDSP_WS_PORT);
+    } else {
+      Serial.println("[mdns] FAILED to start");
+    }
+  }
+};
+
+ControlTransport &controlTransport() { static WifiControlTransport t; return t; }
+
+#endif  // TDSP_CTRL_WIFI
+
+// ===========================================================================
+//  Arduino setup()/loop() -- A2DP + I2S (always) + the active control transport.
+// ===========================================================================
 
 // Onboard LED (GPIO2 on the ESP32-DevKitC). Blinked as a heartbeat in loop() so
 // you can SEE the app is actually running -- independent of the serial mirror
@@ -684,23 +931,27 @@ static void setupBle() {
 static constexpr int LED_PIN = 2;
 
 void setup() {
-  Serial.setRxBufferSize(16384);   // hold a full @INSTR/@DXLS catalog burst from the Teensy while the loop is busy notifying BLE (default 256 B overflows -> truncated/lost)
+  Serial.setRxBufferSize(16384);   // hold a full @INSTR/@DXLS catalog burst from the Teensy while the loop is busy (default 256 B overflows)
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
+#if defined(TDSP_CTRL_BLE)
   Serial.println("T-DSP ESP32: A2DP sink + BLE control, starting...");
+#else
+  Serial.println("T-DSP ESP32: A2DP sink + WiFi WebSocket control, starting...");
+#endif
 
-  // CRITICAL: dual mode so BLE survives A2DP start() (see file header).
+  // Bluetooth mode BEFORE start(): BTDM keeps BLE alive alongside A2DP (BLE build);
+  // CLASSIC_BT frees the BLE controller RAM for the WiFi/lwIP/WebSocket stacks (WiFi build).
+#if defined(TDSP_CTRL_BLE)
   a2dp_sink.set_default_bt_mode(ESP_BT_MODE_BTDM);
+#else
+  a2dp_sink.set_default_bt_mode(ESP_BT_MODE_CLASSIC_BT);
+#endif
 
-  // On boot, actively re-establish the last A2DP connection so a reboot
-  // reconnects with NO manual step. (The stale-bond "connecting... stop" is
-  // avoided because WE initiate the reconnect instead of waiting for the phone.)
-  // The bond can still be wiped on demand -- the 'f' serial command and the BLE
-  // FORGET opcode both call clean_last_connection(), after which there is no
-  // device to auto-reconnect to and the sink is freshly pairable.
-  a2dp_sink.set_auto_reconnect(false);   // explicit only: never auto-reconnect to the last phone
+  // Explicit-only: never auto-reconnect to the last phone; the app decides.
+  a2dp_sink.set_auto_reconnect(false);
 
-  // Mirror A2DP connect/disconnect out to the BLE status characteristic.
+  // Mirror A2DP connect/disconnect out to the active transport's status.
   a2dp_sink.set_on_connection_state_changed(onA2dpConnState);
   // Capture each phone's friendly name on connect, for the paired-sources list.
   a2dp_sink.set_peer_name_callback(onPeerName);
@@ -739,35 +990,39 @@ void setup() {
   goIdle("boot");
   Serial.printf("A2DP sink up (idle). Connect from the app to start Bluetooth audio.\n");
 
-  // BLE control comes up AFTER A2DP so it attaches to the running stack.
-  setupBle();
-  requestCatalog();   // cache the Teensy's song/instrument lists early (also re-fetched on BLE connect)
-  Serial.println("Ready: streaming audio + BLE control both live.");
+  // Control transport comes up AFTER A2DP: BLE attaches to the running Bluedroid
+  // stack; WiFi just joins the LAN + starts the WS server. Exactly one is compiled in.
+  controlTransport().begin();
+  requestCatalog();   // cache the Teensy's song/instrument lists early
+  Serial.println("Ready: streaming audio + control transport both live.");
 }
 
 void loop() {
   // Host command interface over UART0. In the bridge-only setup the ESP32's own
   // USB is unplugged, so the Teensy forwards a byte over Serial7 (mix firmware:
-  // 'P'->'p', 'F'->'f') letting the host drive pairing ON COMMAND without the BLE
-  // app. Also works from the ESP32 USB directly when connected.
+  // 'P'->'p', 'F'->'f') letting the host drive pairing ON COMMAND without the app.
   //   p = enter pairing mode (discoverable + connectable)
   //   f = forget last device (clear NVS bond) THEN enter pairing mode  <- clean re-pair
   //   x = disconnect the current A2DP source
-  //   s = print status
+  //   s = print/emit status
   // Heartbeat: blink the onboard LED ~2 Hz so it's visually obvious the app is
-  // running. If this LED is NOT blinking, the ESP32 is stuck (download mode / reset),
-  // not running the app -- the definitive "is it alive" indicator.
+  // running. If this LED is NOT blinking, the ESP32 is stuck (download mode / reset).
   static uint32_t lastBlink = 0;
   if (millis() - lastBlink >= 250) {
     lastBlink = millis();
     digitalWrite(LED_PIN, !digitalRead(LED_PIN));
   }
 
+  // Service the active control transport (WiFi needs webSocket.loop() + reconnect;
+  // BLE is a no-op -- it runs in its own tasks).
+  controlTransport().loop();
+
   // Two framings share this UART: bare single-char commands (p/f/x/s from the
   // Teensy's P/F relay + pairing) and '@'-framed lines (e.g. @SONGS=/@INSTR=
   // catalog). A '@' starts line mode until '\n'; other bytes are single commands.
   // Big enough for the whole catalog line: Dexed's full 320-voice @INSTR list is
-  // ~7 KB. The value is then chunked out over BLE by setCatalog().
+  // ~7 KB. The value is then routed out by the active transport (chunked over BLE,
+  // verbatim over WiFi).
   static char line[8192];
   static size_t ln = 0;
   static bool inLine = false;
@@ -784,18 +1039,16 @@ void loop() {
       continue;
     }
     if (c == 'p') {
-      enterPairingMode("serial cmd");
+      ctrlEnterPairing();
     } else if (c == 'f') {
-      Serial.println("[cmd] FORGET last device, then pairing mode");
-      a2dp_sink.clean_last_connection();
-      enterPairingMode("forget+serial");
+      ctrlForget();
     } else if (c == 'x') {
-      Serial.println("[cmd] DISCONNECT source");
-      a2dp_sink.disconnect();
+      ctrlDisconnect();
     } else if (c == 's') {
-      pushStatus();
+      ctrlStatus();
     }
   }
-  // A2DP + BLE run in their own FreeRTOS tasks; nothing else to poll.
+  // A2DP + (BLE, if built) run in their own FreeRTOS tasks; the WiFi transport is
+  // serviced above via controlTransport().loop(). Small delay to yield.
   delay(20);
 }

@@ -5,8 +5,87 @@ Bluetooth receiver firmware for the **ESP32-DevKitC** on the
 a phone connects over Bluetooth, the ESP32 decodes the audio and streams it to
 the Teensy 4.1 over I2S, and the Teensy plays it through the TAC5212 DAC.
 
+Alongside the audio, a **control front-end** lets a companion app command the
+receiver (pairing / disconnect / forget) and drive the Teensy's `@`-protocol.
+The control transport is chosen at **build time** — **BLE** or **WiFi**, never
+both. **A2DP audio is present in both builds.**
+
 This is the only **ESP32** project in the repo — it builds with
 `platform = espressif32` instead of `platform = teensy`.
+
+## Control transport (build-time choice: BLE *or* WiFi)
+
+| Env | Flag | Control transport | Bluetooth mode |
+|-----|------|-------------------|----------------|
+| `esp32dev` (default) | `-D TDSP_CTRL_BLE` | BLE GATT service (UUIDs/opcodes in [src/main.cpp](src/main.cpp)) | `BTDM` (dual: A2DP Classic + BLE) |
+| `esp32dev_wifi` | `-D TDSP_CTRL_WIFI` | LAN **WebSocket** server at `tdsp.local:81` | `CLASSIC_BT` (A2DP only; BLE RAM freed) |
+
+Exactly one flag must be defined — `src/main.cpp` `#error`s if neither or both are.
+
+Why WiFi drops BLE: the ESP32 has one radio and limited RAM. The WiFi build needs
+the WiFi/lwIP/WebSocket stacks, so it starts Bluetooth in **classic-only** mode,
+which releases the BLE controller RAM. WiFi and A2DP (Classic) then share the
+radio; the coexistence arbiter is biased toward BT (`esp_coex_preference_set(
+ESP_COEX_PREFER_BT)`) so audio stays glitch-free.
+
+### Code shape
+
+A transport-agnostic core (A2DP + I2S setup, the `@`-line relays to the Teensy,
+and the local A2DP verbs) is shared. The two front-ends sit behind a small
+`ControlTransport` interface (`begin` / `loop` / `sendToApp` / `pushStatus` /
+`pushSources`), selected by `#if` and reached via the `controlTransport()`
+singleton.
+
+## WiFi build
+
+### Setting credentials
+
+Credentials are build flags for now (bench/dev). Edit `[env:esp32dev_wifi]` in
+[platformio.ini](platformio.ini):
+
+```ini
+build_flags =
+    -D TDSP_CTRL_WIFI
+    -D TDSP_WIFI_SSID='"MyNetwork"'
+    -D TDSP_WIFI_PASS='"MyPassword"'
+```
+
+The `'"..."'` quoting passes a C string literal to the compiler. Leaving either
+unset still builds but emits a `#warning` and the device won't join a network.
+Optional overrides: `TDSP_WS_PORT` (default `81`), `TDSP_MDNS_HOST` (default `tdsp`).
+
+> Runtime provisioning (captive portal / app-supplied creds) is a **later phase** —
+> today the SSID/password are baked into the image.
+
+### Wire contract
+
+The device is discoverable via mDNS at **`tdsp.local`**, advertising `_ws._tcp`
+on port **81**. The app opens a WebSocket and exchanges **TEXT frames**:
+
+**Inbound (app → ESP32)**
+
+| Frame | Meaning |
+|-------|---------|
+| `@...` | Relayed **verbatim** to the Teensy over UART (same `@`-protocol as Web Serial / BLE `CMD_RELAY_LINE`). e.g. `@VOL=50`, `@SONG=3`, `@DXVOICE=7`, `@GETCAT` |
+| `!pair` | Enter A2DP pairing mode (discoverable + connectable) |
+| `!forget` | Clear the stored bond, then enter pairing mode |
+| `!disconnect` | Drop the current A2DP source |
+| `!status` | Reply with the status JSON to the requesting client |
+| anything else | Ignored (logged) |
+
+**Outbound (ESP32 → app)**
+
+- Every `@`-line from the Teensy is `broadcastTXT`'d **verbatim** to all clients —
+  including `@SONGS=` / `@INSTR=` / `@DRUMS=` and the file-transfer frames.
+  **No BLE chunking**: WiFi frames are large, so there is no `0x1e` framing and no
+  512-byte splitting. The client reads whole lines.
+- Status is a plain JSON line, e.g.
+  `{"conn":1,"disc":0,"vol":50,"hpf":0,"mpe":0,"rg":1,"peer":"Pixel 7"}`
+- The paired-sources list is broadcast as `@SOURCES=<json array>`.
+
+> In the WiFi build the app sends `@`-lines directly, so the ESP32 does not track
+> `vol`/`hpf`/`mpe`/`rg` — those status fields report firmware defaults and the app
+> owns that state. `conn`/`disc`/`peer` are always accurate.
 
 ## Audio path
 
@@ -44,21 +123,50 @@ ESP32 is I2S **master** (generates BCLK/LRCLK); the Teensy is the slave.
 
 ```bash
 cd projects/t-dsp_esp32_bt_receiver
-python -m platformio run                    # build
-python -m platformio run --target upload    # flash over the DevKitC USB port
+
+# BLE control (default/legacy)
+python -m platformio run -e esp32dev
+python -m platformio run -e esp32dev --target upload
+
+# WiFi WebSocket control (set your creds in platformio.ini first)
+python -m platformio run -e esp32dev_wifi
+python -m platformio run -e esp32dev_wifi --target upload
+
 python -m platformio device monitor         # 115200 baud
 ```
 
-Then pair your phone with the Bluetooth device **"T-DSP"** and play audio. The
-device name is set by `BT_DEVICE_NAME` in [src/main.cpp](src/main.cpp).
+Both envs share the pinned platform, the `huge_app.csv` 3 MB partition, the
+115200 bridge-safe upload speed, and the A2DP library — see
+[platformio.ini](platformio.ini) for why each is pinned.
+
+Pair your phone with the Bluetooth device **"T-DSP"** and play audio. The device
+name is set by `BT_DEVICE_NAME` in [src/main.cpp](src/main.cpp). Note the sink
+boots **idle** (explicit-only): connect it from the app (`!pair` over WiFi, or
+the pairing opcode over BLE) or send `p` over UART.
+
+### Image sizes (3 MB `huge_app` partition)
+
+| Env | Flash | RAM (static) |
+|-----|-------|--------------|
+| `esp32dev` (BLE) | 1,182,957 B — 37.6% | 48,856 B — 14.9% |
+| `esp32dev_wifi` | 1,590,849 B — 50.6% | 72,236 B — 22.0% |
+
+The WiFi build drops the BLE GATT stack but adds WiFi + lwIP + WebSocket + mDNS,
+netting ~400 KB more flash. Both fit the 3 MB partition with room to spare.
 
 ## Status
 
 - [x] A2DP sink → I2S master scaffold (mirrors the proven
       [esp32_T4_bt_music_receiver](https://github.com/JayShoe/esp32_T4_bt_music_receiver))
-- [ ] Bench bring-up: pair, confirm BCLK/LRCLK on the scope, verify audio
-      reaches the Teensy on pin 5 (IN2)
-- [ ] Teensy-side `AudioInputI2S2slave_F32` node + 44.1→48k resampler into the
-      TAC5212 graph
+- [x] BLE GATT control service (dual-mode BTDM alongside A2DP)
+- [x] Build-time selectable control transport (`TDSP_CTRL_BLE` | `TDSP_CTRL_WIFI`)
+      behind a `ControlTransport` seam; both envs compile
+- [x] WiFi station + WebSocket control server + mDNS (`tdsp.local`), A2DP kept
+- [ ] **Hardware validation of the WiFi build** — not yet flashed/tested. In
+      particular WiFi + A2DP radio coexistence (audio glitching under WS traffic)
+      is unverified on real hardware.
+- [ ] Runtime WiFi provisioning (creds are build flags today)
+- [ ] App-side `WiFiTransport` (the app currently speaks BLE only)
+- [ ] Cloud-relay agent (remote control beyond the LAN)
 - [ ] Phase 2: Teensy programs this firmware over UART2 + EN + IO0
       (esptool protocol; ref [collin80/GEVCU7](https://github.com/collin80/GEVCU7/tree/main/src/devices/esp32))
