@@ -76,8 +76,11 @@ export type AppliedArp = { pat: number; rate: number; oct: number; latch: boolea
 // Push a preset to the device and return the derived UI state. The step table (if any) is
 // sent BEFORE the param bundle so it is loaded when PatUserSequence (25) engages. Every
 // param rides ONE @ARPPRESET line (atomic + throttle-friendly vs. ~20 separate commands).
-export function applyArpPreset(tp: Transport, p: ArpPreset, slot: 1 | 2 = 1): AppliedArp {
+// `latchKeep` (when provided) overrides the preset's own latch so the user's latch setting
+// is STICKY across preset/pattern changes — a latching preset never silently flips it on.
+export function applyArpPreset(tp: Transport, p: ArpPreset, slot: 1 | 2 = 1, latchKeep?: boolean): AppliedArp {
   const pr = p.params;
+  const latch = latchKeep !== undefined ? latchKeep : !!pr.latch;
   const seq = pr.steps && pr.steps.length ? toSeqSteps(pr.steps) : undefined;
   // Call as a METHOD (not a detached ref) so `this` stays bound inside the transport.
   if (seq) { if (slot === 2) tp.arp2Sequence(seq); else tp.arpSequence(seq); }
@@ -86,7 +89,7 @@ export function applyArpPreset(tp: Transport, p: ArpPreset, slot: 1 | 2 = 1): Ap
     pat: pr.pattern, rate: pr.rate,
     gatePct: Math.round((pr.gate ?? 0.5) * 100),
     swingPct: Math.round((pr.swing ?? 0.5) * 100),
-    oct: pr.octaveRange, octMode: pr.octaveMode, latch: !!pr.latch,
+    oct: pr.octaveRange, octMode: pr.octaveMode, latch,
     velMode: pr.velMode, velFixed: pr.velFixed, velAccent: pr.velAccent,
     stepMask: pr.stepMask, stepLength: pr.stepLength, mpeMode: pr.mpeMode,
     outCh: pr.outputChannel, scatterBase: pr.scatterBase, scatterCount: pr.scatterCount,
@@ -95,5 +98,5 @@ export function applyArpPreset(tp: Transport, p: ArpPreset, slot: 1 | 2 = 1): Ap
   if (slot === 2) tp.arp2Preset(wire); else tp.arpPreset(wire);
 
   const oct = Math.max(1, Math.min(4, (pr.octaveRange ?? 1) | 0));
-  return { pat: pr.pattern, rate: rateIndexFromFw(pr.rate), oct, latch: !!pr.latch, seq };
+  return { pat: pr.pattern, rate: rateIndexFromFw(pr.rate), oct, latch, seq };
 }
