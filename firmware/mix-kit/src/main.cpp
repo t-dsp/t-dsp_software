@@ -1292,8 +1292,8 @@ static void songStop(Track &t) {
     } else {
         t.sink->onAllNotesOff(0);
     }
-    Serial.println("[song] stopped");
-    if (t.caps.ownsMeter) applyMeter();   // song gave up the meter -> revert (voice 1 = meter master)
+    Serial.printf("[%s] stopped\n", t.tag);
+    if (t.caps.ownsMeter) applyMeter();   // gave up the meter -> revert (voice 1 / a groove owns it while it plays)
 }
 
 // Called every loop() per track: if a looping song just ended on its own, restart it. A manual stop
@@ -1526,12 +1526,9 @@ static void drumStartFile(const char* fname, bool rezero = true) {   // by filen
     drumStartPath(path, disp, rezero);
 }
 static void drumStop() {
-    g_drumArmed = false;                                       // cancel a synchro-armed groove
-    muteSongDrums(false);                                      // give the song back its own drums
-    if (!g_drumPlayer.isPlaying()) return;
-    g_drumPlayer.stop();                                       // releases the groove's ch10 notes
-    Serial.println("[drum] stopped");
-    applyMeter();   // groove gave up the meter -> revert to a playing song's, else 4/4
+    g_drumArmed = false;                 // cancel a synchro-armed groove (not a Track concern yet)
+    muteSongDrums(false);                // give the song back its own drums (even if the groove wasn't playing)
+    songStop(g_drumTrack);               // stop + "[drum] stopped" + meter revert, via the unified Track path
 }
 
 #ifdef TDSP_METRONOME
