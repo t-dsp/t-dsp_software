@@ -30,22 +30,6 @@ struct TrackCaps {
     bool splitGuarded;     // start is a no-op unless the pool split is enabled (voice 2 on a split build)
 };
 
-// The per-voice runtime state that used to live in the g_song*/g_song2* globals, now owned per track.
-struct TrackState {
-    char   name[64];       // display name of the loaded song  (was g_curSong{,2}Name)
-    char   arg[100];       // replay arg for loop/restart       (was g_curSong{,2}Arg)
-    bool   loop;           // end-of-song = repeat              (was g_loop / g_song2Loop)
-    bool   wasPlaying;     // for the loop-restart edge         (was g_song{,2}WasPlaying)
-    float  bpm;            // song native tempo                 (was g_song{,2}Bpm)
-    uint8_t bpb;           // song beats/bar                    (was g_song{,2}Bpb)
-    double loopBeats;      // exact synced loop length          (was g_song{,2}LoopBeats)
-    bool   launchPending;  // armed for the next bar edge       (was g_song{,2}LaunchPending)
-    // Pre-loaded launch (parse off the beat, fire instant on the downbeat) — was g_song2Pre*.
-    const tdsp::MidiFileEvent *preEv;
-    uint32_t preCount;
-    double   preLoopBeats;
-};
-
 struct Track {
     tdsp::MidiFilePlayer *player;
     tdsp::ArpFilter      *arp;       // may be null (no TDSP_ARP2) -> player routes straight to sink
@@ -56,6 +40,18 @@ struct Track {
     tdsp::MidiFileEvent  *buf;       // this track's event buffer (SD parse target)
     uint32_t              bufCap;
     void (*setLevel)(int pct);       // backend hook: voice 1 -> synthSetSongVol, voice 2 -> synthSetVoice2Vol
-    TrackState st;
     TrackCaps  caps;
+
+    // Per-voice STATE — POINTERS to the existing file-scope globals. Phase 1 BINDS the state (does
+    // not move it), so the unified helpers read/write it through the track while every other reader
+    // (@STATE, applyTempos, the position feed) keeps using the globals directly. A later cleanup can
+    // fold these into the struct. Each points at g_song{,2}<field>.
+    char    *name;          // g_curSong{,2}Name
+    char    *arg;           // g_curSong{,2}Arg
+    bool    *loop;          // g_loop / g_song2Loop
+    bool    *wasPlaying;    // g_song{,2}WasPlaying
+    float   *bpm;           // g_song{,2}Bpm
+    uint8_t *bpb;           // g_song{,2}Bpb
+    double  *loopBeats;     // g_song{,2}LoopBeats
+    bool    *launchPending; // g_song{,2}LaunchPending
 };

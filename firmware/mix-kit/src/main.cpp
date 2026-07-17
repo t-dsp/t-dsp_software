@@ -1268,18 +1268,20 @@ FLASHMEM static void songStartIndex(int idx) {
     if (songByIndex(idx, arg, sizeof arg, nullptr, 0)) songStartArg(arg);
     else Serial.printf("[song] index %d out of range\n", idx);
 }
-static void songStop() {
-    g_songWasPlaying = false;   // a manual stop must NOT trigger the loop-restart
-    if (!g_player.isPlaying()) return;
-    g_player.stop();
-    // recenter bend + kill the song's notes — but spare ch10 so a looping groove keeps going.
-    if (g_drumPlayer.isPlaying()) {
-        for (uint8_t ch = 1; ch <= 16; ++ch) if (ch != 10) g_synthSink->onAllNotesOff(ch);
+// Stop a track's song (unified — replaces songStop()/song2Stop()). Silence it, disarm the
+// loop-restart, and revert the meter if this track owns it. Voice 1 shares its sink with the ch10
+// drum groove so it spares ch10 (caps.prepSpecial) — voice 2 has a private sink -> plain reset.
+static void songStop(Track &t) {
+    *t.wasPlaying = false;   // a manual stop must NOT trigger the loop-restart
+    if (!t.player->isPlaying()) return;
+    t.player->stop();
+    if (t.caps.prepSpecial && g_drumPlayer.isPlaying()) {
+        for (uint8_t ch = 1; ch <= 16; ++ch) if (ch != 10) t.sink->onAllNotesOff(ch);
     } else {
-        g_synthSink->onAllNotesOff(0);
+        t.sink->onAllNotesOff(0);
     }
     Serial.println("[song] stopped");
-    applyMeter();   // song gave up the meter -> revert to a looping groove's, else 4/4
+    if (t.caps.ownsMeter) applyMeter();   // song gave up the meter -> revert (voice 1 = meter master)
 }
 
 // Called every loop(): if a looping song just ended on its own, restart it. Manual
@@ -1375,13 +1377,6 @@ FLASHMEM static void song2StartArg(const char *arg) {
         return;
     }
     if (song2Preload(arg)) song2FirePreloaded(false);   // immediate start (in phase with the grid)
-}
-static void song2Stop() {
-    g_song2WasPlaying = false;   // a manual stop must NOT trigger the loop-restart
-    if (!g_player2.isPlaying()) return;
-    g_player2.stop();
-    g_synthSinkB->onAllNotesOff(0);
-    Serial.println("[song2] stopped");
 }
 // Hard restart player 2 from the top on a fresh downbeat (mirrors songRestart for voice 1).
 static void song2Restart(const char *arg) {
@@ -1626,9 +1621,9 @@ static void transportPlay() {
     Serial.println("[transport] PLAY (downbeat defined)");
 }
 static void transportStop() {
-    songStop();
+    songStop(g_tracks[0]);
 #if TDSP_VOICE2
-    song2Stop();
+    songStop(g_tracks[1]);
 #endif
     drumStop();
     g_conductor.stop();                     // halt the master clock (players/drums already stopped)
@@ -2189,7 +2184,7 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     else if (strncmp(line, "@SONGF=", 7) == 0)    songLaunch(line + 7);     // @SONGF=<filename|name> (play by name — the app's path; bar-quantized if @QUANTIZE=1)
     else if (strncmp(line, "@SONGRESTART=", 13) == 0) songRestart(line + 13);   // hard restart on a fresh downbeat (zeroes the clock, ignores quantize) — the app's Play / ‹ ›
     else if (strncmp(line, "@SONG=", 6) == 0) {
-        if (strcmp(line + 6, "stop") == 0) songStop();
+        if (strcmp(line + 6, "stop") == 0) songStop(g_tracks[0]);
         else songStartIndex(atoi(line + 6));   // @SONG=<catalog index> (legacy; resolved via songs.ndjson)
     }
 #if TDSP_VOICE2
@@ -2197,7 +2192,7 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     // immediately (no launch-quantize slot); it still locks to the running grid via sync. ---
     else if (strncmp(line, "@SONG2RESTART=", 14) == 0) song2Restart(line + 14);   // hard restart player 2 on a fresh downbeat
     else if (strncmp(line, "@SONG2F=", 8) == 0)   song2StartArg(line + 8);        // @SONG2F=<filename|name>
-    else if (strncmp(line, "@SONG2=", 7) == 0)  { if (strcmp(line + 7, "stop") == 0) song2Stop(); }
+    else if (strncmp(line, "@SONG2=", 7) == 0)  { if (strcmp(line + 7, "stop") == 0) songStop(g_tracks[1]); }
     else if (strncmp(line, "@LOOP2=", 7) == 0)  { g_song2Loop = (atoi(line + 7) != 0);
                                  Serial.printf("[song2] loop %s\n", g_song2Loop ? "ON" : "off"); }
 #endif
@@ -2514,7 +2509,7 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
                 // Disabling Synth B: engines 4..7 rejoin Synth A, so nothing may keep driving the
                 // B sink or its notes collide with voice 1. Stop the B song player and silence
                 // arp 2 BEFORE the pool reunifies (while engines 4..7 are still B's).
-                song2Stop();
+                songStop(g_tracks[1]);
 #if TDSP_ARP2
                 g_arpFilter2.panic();
 #endif
@@ -2650,7 +2645,8 @@ FLASHMEM static void tracksInit() {
 #endif
     t0.sink = g_synthSink; t0.buf = g_buf; t0.bufCap = MAX_EVENTS; t0.setLevel = setSongVol;
     t0.caps = { /*ownsGlobalMode*/true, /*ownsMeter*/true, /*prepSpecial*/true, /*splitGuarded*/false };
-    t0.st.bpm = 120.0f; t0.st.bpb = 4;
+    t0.name = g_curSongName; t0.arg = g_curSongArg; t0.loop = &g_loop; t0.wasPlaying = &g_songWasPlaying;
+    t0.bpm = &g_songBpm; t0.bpb = &g_songBpb; t0.loopBeats = &g_songLoopBeats; t0.launchPending = &g_songLaunchPending;
 #if TDSP_VOICE2
     Track &t1 = g_tracks[1];
     t1.player = &g_player2;
@@ -2667,7 +2663,8 @@ FLASHMEM static void tracksInit() {
 #endif
     t1.sink = g_synthSinkB; t1.buf = g_buf2; t1.bufCap = MAX_EVENTS2; t1.setLevel = synthSetVoice2Vol;
     t1.caps = { false, false, false, /*splitGuarded*/true };
-    t1.st.bpm = 120.0f; t1.st.bpb = 4;
+    t1.name = g_curSong2Name; t1.arg = g_curSong2Arg; t1.loop = &g_song2Loop; t1.wasPlaying = &g_song2WasPlaying;
+    t1.bpm = &g_song2Bpm; t1.bpb = &g_song2Bpb; t1.loopBeats = &g_song2LoopBeats; t1.launchPending = &g_song2LaunchPending;
 #endif
 }
 
@@ -3161,7 +3158,7 @@ void loop() {
                                  if (g_codecOk) applyVol(); applyAppMaster();
                                  Serial.printf("[cmd] codec=%s (%s), out %.0f dB, app master %d%%\n",
                                                g_codecOk ? "OK" : "FAIL", g_codecMsg, (double)g_dvol, g_appMasterPct); }
-            else if (c == 'W') { if (g_player.isPlaying()) songStop();                       // play/stop
+            else if (c == 'W') { if (g_player.isPlaying()) songStop(g_tracks[0]);             // play/stop
                                  else if (g_curSongArg[0]) songStartArg(g_curSongArg);
                                  else songStartIndex(0); }
             else if (c == 'S') { int n = songCatalogCount();                                 // browse to the next song (no play)
