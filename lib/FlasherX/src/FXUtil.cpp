@@ -28,6 +28,7 @@ typedef struct {	//
 // hex_info_t	struct for hex record and hex file info
 //******************************************************************************
 void read_ascii_line( Stream *serial, char *line, int maxbytes );
+bool fx_read_timed_out();   // LOCAL MOD: defined with read_ascii_line below
 int  parse_hex_line( const char *theline, char *bytes,
 	unsigned int *addr, unsigned int *num, unsigned int *code );
 int  process_hex_record( hex_info_t *hex );
@@ -54,6 +55,10 @@ void update_firmware( Stream *in, Stream *out,
   while (!hex.eof)  {
 
     read_ascii_line( in, line, sizeof(line) );
+    if (fx_read_timed_out()) {   // LOCAL MOD: relay stalled -> abort (caller reboots)
+      out->printf( "abort - receive timeout\n" );
+      return;
+    }
     // reliability of transfer via USB is improved by this printf/flush
     if (in == out && out == (Stream*)&Serial) {
       out->printf( "%s\n", line );
@@ -116,6 +121,10 @@ void update_firmware( Stream *in, Stream *out,
   while (user_lines != hex.lines && user_lines != 0) {
     out->printf( "enter %d to flash or 0 to abort\n", hex.lines );
     read_ascii_line( out, line, sizeof(line) );
+    if (fx_read_timed_out()) {   // LOCAL MOD: no confirm within timeout -> abort
+      out->printf( "abort - confirm timeout\n" );
+      return;
+    }
     sscanf( line, "%d", &user_lines );
   }
   
@@ -138,9 +147,20 @@ void update_firmware( Stream *in, Stream *out,
 //******************************************************************************
 // read_ascii_line()	read ascii characters until '\n', '\r', or max bytes
 //******************************************************************************
+// LOCAL MOD (T-DSP): stall guard. Upstream read_ascii_line() busy-waits for the
+// next byte forever. Over USB that's fine (human-driven), but over the ESP32 relay
+// a dropped WiFi client leaves the Teensy spinning here with no way out -- it hung
+// the board once. Add an inter-byte timeout: on stall we set a flag the caller
+// (update_firmware) checks to abort cleanly (free buffer + reboot) instead of hanging.
+static const uint32_t FX_RX_TIMEOUT_MS = 8000;  // no byte for this long -> abort
+static volatile bool   s_fx_timed_out = false;
+bool fx_read_timed_out() { return s_fx_timed_out; }
+
 void read_ascii_line( Stream *serial, char *line, int maxbytes )
 {
   int c=0, nchar=0;
+  uint32_t t0 = millis();
+  s_fx_timed_out = false;
   while (serial->available()) {
     c = serial->read();
     if (c == '\n' || c == '\r')
@@ -154,6 +174,11 @@ void read_ascii_line( Stream *serial, char *line, int maxbytes )
     if (serial->available()) {
       c = serial->read();
       line[nchar++] = c;
+      t0 = millis();                                    // LOCAL MOD: progress resets timer
+    } else if ((uint32_t)(millis() - t0) > FX_RX_TIMEOUT_MS) {
+      s_fx_timed_out = true;                            // LOCAL MOD: stall -> flag + bail
+      line[nchar++] = '\n';                             // keep the index below valid
+      break;
     }
   }
   line[nchar-1] = 0;	// null-terminate

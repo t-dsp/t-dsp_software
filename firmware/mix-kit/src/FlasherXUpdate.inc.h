@@ -25,6 +25,17 @@ extern "C" {
 // FlasherX's serial mode). Blocks while the image transfers. Reboots into the new
 // firmware on success (never returns); returns only on error/abort.
 static void fxRunUpdate(Stream& io) {
+  // Over the ESP32 UART relay, bytes stream in continuously at 115200 while
+  // FlasherX pauses to write each record to flash (interrupts briefly off). The
+  // default 64-byte Serial7 RX ring can overflow during those pauses -> a dropped
+  // byte -> "bad hex line". Give the UART a large RX ring so it rides through the
+  // write pauses. Only for the UART path (the USB Serial isn't a HardwareSerial).
+  // MUST live in DMAMEM (OCRAM): this Dexed-pool build leaves only ~15 KB DTCM
+  // stack, so an 8 KB DTCM static overflows the stack when the A2DP graph goes live
+  // (crash-loop on boot -- learned the hard way). OCRAM has 500+ KB free.
+  static DMAMEM uint8_t s_rxbuf[8192];
+  if (&io == (Stream*)&Serial7) Serial7.addMemoryForRead(s_rxbuf, sizeof(s_rxbuf));
+
   uint32_t buffer_addr, buffer_size;
   io.printf("[fx] FlasherX update — target %s (%dK flash, %dK sectors)\n",
             FLASH_ID, FLASH_SIZE / 1024, FLASH_SECTOR_SIZE / 1024);
