@@ -177,6 +177,52 @@ function PageHeader({ title, value, status, subtitle, actions, progress, onBack,
   );
 }
 
+// A tiny pub/sub for catalog-load progress. The load emits ~10 updates/sec; if that drove
+// App-level state it would re-render the ENTIRE app that often, and those synchronous renders
+// starve the USB reader loop enough to stall the very transfer we're showing (a self-inflicted
+// hang — see catalog.ts throttle note). So progress flows through this bus to LoadScreen ONLY,
+// which owns its own state and re-renders in isolation. `last` lets a fresh subscriber catch up.
+class ProgressBus {
+  private listeners = new Set<(p: LoadProgress | null) => void>();
+  private last: LoadProgress | null = null;
+  emit = (p: LoadProgress | null) => { this.last = p; this.listeners.forEach(l => l(p)); };
+  get value() { return this.last; }
+  subscribe(l: (p: LoadProgress | null) => void) { this.listeners.add(l); l(this.last); return () => { this.listeners.delete(l); }; }   // replay latest so a subscriber can't miss the mount→effect gap
+}
+
+// The "Loading catalog…" screen. Owns progress + elapsed-seconds state locally (fed by the
+// ProgressBus) so its 10x/sec updates re-render this component alone, not the whole App.
+function LoadScreen({ bus, tpLabel }: { bus: ProgressBus; tpLabel: string }) {
+  const [prog, setProg] = useState<LoadProgress | null>(bus.value);
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => bus.subscribe(setProg), [bus]);
+  // Ticks while this screen is mounted (i.e. connected but not yet loaded), so the load reads
+  // as "working" even if a single @READ stalls — a frozen bar looks broken.
+  useEffect(() => {
+    const t0 = Date.now();
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - t0) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const pct = prog && prog.total > 0 ? Math.min(100, Math.round(100 * prog.done / prog.total)) : 0;
+  return (
+    <View style={s.loadWrap}>
+      <ActivityIndicator color={C.accent} size="large" />
+      <Text style={s.loadTitle}>Loading catalog…</Text>
+      {prog && prog.index > 0 && prog.det && prog.total > 0 ? (
+        // A file is streaming and the device reported sizes: live byte-fraction bar.
+        <>
+          <View style={s.loadTrack}><View style={[s.loadFill, { width: `${pct}%` }]} /></View>
+          <Text style={s.loadSub}>{prog.label} · {prog.index}/{prog.count} · {pct}% · {kb(prog.done)}/{kb(prog.total)} KB</Text>
+        </>
+      ) : (
+        // Reading the index, or old firmware with no sizes: name the step instead.
+        <Text style={s.loadSub}>{prog && prog.index > 0 ? `${prog.label} · ${prog.index}/${prog.count}` : 'Reading catalog index…'}</Text>
+      )}
+      <Text style={s.loadHint}>{elapsed}s elapsed{elapsed >= 6 ? ` · streaming over ${tpLabel}…` : ''}</Text>
+    </View>
+  );
+}
+
 // A transport button for a section header (nested Pressable → doesn't navigate the card).
 // All header buttons share one uniform width (s.hdrBtn.minWidth).
 const HdrBtn = ({ label, onPress, stop }: { label: string; onPress: () => void; stop?: boolean }) => (
@@ -302,8 +348,11 @@ export default function App() {
     return () => { d.stop(); setScanning(false); };
   }, [tkind, connected, connecting]);
   useEffect(() => () => discoRef.current.stop(), []);   // release the scanner on unmount
-  const [prog, setProg] = useState<LoadProgress | null>(null);   // catalog load progress (drives the loading screen); null when not loading
-  const [loadElapsed, setLoadElapsed] = useState(0);             // seconds on the current catalog load — shows it's alive even if a read stalls
+  // Catalog-load progress rides a ProgressBus (module scope) into <LoadScreen>, NOT App state,
+  // so the ~10/sec load ticks don't re-render the whole App (that starved the USB reader and
+  // stalled the transfer). The bus is stable for the App's lifetime.
+  const busRef = useRef<ProgressBus | null>(null);
+  const progBus = (busRef.current ??= new ProgressBus());
   const manualStopRef = useRef(false);                  // set on user Stop so the resulting @SONGP=-1 isn't treated as a natural song end
   const onSongEndRef = useRef<() => void>(() => {});     // latest "song finished naturally" handler (continue/shuffle); kept in a ref so the @SONGP listener never goes stale
   const manualStop2Ref = useRef(false);                 // same guards for MIDI Player 2 (@SONG2P feed)
@@ -549,7 +598,7 @@ export default function App() {
     catch (e: any) { if (!auto && !userDiscRef.current) notify('Connect failed: ' + e + (Platform.OS === 'web' && tkind !== 'wifi' ? '\n\nClose any control.html tab (one page owns the port), then retry.' : '')); }
     finally { connectingRef.current = false; setConnecting(false); }
   }
-  async function disconnect() { try { await tp.disconnect(); } catch {} setConnected(false); setConnecting(false); setLoaded(false); setProg(null); setRoute('home'); }
+  async function disconnect() { try { await tp.disconnect(); } catch {} setConnected(false); setConnecting(false); setLoaded(false); progBus.emit(null); setRoute('home'); }
   // Button handlers wrap connect/disconnect so a *manual* disconnect suppresses auto-reconnect
   // (else the poll below would immediately reconnect and the Disconnect button would do nothing).
   // userDiscRef is set synchronously (before the async setState lands) so connect() sees a
@@ -574,18 +623,12 @@ export default function App() {
     }, 4000);
     return () => { cancelled = true; clearInterval(id); };
   }, [tp, tkind]);
-  // Tick an elapsed-seconds counter while the catalog is loading, so the load screen
-  // reads as "working" even if a single @READ stalls (a frozen bar looks broken).
-  useEffect(() => {
-    if (!(connected && !loaded)) { setLoadElapsed(0); return; }
-    const t0 = Date.now();
-    const id = setInterval(() => setLoadElapsed(Math.floor((Date.now() - t0) / 1000)), 1000);
-    return () => clearInterval(id);
-  }, [connected, loaded]);
+  // (elapsed-seconds ticker now lives inside <LoadScreen>, which mounts exactly while the
+  // catalog is loading — so it no longer re-renders App every second.)
   async function load() {
-    try { const c = await loadCatalog(tp, setProg); setCat(c); setLoaded(true); setProg(null); }
+    try { const c = await loadCatalog(tp, progBus.emit); setCat(c); setLoaded(true); progBus.emit(null); }
     catch (e: any) {
-      setProg(null);
+      progBus.emit(null);
       const yes = Platform.OS === 'web'
         ? (globalThis as any).confirm?.('Catalog load failed: ' + (e?.message || e) + '\n\nRebuild it now (@REINDEX)?')
         : true;
@@ -1685,23 +1728,7 @@ export default function App() {
       {/* Connected but the catalog is still streaming: show a load screen instead of the
           half-populated (broken-looking) homepage. Determinate bar when the device announced
           sizes; otherwise an indeterminate spinner. */}
-      {connected && !loaded && (
-        <View style={s.loadWrap}>
-          <ActivityIndicator color={C.accent} size="large" />
-          <Text style={s.loadTitle}>Loading catalog…</Text>
-          {prog && prog.index > 0 && prog.det && prog.total > 0 ? (
-            // A file is streaming and the device reported sizes: live byte-fraction bar.
-            <>
-              <View style={s.loadTrack}><View style={[s.loadFill, { width: `${Math.min(100, Math.round(100 * prog.done / prog.total))}%` }]} /></View>
-              <Text style={s.loadSub}>{prog.label} · {prog.index}/{prog.count} · {Math.min(100, Math.round(100 * prog.done / prog.total))}% · {kb(prog.done)}/{kb(prog.total)} KB</Text>
-            </>
-          ) : (
-            // Reading the index, or old firmware with no sizes: name the step instead.
-            <Text style={s.loadSub}>{prog && prog.index > 0 ? `${prog.label} · ${prog.index}/${prog.count}` : 'Reading catalog index…'}</Text>
-          )}
-          <Text style={s.loadHint}>{loadElapsed}s elapsed{loadElapsed >= 6 ? ` · streaming over ${TP_LABEL[tp.name]}…` : ''}</Text>
-        </View>
-      )}
+      {connected && !loaded && <LoadScreen bus={progBus} tpLabel={TP_LABEL[tp.name]} />}
 
       {connected && loaded && (
         <View style={{ flex: 1 }}>
