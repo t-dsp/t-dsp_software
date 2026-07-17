@@ -40,7 +40,19 @@ struct Track {
     tdsp::MidiFileEvent  *buf;       // this track's event buffer (SD parse target)
     uint32_t              bufCap;
     void (*setLevel)(int pct);       // backend hook: voice 1 -> synthSetSongVol, voice 2 -> synthSetVoice2Vol
+    const char *tag;                 // log/serial tag: "song" (voice 1) / "song2" (voice 2). Voice 1's
+                                     // "[song] <n> bpm" print is the one the app parses (Reset->song bpm).
     TrackCaps  caps;
+
+    // Preload stash (trackPreload -> trackFire): the loaded event stream + how to launch it, so the
+    // bar-edge fire is play()+sync with NO SD parse on the downbeat (this is voice 2's preload/fire
+    // pattern, now shared by voice 1 too — the P1.4 improvement). Internal to the start path; nothing
+    // outside trackPreload/trackFire reads it (it replaced the old g_song2Pre* globals).
+    const tdsp::MidiFileEvent *preEv;   // stream to play (this track's buf, or a baked flash array)
+    uint32_t preCount;                  // events in preEv
+    double   preLoopBeats;              // exact loop length from the SD parse (0 => derive from ms)
+    bool     preForceMode;              // fire always sets the global MIDI/MPE mode (a test song) — caps.ownsGlobalMode-gated
+    bool     preMpe;                    // the mode to apply/force on fire
 
     // Per-voice STATE — POINTERS to the existing file-scope globals. Phase 1 BINDS the state (does
     // not move it), so the unified helpers read/write it through the track while every other reader

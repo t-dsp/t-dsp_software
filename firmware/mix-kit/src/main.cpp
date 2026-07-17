@@ -925,22 +925,19 @@ static bool g_engineHasDrums = false;// engine renders ch10 (captured once at se
 // LAUNCH QUANTIZE (opt-in, default off): defer a song/groove START to the next bar edge of
 // the free-running master clock — the SAME grid the arp already steps on — so songs, grooves
 // and the arp all share one downbeat and stay locked. A launch only ever waits ≤ 1 bar. The
-// per-loop restart of a looping song is NOT quantized (it re-arms via songStartArg directly),
+// per-loop restart of a looping song is NOT quantized (it re-arms via trackStartArg directly),
 // so a loop never grows a bar-long gap. This aligns to the free grid without re-zeroing it.
 static bool g_launchQuantize   = false;
-static bool g_songLaunchPending = false;
-static char g_pendingSongArg[64] = {0};
+static bool g_songLaunchPending = false;   // player 1 (@SONGF/@SONGRESTART) armed for the next bar
 static bool g_drumLaunchPending = false;
 static char g_pendingDrumFile[80] = {0};
 #if TDSP_VOICE2
-static bool g_song2LaunchPending = false;   // player 2 (@SONG2) armed for the next bar (see song2Restart)
-// PRE-LOADED player-2 launch: the (blocking) SD parse runs when the launch is ARMED, not on the
-// downbeat — so firing on the bar edge is just play()+sync and never stalls loop() right when both
-// players need to hit their downbeat note (that stall was dropping notes). See song2Preload().
-static const tdsp::MidiFileEvent *g_song2PreEv = nullptr;
-static uint32_t g_song2PreCount     = 0;
-static double   g_song2PreLoopBeats = 0.0;
+static bool g_song2LaunchPending = false;   // player 2 (@SONG2) armed for the next bar (see trackRestart)
 #endif
+// A pending song launch (either voice) now stashes its PRELOADED stream in the Track (t.preEv/…),
+// not a filename to re-parse on the beat: the (blocking) SD parse runs when the launch is ARMED, so
+// firing on the bar edge is just play()+sync and never stalls loop() when players need their downbeat
+// note (that stall was dropping notes). See trackPreload()/trackFire().
 // Set true just before a bar-quantized launch fires, so songApplySync/song2ApplySync anchor the
 // player at the downbeat FROM ITS TOP (never re-zeroing the shared clock under a running player).
 static bool g_syncAnchorNow = false;
@@ -1007,7 +1004,7 @@ static bool g_forceTransportZero = false;
 // player to start defines the grid's zero point; every later player JOINS the running grid
 // in phase (a synced player anchors itself via fmod(now, loopBeats) in setSyncedMode). Never
 // yank the grid out from under an already-locked song/groove/arp — UNLESS g_forceTransportZero
-// is set, i.e. the user explicitly asked to restart the song from the top (see songRestart).
+// is set, i.e. the user explicitly asked to restart the song from the top (see trackRestart).
 // PLAN §5. Call this BEFORE the new player's play()/setSyncedMode(), so the anchor reads the
 // (possibly re-zeroed) clock.
 #if TDSP_RECORDER
@@ -1178,96 +1175,106 @@ static void songPrep(Track &t) {
 #endif
 }
 
-// Play a baked built-in (test sequence or legacy demo) by display name. Returns true
-// if a built-in matched; false lets the caller fall back to an SD lookup.
-FLASHMEM static bool songStartBuiltin(const char *name) {
-    // Rich MPE/MIDI test sequences: set the device mode (MPE tests need per-note
-    // expression) then hand the events straight to the player — no expansion needed.
-    for (int i = 0; i < testsong::kNumTestSongs; ++i) {
-        if (strcasecmp(name, testsong::kTestSongs[i].name) != 0) continue;
-        songPrep(g_tracks[0]);
-        applyMidiMode(testsong::kTestSongs[i].mpe);
-        g_songBpm = testsong::kTestSongs[i].bpm; applyTempos();        // per-song native tempo -> master
-        snprintf(g_curSongName, sizeof g_curSongName, "%s", testsong::kTestSongs[i].name);
-        snprintf(g_curSongArg,  sizeof g_curSongArg,  "%s", testsong::kTestSongs[i].name);
-        // Print the BPM so the app auto-follows the song's tempo (its @STATE/[song] handler
-        // sets master BPM from this) — drums + arp then lock to the same grid.
-        Serial.printf("[song] %s -> %s (%s, %lu events, %.1f bpm, start)\n", g_curSongName, synthName(),
-                      testsong::kTestSongs[i].mpe ? "MPE" : "MIDI", (unsigned long)testsong::kTestSongs[i].count,
-                      (double)g_songBpm);
-        g_songBpb = 4;   // baked test sequence: no time-sig meta -> common time
-        ensureTransportStarted();   // auto-start: define the grid on the first player, else lock in phase
-        g_player.play(testsong::kTestSongs[i].ev, testsong::kTestSongs[i].count);
-        songApplySync(g_tracks[0], 0.0);   // baked: loopBeats derived from the stream's total ms
-        applyMeter();
-        g_songBarClock = 0;
-        return true;
-    }
-    // Baked legacy demos (SongEv, tempo estimate). A prior MPE test may have left the
-    // device in MPE mode — return to normal MIDI so a multitimbral song plays right.
-    for (int i = 0; i < kNumBuiltin; ++i) {
-        if (strcasecmp(name, kBuiltinSongs[i].name) != 0) continue;
-        songPrep(g_tracks[0]);
-        if (g_mpeMode) applyMidiMode(false);
-        g_songBpm = kBuiltinSongs[i].bpm;
-        uint32_t n = tdsp::expandLegacyNotes(kBuiltinSongs[i].ev, kBuiltinSongs[i].count, g_buf, MAX_EVENTS);
-        snprintf(g_curSongName, sizeof g_curSongName, "%s", kBuiltinSongs[i].name);
-        snprintf(g_curSongArg,  sizeof g_curSongArg,  "%s", kBuiltinSongs[i].name);
-        Serial.printf("[song] %s (%.1f bpm est) -> %s (start)\n", g_curSongName, (double)g_songBpm, synthName());
-        g_songBpb = 4;   // baked legacy demo: no time-sig meta -> common time
-        if (n) {
-            applyTempos();
-            ensureTransportStarted();
-            g_player.play(g_buf, n);
-            songApplySync(g_tracks[0], 0.0);   // baked: loopBeats derived from the stream's total ms
-            applyMeter(); g_songBarClock = 0;
-        }
-        return true;
-    }
-    return false;
-}
+// Both per-voice name/arg buffers are the same size; the unified helpers write through the Track's
+// name/arg pointers with these caps (g_curSong{,2}Name are [64], g_curSong{,2}Arg are [100]).
+static constexpr size_t kSongNameCap = sizeof g_curSongName;
+static constexpr size_t kSongArgCap  = sizeof g_curSongArg;
 
-// Play an SD .mid by absolute path (disp = display name, arg = the @SONGF replay arg).
-FLASHMEM static bool songStartSd(const char *path, const char *disp, const char *arg) {
-    songPrep(g_tracks[0]);
-    if (g_mpeMode) applyMidiMode(false);
-    g_songBpm = 120.0f; g_songBpb = 4; double parsedLoopBeats = 0.0;
-    int got = tdsp::smf::loadSmfFile(path, g_buf, MAX_EVENTS, &g_songBpm, &g_songBpb, &parsedLoopBeats);   // + exact loop length
-    if (got <= 0) { Serial.printf("[song] SD load FAILED: %s\n", path); return false; }
-    snprintf(g_curSongName, sizeof g_curSongName, "%s", disp);
-    snprintf(g_curSongArg,  sizeof g_curSongArg,  "%s", arg);
-    Serial.printf("[song] %s (SD, %lu events, %.1f bpm, %u beats/bar, psram=%uMB ocramFree=%luKB) -> %s (start)\n",
-                  disp, (unsigned long)got, (double)g_songBpm, (unsigned)g_songBpb,
-                  (unsigned)external_psram_size, (unsigned long)(tdsp::smf::ocramHeapFree() / 1024), synthName());
-    applyTempos();   // retime the song (and groove) to the master BPM
-    ensureTransportStarted();       // auto-start: define the grid if idle, else join in phase
-    g_player.play(g_buf, (uint32_t)got);
-    songApplySync(g_tracks[0], parsedLoopBeats);   // lock a looping song to the grid (exact length from the parse)
-    applyMeter();    // bar length from the song's time signature (song = meter master)
-    g_songBarClock = 0;
-    return true;
-}
+// --- Unified START path (P1.4): one preload -> fire Track& path for EVERY voice ----------------
+// Replaces the old song*/song2* start families. LOAD (the slow, blocking part) runs in trackPreload;
+// trackFire is fast play()+sync so it can land ON a bar downbeat without stalling loop() (that stall
+// dropped the downbeat note — the whole reason voice 2 preloaded). Folding voice 1 onto this pattern
+// is the deliberate P1.4 improvement: voice 1's start no longer parses SD on the beat. The three
+// voice-1-only side effects (global MIDI/MPE mode, meter ownership, the special prep) are caps-gated.
 
-// Play a song by NAME — the @SONGF primitive (mirrors @DRUMF). `arg` ending in ".mid"
-// is an SD file in /songs (or the card root); otherwise it's a built-in display name.
-// No index, no registry, no cap.
-FLASHMEM static void songStartArg(const char *arg) {
-    if (!arg || !*arg) return;
+// trackPreload: load `arg` into the track's stash (t.preEv/preCount/preLoopBeats + how to set the
+// device mode on fire) with NO sink/clock side effects — safe to call while other players run, off
+// the downbeat. `arg` ending in ".mid" is an SD file in /songs (or the card root); otherwise a baked
+// built-in (test sequence or legacy demo) by display name. Returns false if not found / load failed.
+FLASHMEM static bool trackPreload(Track &t, const char *arg) {
+    if (!arg || !*arg) return false;
+    *t.bpm = 120.0f; *t.bpb = 4;
+    t.preEv = nullptr; t.preCount = 0; t.preLoopBeats = 0.0;
+    t.preForceMode = false; t.preMpe = false;   // default (SD / legacy): force normal MIDI only if currently MPE
     if (endsWithMid(arg)) {
         char path[128]; char disp[64]; songDisp(disp, sizeof disp, arg);
         snprintf(path, sizeof path, "/songs/%s", arg);
         if (!SD.exists(path)) snprintf(path, sizeof path, "/%s", arg);
-        songStartSd(path, disp, arg);
-    } else if (!songStartBuiltin(arg)) {
-        Serial.printf("[song] not found: %s\n", arg);
+        double plb = 0.0;
+        int got = tdsp::smf::loadSmfFile(path, t.buf, t.bufCap, t.bpm, t.bpb, &plb);   // + exact loop length
+        if (got <= 0) { Serial.printf("[%s] SD load FAILED: %s\n", t.tag, path); return false; }
+        snprintf(t.name, kSongNameCap, "%s", disp);
+        snprintf(t.arg,  kSongArgCap,  "%s", arg);
+        t.preEv = t.buf; t.preCount = (uint32_t)got; t.preLoopBeats = plb;
+        // The "[song] … bpm" line the app parses (Reset->song bpm) — emitted at preload, not fire.
+        Serial.printf("[%s] %s (SD, %lu events, %.1f bpm, %u beats/bar, psram=%uMB ocramFree=%luKB) -> %s (preloaded)\n",
+                      t.tag, disp, (unsigned long)got, (double)*t.bpm, (unsigned)*t.bpb,
+                      (unsigned)external_psram_size, (unsigned long)(tdsp::smf::ocramHeapFree() / 1024), synthName());
+        return true;
     }
+    // Rich MPE/MIDI test sequences: play straight from flash (no expansion). A test sets the device
+    // mode on fire (preForceMode) so an MPE test gets per-note expression.
+    for (int i = 0; i < testsong::kNumTestSongs; ++i) {
+        if (strcasecmp(arg, testsong::kTestSongs[i].name) != 0) continue;
+        *t.bpm = testsong::kTestSongs[i].bpm; *t.bpb = 4;
+        snprintf(t.name, kSongNameCap, "%s", testsong::kTestSongs[i].name);
+        snprintf(t.arg,  kSongArgCap,  "%s", testsong::kTestSongs[i].name);
+        t.preEv = testsong::kTestSongs[i].ev; t.preCount = testsong::kTestSongs[i].count;
+        t.preForceMode = true; t.preMpe = testsong::kTestSongs[i].mpe;
+        Serial.printf("[%s] %s (%s, %lu events, %.1f bpm) -> %s (preloaded)\n", t.tag, testsong::kTestSongs[i].name,
+                      testsong::kTestSongs[i].mpe ? "MPE" : "MIDI", (unsigned long)t.preCount, (double)*t.bpm, synthName());
+        return true;
+    }
+    // Baked legacy demos (SongEv, tempo estimate) — expand into the track's buffer. A prior MPE test
+    // may have left MPE on; fire returns to normal MIDI so a multitimbral song plays right (default preMpe).
+    for (int i = 0; i < kNumBuiltin; ++i) {
+        if (strcasecmp(arg, kBuiltinSongs[i].name) != 0) continue;
+        *t.bpm = kBuiltinSongs[i].bpm; *t.bpb = 4;
+        uint32_t n = tdsp::expandLegacyNotes(kBuiltinSongs[i].ev, kBuiltinSongs[i].count, t.buf, t.bufCap);
+        if (!n) return false;
+        snprintf(t.name, kSongNameCap, "%s", kBuiltinSongs[i].name);
+        snprintf(t.arg,  kSongArgCap,  "%s", kBuiltinSongs[i].name);
+        t.preEv = t.buf; t.preCount = n;
+        Serial.printf("[%s] %s (%.1f bpm est) -> %s (preloaded)\n", t.tag, kBuiltinSongs[i].name, (double)*t.bpm, synthName());
+        return true;
+    }
+    Serial.printf("[%s] not found: %s\n", t.tag, arg);
+    return false;
+}
+
+// trackFire: PLAY the preloaded stream — fast + non-blocking, so it can fire ON the downbeat without
+// stalling loop(). anchorNow=true starts it from its top at the current beat (a quantized bar launch);
+// false joins the running grid in phase. The voice-1-only global-mode/meter effects are caps-gated.
+static void trackFire(Track &t, bool anchorNow) {
+    if (!t.preEv || t.preCount == 0) return;
+    songPrep(t);
+    if (t.caps.ownsGlobalMode && (t.preForceMode || g_mpeMode != t.preMpe)) applyMidiMode(t.preMpe);
+    applyTempos();              // retime this player (and the groove) to the master BPM
+    ensureTransportStarted();   // define the grid if idle, else join the running clock in phase
+    t.player->play(t.preEv, t.preCount);
+    g_syncAnchorNow = anchorNow;
+    songApplySync(t, t.preLoopBeats);   // grid-lock (exact length from the parse, else derived from ms)
+    if (t.caps.ownsMeter) { applyMeter(); g_songBarClock = 0; }   // song = meter master (voice 1)
+}
+
+// trackStartArg: immediate start, in phase with the running grid — preload then fire from the current
+// beat. The non-quantized entry (a loop re-arm, @SONG2F, or launch-quantize off). Voice 2's
+// split-guard (caps.splitGuarded) blocks it until Synth B is enabled.
+FLASHMEM static void trackStartArg(Track &t, const char *arg) {
+#if TDSP_VOICE2
+    if (t.caps.splitGuarded && !g_voice2Split) {   // Synth B off -> engines 4..7 belong to Synth A
+        Serial.println("[song2] ignored: enable Synth B (@VOICE2=1) first");
+        return;
+    }
+#endif
+    if (trackPreload(t, arg)) trackFire(t, /*anchorNow=*/false);
 }
 
 // Back-compat: @SONG=<i> plays the i-th catalog row (resolved via songs.ndjson).
-FLASHMEM static void songStartIndex(int idx) {
+FLASHMEM static void trackStartIndex(Track &t, int idx) {
     char arg[120];
-    if (songByIndex(idx, arg, sizeof arg, nullptr, 0)) songStartArg(arg);
-    else Serial.printf("[song] index %d out of range\n", idx);
+    if (songByIndex(idx, arg, sizeof arg, nullptr, 0)) trackStartArg(t, arg);
+    else Serial.printf("[%s] index %d out of range\n", t.tag, idx);
 }
 // Stop a track's song (unified — replaces songStop()/song2Stop()). Silence it, disarm the
 // loop-restart, and revert the meter if this track owns it. Voice 1 shares its sink with the ch10
@@ -1285,115 +1292,22 @@ static void songStop(Track &t) {
     if (t.caps.ownsMeter) applyMeter();   // song gave up the meter -> revert (voice 1 = meter master)
 }
 
-// Called every loop(): if a looping song just ended on its own, restart it. Manual
-// stops clear g_songWasPlaying above, so they don't re-trigger.
-static void songLoopTick() {
-    bool now = g_player.isPlaying();
-    if (g_songWasPlaying && !now) {
-        if (g_loop) {
-            songStartArg(g_curSongArg); // re-arm the same song (also re-applies its MIDI/MPE mode)
-            now = g_player.isPlaying();
-        } else {
-            applyMeter();               // natural end (not looping): song gives up the meter -> groove's, else 4/4
+// Called every loop() per track: if a looping song just ended on its own, restart it. A manual stop
+// clears *t.wasPlaying (in songStop), so it doesn't re-trigger. Unified across voices — replaces
+// songLoopTick/song2LoopTick. Voice 1 (caps.ownsMeter) also reverts the meter on a natural non-loop
+// end; voice 2 doesn't own the meter, so that branch is a no-op for it.
+static void trackLoopTick(Track &t) {
+    bool now = t.player->isPlaying();
+    if (*t.wasPlaying && !now) {
+        if (*t.loop) {
+            trackStartArg(t, t.arg);   // re-arm the same song (also re-applies its MIDI/MPE mode if owned)
+            now = t.player->isPlaying();
+        } else if (t.caps.ownsMeter) {
+            applyMeter();              // natural end (not looping): song gives up the meter -> groove's, else 4/4
         }
     }
-    g_songWasPlaying = now;
+    *t.wasPlaying = now;
 }
-
-#if TDSP_VOICE2
-// --- Player 2 (voice-2 song player) ---------------------------------------------
-// A twin of the voice-1 song helpers above, targeting g_player2 -> g_synthSinkB (engines 4..7)
-// with its OWN state (g_curSong2*, g_song2*, g_song2Loop). It never touches voice-1 state, the global
-// meter, or the global MPE mode, so a second song plays on the keyboard voice independently and
-// stays locked to the same master grid (song2ApplySync joins the running clock in phase — see
-// ensureTransportStarted, which now also counts player 2 as holding the grid).
-// LOAD (the slow, blocking part) a player-2 song into memory + stash where to play it from.
-// No sink/clock side effects — safe to call while other players run, off the downbeat. Returns
-// false if not found / load failed. song2FirePreloaded() then starts it instantly.
-FLASHMEM static bool song2Preload(const char *arg) {
-    if (!arg || !*arg) return false;
-    g_song2Bpm = 120.0f; g_song2Bpb = 4;
-    g_song2PreEv = nullptr; g_song2PreCount = 0; g_song2PreLoopBeats = 0.0;
-    if (endsWithMid(arg)) {
-        char path[128]; char disp[64]; songDisp(disp, sizeof disp, arg);
-        snprintf(path, sizeof path, "/songs/%s", arg);
-        if (!SD.exists(path)) snprintf(path, sizeof path, "/%s", arg);
-        double plb = 0.0;
-        int got = tdsp::smf::loadSmfFile(path, g_buf2, MAX_EVENTS2, &g_song2Bpm, &g_song2Bpb, &plb);
-        if (got <= 0) { Serial.printf("[song2] SD load FAILED: %s\n", path); return false; }
-        snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", disp);
-        snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", arg);
-        g_song2PreEv = g_buf2; g_song2PreCount = (uint32_t)got; g_song2PreLoopBeats = plb;
-        Serial.printf("[song2] preloaded %s (SD, %lu events, %.1f bpm)\n", disp, (unsigned long)got, (double)g_song2Bpm);
-        return true;
-    }
-    for (int i = 0; i < testsong::kNumTestSongs; ++i) {   // baked test sequences (play from flash)
-        if (strcasecmp(arg, testsong::kTestSongs[i].name) != 0) continue;
-        g_song2Bpm = testsong::kTestSongs[i].bpm; g_song2Bpb = 4;
-        snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", testsong::kTestSongs[i].name);
-        snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", testsong::kTestSongs[i].name);
-        g_song2PreEv = testsong::kTestSongs[i].ev; g_song2PreCount = testsong::kTestSongs[i].count;
-        return true;
-    }
-    for (int i = 0; i < kNumBuiltin; ++i) {   // baked legacy demos (expand into g_buf2)
-        if (strcasecmp(arg, kBuiltinSongs[i].name) != 0) continue;
-        g_song2Bpm = kBuiltinSongs[i].bpm; g_song2Bpb = 4;
-        uint32_t n = tdsp::expandLegacyNotes(kBuiltinSongs[i].ev, kBuiltinSongs[i].count, g_buf2, MAX_EVENTS2);
-        if (!n) return false;
-        snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", kBuiltinSongs[i].name);
-        snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", kBuiltinSongs[i].name);
-        g_song2PreEv = g_buf2; g_song2PreCount = n;
-        return true;
-    }
-    Serial.printf("[song2] not found: %s\n", arg);
-    return false;
-}
-// PLAY the preloaded song — fast + non-blocking, so it can fire ON the downbeat without stalling
-// loop(). anchorNow=true starts it from its top at the current beat (a quantized bar launch).
-static void song2FirePreloaded(bool anchorNow) {
-    if (!g_song2PreEv || g_song2PreCount == 0) return;
-    songPrep(g_tracks[1]);
-    applyTempos();
-    ensureTransportStarted();   // join the running grid in phase (or define it if idle)
-    g_player2.play(g_song2PreEv, g_song2PreCount);
-    g_syncAnchorNow = anchorNow;
-    songApplySync(g_tracks[1], g_song2PreLoopBeats);
-}
-FLASHMEM static void song2StartArg(const char *arg) {
-    if (!g_voice2Split) {   // Synth B off -> engines 4..7 belong to Synth A; playing here would collide
-        Serial.println("[song2] ignored: enable Synth B (@VOICE2=1) first");
-        return;
-    }
-    if (song2Preload(arg)) song2FirePreloaded(false);   // immediate start (in phase with the grid)
-}
-// Hard restart player 2 from the top on a fresh downbeat (mirrors songRestart for voice 1).
-static void song2Restart(const char *arg) {
-    if (!arg || !*arg) return;
-    if (!g_voice2Split) {   // Synth B off -> nothing to launch on voice 2
-        Serial.println("[song2] ignored: enable Synth B (@VOICE2=1) first");
-        return;
-    }
-    // If the master clock is already running (a player, a groove, or just the metronome owns the
-    // grid), DON'T re-zero it — that would strand whatever's running. PRE-LOAD the song now (off the
-    // downbeat, so the SD parse never stalls loop() on the beat) and fire it on the NEXT bar edge,
-    // from its top, while everything else keeps running. Only an idle transport defines the downbeat.
-    if (g_conductor.running()) {
-        if (!song2Preload(arg)) return;
-        g_song2LaunchPending = true; g_launchSched.barHit = false;   // fire on the next bar edge
-        Serial.printf("[sync] song2 launch armed (preloaded): %s -> next bar (from top)\n", arg);
-        return;
-    }
-    g_forceTransportZero = true;   // idle: define the downbeat now and start from the top
-    song2StartArg(arg);
-    g_forceTransportZero = false;
-}
-// Auto-restart a looping player-2 song when it ends on its own (manual stop clears the flag).
-static void song2LoopTick() {
-    bool now = g_player2.isPlaying();
-    if (g_song2WasPlaying && !now && g_song2Loop) { song2StartArg(g_curSong2Arg); now = g_player2.isPlaying(); }
-    g_song2WasPlaying = now;
-}
-#endif  // TDSP_VOICE2
 
 // --- Drum grooves (channel-10 GM percussion) --------------------------------
 // A groove is a short, LOOPABLE, channel-10-only .mid on the SD card under
@@ -1634,35 +1548,43 @@ static void setDrumKit(int i) {
     Serial.printf("[drum] kit -> %s (prog %u)\n", kDrumKits[i].name, kDrumKits[i].prog);
 }
 
-// --- Launch quantize: the user-facing START entry points. When quantize is on they arm a
-// pending launch that loop() fires on the next bar edge; otherwise they start immediately.
-static void songLaunch(const char* arg) {
+// --- Launch quantize: the user-facing START entry points. When quantize is on they PRELOAD now
+// (off the beat) and arm a pending launch that loop() FIRES on the next bar edge; otherwise they
+// start immediately. Unified Track& path — replaces songLaunch/songRestart + song2StartArg/song2Restart.
+// trackLaunch: the app's play-by-name entry (@SONGF/@SONG2F). With launch-quantize on and the clock
+// running, preload + arm; otherwise start immediately.
+static void trackLaunch(Track &t, const char* arg) {
     if (g_launchQuantize && g_conductor.running()) {
-        snprintf(g_pendingSongArg, sizeof g_pendingSongArg, "%s", arg);
-        g_songLaunchPending = true; g_launchSched.barHit = false;   // wait for the NEXT bar edge
-        Serial.printf("[sync] song launch armed: %s -> next bar\n", arg);
+#if TDSP_VOICE2
+        if (t.caps.splitGuarded && !g_voice2Split) { Serial.println("[song2] ignored: enable Synth B (@VOICE2=1) first"); return; }
+#endif
+        if (!trackPreload(t, arg)) return;                          // load off the beat; nothing to fire if it failed
+        *t.launchPending = true; g_launchSched.barHit = false;      // wait for the NEXT bar edge
+        Serial.printf("[sync] %s launch armed (preloaded): %s -> next bar\n", t.tag, arg);
         return;
     }
-    songStartArg(arg);
+    trackStartArg(t, arg);
 }
-// Hard restart from the top, in time: re-zero the master transport (downbeat = now) so a
-// synced/looping song begins at beat 0 — instead of jumping to the running clock's current
-// phase — then play the song from its first event. Bypasses launch-quantize: this press
-// DEFINES the downbeat. The re-zero also re-locks a drum groove + held arp chord to the same
-// fresh downbeat, so everything restarts in phase. The app's MIDI-player Play / ‹ › use this.
-static void songRestart(const char* arg) {
+// trackRestart: hard restart from the top, in time (the app's MIDI-player Play / ‹ ›). If the master
+// clock is already running (a player, a groove, or just the metronome owns the grid), DON'T re-zero it
+// — that would strand whatever's running. PRELOAD now (off the downbeat, so the SD parse never stalls
+// loop() on the beat) and FIRE on the NEXT bar edge, from the top, while everything else keeps running.
+// Only an idle transport defines the downbeat (re-zero also re-locks a groove + held arp chord to the
+// fresh downbeat). Replaces songRestart/song2Restart.
+static void trackRestart(Track &t, const char* arg) {
     if (!arg || !*arg) return;
-    // Symmetric to song2Restart: if the master clock is already running, quantize player 1 onto the
-    // next bar (from top) instead of re-zeroing the clock under whatever else is playing.
+#if TDSP_VOICE2
+    if (t.caps.splitGuarded && !g_voice2Split) { Serial.println("[song2] ignored: enable Synth B (@VOICE2=1) first"); return; }
+#endif
     if (g_conductor.running()) {
-        snprintf(g_pendingSongArg, sizeof g_pendingSongArg, "%s", arg);
-        g_songLaunchPending = true; g_launchSched.barHit = false;
-        Serial.printf("[sync] song launch armed: %s -> next bar (from top)\n", arg);
+        if (!trackPreload(t, arg)) return;
+        *t.launchPending = true; g_launchSched.barHit = false;
+        Serial.printf("[sync] %s launch armed (preloaded): %s -> next bar (from top)\n", t.tag, arg);
         return;
     }
     g_forceTransportZero = true;   // idle: define the downbeat now and start from the top
-    songStartArg(arg);
-    g_forceTransportZero = false;  // safety: clear if songStartArg bailed before consuming it
+    trackStartArg(t, arg);
+    g_forceTransportZero = false;  // safety: clear if trackStartArg bailed before consuming it
 }
 static void drumLaunchFile(const char* fname) {
     if (g_launchQuantize && g_conductor.running()) {
@@ -2169,17 +2091,17 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         reply.printf("@DXPICKED=%s\t%d\t%s\n", buf, voice, nm ? nm : "?");
     }
 #endif
-    else if (strncmp(line, "@SONGF=", 7) == 0)    songLaunch(line + 7);     // @SONGF=<filename|name> (play by name — the app's path; bar-quantized if @QUANTIZE=1)
-    else if (strncmp(line, "@SONGRESTART=", 13) == 0) songRestart(line + 13);   // hard restart on a fresh downbeat (zeroes the clock, ignores quantize) — the app's Play / ‹ ›
+    else if (strncmp(line, "@SONGF=", 7) == 0)    trackLaunch(g_tracks[0], line + 7);     // @SONGF=<filename|name> (play by name — the app's path; bar-quantized if @QUANTIZE=1)
+    else if (strncmp(line, "@SONGRESTART=", 13) == 0) trackRestart(g_tracks[0], line + 13);   // hard restart on a fresh downbeat — the app's Play / ‹ ›
     else if (strncmp(line, "@SONG=", 6) == 0) {
         if (strcmp(line + 6, "stop") == 0) songStop(g_tracks[0]);
-        else songStartIndex(atoi(line + 6));   // @SONG=<catalog index> (legacy; resolved via songs.ndjson)
+        else trackStartIndex(g_tracks[0], atoi(line + 6));   // @SONG=<catalog index> (legacy; resolved via songs.ndjson)
     }
 #if TDSP_VOICE2
-    // --- Player 2 (voice-2 song player), so a second song plays at the same time. Started
+    // --- Player 2 (voice-2 song player), so a second song plays at the same time. @SONG2F starts
     // immediately (no launch-quantize slot); it still locks to the running grid via sync. ---
-    else if (strncmp(line, "@SONG2RESTART=", 14) == 0) song2Restart(line + 14);   // hard restart player 2 on a fresh downbeat
-    else if (strncmp(line, "@SONG2F=", 8) == 0)   song2StartArg(line + 8);        // @SONG2F=<filename|name>
+    else if (strncmp(line, "@SONG2RESTART=", 14) == 0) trackRestart(g_tracks[1], line + 14);   // hard restart player 2 on a fresh downbeat
+    else if (strncmp(line, "@SONG2F=", 8) == 0)   trackStartArg(g_tracks[1], line + 8);        // @SONG2F=<filename|name>
     else if (strncmp(line, "@SONG2=", 7) == 0)  { if (strcmp(line + 7, "stop") == 0) songStop(g_tracks[1]); }
     else if (strncmp(line, "@LOOP2=", 7) == 0)  { g_song2Loop = (atoi(line + 7) != 0);
                                  Serial.printf("[song2] loop %s\n", g_song2Loop ? "ON" : "off"); }
@@ -2631,7 +2553,7 @@ FLASHMEM static void tracksInit() {
 #else
     t0.looper = nullptr;
 #endif
-    t0.sink = g_synthSink; t0.buf = g_buf; t0.bufCap = MAX_EVENTS; t0.setLevel = setSongVol;
+    t0.sink = g_synthSink; t0.buf = g_buf; t0.bufCap = MAX_EVENTS; t0.setLevel = setSongVol; t0.tag = "song";
     t0.caps = { /*ownsGlobalMode*/true, /*ownsMeter*/true, /*prepSpecial*/true, /*splitGuarded*/false };
     t0.name = g_curSongName; t0.arg = g_curSongArg; t0.loop = &g_loop; t0.wasPlaying = &g_songWasPlaying;
     t0.bpm = &g_songBpm; t0.bpb = &g_songBpb; t0.loopBeats = &g_songLoopBeats; t0.launchPending = &g_songLaunchPending;
@@ -2649,7 +2571,7 @@ FLASHMEM static void tracksInit() {
 #else
     t1.looper = nullptr;
 #endif
-    t1.sink = g_synthSinkB; t1.buf = g_buf2; t1.bufCap = MAX_EVENTS2; t1.setLevel = synthSetVoice2Vol;
+    t1.sink = g_synthSinkB; t1.buf = g_buf2; t1.bufCap = MAX_EVENTS2; t1.setLevel = synthSetVoice2Vol; t1.tag = "song2";
     t1.caps = { false, false, false, /*splitGuarded*/true };
     t1.name = g_curSong2Name; t1.arg = g_curSong2Arg; t1.loop = &g_song2Loop; t1.wasPlaying = &g_song2WasPlaying;
     t1.bpm = &g_song2Bpm; t1.bpb = &g_song2Bpb; t1.loopBeats = &g_song2LoopBeats; t1.launchPending = &g_song2LaunchPending;
@@ -2976,10 +2898,12 @@ void loop() {
     // players so a JUST-launched one still lands its own downbeat in this same iteration.
     if (g_launchSched.barHit) {
         g_launchSched.barHit = false;
-        if (g_songLaunchPending)  { g_songLaunchPending  = false; g_syncAnchorNow = true; songStartArg(g_pendingSongArg); }
-        if (g_drumLaunchPending)  { g_drumLaunchPending  = false; drumStartFile(g_pendingDrumFile, /*rezero=*/false); }
+        // Every voice fires from its PRELOADED stash (trackFire = play()+sync, no SD parse) so a launch
+        // can never stall loop() on the beat. anchorNow=true starts it from the top at this downbeat.
+        if (*g_tracks[0].launchPending) { *g_tracks[0].launchPending = false; trackFire(g_tracks[0], /*anchorNow=*/true); }
+        if (g_drumLaunchPending)        { g_drumLaunchPending        = false; drumStartFile(g_pendingDrumFile, /*rezero=*/false); }
 #if TDSP_VOICE2
-        if (g_song2LaunchPending) { g_song2LaunchPending = false; song2FirePreloaded(/*anchorNow=*/true); }   // preloaded -> instant
+        if (*g_tracks[1].launchPending) { *g_tracks[1].launchPending = false; trackFire(g_tracks[1], /*anchorNow=*/true); }
 #endif
         g_syncAnchorNow = false;   // defensive: a not-found launch never leaves it armed
         g_player.tick();           // a just-launched player hits its downbeat now (already-running ones no-op)
@@ -3004,9 +2928,9 @@ void loop() {
     // snapshots the clock-follow rate). Playback itself runs in the audio ISR (update()).
     for (uint8_t i = 0; i < g_aloopN; i++) g_aloop[i].poll();
 #endif
-    songLoopTick();   // auto-restart the song if loop mode is on and it just ended
+    trackLoopTick(g_tracks[0]);   // auto-restart the song if loop mode is on and it just ended
 #if TDSP_VOICE2
-    song2LoopTick();  // same for player 2
+    trackLoopTick(g_tracks[1]);   // same for player 2
 #endif
 
     // @SYNCPROBE: once/second, print the master beat next to each synced player's
@@ -3022,7 +2946,7 @@ void loop() {
 
     // Push song-playback position to the app (drives the MIDI Player progress bar).
     // ~2.5x/sec while playing; one "@SONGP=-1" on the falling edge resets the bar and
-    // clears the ♪ flag. Runs AFTER songLoopTick() so a loop re-arm keeps us "playing"
+    // clears the ♪ flag. Runs AFTER trackLoopTick() so a loop re-arm keeps us "playing"
     // (no spurious -1 at the loop seam).
     {
         static elapsedMillis songPosClock;
@@ -3147,8 +3071,8 @@ void loop() {
                                  Serial.printf("[cmd] codec=%s (%s), out %.0f dB, app master %d%%\n",
                                                g_codecOk ? "OK" : "FAIL", g_codecMsg, (double)g_dvol, g_appMasterPct); }
             else if (c == 'W') { if (g_player.isPlaying()) songStop(g_tracks[0]);             // play/stop
-                                 else if (g_curSongArg[0]) songStartArg(g_curSongArg);
-                                 else songStartIndex(0); }
+                                 else if (g_curSongArg[0]) trackStartArg(g_tracks[0], g_curSongArg);
+                                 else trackStartIndex(g_tracks[0], 0); }
             else if (c == 'S') { int n = songCatalogCount();                                 // browse to the next song (no play)
                                  if (n > 0) { g_songBrowse = (g_songBrowse + 1) % n;
                                    char nm[64]; if (songByIndex(g_songBrowse, g_curSongArg, sizeof g_curSongArg, nm, sizeof nm)) {
