@@ -71,9 +71,50 @@ only the audio *source* is muxed.
 > there's no *separate* ASRC block. "No software ASRC on the Teensy" is the real claim, and
 > it holds in both modes.
 
-## Chips that do this out of the box
+## How to do the ASRC — by cost, cheapest first
 
-### The hero part — hardware ASRC: **TI SRC4392** (verified)
+The A2DP async-reconciliation can live in three places. Pick by cost/risk.
+
+### Tier 0 — **S3 does the ASRC in software** (≈ $0 extra silicon) — RECOMMENDED FIRST
+
+This is the original Mode-A plan (`CLASSIC/sink → S3 as ASRC → Teensy`), and it's free: the
+S3 is already on the board. Wiring: the A2DP sink's I2S feeds the S3's I2S0 (S3 slaves to
+the sink's clock on input); the S3 runs a software ASRC and drives I2S1 out to the Teensy
+slaved to the system MCLK. The ESP32-S3 has **two I2S peripherals**, so in + out is native.
+
+Why the S3 can likely do what the classic couldn't (the alex6679 result): the classic
+failed doing **A2DP + ASRC on one chip at once** — it was already saturated running the
+Bluetooth stack. In this architecture the **S3 is NOT running Bluetooth at all** (the sink
+does), so its cycles are free for DSP; and the S3 is a far stronger DSP part (dual-core
+240 MHz, SIMD/PIE vector extensions, PSRAM). Real-time DSP headroom is demonstrated — e.g. a
+[full FM-stereo + RDS 24-bit DSP pipeline runs live on the S3](https://blog.infrasonicaudio.com/real-time-audio-synthesis-on-esp-32).
+
+- **Cost:** nothing beyond the S3 already in the design.
+- **Risk / must-spike:** confirm alex6679's resampler (or an equivalent) fits in real time
+  on the S3 alongside I2S-in, I2S-out, and control. Plausible but UNPROVEN — this is the
+  spike that decides whether Tier 0 flies or we drop to Tier 1. It also needs the async
+  resampler ported from Teensy/OpenAudio-F32 to ESP-IDF.
+
+### Tier 1 — **cheap dedicated hardware ASRC: Cirrus CS8421** (≈ $5) — the fallback
+
+If the S3 can't carry the ASRC in real time, this is the deterministic hardware answer at a
+fraction of the SRC4392's price ([CS8421](https://www.cirrus.com/products/cs8421)):
+
+- 32-bit / 192 kHz **stereo asynchronous** SRC; input and output can be **completely
+  asynchronous** or synced to an external clock — exactly our case.
+- **~$4.85 @ 10k** (vs the SRC4392's ~$8–13). It's cheaper because it's *just* the ASRC — no
+  S/PDIF transceiver, which we don't need here.
+- Small package, SPI/I2C config. A2DP sink (I2S master) → CS8421 (locks output to system
+  MCLK) → Teensy. Zero software ASRC, guaranteed timing.
+- Other cheap-ish dedicated ASRCs if sourcing pushes back: **ADI AD1896**, **TI SRC4192**
+  (the SRC4392's ASRC core *without* the S/PDIF combo — cheaper than the 4392).
+
+### Tier 2 — **TI SRC4392** (≈ $8–13) — only if you want the S/PDIF combo too
+
+Verified, premium, and overkill *for A2DP alone* — you'd choose it only to also clock-
+correct an optical S/PDIF input on the same chip.
+
+### The hero part — hardware ASRC: **TI SRC4392** (verified; premium — see Tier 2)
 
 This is the chip that "ties the stream to the clocks we use everywhere," confirmed against
 the datasheet ([TI SRC4392](https://www.ti.com/product/SRC4392)):
@@ -109,15 +150,19 @@ the datasheet ([TI SRC4392](https://www.ti.com/product/SRC4392)):
   SRC4392 downstream makes the sink's own clock behavior mostly irrelevant anyway (it just
   needs a clean I2S master output), which is the beauty of the two-chip split.
 
-### Net: the concrete, off-the-shelf chain
+### Net: the concrete chains (cheapest first)
 
 ```
-[CSR8675 A2DP module]  ──I2S(master)──▶  [SRC4392 ASRC]  ──I2S(slaved to system MCLK)──▶  Teensy TDM
-                                              ▲
-                              system low-jitter audio oscillator (e.g. 24.576 / 22.5792 MHz)
+Tier 0 ($0):  [A2DP sink] ──I2S──▶ [ESP32-S3: SW ASRC, out slaved to MCLK] ──▶ Teensy TDM
+Tier 1 (~$5): [A2DP sink] ──I2S──▶ [CS8421 ASRC, out slaved to MCLK]        ──▶ Teensy TDM
+                                          ▲
+                          system low-jitter audio oscillator (e.g. 24.576 / 22.5792 MHz)
 ```
 
-Everything downstream of the SRC4392 is synchronous. Zero software ASRC.
+Everything downstream of the ASRC (SW on the S3, or the CS8421) is synchronous to the
+system clock. Zero software ASRC **on the Teensy** either way. Recommendation: **spike Tier 0
+first** (it's free and it's the original plan); fall back to the CS8421 only if the S3 can't
+carry the resampler in real time.
 
 ## Open questions before a board spin
 
