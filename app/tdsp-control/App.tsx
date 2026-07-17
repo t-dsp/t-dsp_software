@@ -109,8 +109,8 @@ function BeatStrip({ sig, bpm, active, live }: { sig: number; bpm: number; activ
 // the bottom (a card is far narrower than the window, so they never share the title's
 // line). Only the › chevron opens the section — the card body itself is inert, so the
 // header controls (nested Pressables) never risk a stray navigation.
-function Card({ title, value, status, subtitle, actions, progress, onPress, style, accent }:
-  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onPress: () => void; style?: any; accent?: string }) {
+function Card({ title, value, status, subtitle, actions, progress, onPress, style, accent, topRight }:
+  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onPress: () => void; style?: any; accent?: string; topRight?: React.ReactNode }) {
   return (
     <View style={[s.card, style, accent && { borderLeftColor: accent, borderLeftWidth: 3 }]}>
       <View style={s.cardHead}>
@@ -119,6 +119,7 @@ function Card({ title, value, status, subtitle, actions, progress, onPress, styl
           {subtitle ?? <Subtitle value={value} status={status} />}
           {progress != null && <ProgressBar value={progress} />}
         </View>
+        {topRight}
         <Pressable onPress={onPress} hitSlop={10} style={s.chevBtn}><Text style={s.chev}>›</Text></Pressable>
       </View>
       {!!actions && <View style={s.cardActions}>{actions}</View>}
@@ -128,8 +129,8 @@ function Card({ title, value, status, subtitle, actions, progress, onPress, styl
 
 // Section page header: a back arrow + the section title/value, with the same controls
 // available (on the right when wide, on their own row when narrow).
-function PageHeader({ title, value, status, subtitle, actions, progress, onBack, accent }:
-  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onBack: () => void; accent?: string }) {
+function PageHeader({ title, value, status, subtitle, actions, progress, onBack, accent, topRight }:
+  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onBack: () => void; accent?: string; topRight?: React.ReactNode }) {
   const { width } = useWindowDimensions();
   const narrow = width < 640;
   return (
@@ -141,6 +142,7 @@ function PageHeader({ title, value, status, subtitle, actions, progress, onBack,
           {subtitle ?? <Subtitle value={value} status={status} />}
           {progress != null && <ProgressBar value={progress} />}
         </View>
+        {topRight}
         {!narrow && !!actions && <View style={s.headActions}>{actions}</View>}
       </View>
       {narrow && !!actions && <View style={s.hdrActionsRow}>{actions}</View>}
@@ -152,6 +154,22 @@ function PageHeader({ title, value, status, subtitle, actions, progress, onBack,
 // All header buttons share one uniform width (s.hdrBtn.minWidth).
 const HdrBtn = ({ label, onPress, stop }: { label: string; onPress: () => void; stop?: boolean }) => (
   <Pressable onPress={onPress} style={[s.hdrBtn, stop && s.hdrBtnStop]}><Text style={s.hdrBtnText}>{label}</Text></Pressable>
+);
+// A small keyboard glyph drawn with Views so it can be tinted (an emoji can't): a bordered
+// body with five keys. WHITE = this synth owns the USB keyboard; GREY = another synth does.
+function KbdGlyph({ color }: { color: string }) {
+  return (
+    <View style={{ width: 26, height: 17, borderWidth: 1.5, borderColor: color, borderRadius: 3, paddingHorizontal: 2.5, paddingBottom: 2.5, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+      {[0, 1, 2, 3, 4].map(i => <View key={i} style={{ width: 2.5, height: 7, backgroundColor: color, borderRadius: 1 }} />)}
+    </View>
+  );
+}
+// Keyboard-ownership control: tap a GREY keyboard to route the USB keyboard to this synth.
+const KbdBtn = ({ owned, onPress }: { owned: boolean; onPress: () => void }) => (
+  <Pressable onPress={onPress} hitSlop={10} style={{ paddingHorizontal: 6, paddingVertical: 4, alignSelf: 'flex-start' }}
+    accessibilityLabel={owned ? 'USB keyboard plays this synth' : 'Tap to play this synth with the USB keyboard'}>
+    <KbdGlyph color={owned ? C.text : C.muted} />
+  </Pressable>
 );
 const Row = ({ children }: any) => <View style={s.row}>{children}</View>;
 // A per-section level slider (0..150 %, 100 = the file's own velocity), independent of the
@@ -716,7 +734,7 @@ export default function App() {
 
   // ===== the sections: one entry drives both its homepage card and its page. =====
   // `value`/`status` = the subtitle; `actions` = the header controls; `body` = the page.
-  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; accent?: string };
+  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; accent?: string; topRight?: React.ReactNode };
 
   // The card/page subtitle: the currently-loaded instrument if one is picked, else a
   // summary of where the browser is (folder name or catalog counts).
@@ -744,6 +762,14 @@ export default function App() {
   if (vpath === '@bundled') crumbs.push({ label: 'Bundled', go: () => setCart(null) });
   else if (vpath) { let acc = ''; for (const seg of vpath.split('/')) { acc = acc ? acc + '/' + seg : seg; const p = acc; crumbs.push({ label: seg, go: () => { setCart(null); setVpath(p); } }); } }
   if (cart) crumbs.push({ label: cart.name, go: () => {} });
+
+  // Route the USB keyboard to synth `owner` (1 = main synth, 2 = the Voices-2 keyboard voice).
+  // The keyboard has exactly ONE owner: giving it to voice 2 enables the split; giving it back
+  // to voice 1 unifies the pool. The keyboard icon on each card reflects who holds it.
+  const takeKeyboard = (owner: 1 | 2) => { const on = owner === 2; setVoice2(v => ({ ...v, on })); tp.voice2Enable(on); };
+  const kbdBtn = (owner: 1 | 2) => caps.voice2
+    ? <KbdBtn owned={owner === 2 ? voice2.on : !voice2.on} onPress={() => takeKeyboard(owner)} />
+    : undefined;
 
   // The folder browser (nav bar + picker), shared by the Synth and Synth/Voices 2 pages.
   // Both share the browse position (cart/folder) but keep their own selection + list ref, and
@@ -908,6 +934,7 @@ export default function App() {
     // SYNTH / VOICES — folder browser over bundled voices + the whole /dexed library
     {
       id: 'synth', title: 'Synth / Voices', show: true, value: synthValue, subtitle: synthSubtitle, fullHeight: true,
+      topRight: kbdBtn(1),
       actions: (<>
         <HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1)} />
         <HdrBtn label="Next ›" stop onPress={() => stepVoice(1)} />
@@ -926,6 +953,7 @@ export default function App() {
     // (song/arp/drums), engines 4-7 are this voice, played live by a USB-host keyboard.
     {
       id: 'synth2', title: 'Synth / Voices 2', show: caps.voice2, fullHeight: true, accent: C.accent2,
+      topRight: kbdBtn(2),
       value: (voice2.on ? '' : '(off)  ') + (voice2.name || 'None'),
       subtitle: voice2.name ? (
         <>
@@ -1135,7 +1163,7 @@ export default function App() {
                 {visible.map(sec => (
                   <View key={sec.id} style={[s.cell, { width: `${100 / cols}%` }]}>
                     <Card title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions}
-                      onPress={() => setRoute(sec.id)} style={s.cardGrid} accent={sec.accent} />
+                      onPress={() => setRoute(sec.id)} style={s.cardGrid} accent={sec.accent} topRight={sec.topRight} />
                   </View>
                 ))}
               </View>
@@ -1146,7 +1174,7 @@ export default function App() {
           {cur && !cur.fullHeight && (
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 400 }}>
               <View style={s.page}>
-                <PageHeader title={cur.title} value={cur.value} status={cur.status} subtitle={cur.subtitle} progress={cur.progress} actions={cur.actions} onBack={() => setRoute('home')} accent={cur.accent} />
+                <PageHeader title={cur.title} value={cur.value} status={cur.status} subtitle={cur.subtitle} progress={cur.progress} actions={cur.actions} onBack={() => setRoute('home')} accent={cur.accent} topRight={cur.topRight} />
                 <View style={s.pageBody}>{cur.body}</View>
               </View>
             </ScrollView>
@@ -1156,7 +1184,7 @@ export default function App() {
                   selected folder AND the picker's scroll position persist across nav ===== */}
           {fullPages.map(sec => (
             <View key={sec.id} style={[s.page, { flex: 1 }, route !== sec.id && s.hidden]}>
-              <PageHeader title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions} onBack={() => setRoute('home')} accent={sec.accent} />
+              <PageHeader title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions} onBack={() => setRoute('home')} accent={sec.accent} topRight={sec.topRight} />
               <View style={[s.pageBody, { flex: 1 }]}>{sec.body}</View>
             </View>
           ))}
