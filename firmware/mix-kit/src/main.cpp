@@ -81,6 +81,10 @@
 // allocated from PSRAM when present else OCRAM. See planning/audio-looper/DESIGN.md.
 #include <TDspAudioLoop.h>
 #include <AudioLoopWav.h>   // @ALSAVE -> /loops/<name>.wav (pulls <SD.h>, already used)
+// Track: one voice's whole stack (player+arp+router+follow+looper+sink+state) as a single
+// binding, so Voice 1 & Voice 2 share ONE helper family. Phase 1 of the Tracks refactor —
+// see Track.h / planning/tracks/DESIGN.md. Forward-declares only; no behavior change yet.
+#include "Track.h"
 
 // Developer bench diagnostics (self-tests, MPE/axis proofs, capture probes, the
 // ReplayGain sweep) are opt-in and live in Diagnostics.inc.h. Default ON so every
@@ -226,6 +230,16 @@ static uint8_t         g_recVoice = 1;       // 1 or 2: target of @REC/@RECDUB/@
 static bool            g_recClickAuto = false; // WE turned the count-in click on for a fresh
                                               // record; auto-stop it when the loop is captured
 #endif
+
+// The tracks: [0] = Voice 1, [1] = Voice 2 (VOICE2 builds). A thin binding view over the
+// per-voice objects above + per-voice state; populated by tracksInit() in setup(). Phase 1
+// only DECLARES these; nothing reads them yet (see Track.h / planning/tracks/DESIGN.md).
+#if TDSP_VOICE2
+static const int kNumTracks = 2;
+#else
+static const int kNumTracks = 1;
+#endif
+static Track g_tracks[kNumTracks];
 
 AudioMixer4_F32        outL, outR;           // F32 mix: 0=BT, 1=local tone, 2=S/PDIF-in, 3=synth
 AudioAnalyzePeak_F32   peakSpdif, peakOut;
@@ -2623,8 +2637,43 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     return true;
 }
 
+// Populate g_tracks[] — pointers to the per-voice objects declared at file scope + caps. Called
+// once from setup(). The three caps flags carry the deliberately voice-1-ONLY behaviors (global
+// MPE mode, meter ownership, the special prep); voice 2 leaves them false (its current behavior).
+FLASHMEM static void tracksInit() {
+    Track &t0 = g_tracks[0];
+    t0.player = &g_player; t0.arp = &g_arpFilter; t0.router = &g_router; t0.follow = &g_songFollow;
+#if TDSP_RECORDER
+    t0.looper = &g_loop1;
+#else
+    t0.looper = nullptr;
+#endif
+    t0.sink = g_synthSink; t0.buf = g_buf; t0.bufCap = MAX_EVENTS; t0.setLevel = setSongVol;
+    t0.caps = { /*ownsGlobalMode*/true, /*ownsMeter*/true, /*prepSpecial*/true, /*splitGuarded*/false };
+    t0.st.bpm = 120.0f; t0.st.bpb = 4;
+#if TDSP_VOICE2
+    Track &t1 = g_tracks[1];
+    t1.player = &g_player2;
+#if TDSP_ARP2
+    t1.arp = &g_arpFilter2;
+#else
+    t1.arp = nullptr;
+#endif
+    t1.router = &g_kbdRouter; t1.follow = &g_songFollow2;
+#if TDSP_RECORDER
+    t1.looper = &g_loop2;
+#else
+    t1.looper = nullptr;
+#endif
+    t1.sink = g_synthSinkB; t1.buf = g_buf2; t1.bufCap = MAX_EVENTS2; t1.setLevel = synthSetVoice2Vol;
+    t1.caps = { false, false, false, /*splitGuarded*/true };
+    t1.st.bpm = 120.0f; t1.st.bpb = 4;
+#endif
+}
+
 FLASHMEM void setup() {
     hardResetCodecPower();
+    tracksInit();
 
     Serial.begin(115200);
     uint32_t t0 = millis();
