@@ -76,10 +76,10 @@ export type AppliedArp = { pat: number; rate: number; oct: number; latch: boolea
 // Push a preset to the device and return the derived UI state. The step table (if any) is
 // sent BEFORE the param bundle so it is loaded when PatUserSequence (25) engages. Every
 // param rides ONE @ARPPRESET line (atomic + throttle-friendly vs. ~20 separate commands).
-export function applyArpPreset(tp: Transport, p: ArpPreset): AppliedArp {
+export function applyArpPreset(tp: Transport, p: ArpPreset, slot: 1 | 2 = 1): AppliedArp {
   const pr = p.params;
   const seq = pr.steps && pr.steps.length ? toSeqSteps(pr.steps) : undefined;
-  if (seq) tp.arpSequence(seq);
+  if (seq) (slot === 2 ? tp.arp2Sequence : tp.arpSequence)(seq);
 
   const wire: ArpWireParams = {
     pat: pr.pattern, rate: pr.rate,
@@ -91,7 +91,7 @@ export function applyArpPreset(tp: Transport, p: ArpPreset): AppliedArp {
     outCh: pr.outputChannel, scatterBase: pr.scatterBase, scatterCount: pr.scatterCount,
     scale: pr.scale, scaleRoot: pr.scaleRoot, transpose: pr.transpose, repeat: pr.repeat,
   };
-  tp.arpPreset(wire);
+  (slot === 2 ? tp.arp2Preset : tp.arpPreset)(wire);
 
   const oct = Math.max(1, Math.min(4, (pr.octaveRange ?? 1) | 0));
   return { pat: pr.pattern, rate: rateIndexFromFw(pr.rate), oct, latch: !!pr.latch, seq };

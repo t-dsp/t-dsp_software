@@ -222,12 +222,15 @@ export default function App() {
   const [selVoicePath, setSelVoicePath] = useState('');   // full location of the picked instrument (e.g. /dexed/<cart>.syx, or "Bundled") — shown under the name
   // Voices 2 (build-flag gated): a second Dexed voice on the keyboard half of the pool.
   // `caps` = which optional features the connected firmware was built with (from @STATE),
-  // so the cards SHOW only when compiled in. `voiceTarget` = which voice the shared browser
-  // edits (1 = main, 2 = the keyboard voice); it stays 1 unless you're picking Voices 2.
+  // so the Voices 2 / Arpeggiator 2 cards SHOW only when compiled in. Each has its own
+  // selection + volume + arp state; the folder browser is shared (pickVoice takes a target).
   const [caps, setCaps] = useState({ voice2: false, arp2: false });
   const [voice2, setVoice2] = useState({ on: false, vol: 100, name: '', path: '' });
-  const [voiceTarget, setVoiceTarget] = useState<1 | 2>(1);
+  const [selVoice2, setSelVoice2] = useState('');   // voice-2 browser highlight (independent of voice 1)
   const [arp2, setArp2] = useState({ on: false, pat: 0, rate: 0, oct: 1, latch: false });
+  const [seq2, setSeq2] = useState<SeqStep[]>(() => DEFAULT_SHAPE.steps.map(s => ({ ...s })));   // arp-2 User Sequence table (app-owned, mirrors seq)
+  const [arp2PresetId, setArp2PresetId] = useState<string>('');
+  const [arp2Mode, setArp2Mode] = useState<'preset' | 'manual'>('preset');
   const [cart, setCart] = useState<{ rel: string; name: string } | null>(null);
   const [vpath, setVpath] = useState('');                 // dexed folder-browser current path ('' = root)
   const [level, setLevel] = useState<DirPage>(EMPTY_DIR); // current /dexed folder listing (lazy @DXLS)
@@ -429,48 +432,55 @@ export default function App() {
 
   // The voices currently listed in Synth/Voices (a cart's voices, or the bundled set).
   const voiceRef = useRef<FlatList<VItem>>(null);
+  const voiceRef2 = useRef<FlatList<VItem>>(null);         // Voices-2 page has its own list ref (both pages stay mounted)
   const browseRef = useRef<ScrollView>(null);              // the folder-browse list
+  const browseRef2 = useRef<ScrollView>(null);
   const pickerY = useRef<Record<string, number>>({});      // saved scroll offset per list, so we can restore on return
   const voiceData: VItem[] = useMemo(() =>
     cart ? cartVoices.map((vn, i) => ({ key: 'c' + cart.rel + ':' + i, label: (i + 1) + '. ' + vn, i }))
       : vpath === '@bundled' ? cat.instruments.map(v => ({ key: 'b' + v.i, label: v.name, i: v.i }))
         : [], [cart, cartVoices, vpath, cat.instruments]);
   const listId = voiceData.length ? (cart ? 'c' + cart.rel : '@bundled') : 'br:' + vpath;   // identity of the currently-shown picker list
-  const pickVoice = (it: VItem) => {
-    setSelVoice(it.key);
+  // Pick a voice for slot `target` (1 = main synth, 2 = the keyboard's Voices-2). Both share
+  // the same browse state (cart/folder position) but have independent selection + device
+  // targets (@DXVOICE/@DXPICK vs @DXVOICE2/@DXPICK2).
+  const pickVoice = (it: VItem, target: 1 | 2 = 1) => {
     const nm = it.label.replace(/^\d+\.\s*/, '');
     const isCart = it.key[0] === 'c' && !!cart;
     const path = isCart ? '/dexed/' + cart!.rel : 'Bundled';
-    if (voiceTarget === 2) {   // editing the keyboard voice (Synth / Voices 2)
+    if (target === 2) {
+      setSelVoice2(it.key);
       setVoice2(v => ({ ...v, name: nm, path }));
       if (isCart) tp.dxPick2(cart!.rel, it.i); else if (it.key[0] === 'b') tp.dxVoice2(it.i);
       return;
     }
-    setSelVoiceName(nm);
+    setSelVoice(it.key); setSelVoiceName(nm);
     if (isCart) { setSelVoicePath('/dexed/' + cart!.rel); tp.dxPick(cart!.rel, it.i); }
     else if (it.key[0] === 'b') { setSelVoicePath('Bundled'); tp.dxVoice(it.i); }
   };
-  const stepVoice = (dir: number) => {
+  const stepVoice = (dir: number, target: 1 | 2 = 1) => {
+    const sel = target === 2 ? selVoice2 : selVoice;
     // In a visible list (a cart's voices or the bundled set), step within it so the
     // selection stays scrolled into view.
     if (voiceData.length) {
-      const idx = voiceData.findIndex(d => d.key === selVoice);
+      const idx = voiceData.findIndex(d => d.key === sel);
       const ni = Math.max(0, Math.min(voiceData.length - 1, (idx < 0 ? 0 : idx) + dir));
-      if (voiceData[ni]) pickVoice(voiceData[ni]);
+      if (voiceData[ni]) pickVoice(voiceData[ni], target);
       return;
     }
     // No list open (browsing folders): step within the bundled set. Crossing /dexed cart
     // boundaries isn't possible now that the library is browsed lazily (not held in RAM),
     // so to step through SD voices, open a cart first.
-    if (selVoice[0] !== 'c' && cat.instruments.length) {
-      const idx = cat.instruments.findIndex(v => 'b' + v.i === selVoice);
+    if (sel[0] !== 'c' && cat.instruments.length) {
+      const idx = cat.instruments.findIndex(v => 'b' + v.i === sel);
       const ni = Math.max(0, Math.min(cat.instruments.length - 1, (idx < 0 ? 0 : idx) + dir));
-      const v = cat.instruments[ni]; if (v) { setSelVoice('b' + v.i); setSelVoiceName(v.name); setSelVoicePath('Bundled'); tp.dxVoice(v.i); }
+      const v = cat.instruments[ni]; if (v) pickVoice({ key: 'b' + v.i, label: v.name, i: v.i }, target);
     }
   };
-  // Leaving both synth pages ends the "picking Voices 2" mode so the browser is back to
-  // editing voice 1 next time it's opened.
-  useEffect(() => { if (route !== 'synth' && route !== 'synth2') setVoiceTarget(1); }, [route]);
+  useEffect(() => {   // keep the Voices-2 selection in view on its own list
+    const idx = voiceData.findIndex(d => d.key === selVoice2);
+    if (idx >= 0) { const t = setTimeout(() => { try { voiceRef2.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.5 }); } catch {} }, 60); return () => clearTimeout(t); }
+  }, [selVoice2, voiceData]);
   useEffect(() => {   // keep the selected voice in view (on pick + on list change)
     const idx = voiceData.findIndex(d => d.key === selVoice);
     if (idx >= 0) { const t = setTimeout(() => { try { voiceRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.5 }); } catch {} }, 60); return () => clearTimeout(t); }
@@ -577,6 +587,102 @@ export default function App() {
   const playArp = () => { if (arp.on) tp.arpRestart(); else { setArp(a => ({ ...a, on: true })); tp.arpOn(true); } };
   const stopArp = () => { setArp(a => ({ ...a, on: false })); tp.arpOn(false); };
   const activePresetName = ARP_LIBRARY.find(p => p.id === arpPresetId)?.name || '';
+
+  // --- Arp 2 (the keyboard voice's own arp) — the exact same handler set, targeting the
+  // @ARP2* commands + the arp2 UI state, so the Arpeggiator 2 card is a full clone. ---
+  const selectPattern2 = (i: number) => { setArp2(a => ({ ...a, pat: i })); tp.arp2Pattern(i); if (i === PAT_USER_SEQUENCE) tp.arp2Sequence(seq2); setArp2PresetId(''); };
+  const stepArpPat2 = (dir: number) => selectPattern2((arp2.pat + dir + ARP_PAT.length) % ARP_PAT.length);
+  const applySeq2 = (steps: SeqStep[]) => { setSeq2(steps); tp.arp2Sequence(steps); if (arp2.pat !== PAT_USER_SEQUENCE) { setArp2(a => ({ ...a, pat: PAT_USER_SEQUENCE })); tp.arp2Pattern(PAT_USER_SEQUENCE); } setArp2PresetId(''); };
+  const applyPreset2 = (p: ArpPreset) => { const st = applyArpPreset(tp, p, 2); setArp2(a => ({ ...a, pat: st.pat, rate: st.rate, oct: st.oct, latch: st.latch })); if (st.seq) setSeq2(st.seq); setArp2PresetId(p.id); };
+  const stepPreset2 = (dir: number) => { if (!ARP_LIBRARY.length) return; const idx = ARP_LIBRARY.findIndex(p => p.id === arp2PresetId); const ni = (idx < 0 ? (dir > 0 ? -1 : 0) : idx) + dir; applyPreset2(ARP_LIBRARY[(ni + ARP_LIBRARY.length) % ARP_LIBRARY.length]); };
+  const stepArpNav2 = (dir: number) => (arp2Mode === 'preset' ? stepPreset2(dir) : stepArpPat2(dir));
+  const resetArpManual2 = () => { tp.arp2Preset({ pat: arp2.pat, rate: ARP_RATES[arp2.rate].fw, gatePct: 50, swingPct: 50, oct: arp2.oct, octMode: 0, latch: arp2.latch, velMode: 0, velFixed: 100, velAccent: 127, stepMask: -1, stepLength: 16, mpeMode: 0, outCh: 1, scatterBase: 2, scatterCount: 4, scale: 0, scaleRoot: 0, transpose: 0, repeat: 1 }); setArp2PresetId(''); };
+  const enterManualMode2 = () => { setArp2Mode('manual'); resetArpManual2(); };
+  const playArp2 = () => { if (arp2.on) tp.arp2Restart(); else { setArp2(a => ({ ...a, on: true })); tp.arp2On(true); } };
+  const stopArp2 = () => { setArp2(a => ({ ...a, on: false })); tp.arp2On(false); };
+  const activePreset2Name = ARP_LIBRARY.find(p => p.id === arp2PresetId)?.name || '';
+
+  // One arp "slot" bundles a filter's state + handlers so the same body/value/actions render
+  // both the main arp and Arp 2. arpSlot(1) = main (@ARP*), arpSlot(2) = keyboard (@ARP2*).
+  type ArpSlotT = {
+    arp: { on: boolean; pat: number; rate: number; oct: number; latch: boolean };
+    mode: 'preset' | 'manual'; setMode: (m: 'preset' | 'manual') => void;
+    presetId: string; activeName: string; seq: SeqStep[];
+    play: () => void; stop: () => void; stepNav: (d: number) => void;
+    selectPattern: (i: number) => void; applyPreset: (p: ArpPreset) => void; applySeq: (st: SeqStep[]) => void;
+    enterManual: () => void; resetManual: () => void;
+    setRate: (i: number) => void; setOct: (n: number) => void; setLatch: (v: boolean) => void;
+  };
+  const arpSlot1: ArpSlotT = {
+    arp, mode: arpMode, setMode: setArpMode, presetId: arpPresetId, activeName: activePresetName, seq,
+    play: playArp, stop: stopArp, stepNav: stepArpNav,
+    selectPattern, applyPreset, applySeq, enterManual: enterManualMode, resetManual: resetArpManual,
+    setRate: i => { setArp(a => ({ ...a, rate: i })); tp.arpRate(ARP_RATES[i].fw); setArpPresetId(''); },
+    setOct: n => { setArp(a => ({ ...a, oct: n })); tp.arpOctaves(n); setArpPresetId(''); },
+    setLatch: v => { setArp(a => ({ ...a, latch: v })); tp.arpLatch(v); setArpPresetId(''); },
+  };
+  const arpSlot2: ArpSlotT = {
+    arp: arp2, mode: arp2Mode, setMode: setArp2Mode, presetId: arp2PresetId, activeName: activePreset2Name, seq: seq2,
+    play: playArp2, stop: stopArp2, stepNav: stepArpNav2,
+    selectPattern: selectPattern2, applyPreset: applyPreset2, applySeq: applySeq2, enterManual: enterManualMode2, resetManual: resetArpManual2,
+    setRate: i => { setArp2(a => ({ ...a, rate: i })); tp.arp2Rate(ARP_RATES[i].fw); setArp2PresetId(''); },
+    setOct: n => { setArp2(a => ({ ...a, oct: n })); tp.arp2Octaves(n); setArp2PresetId(''); },
+    setLatch: v => { setArp2(a => ({ ...a, latch: v })); tp.arp2Latch(v); setArp2PresetId(''); },
+  };
+  const arpValue = (A: ArpSlotT) => (A.arp.on ? '' : '(off)  ') + (A.mode === 'preset'
+    ? (A.activeName || 'Preset — none picked')
+    : ARP_PAT[A.arp.pat] + '  ·  ' + ARP_RATES[A.arp.rate].label);
+  const arpActions = (A: ArpSlotT) => (<>
+    <HdrBtn label="‹" stop onPress={() => A.stepNav(-1)} />
+    <HdrBtn label="›" stop onPress={() => A.stepNav(1)} />
+    <HdrBtn label="▶" onPress={A.play} />
+    <HdrBtn label="■" stop onPress={A.stop} />
+  </>);
+  const arpBody = (A: ArpSlotT) => (
+    <>
+      {/* Play and Stop are independent (not a toggle): Play re-triggers a running arp,
+          Stop bypasses it. The active state is shown by which button is highlighted. */}
+      <Row>
+        <Pressable style={[s.btn, s.grow1, A.arp.on && s.btnOn]} onPress={A.play}>
+          <Text style={s.btnText}>▶  {A.arp.on ? 'Restart' : 'Play'}</Text>
+        </Pressable>
+        <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={A.stop}>
+          <Text style={s.btnText}>■  Stop</Text>
+        </Pressable>
+      </Row>
+      <View style={s.arpTabs}>
+        <Pressable style={[s.arpTab, A.mode === 'preset' && s.arpTabOn]} onPress={() => A.setMode('preset')}>
+          <Text style={[s.arpTabTxt, A.mode === 'preset' && s.arpTabTxtOn]}>Presets</Text>
+        </Pressable>
+        <Pressable style={[s.arpTab, A.mode === 'manual' && s.arpTabOn]} onPress={A.enterManual}>
+          <Text style={[s.arpTabTxt, A.mode === 'manual' && s.arpTabTxtOn]}>Manual</Text>
+        </Pressable>
+      </View>
+      {A.mode === 'preset' ? (
+        <>
+          <Text style={s.muted}>{A.activeName ? 'Active preset: ' + A.activeName : 'Pick a preset — it sets everything (pattern, rate, feel, scale…). Switch to Manual to tweak.'}</Text>
+          <ArpPresetBrowser onApply={A.applyPreset} activeId={A.presetId} />
+        </>
+      ) : (
+        <>
+          <Text style={s.muted}>Pattern</Text>
+          <View style={s.patGrid}>
+            {ARP_PAT.map((p, i) => <Pressable key={i} style={[s.patCell, A.arp.pat === i && s.patCellOn]} onPress={() => A.selectPattern(i)}><Text style={s.patCellTxt} numberOfLines={1}>{p}</Text></Pressable>)}
+          </View>
+          {A.arp.pat === PAT_USER_SEQUENCE && <ArpStepGrid steps={A.seq} onChange={A.applySeq} />}
+          <Row><Text style={[s.muted, { flex: 1 }]}>Rate</Text>
+            {ARP_RATES.map((r, i) => <Pressable key={i} style={[s.pill, A.arp.rate === i && s.pillOn]} onPress={() => A.setRate(i)}><Text style={s.text}>{r.label}</Text></Pressable>)}</Row>
+          <Row><Text style={[s.muted, { flex: 1 }]}>Octaves {A.arp.oct}</Text>
+            {[1, 2, 3, 4].map(n => <Pressable key={n} style={[s.pill, A.arp.oct === n && s.pillOn]} onPress={() => A.setOct(n)}><Text style={s.text}>{n}</Text></Pressable>)}</Row>
+          <Row><Text style={[s.muted, { flex: 1 }]}>Latch</Text>
+            <Switch value={A.arp.latch} onValueChange={A.setLatch} /></Row>
+          <Pressable style={[s.btn, s.btnGhost, s.btnWide]} onPress={A.resetManual}>
+            <Text style={s.btnText}>Reset to plain arp</Text>
+          </Pressable>
+        </>
+      )}
+    </>
+  );
   const playSong = () => { const sg = cat.songs.find(x => x.name === player.song) || cat.songs[0]; if (!sg) return; tp.songRestart(songArg(sg)); setPlayer(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };  // restart from the top on a fresh downbeat; -1 until the device reports position
   const stopSong = () => { manualStopRef.current = true; tp.stopSong(); setPlayer(p => ({ ...p, playing: false, prog: 0 })); };
   const playSongOf = (sg: Song) => { tp.songPlay(songArg(sg)); setPlayer(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };
@@ -633,6 +739,59 @@ export default function App() {
   if (vpath === '@bundled') crumbs.push({ label: 'Bundled', go: () => setCart(null) });
   else if (vpath) { let acc = ''; for (const seg of vpath.split('/')) { acc = acc ? acc + '/' + seg : seg; const p = acc; crumbs.push({ label: seg, go: () => { setCart(null); setVpath(p); } }); } }
   if (cart) crumbs.push({ label: cart.name, go: () => {} });
+
+  // The folder browser (nav bar + picker), shared by the Synth and Synth/Voices 2 pages.
+  // Both share the browse position (cart/folder) but keep their own selection + list ref, and
+  // pick into their own voice slot. `target` routes taps to voice 1 or voice 2.
+  const voiceBrowserBody = (target: 1 | 2) => {
+    const sel = target === 2 ? selVoice2 : selVoice;
+    const lref = target === 2 ? voiceRef2 : voiceRef;
+    const bref = target === 2 ? browseRef2 : browseRef;
+    return (
+      <>
+        {/* nav bar: up-one-level on the left, breadcrumb trail beside it */}
+        <View style={s.navBar}>
+          <Pressable style={[s.upBtn, atRoot && s.upBtnOff]} onPress={goUp} disabled={atRoot}>
+            <Text style={s.upTxt}>‹</Text>
+          </Pressable>
+          <ScrollView horizontal style={s.crumbs} showsHorizontalScrollIndicator={false} contentContainerStyle={s.crumbsInner}>
+            {crumbs.map((c, i) => {
+              const last = i === crumbs.length - 1;
+              return (
+                <View key={i} style={s.crumbItem}>
+                  {i > 0 && <Text style={s.crumbSep}>›</Text>}
+                  <Pressable onPress={c.go} disabled={last}>
+                    <Text style={last ? s.crumbLast : s.crumbTxt} numberOfLines={1}>{c.label}</Text>
+                  </Pressable>
+                </View>
+              );
+            })}
+          </ScrollView>
+        </View>
+        {/* the picker: always fills the remaining page height */}
+        {!loaded ? <Text style={s.muted}>Connect to load voices.</Text> : voiceData.length ? (
+          <FlatList ref={lref} data={voiceData} style={s.picker} nestedScrollEnabled keyExtractor={d => d.key}
+            getItemLayout={(_, index) => ({ length: ROW_H, offset: ROW_H * index, index })}
+            onScrollToIndexFailed={() => {}} scrollEventThrottle={32}
+            onScroll={e => { pickerY.current[listId] = e.nativeEvent.contentOffset.y; }}
+            renderItem={({ item }) => <ListBtn label={item.label} sel={sel === item.key} onPress={() => pickVoice(item, target)} />} />
+        ) : libBusy ? (
+          <View style={{ padding: 20, alignItems: 'center' }}><ActivityIndicator color={C.accent} /><Text style={[s.muted, { marginTop: 8 }]}>Loading…</Text></View>
+        ) : cart ? (
+          <Text style={s.muted}>Couldn't read this cart's voices.</Text>
+        ) : (
+          <ScrollView ref={bref} style={s.picker} nestedScrollEnabled scrollEventThrottle={32}
+            onScroll={e => { pickerY.current[listId] = e.nativeEvent.contentOffset.y; }}>
+            {vpath === '' && <ListBtn label={'★ Bundled voices (' + cat.instruments.length + ')'} onPress={() => setVpath('@bundled')} />}
+            {cat.hasDexed && level.folders.map(f => <ListBtn key={'f' + f} label={'📁 ' + f} onPress={() => setVpath(vpath ? vpath + '/' + f : f)} />)}
+            {cat.hasDexed && level.carts.map(c => <ListBtn key={c.rel} label={'🎛 ' + c.name} onPress={() => setCart({ rel: c.rel, name: c.name })} />)}
+            {cat.hasDexed && !!libErr && <Text style={[s.muted, { padding: 12 }]}>⚠ SD library: {libErr} — restart the dev server with `expo start --web -c` and hard-reload.</Text>}
+            {cat.hasDexed && !libErr && level.folders.length === 0 && level.carts.length === 0 && <Text style={s.muted}>{vpath === '' ? 'No SD library found (/dexed empty?)' : '(empty folder)'}</Text>}
+          </ScrollView>
+        )}
+      </>
+    );
+  };
 
   const sections: Section[] = [
     // CONNECTION — catalog stats
@@ -750,106 +909,41 @@ export default function App() {
       </>),
       body: (
         <View style={s.synthWrap}>
-          {/* When picking the Voices-2 sound, the same browser writes to voice 2 instead of
-              voice 1. A banner makes that mode obvious and offers a one-tap way back. */}
-          {voiceTarget === 2 && (
-            <Pressable style={[s.btn, s.btnOn, s.btnWide]} onPress={() => { setVoiceTarget(1); setRoute('synth2'); }}>
-              <Text style={s.btnText}>Choosing Voices 2 sound — tap a voice, then ✓ Done</Text>
-            </Pressable>
-          )}
           {/* Synth output level — the same control as the MIDI Player's Volume (both drive
               @SONGVOL, the synth mix-bus fader), surfaced here since this is the synth page. */}
           <VolSlider label="Volume" value={songVol} onChange={setSongVol} onCommit={v => tp.songVol(v)} disabled={!connected} />
-          {/* nav bar: up-one-level on the left, breadcrumb trail beside it */}
-          <View style={s.navBar}>
-            <Pressable style={[s.upBtn, atRoot && s.upBtnOff]} onPress={goUp} disabled={atRoot}>
-              <Text style={s.upTxt}>‹</Text>
-            </Pressable>
-            <ScrollView horizontal style={s.crumbs} showsHorizontalScrollIndicator={false} contentContainerStyle={s.crumbsInner}>
-              {crumbs.map((c, i) => {
-                const last = i === crumbs.length - 1;
-                return (
-                  <View key={i} style={s.crumbItem}>
-                    {i > 0 && <Text style={s.crumbSep}>›</Text>}
-                    <Pressable onPress={c.go} disabled={last}>
-                      <Text style={last ? s.crumbLast : s.crumbTxt} numberOfLines={1}>{c.label}</Text>
-                    </Pressable>
-                  </View>
-                );
-              })}
-            </ScrollView>
-          </View>
-          {/* the picker: always fills the remaining page height */}
-          {!loaded ? <Text style={s.muted}>Connect to load voices.</Text> : voiceData.length ? (
-            <FlatList ref={voiceRef} data={voiceData} style={s.picker} nestedScrollEnabled keyExtractor={d => d.key}
-              getItemLayout={(_, index) => ({ length: ROW_H, offset: ROW_H * index, index })}
-              onScrollToIndexFailed={() => {}} scrollEventThrottle={32}
-              onScroll={e => { pickerY.current[listId] = e.nativeEvent.contentOffset.y; }}
-              renderItem={({ item }) => <ListBtn label={item.label} sel={selVoice === item.key} onPress={() => pickVoice(item)} />} />
-          ) : libBusy ? (
-            <View style={{ padding: 20, alignItems: 'center' }}><ActivityIndicator color={C.accent} /><Text style={[s.muted, { marginTop: 8 }]}>Loading…</Text></View>
-          ) : cart ? (
-            <Text style={s.muted}>Couldn't read this cart's voices.</Text>
-          ) : (
-            <ScrollView ref={browseRef} style={s.picker} nestedScrollEnabled scrollEventThrottle={32}
-              onScroll={e => { pickerY.current[listId] = e.nativeEvent.contentOffset.y; }}>
-              {vpath === '' && <ListBtn label={'★ Bundled voices (' + cat.instruments.length + ')'} onPress={() => setVpath('@bundled')} />}
-              {/* /dexed cart library — only on Dexed engines (others have no cart library to browse) */}
-              {cat.hasDexed && level.folders.map(f => <ListBtn key={'f' + f} label={'📁 ' + f} onPress={() => setVpath(vpath ? vpath + '/' + f : f)} />)}
-              {cat.hasDexed && level.carts.map(c => <ListBtn key={c.rel} label={'🎛 ' + c.name} onPress={() => setCart({ rel: c.rel, name: c.name })} />)}
-              {cat.hasDexed && !!libErr && <Text style={[s.muted, { padding: 12 }]}>⚠ SD library: {libErr} — restart the dev server with `expo start --web -c` and hard-reload.</Text>}
-              {cat.hasDexed && !libErr && level.folders.length === 0 && level.carts.length === 0 && <Text style={s.muted}>{vpath === '' ? 'No SD library found (/dexed empty?)' : '(empty folder)'}</Text>}
-            </ScrollView>
-          )}
+          {voiceBrowserBody(1)}
         </View>
       ),
     },
-    // SYNTH / VOICES 2 — build-flag gated (caps.voice2). Splits the Dexed pool 4/4 so a
-    // USB-host keyboard plays its own voice live while the main path (song/arp/drums) keeps
-    // voice 1. The voice picker reuses the Synth browser in "voice 2" mode (voiceTarget).
+    // SYNTH / VOICES 2 — build-flag gated (caps.voice2). A full clone of the Synth/Voices
+    // page (same folder browser) plus an on/off split toggle: engines 0-3 keep voice 1
+    // (song/arp/drums), engines 4-7 are this voice, played live by a USB-host keyboard.
     {
-      id: 'synth2', title: 'Synth / Voices 2', show: caps.voice2,
-      value: voice2.on ? (voice2.name || 'On') : 'Off',
+      id: 'synth2', title: 'Synth / Voices 2', show: caps.voice2, fullHeight: true,
+      value: (voice2.on ? '' : '(off)  ') + (voice2.name || 'None'),
       subtitle: voice2.name ? (
         <>
           <Text style={s.drawerValue} numberOfLines={1}>{voice2.name}</Text>
           {!!voice2.path && <Text style={s.pathLine} numberOfLines={1} ellipsizeMode="head">{voice2.path}</Text>}
         </>
       ) : undefined,
+      actions: (<>
+        <HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1, 2)} />
+        <HdrBtn label="Next ›" stop onPress={() => stepVoice(1, 2)} />
+      </>),
       body: (
-        <>
-          <Text style={s.muted}>Splits the Dexed pool 4/4: the song, arp and drums keep the main voice while a keyboard on the USB-host port plays this second voice live. Enabling drops each side to 8-voice polyphony.</Text>
+        <View style={s.synthWrap}>
+          {/* Enable the split: engines 0-3 keep voice 1 (song/arp/drums), engines 4-7 become
+              this voice, played live by a USB-host keyboard. Off = one unified 16-voice pool. */}
           <Row><View style={{ flex: 1 }}>
-              <Text style={s.text}>Enable Voices 2</Text>
-              <Text style={s.muted}>Break the USB-host keyboard off to its own instrument.</Text>
+              <Text style={s.text}>Enable Voices 2 (keyboard split)</Text>
+              <Text style={s.muted}>Breaks a USB keyboard off to this voice. Each side drops to 8-voice polyphony.</Text>
             </View>
             <Switch value={voice2.on} onValueChange={v => { setVoice2(x => ({ ...x, on: v })); tp.voice2Enable(v); }} /></Row>
-          <Text style={[s.text, { marginTop: 6 }]}>Voice</Text>
-          <Text style={s.muted} numberOfLines={1}>{voice2.name || '— none picked —'}{voice2.path ? '   ·   ' + voice2.path : ''}</Text>
-          <Pressable style={[s.btn, s.btnWide]} onPress={() => { setVoiceTarget(2); setRoute('synth'); }}>
-            <Text style={s.btnText}>Choose Voices 2 sound →</Text>
-          </Pressable>
           <VolSlider label="Volume" value={voice2.vol} onChange={v => setVoice2(x => ({ ...x, vol: v }))} onCommit={v => tp.voice2Vol(v)} disabled={!connected || !voice2.on} />
-          {caps.arp2 && (
-            <>
-              <Text style={[s.text, { marginTop: 10 }]}>Keyboard arpeggiator</Text>
-              <Text style={s.muted}>A second arp, only on the keyboard voice — the main arp is untouched.</Text>
-              <Pressable style={[s.btn, s.btnWide, arp2.on && s.btnOn]} onPress={() => { const on = !arp2.on; setArp2(a => ({ ...a, on })); tp.arp2On(on); }}>
-                <Text style={s.btnText}>{arp2.on ? '● Arp on' : '○ Arp off'}</Text>
-              </Pressable>
-              <Text style={s.muted}>Pattern</Text>
-              <View style={s.patGrid}>
-                {ARP_PAT.map((p, i) => <Pressable key={i} style={[s.patCell, arp2.pat === i && s.patCellOn]} onPress={() => { setArp2(a => ({ ...a, pat: i })); tp.arp2Pattern(i); }}><Text style={s.patCellTxt} numberOfLines={1}>{p}</Text></Pressable>)}
-              </View>
-              <Row><Text style={[s.muted, { flex: 1 }]}>Rate</Text>
-                {ARP_RATES.map((r, i) => <Pressable key={i} style={[s.pill, arp2.rate === i && s.pillOn]} onPress={() => { setArp2(a => ({ ...a, rate: i })); tp.arp2Rate(r.fw); }}><Text style={s.text}>{r.label}</Text></Pressable>)}</Row>
-              <Row><Text style={[s.muted, { flex: 1 }]}>Octaves {arp2.oct}</Text>
-                {[1, 2, 3, 4].map(n => <Pressable key={n} style={[s.pill, arp2.oct === n && s.pillOn]} onPress={() => { setArp2(a => ({ ...a, oct: n })); tp.arp2Octaves(n); }}><Text style={s.text}>{n}</Text></Pressable>)}</Row>
-              <Row><Text style={[s.muted, { flex: 1 }]}>Latch</Text>
-                <Switch value={arp2.latch} onValueChange={v => { setArp2(a => ({ ...a, latch: v })); tp.arp2Latch(v); }} /></Row>
-            </>
-          )}
-        </>
+          {voiceBrowserBody(2)}
+        </View>
       ),
     },
     // MIDI PLAYER — select a song; Play/Stop in the header (works collapsed); loop toggle
@@ -885,66 +979,15 @@ export default function App() {
     // ARPEGGIATOR
     {
       id: 'arp', title: 'Arpeggiator', show: true,
-      value: (arp.on ? '' : '(off)  ') + (arpMode === 'preset'
-        ? (activePresetName || 'Preset — none picked')
-        : ARP_PAT[arp.pat] + '  ·  ' + ARP_RATES[arp.rate].label),
-      actions: (<>
-        <HdrBtn label="‹" stop onPress={() => stepArpNav(-1)} />
-        <HdrBtn label="›" stop onPress={() => stepArpNav(1)} />
-        <HdrBtn label="▶" onPress={playArp} />
-        <HdrBtn label="■" stop onPress={stopArp} />
-      </>),
-      body: (
-        <>
-          {/* Play and Stop are independent (not a toggle): Play re-triggers a running arp,
-              Stop bypasses it. The active state is shown by which button is highlighted. */}
-          <Row>
-            <Pressable style={[s.btn, s.grow1, arp.on && s.btnOn]} onPress={playArp}>
-              <Text style={s.btnText}>▶  {arp.on ? 'Restart' : 'Play'}</Text>
-            </Pressable>
-            <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={stopArp}>
-              <Text style={s.btnText}>■  Stop</Text>
-            </Pressable>
-          </Row>
-          {/* Two tabs — Preset vs Manual — so only ONE editor drives the arp at a time and it's
-              always clear which. Both write the same device config, so we never show both at once. */}
-          <View style={s.arpTabs}>
-            <Pressable style={[s.arpTab, arpMode === 'preset' && s.arpTabOn]} onPress={() => setArpMode('preset')}>
-              <Text style={[s.arpTabTxt, arpMode === 'preset' && s.arpTabTxtOn]}>Presets</Text>
-            </Pressable>
-            <Pressable style={[s.arpTab, arpMode === 'manual' && s.arpTabOn]} onPress={enterManualMode}>
-              <Text style={[s.arpTabTxt, arpMode === 'manual' && s.arpTabTxtOn]}>Manual</Text>
-            </Pressable>
-          </View>
-
-          {arpMode === 'preset' ? (
-            /* PRESET tab — browse the 238-preset library and apply one. */
-            <>
-              <Text style={s.muted}>{activePresetName ? 'Active preset: ' + activePresetName : 'Pick a preset — it sets everything (pattern, rate, feel, scale…). Switch to Manual to tweak.'}</Text>
-              <ArpPresetBrowser onApply={applyPreset} activeId={arpPresetId} />
-            </>
-          ) : (
-            /* MANUAL tab — hand-build the arp. Editing anything here diverges from a preset. */
-            <>
-              <Text style={s.muted}>Pattern</Text>
-              <View style={s.patGrid}>
-                {ARP_PAT.map((p, i) => <Pressable key={i} style={[s.patCell, arp.pat === i && s.patCellOn]} onPress={() => selectPattern(i)}><Text style={s.patCellTxt} numberOfLines={1}>{p}</Text></Pressable>)}
-              </View>
-              {/* User Sequence: the step-grid editor + shape presets (the "actual arpeggiator preset" pattern). */}
-              {arp.pat === PAT_USER_SEQUENCE && <ArpStepGrid steps={seq} onChange={applySeq} />}
-              <Row><Text style={[s.muted, { flex: 1 }]}>Rate</Text>
-                {ARP_RATES.map((r, i) => <Pressable key={i} style={[s.pill, arp.rate === i && s.pillOn]} onPress={() => { setArp(a => ({ ...a, rate: i })); tp.arpRate(r.fw); setArpPresetId(''); }}><Text style={s.text}>{r.label}</Text></Pressable>)}</Row>
-              <Row><Text style={[s.muted, { flex: 1 }]}>Octaves {arp.oct}</Text>
-                {[1, 2, 3, 4].map(n => <Pressable key={n} style={[s.pill, arp.oct === n && s.pillOn]} onPress={() => { setArp(a => ({ ...a, oct: n })); tp.arpOctaves(n); setArpPresetId(''); }}><Text style={s.text}>{n}</Text></Pressable>)}</Row>
-              <Row><Text style={[s.muted, { flex: 1 }]}>Latch</Text>
-                <Switch value={arp.latch} onValueChange={v => { setArp(a => ({ ...a, latch: v })); tp.arpLatch(v); setArpPresetId(''); }} /></Row>
-              <Pressable style={[s.btn, s.btnGhost, s.btnWide]} onPress={resetArpManual}>
-                <Text style={s.btnText}>Reset to plain arp</Text>
-              </Pressable>
-            </>
-          )}
-        </>
-      ),
+      value: arpValue(arpSlot1), actions: arpActions(arpSlot1),
+      body: arpBody(arpSlot1),
+    },
+    // ARPEGGIATOR 2 — build-flag gated (caps.arp2). A full clone of the arp, on the Voices-2
+    // keyboard voice only (@ARP2*); the main arp is untouched.
+    {
+      id: 'arp2', title: 'Arpeggiator 2', show: caps.arp2,
+      value: arpValue(arpSlot2), actions: arpActions(arpSlot2),
+      body: arpBody(arpSlot2),
     },
     // DRUMS — only if the built engine renders ch10 drums (hidden e.g. on a no-PSRAM TSF build)
     {
@@ -1013,7 +1056,7 @@ export default function App() {
   // Display order (homepage cards + page routing). Performance sections first
   // (play → pick a voice → tempo → arp → drums), then system (connection, BT, codec).
   // Unlisted ids fall to the end in their definition order (stable sort).
-  const SECTION_ORDER = ['player', 'synth', 'synth2', 'bpm', 'metro', 'arp', 'drums', 'conn', 'bt', 'codec'];
+  const SECTION_ORDER = ['player', 'synth', 'synth2', 'bpm', 'metro', 'arp', 'arp2', 'drums', 'conn', 'bt', 'codec'];
   const ord = (id: string) => { const i = SECTION_ORDER.indexOf(id); return i < 0 ? 999 : i; };
   const visible = sections.filter(x => x.show).sort((a, b) => ord(a.id) - ord(b.id));
   const cur = route === 'home' ? null : visible.find(x => x.id === route);

@@ -98,10 +98,15 @@ export interface Transport {
   dxVoice2(index: number): void;                      // bundled voice for the keyboard half (@DXVOICE2=)
   dxPick2(cartRel: string, voice: number): void;      // /dexed cart voice for the keyboard half (@DXPICK2=)
   arp2On(on: boolean): void;                          // keyboard-path arp on/off (@ARP2ON=) — gated by caps.arp2
+  arp2Restart(): void;                                // @ARP2RESTART
   arp2Pattern(i: number): void;
   arp2Rate(i: number): void;                          // i = firmware Rate index
+  arp2Gate(pct: number): void;                        // @ARP2GATE=
+  arp2Swing(pct: number): void;                       // @ARP2SWING=
   arp2Octaves(n: number): void;
   arp2Latch(on: boolean): void;
+  arp2Sequence(steps: SeqStep[]): void;               // @ARP2SEQ=
+  arp2Preset(params: ArpWireParams): void;            // @ARP2PRESET=
   espPair(): void;
   espReconnect(): void;      // (re)connect A2DP audio to the last paired source
   espDisconnect(): void;     // drop the current A2DP audio source

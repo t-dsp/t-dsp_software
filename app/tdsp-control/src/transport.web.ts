@@ -201,10 +201,15 @@ export class WebSerialTransport implements Transport {
   dxVoice2(i: number) { this.send('@DXVOICE2=' + i); }
   dxPick2(cartRel: string, voice: number) { this.send('@DXPICK2=' + cartRel + '\t' + voice); }
   arp2On(on: boolean) { this.send('@ARP2ON=' + (on ? 1 : 0)); }
+  arp2Restart() { this.send('@ARP2RESTART'); }
   arp2Pattern(i: number) { this.send('@ARP2PAT=' + i); }
   arp2Rate(i: number) { this.send('@ARP2RATE=' + i); }
+  arp2Gate(pct: number) { this.send('@ARP2GATE=' + Math.max(5, Math.min(150, Math.round(pct)))); }
+  arp2Swing(pct: number) { this.send('@ARP2SWING=' + Math.max(50, Math.min(85, Math.round(pct)))); }
   arp2Octaves(n: number) { this.send('@ARP2OCT=' + n); }
   arp2Latch(on: boolean) { this.send('@ARP2LATCH=' + (on ? 1 : 0)); }
+  arp2Sequence(steps: SeqStep[]) { this.send('@ARP2SEQ=' + encodeSequence(steps)); }
+  arp2Preset(params: ArpWireParams) { this.send('@ARP2PRESET=' + encodeArpParams(params)); }
   espPair() { this.send('P'); }
   espReconnect() { this.send('r'); }
   espDisconnect() { this.send('X'); }   // Teensy relays 'X' -> ESP32 'x' (A2DP disconnect)

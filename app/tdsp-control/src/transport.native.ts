@@ -311,10 +311,15 @@ export class BleTransport implements Transport {
   dxVoice2(i: number) { this.relay('@DXVOICE2=' + i); }
   dxPick2(cartRel: string, voice: number) { this.relay('@DXPICK2=' + cartRel + '\t' + voice); }
   arp2On(on: boolean) { this.relay('@ARP2ON=' + (on ? 1 : 0)); }
+  arp2Restart() { this.relay('@ARP2RESTART'); }
   arp2Pattern(i: number) { this.relay('@ARP2PAT=' + i); }
   arp2Rate(i: number) { this.relay('@ARP2RATE=' + i); }
+  arp2Gate(pct: number) { this.relay('@ARP2GATE=' + Math.max(5, Math.min(150, Math.round(pct)))); }
+  arp2Swing(pct: number) { this.relay('@ARP2SWING=' + Math.max(50, Math.min(85, Math.round(pct)))); }
   arp2Octaves(n: number) { this.relay('@ARP2OCT=' + n); }
   arp2Latch(on: boolean) { this.relay('@ARP2LATCH=' + (on ? 1 : 0)); }
+  arp2Sequence(steps: SeqStep[]) { this.relay('@ARP2SEQ=' + encodeSequence(steps)); }
+  arp2Preset(params: ArpWireParams) { this.relay('@ARP2PRESET=' + encodeArpParams(params)); }
   // ESP32-LOCAL Bluetooth control (act on the receiver, not the Teensy) → opcodes.
   espPair() { this.cmd(CMD.PAIRING_MODE); }
   espReconnect() { this.cmd(CMD.RECONNECT); }
