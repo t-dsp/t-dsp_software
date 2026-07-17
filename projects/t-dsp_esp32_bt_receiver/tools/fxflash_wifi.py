@@ -26,17 +26,23 @@ CHUNK = 512   # BIN frame size; matches the ESP's WS buffer headroom
 
 class Tunnel:
     def __init__(self, url):
-        self.ws = websocket.create_connection(url, timeout=10)
-        self.ws.settimeout(0.2)
+        self.ws = websocket.create_connection(url, timeout=25)
         self.buf = ""
 
-    def drain(self):
+    def drain(self, t=0.3):
+        # Use a SHORT timeout only for reads, then restore blocking mode so that
+        # send() waits out TCP backpressure (the ESP paces us to 115200 via a full
+        # UART TX FIFO) instead of raising a socket timeout mid-transfer -- the bug
+        # that stalled the first attempt and hung the Teensy.
+        self.ws.settimeout(t)
         try:
             while True:
                 m = self.ws.recv()
                 self.buf += m.decode("ascii", "replace") if isinstance(m, bytes) else m
         except Exception:
             pass
+        finally:
+            self.ws.settimeout(None)   # blocking sends for the streaming phase
 
     def wait(self, pattern, secs, regex=False):
         end = time.time() + secs
@@ -72,11 +78,12 @@ def main():
         print("  warning: didn't see 'reading hex lines' -- streaming anyway")
 
     print(f"streaming {len(data)} bytes as {CHUNK}-byte frames...")
+    t.ws.settimeout(None)   # blocking sends: TCP backpressure paces us to the UART
     t0 = time.time()
     for i in range(0, len(data), CHUNK):
         t.ws.send_binary(data[i:i + CHUNK])
         if (i // CHUNK) % 128 == 0:
-            t.drain()  # keep the socket healthy; check for early abort
+            t.drain()  # keep the socket healthy; check for early abort (restores blocking)
             if "abort -" in t.buf:
                 print("STREAM ABORT:", t.buf[-160:]); t.ws.send("!fxend"); return 3
             if i:
