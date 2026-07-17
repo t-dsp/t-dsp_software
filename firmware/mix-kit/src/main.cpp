@@ -2605,13 +2605,29 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
                        t.player->isPlaying() ? 1 : 0, t.player->positionPermille(), t.player->isSynced() ? 1 : 0, *t.loop ? 1 : 0);
           tdsp::catdb::jsonStr(reply, t.name); reply.print("}"); }
 #endif
+        // tracks[] — the compiled Track INVENTORY as data (Phase 3): one entry per Track so the app can
+        // render a card per track (kind/name/playing/on/arp) instead of hardcoding Synth A/B/Drums.
+        // Additive alongside the per-voice keys above; the app migrates to this, the old keys retire
+        // later. "on" = the track is currently usable (voice 2 enabled / engine renders ch10 drums).
+        reply.print(",\"tracks\":[");
+        reply.printf("{\"i\":0,\"kind\":\"synth\",\"playing\":%d,\"on\":1,\"arp\":1,\"name\":", g_tracks[0].player->isPlaying() ? 1 : 0);
+        tdsp::catdb::jsonStr(reply, synthInstrumentName(synthInstrument())); reply.print("}");
+#if TDSP_VOICE2
+        reply.printf(",{\"i\":1,\"kind\":\"synth\",\"playing\":%d,\"on\":%d,\"arp\":%d,\"name\":",
+                     g_tracks[1].player->isPlaying() ? 1 : 0, g_voice2On ? 1 : 0, TDSP_ARP2 ? 1 : 0);
+        tdsp::catdb::jsonStr(reply, synthInstrumentName(g_synthInstrument2)); reply.print("}");
+#endif
+        reply.printf(",{\"i\":%d,\"kind\":\"drum\",\"playing\":%d,\"on\":%d,\"arp\":0,\"name\":",
+                     TDSP_VOICE2 ? 2 : 1, g_drumTrack.player->isPlaying() ? 1 : 0, drumEngineOk() ? 1 : 0);
+        tdsp::catdb::jsonStr(reply, g_curDrumName); reply.print("}]");
         // Build-time capabilities so the app SHOWS the Voices-2 / arp-2 cards only on builds
-        // that have them compiled in (both are pool-only, build-flag gated).
+        // that have them compiled in (both are pool-only, build-flag gated). caps.tracks = the
+        // compiled track count (2 synth voices + 1 drum, or 1+1 on a non-voice2 build).
         // caps.audioloop = the number of audio loops that ACTUALLY allocated (0 = the board
         // couldn't spare the RAM -> the app hides the card), not just the build flag.
-        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"audioloop\":%d}",
+        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"tracks\":%d,\"audioloop\":%d}",
                      TDSP_VOICE2 ? 1 : 0, (TDSP_VOICE2 && TDSP_ARP2) ? 1 : 0, TDSP_RECORDER ? 1 : 0,
-                     TDSP_RECORDER_EDIT ? 1 : 0,
+                     TDSP_RECORDER_EDIT ? 1 : 0, (TDSP_VOICE2 ? 2 : 1) + 1,
 #if TDSP_AUDIOLOOP
                      (int)g_aloopN
 #else
