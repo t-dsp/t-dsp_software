@@ -25,7 +25,8 @@
     "android": "expo start --android",
     "ios": "expo start --ios",
     "web": "expo start --web",
-    "sync:arp": "node scripts/sync-arp-library.mjs"
+    "sync:arp": "node scripts/sync-arp-library.mjs",
+    "test:codec": "node scripts/test-codec.mjs"
   },
   "private": true
 }
