@@ -75,6 +75,12 @@
 // Build-flag gated (TDSP_RECORDER); the app hides the card without it. See
 // project_midi_loop_recorder.
 #include <TDspMidiLoop.h>
+// Audio loop recorder (lib/TDspAudioLoop): stereo AudioStream_F32 nodes that capture
+// the master mix into bar-locked, crossfaded audio loops (the audio-domain sibling of
+// the MIDI looper). N independent loops, build-flag gated (TDSP_AUDIOLOOP), buffers
+// allocated from PSRAM when present else OCRAM. See planning/audio-looper/DESIGN.md.
+#include <TDspAudioLoop.h>
+#include <AudioLoopWav.h>   // @ALSAVE -> /loops/<name>.wav (pulls <SD.h>, already used)
 
 // Developer bench diagnostics (self-tests, MPE/axis proofs, capture probes, the
 // ReplayGain sweep) are opt-in and live in Diagnostics.inc.h. Default ON so every
@@ -85,6 +91,7 @@
 #endif
 
 extern "C" uint8_t external_psram_size;   // MB of soldered PSRAM (Teensy core startup)
+extern "C" void   *extmem_malloc(size_t size);   // Teensy 4.1 PSRAM heap (EXTMEM) allocator
 
 constexpr int     TAC5212_EN_PIN      = 35;     // shared SHDNZ, active-low
 constexpr uint8_t TAC5212_I2C_ADDRESS = 0x51;
@@ -168,8 +175,18 @@ tdsp::MidiRouter       g_router;
 #ifndef TDSP_RECORDER
 #define TDSP_RECORDER 0
 #endif
+// Audio loop recorder (record the master mix as looping audio). Independent of the
+// MIDI recorder. Buffers are allocated at runtime from PSRAM (big) or OCRAM (small);
+// loops that can't allocate are dropped, so a no-PSRAM board degrades gracefully.
+#ifndef TDSP_AUDIOLOOP
+#define TDSP_AUDIOLOOP 0
+#endif
+#ifndef TDSP_AUDIOLOOP_N
+#define TDSP_AUDIOLOOP_N 2          // number of independent audio loops (<=3: final mixer slots 1..N)
+#endif
 #if TDSP_VOICE2
 tdsp::MidiRouter       g_kbdRouter;          // USB-host keyboard -> (arp2 ->) g_synthSinkB
+tdsp::MidiFilePlayer   g_player2;            // SECOND song player, routed to voice 2 (engines 4..7) so two songs play at once
 static bool            g_voice2On = false;   // runtime split enable (@VOICE2=1)
 #if TDSP_ARP2
 tdsp::ArpFilter        g_arpFilter2;         // optional arp on the keyboard/Voices-2 path
@@ -184,6 +201,9 @@ tdsp::ArpFilter        g_arpFilter2;         // optional arp on the keyboard/Voi
 tdsp::Conductor        g_conductor;
 tdsp::PlayerFollower   g_songFollow{g_player};      // g_player / g_drumPlayer are
 tdsp::PlayerFollower   g_drumFollow{g_drumPlayer};  // declared above (lines ~92-93)
+#if TDSP_VOICE2
+tdsp::PlayerFollower   g_songFollow2{g_player2};    // player 2 follows the same master tempo grid
+#endif
 tdsp::ClockSink        g_clockSink{&g_conductor.clock()};
 tdsp::ArpFilter        g_arpFilter;                 // live MIDI -> arp -> synth (bypass by default)
 static bool            g_mpeMode = false;    // false = normal MIDI (bend +-2, ch10 drums), true = MPE
@@ -198,6 +218,8 @@ tdsp::MidiLooper       g_loop1;              // voice-1 loop recorder
 tdsp::MidiLooper       g_loop2;              // voice-2 loop recorder (pool split only)
 #endif
 static uint8_t         g_recVoice = 1;       // 1 or 2: target of @REC/@RECDUB/@RECCLR
+static bool            g_recClickAuto = false; // WE turned the count-in click on for a fresh
+                                              // record; auto-stop it when the loop is captured
 #endif
 
 AudioMixer4_F32        outL, outR;           // F32 mix: 0=BT, 1=local tone, 2=S/PDIF-in, 3=synth
@@ -225,8 +247,42 @@ AudioConnection_F32 c_toneR  (testTone,   0, outR, 1);
 AudioConnection_F32 c_spL    (spdifIn,    0, outL, 2);
 AudioConnection_F32 c_spR    (spdifIn,    1, outR, 2);
 #endif
+#if TDSP_AUDIOLOOP
+// --- Audio loop recorder: record bus (outL/outR) -> loops -> final mix -> DAC ------
+// outL/outR stay the RECORD BUS (everything the user makes); each loop taps it and its
+// return sums back in finalL/finalR. Recording the bus (NOT the post-loop mix) means
+// overdub can't feed back. The app master fader (tdmOut.setGain) is unchanged — it's
+// after the final mix. See planning/audio-looper/DESIGN.md §3.2.
+tdsp::AudioLooper   g_aloop[TDSP_AUDIOLOOP_N];
+AudioMixer4_F32     finalL, finalR;
+AudioConnection_F32 c_finBusL(outL, 0, finalL, 0);        // record bus -> final slot 0
+AudioConnection_F32 c_finBusR(outR, 0, finalR, 0);
+AudioConnection_F32 c_finOutL(finalL, 0, tdmOut, 0);      // final mix -> DAC
+AudioConnection_F32 c_finOutR(finalR, 0, tdmOut, 1);
+AudioConnection_F32 c_al0inL (outL, 0, g_aloop[0], 0);    // loop 0 taps the record bus
+AudioConnection_F32 c_al0inR (outR, 0, g_aloop[0], 1);
+AudioConnection_F32 c_al0rL  (g_aloop[0], 0, finalL, 1);  // loop 0 return -> final slot 1
+AudioConnection_F32 c_al0rR  (g_aloop[0], 1, finalR, 1);
+#if TDSP_AUDIOLOOP_N >= 2
+AudioConnection_F32 c_al1inL (outL, 0, g_aloop[1], 0);
+AudioConnection_F32 c_al1inR (outR, 0, g_aloop[1], 1);
+AudioConnection_F32 c_al1rL  (g_aloop[1], 0, finalL, 2);
+AudioConnection_F32 c_al1rR  (g_aloop[1], 1, finalR, 2);
+#endif
+#if TDSP_AUDIOLOOP_N >= 3
+AudioConnection_F32 c_al2inL (outL, 0, g_aloop[2], 0);
+AudioConnection_F32 c_al2inR (outR, 0, g_aloop[2], 1);
+AudioConnection_F32 c_al2rL  (g_aloop[2], 0, finalL, 3);
+AudioConnection_F32 c_al2rR  (g_aloop[2], 1, finalR, 3);
+#endif
+static uint8_t  g_aloopSel = 0;                          // selected loop for @AL* commands
+static uint8_t  g_aloopN   = 0;                          // loops that actually allocated (runtime)
+static int16_t *g_aloopBuf[TDSP_AUDIOLOOP_N]        = { 0 };
+static uint32_t g_aloopBufSamples[TDSP_AUDIOLOOP_N] = { 0 };
+#else
 AudioConnection_F32 c_outL   (outL,       0, tdmOut, 0);
 AudioConnection_F32 c_outR   (outR,       0, tdmOut, 1);
+#endif
 #if TDSP_ROLE_BT_RECEIVER
 AudioConnection_F32 c_pkBt   (btToF32L,   0, peakBt,    0);
 #endif
@@ -738,6 +794,14 @@ static const int kNumBuiltin = sizeof(kBuiltinSongs) / sizeof(kBuiltinSongs[0]);
 
 static const int MAX_EVENTS = 24000;                 // longest playable song (baked or SD)
 DMAMEM static tdsp::MidiFileEvent g_buf[MAX_EVENTS];  // ~144KB in OCRAM (off the DTCM budget)
+#if TDSP_VOICE2
+// Player 2 needs its OWN event buffer — MidiFilePlayer::play() holds a pointer (does not copy),
+// so it can't share g_buf with player 1. Half-size (~72KB) to keep OCRAM in budget on the
+// no-PSRAM pool build; a second simultaneous song is typically a shorter backing/loop. A song
+// longer than this is truncated on player 2 (player 1 still gets the full 24000-event buffer).
+static const int MAX_EVENTS2 = 12000;
+DMAMEM static tdsp::MidiFileEvent g_buf2[MAX_EVENTS2];
+#endif
 
 static bool endsWithMid(const char *s) {
     size_t n = strlen(s);
@@ -823,6 +887,17 @@ static char g_curSongArg[100] = "";
 static int  g_songBrowse = 0;       // dev-key ('S') browse cursor into songs.ndjson
 static bool g_loop = false;         // when set, a song restarts itself when it ends
 static bool g_songWasPlaying = false;  // edge-detect natural song end (for loop) in loop()
+#if TDSP_VOICE2
+// Player 2's own copies of the per-song state (mirrors the voice-1 slot above), so the second
+// song player is fully independent: its own name/arg/loop/tempo/meter/sync length.
+static char   g_curSong2Name[64] = "";
+static char   g_curSong2Arg[100] = "";
+static bool   g_song2Loop = false;   // NB: g_loop2 (a MidiLooper) is the recorder's — this is the player-2 song-loop flag
+static bool   g_song2WasPlaying = false;
+static float  g_song2Bpm = 120.0f;      // player-2 song native tempo (retimed to master by applyTempos)
+static uint8_t g_song2Bpb = 4;
+static double g_song2LoopBeats = 0.0;
+#endif
 static bool          g_syncProbe = false;   // @SYNCPROBE: 1 Hz drift probe (PLAN §9)
 static elapsedMillis g_syncProbeClock;      // throttle for the probe print
 
@@ -893,6 +968,9 @@ static uint32_t      g_drumArmedN    = 0;
 static void applyTempos() {
     g_songFollow.setNativeBpm(g_songBpm);
     g_drumFollow.setNativeBpm(g_drumFileBpm);
+#if TDSP_VOICE2
+    g_songFollow2.setNativeBpm(g_song2Bpm);   // player 2 retimes to the same master BPM
+#endif
     g_conductor.setBpm(g_masterBpm);
 }
 
@@ -923,7 +1001,11 @@ static bool g_forceTransportZero = false;
 // PLAN §5. Call this BEFORE the new player's play()/setSyncedMode(), so the anchor reads the
 // (possibly re-zeroed) clock.
 static void ensureTransportStarted() {
-    if (g_forceTransportZero || (!g_player.isPlaying() && !g_drumPlayer.isPlaying())) {
+    bool anyPlaying = g_player.isPlaying() || g_drumPlayer.isPlaying();
+#if TDSP_VOICE2
+    anyPlaying = anyPlaying || g_player2.isPlaying();   // player 2 also holds the grid
+#endif
+    if (g_forceTransportZero || !anyPlaying) {
         g_conductor.start();
         g_arpFilter.resyncToGrid();   // a chord held on the arp re-locks to the new downbeat
     }
@@ -938,16 +1020,91 @@ static tdsp::MidiLooper *recSel() {
 #endif
     return &g_loop1;
 }
-// Arming a recording needs a running beat grid to anchor to; when nothing else
-// is playing, also strike the metronome so the player has a click to play against
-// (recording still begins on the first note press). See project_midi_loop_recorder.
-static void recArmTransport() {
+// True while a looper is still arming/capturing a FRESH take (the count-in click should
+// run during this, then stop). Overdub plays the existing loop as its own reference.
+static bool recFreshCapturing() {
+    auto arming = [](tdsp::MidiLooper &l) {
+        return l.state() == tdsp::MidiLooper::Armed || l.state() == tdsp::MidiLooper::Recording;
+    };
+    bool a = arming(g_loop1);
+#if TDSP_VOICE2
+    a = a || arming(g_loop2);
+#endif
+    return a;
+}
+
+// Arming a recording needs a running beat grid to anchor to; when nothing else is playing,
+// also strike the metronome as a count-in so the player has a click to play against
+// (recording still begins on the first note press). The click is auto-stopped once the loop
+// is captured (recPollClick, below) so it never bleeds into playback. Overdub/resume pass
+// startClick=false — the already-looping clip is the reference. See project_midi_loop_recorder.
+static void recArmTransport(bool startClick) {
     applyMeter();                 // bars-up the clock on the current (record) signature
     ensureTransportStarted();     // define the downbeat if the transport is idle
 #ifdef TDSP_METRONOME
-    if (!g_player.isPlaying() && !g_drumPlayer.isPlaying()) metroSetEnabled(true);
+    if (startClick && !g_metroOn && !g_player.isPlaying() && !g_drumPlayer.isPlaying()) {
+        metroSetEnabled(true);
+        g_recClickAuto = true;    // remember WE started it, so we may auto-stop it
+    }
+#endif
+    (void)startClick;
+}
+
+// Auto-stop the count-in click the instant the loop finishes recording (state -> Playing),
+// but only if we started it — never kill a click the user turned on themselves. Call from loop().
+static void recPollClick() {
+#ifdef TDSP_METRONOME
+    if (g_recClickAuto && !recFreshCapturing()) {
+        metroSetEnabled(false);
+        g_recClickAuto = false;
+    }
 #endif
 }
+#endif
+
+#if TDSP_AUDIOLOOP
+// The audio loop the @AL* commands currently target.
+static tdsp::AudioLooper *alSel() { return &g_aloop[g_aloopSel < g_aloopN ? g_aloopSel : 0]; }
+
+// (Re)init loop i for mono/stereo. Mono stores 1 int16/frame, so the same buffer holds
+// 2x the frames — set the capacity accordingly. Preserves bars/level/follow (separate setters).
+static void aloopInit(uint8_t i, bool mono) {
+    if (i >= TDSP_AUDIOLOOP_N || !g_aloopBuf[i]) return;
+    g_aloop[i].clear();
+    g_aloop[i].setMono(mono);
+    const uint32_t bs = g_aloopBufSamples[i];
+    g_aloop[i].begin(&g_conductor.clock(), g_aloopBuf[i], mono ? bs : bs / 2);
+}
+
+// Allocate loop buffers once at boot: PSRAM (generous) when present, else OCRAM (small).
+// Stop at the first allocation failure so a low-RAM board simply gets fewer loops
+// (g_aloopN), and the app hides slots it doesn't have (caps.audioloop = g_aloopN).
+FLASHMEM static void audioLoopSetup() {
+    finalL.gain(0, 1.0f); finalR.gain(0, 1.0f);                 // record bus at unity
+    for (uint8_t s = 1; s <= 3; s++) { finalL.gain(s, 1.0f); finalR.gain(s, 1.0f); }
+    const uint32_t psramSamples = 2u * 8u * (uint32_t)AUDIO_SAMPLE_RATE_I;   // 8 s stereo/loop (PSRAM)
+    // OCRAM fallback (no PSRAM): 1.0 s stereo = 2.0 s in mono = one bar at 120 BPM 4/4 —
+    // the MINIMUM that can hold a musical loop. We deliberately do NOT fall back smaller:
+    // a 0.2 s loop can't hold any bar length, and a card whose every option is greyed out
+    // is worse than no card. If this won't fit (a lean, no-PSRAM board like the COM4 dev
+    // unit), that loop simply doesn't exist -> caps.audioloop=0 and the app hides it.
+    // Real capacity needs PSRAM; see planning/audio-looper/DESIGN.md §5.
+    const uint32_t ramSamples = 2u * (uint32_t)AUDIO_SAMPLE_RATE_I;
+    for (uint8_t i = 0; i < TDSP_AUDIOLOOP_N; i++) {
+        int16_t *buf = nullptr; uint32_t n = 0;
+        if (external_psram_size > 0) { n = psramSamples; buf = (int16_t *)extmem_malloc((size_t)n * sizeof(int16_t)); }
+        if (!buf)                    { n = ramSamples;   buf = (int16_t *)malloc((size_t)n * sizeof(int16_t)); }
+        if (!buf) break;
+        g_aloopBuf[i] = buf; g_aloopBufSamples[i] = n;
+        g_aloop[i].begin(&g_conductor.clock(), buf, n / 2);    // stereo default
+        g_aloop[i].setBars(4);
+        g_aloopN = (uint8_t)(i + 1);
+    }
+    Serial.printf("[aloop] %u loop(s) allocated (psram=%u MB)\n", g_aloopN, external_psram_size);
+}
+
+// Audio recording captures on the next bar downbeat, so the master grid must be running.
+static void audioArmTransport() { applyMeter(); ensureTransportStarted(); }
 #endif
 
 // Lock a LOOPING song to the master beat grid (like the drums + arp) so it wraps
@@ -1106,6 +1263,103 @@ static void songLoopTick() {
     }
     g_songWasPlaying = now;
 }
+
+#if TDSP_VOICE2
+// --- Player 2 (voice-2 song player) ---------------------------------------------
+// A twin of the voice-1 song helpers above, targeting g_player2 -> g_synthSinkB (engines 4..7)
+// with its OWN state (g_curSong2*, g_song2*, g_song2Loop). It never touches voice-1 state, the global
+// meter, or the global MPE mode, so a second song plays on the keyboard voice independently and
+// stays locked to the same master grid (song2ApplySync joins the running clock in phase — see
+// ensureTransportStarted, which now also counts player 2 as holding the grid).
+static void song2Prep() { g_synthSinkB->onAllNotesOff(0); }   // silence only voice 2's own notes
+static void song2ApplySync(double parsedLoopBeats) {
+    g_song2LoopBeats = 0.0;
+    if (!g_song2Loop) return;                    // one-shot -> free-running ms engine
+    double lb = parsedLoopBeats;
+    if (lb <= 0.0)
+        lb = tdsp::smf::snapLoopBeatsHalf((double)g_player2.totalMs() * (double)g_song2Bpm / 60000.0);
+    if (lb <= 0.0) return;
+    g_song2LoopBeats = lb;
+    g_player2.setSyncedMode(&g_conductor.clock(), lb, g_song2Bpm);
+    Serial.printf("[song2] tick-synced: loop=%.2f beats @ %.1f bpm\n", lb, (double)g_song2Bpm);
+}
+FLASHMEM static bool song2StartSd(const char *path, const char *disp, const char *arg) {
+    song2Prep();
+    g_song2Bpm = 120.0f; g_song2Bpb = 4; double parsedLoopBeats = 0.0;
+    int got = tdsp::smf::loadSmfFile(path, g_buf2, MAX_EVENTS2, &g_song2Bpm, &g_song2Bpb, &parsedLoopBeats);
+    if (got <= 0) { Serial.printf("[song2] SD load FAILED: %s\n", path); return false; }
+    snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", disp);
+    snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", arg);
+    Serial.printf("[song2] %s (SD, %lu events, %.1f bpm) -> voice 2 (start)\n", disp, (unsigned long)got, (double)g_song2Bpm);
+    applyTempos();
+    if (g_song2Loop) ensureTransportStarted();   // join the running grid in phase (or define it if idle)
+    g_player2.play(g_buf2, (uint32_t)got);
+    song2ApplySync(parsedLoopBeats);
+    return true;
+}
+FLASHMEM static bool song2StartBuiltin(const char *name) {
+    // Baked test sequences (played verbatim; we do NOT flip the global MPE mode — that belongs to
+    // voice 1). An MPE test song is an edge case on voice 2 and may render as plain multitimbral.
+    for (int i = 0; i < testsong::kNumTestSongs; ++i) {
+        if (strcasecmp(name, testsong::kTestSongs[i].name) != 0) continue;
+        song2Prep();
+        g_song2Bpm = testsong::kTestSongs[i].bpm; g_song2Bpb = 4; applyTempos();
+        snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", testsong::kTestSongs[i].name);
+        snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", testsong::kTestSongs[i].name);
+        if (g_song2Loop) ensureTransportStarted();
+        g_player2.play(testsong::kTestSongs[i].ev, testsong::kTestSongs[i].count);
+        song2ApplySync(0.0);
+        return true;
+    }
+    for (int i = 0; i < kNumBuiltin; ++i) {   // baked legacy demos (expand into g_buf2)
+        if (strcasecmp(name, kBuiltinSongs[i].name) != 0) continue;
+        song2Prep();
+        g_song2Bpm = kBuiltinSongs[i].bpm; g_song2Bpb = 4;
+        uint32_t n = tdsp::expandLegacyNotes(kBuiltinSongs[i].ev, kBuiltinSongs[i].count, g_buf2, MAX_EVENTS2);
+        snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", kBuiltinSongs[i].name);
+        snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", kBuiltinSongs[i].name);
+        if (n) {
+            applyTempos();
+            if (g_song2Loop) ensureTransportStarted();
+            g_player2.play(g_buf2, n);
+            song2ApplySync(0.0);
+        }
+        return true;
+    }
+    return false;
+}
+FLASHMEM static void song2StartArg(const char *arg) {
+    if (!arg || !*arg) return;
+    if (endsWithMid(arg)) {
+        char path[128]; char disp[64]; songDisp(disp, sizeof disp, arg);
+        snprintf(path, sizeof path, "/songs/%s", arg);
+        if (!SD.exists(path)) snprintf(path, sizeof path, "/%s", arg);
+        song2StartSd(path, disp, arg);
+    } else if (!song2StartBuiltin(arg)) {
+        Serial.printf("[song2] not found: %s\n", arg);
+    }
+}
+static void song2Stop() {
+    g_song2WasPlaying = false;   // a manual stop must NOT trigger the loop-restart
+    if (!g_player2.isPlaying()) return;
+    g_player2.stop();
+    g_synthSinkB->onAllNotesOff(0);
+    Serial.println("[song2] stopped");
+}
+// Hard restart player 2 from the top on a fresh downbeat (mirrors songRestart for voice 1).
+static void song2Restart(const char *arg) {
+    if (!arg || !*arg) return;
+    g_forceTransportZero = true;
+    song2StartArg(arg);
+    g_forceTransportZero = false;
+}
+// Auto-restart a looping player-2 song when it ends on its own (manual stop clears the flag).
+static void song2LoopTick() {
+    bool now = g_player2.isPlaying();
+    if (g_song2WasPlaying && !now && g_song2Loop) { song2StartArg(g_curSong2Arg); now = g_player2.isPlaying(); }
+    g_song2WasPlaying = now;
+}
+#endif  // TDSP_VOICE2
 
 // --- Drum grooves (channel-10 GM percussion) --------------------------------
 // A groove is a short, LOOPABLE, channel-10-only .mid on the SD card under
@@ -1747,6 +2001,15 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         if (strcmp(line + 6, "stop") == 0) songStop();
         else songStartIndex(atoi(line + 6));   // @SONG=<catalog index> (legacy; resolved via songs.ndjson)
     }
+#if TDSP_VOICE2
+    // --- Player 2 (voice-2 song player), so a second song plays at the same time. Started
+    // immediately (no launch-quantize slot); it still locks to the running grid via sync. ---
+    else if (strncmp(line, "@SONG2RESTART=", 14) == 0) song2Restart(line + 14);   // hard restart player 2 on a fresh downbeat
+    else if (strncmp(line, "@SONG2F=", 8) == 0)   song2StartArg(line + 8);        // @SONG2F=<filename|name>
+    else if (strncmp(line, "@SONG2=", 7) == 0)  { if (strcmp(line + 7, "stop") == 0) song2Stop(); }
+    else if (strncmp(line, "@LOOP2=", 7) == 0)  { g_song2Loop = (atoi(line + 7) != 0);
+                                 Serial.printf("[song2] loop %s\n", g_song2Loop ? "ON" : "off"); }
+#endif
     else if (strcmp(line, "@GETCAT") == 0)        refreshCatalog(reply);   // re-scan SD + send catalog
     else if (strcmp(line, "@REINDEX") == 0)       { tdsp::catdb::buildCatalog(engineCaps(), catdbWriteBundled, millis()); reply.println("@REINDEXED"); }  // rebuild /tdsp/*.ndjson DB (upsert)
     else if (strncmp(line, "@READ=", 6) == 0)     streamFile(reply, line + 6);  // generic file fetch (catalog transport)
@@ -1830,12 +2093,12 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         reply.printf("@RECSIG=%d\n", g_metroBpb);
     }
     else if (strncmp(line, "@REC=", 5) == 0) {                  // 1 = arm (replace), 0 = stop
-        if (atoi(line + 5) != 0) { recArmTransport(); recSel()->armRecord(); }
+        if (atoi(line + 5) != 0) { recArmTransport(/*startClick=*/true); recSel()->armRecord(); }
         else recSel()->stop();
         reply.printf("@REC=%d\n", (int)recSel()->state());
     }
     else if (strncmp(line, "@RECDUB=", 8) == 0) {               // 1 = arm overdub onto the existing clip
-        if (atoi(line + 8) != 0) { recArmTransport(); recSel()->armOverdub(); }
+        if (atoi(line + 8) != 0) { recArmTransport(/*startClick=*/false); recSel()->armOverdub(); }
         else recSel()->stop();
         reply.printf("@REC=%d\n", (int)recSel()->state());
     }
@@ -1844,9 +2107,45 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         reply.printf("@REC=%d\n", (int)recSel()->state());
     }
     else if (strncmp(line, "@RECPLAY=", 9) == 0) {             // 1 = resume a stopped clip, 0 = stop
-        if (atoi(line + 9) != 0) { recArmTransport(); recSel()->resume(); }
+        if (atoi(line + 9) != 0) { recArmTransport(/*startClick=*/false); recSel()->resume(); }
         else recSel()->stop();
         reply.printf("@REC=%d\n", (int)recSel()->state());
+    }
+#endif
+#if TDSP_AUDIOLOOP
+    // Audio loop recorder. @ALSEL picks the loop; @ALBARS/@ALMONO/@ALFOLLOW/@ALLEVEL
+    // configure it; @AL arms (replace)/stops; @ALDUB overdubs; @ALCLR wipes; @ALPLAY
+    // resumes; @ALSAVE writes /loops/<name>.wav. Recording starts on the next bar downbeat.
+    else if (strncmp(line, "@ALSEL=", 7) == 0) {
+        int i = atoi(line + 7); if (i < 0) i = 0; if (g_aloopN && i >= g_aloopN) i = g_aloopN - 1;
+        g_aloopSel = (uint8_t)i; reply.printf("@ALSEL=%d\n", g_aloopSel);
+    }
+    else if (strncmp(line, "@ALBARS=", 8) == 0) { alSel()->setBars((uint8_t)atoi(line + 8)); reply.printf("@ALBARS=%d\n", alSel()->bars()); }
+    else if (strncmp(line, "@ALMONO=", 8) == 0) { aloopInit(g_aloopSel, atoi(line + 8) != 0); reply.printf("@ALMONO=%d\n", alSel()->mono() ? 1 : 0); }
+    else if (strncmp(line, "@ALFOLLOW=", 10) == 0) { bool on = atoi(line + 10) != 0; alSel()->setClockFollow(on); reply.printf("@ALFOLLOW=%d\n", on ? 1 : 0); }
+    else if (strncmp(line, "@ALLEVEL=", 9) == 0) { int v = atoi(line + 9); if (v < 0) v = 0; if (v > 100) v = 100; alSel()->setReturnLevel(v / 100.0f); reply.printf("@ALLEVEL=%d\n", v); }
+    else if (strncmp(line, "@AL=", 4) == 0) {
+        if (g_aloopN == 0) reply.print("@AL=-1\n");
+        else { if (atoi(line + 4) != 0) { audioArmTransport(); alSel()->armRecord(); } else alSel()->stop();
+               reply.printf("@AL=%d\n", (int)alSel()->state()); }
+    }
+    else if (strncmp(line, "@ALDUB=", 7) == 0) {
+        if (g_aloopN == 0) reply.print("@AL=-1\n");
+        else { if (atoi(line + 7) != 0) { audioArmTransport(); alSel()->armOverdub(); } else alSel()->stop();
+               reply.printf("@AL=%d\n", (int)alSel()->state()); }
+    }
+    else if (strcmp(line, "@ALCLR") == 0) { alSel()->clear(); reply.printf("@AL=%d\n", (int)alSel()->state()); }
+    else if (strncmp(line, "@ALPLAY=", 8) == 0) {
+        if (g_aloopN == 0) reply.print("@AL=-1\n");
+        else { if (atoi(line + 8) != 0) { audioArmTransport(); alSel()->resume(); } else alSel()->stop();
+               reply.printf("@AL=%d\n", (int)alSel()->state()); }
+    }
+    else if (strncmp(line, "@ALSAVE=", 8) == 0) {   // save the selected loop as /loops/<name>.wav
+        char path[96]; snprintf(path, sizeof(path), "/loops/%s.wav", line + 8);
+        SD.mkdir("/loops");
+        bool ok = tdsp::saveWavFile(path, *alSel());
+        reply.printf("@ALSAVE=%s\t%d\n", line + 8, ok ? 1 : 0);
+        Serial.printf("[aloop] save %s -> %d\n", path, ok ? 1 : 0);
     }
 #endif
     else if (strncmp(line, "@APP=", 5) == 0) {   // store the opaque app-owned state blob (see g_appState)
@@ -1899,6 +2198,11 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         // on the next Program Change (gmProgramTrim() honors the switch), so re-selecting the
         // instrument here would needlessly stomp the song's per-channel programs.
         if (!g_player.isPlaying()) synthSetInstrument(g_synthInstrument);
+#if defined(TDSP_SYNTH_DEXED_POOL) && TDSP_VOICE2
+        // Voice 2 carries its OWN Tier-1 trim (dxpTrimB), so re-gate it too — otherwise the
+        // toggle would only re-gain synth A. Gain-only (no reload), so it's safe mid-play.
+        synthReapplyVoice2Trim();
+#endif
         reply.printf("@RG=%d\n", tdsp::g_replayGainOn ? 1 : 0);
         Serial.printf("[synth] ReplayGain %s\n", tdsp::g_replayGainOn ? "ON" : "off");
     }
@@ -1990,6 +2294,15 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
 #endif
         reply.print("},");
 #endif
+#if TDSP_AUDIOLOOP
+        // Audio loops: selected slot, how many actually allocated (n), the selected
+        // loop's config + state (same 0..4 codes as "rec") + progress permille, and its
+        // capacity in tenths of a second so the app can grey out bars that can't fit.
+        reply.printf("\"aloop\":{\"sel\":%d,\"n\":%d,\"bars\":%d,\"mono\":%d,\"follow\":%d,\"st\":%d,\"p\":%d,\"cap\":%d},",
+                     g_aloopSel, g_aloopN, alSel()->bars(), alSel()->mono() ? 1 : 0,
+                     alSel()->clockFollow() ? 1 : 0, (int)alSel()->state(),
+                     alSel()->positionPermille(), (int)(alSel()->capSeconds() * 10.0f + 0.5f));
+#endif
         reply.print("\"voice\":{");
 #if defined(TDSP_SYNTH_DEXED) || defined(TDSP_SYNTH_DEXED_POOL)
         if (g_curCartRel[0]) {   // last pick was a /dexed cart voice (@DXPICK)
@@ -2015,10 +2328,24 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
                      g_arpFilter2.enabled() ? 1 : 0, (int)g_arpFilter2.pattern(), (int)g_arpFilter2.rate(),
                      g_arpFilter2.octaveRange(), g_arpFilter2.latch() ? 1 : 0);
 #endif
+        // Player 2 (voice-2 song player): playing/position/loop + name, so the app rehydrates the
+        // second MIDI-player card. Its level shares the voice-2 bus (voice2.vol above).
+        reply.printf(",\"song2\":{\"playing\":%d,\"p\":%d,\"sync\":%d,\"loop\":%d,\"name\":",
+                     g_player2.isPlaying() ? 1 : 0, g_player2.positionPermille(), g_player2.isSynced() ? 1 : 0, g_song2Loop ? 1 : 0);
+        tdsp::catdb::jsonStr(reply, g_curSong2Name); reply.print("}");
 #endif
         // Build-time capabilities so the app SHOWS the Voices-2 / arp-2 cards only on builds
         // that have them compiled in (both are pool-only, build-flag gated).
-        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d}", TDSP_VOICE2 ? 1 : 0, (TDSP_VOICE2 && TDSP_ARP2) ? 1 : 0, TDSP_RECORDER ? 1 : 0);
+        // caps.audioloop = the number of audio loops that ACTUALLY allocated (0 = the board
+        // couldn't spare the RAM -> the app hides the card), not just the build flag.
+        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"audioloop\":%d}",
+                     TDSP_VOICE2 ? 1 : 0, (TDSP_VOICE2 && TDSP_ARP2) ? 1 : 0, TDSP_RECORDER ? 1 : 0,
+#if TDSP_AUDIOLOOP
+                     (int)g_aloopN
+#else
+                     0
+#endif
+                     );
         reply.print("}\n");   // close root object
         reply.printf("@APP=%s\n", g_appState);   // opaque app-owned state, emitted with @STATE so one connect rehydrates both
     }
@@ -2096,7 +2423,13 @@ FLASHMEM void setup() {
     // tone, and the input side of the convert blocks; the F32 pool feeds the mix
     // bus, converts, S/PDIF-in and the TDM output.
     AudioMemory(80);   // headroom for up to 4 OPM banks (ymfm multitimbral); Dexed uses far less
+#if TDSP_AUDIOLOOP
+    // The audio loops add nodes to the F32 graph (N loopers + the final L/R mix), each
+    // allocating blocks per update — give the pool headroom or they starve and drop out.
+    AudioMemory_F32(60 + 6 + 4 * TDSP_AUDIOLOOP_N);
+#else
     AudioMemory_F32(60);
+#endif
     setMix(1.0f, 0.0f, 1.0f);
     outL.gain(3, TDSP_DEFAULT_SYNTH_MAKEUP);  outR.gain(3, TDSP_DEFAULT_SYNTH_MAKEUP);  // synth (slot 3) mix make-up in the
                                                  // F32 domain, where there's real headroom.
@@ -2143,6 +2476,9 @@ FLASHMEM void setup() {
     g_arpFilter.setClock(&g_conductor.clock());
     g_arpFilter.addDownstream(g_synthSink);
     g_router.addSink(&g_arpFilter);
+#if TDSP_AUDIOLOOP
+    audioLoopSetup();   // allocate the audio-loop buffers (PSRAM else OCRAM) + final-mix gains
+#endif
 #if TDSP_RECORDER
     // Voice-1 loop recorder: tap the arp downstream (captures the BAKED note stream
     // the synth hears) and play the loop back into the synth sink directly.
@@ -2192,6 +2528,22 @@ FLASHMEM void setup() {
     // The song player must NEVER panic ch10 on stop/restart, or it cuts a looping
     // groove for a beat when you press Play/Stop on a song. (Drums are the groove's.)
     g_player.setPanicMask(tdsp::MidiFilePlayer::kMaskNoDrums);
+#if TDSP_VOICE2
+    // Player 2 -> voice 2 (engines 4..7), THROUGH arp-2 when present — mirroring voice 1's
+    // g_player -> g_arpFilter. Two reasons: parity (the arp treats a song the same on both
+    // synths, and is bypassed when off), and it puts player 2's song on the arp downstream where
+    // g_loop2 taps — so voice 2's loop recorder captures the SAME combined post-arp stream as
+    // voice 1 (song + live keyboard) instead of the keyboard alone. Without arp-2 compiled in
+    // there's no filter to pass through, so go straight to the sink.
+#if TDSP_ARP2
+    g_player2.setSink(&g_arpFilter2);
+#else
+    g_player2.setSink(g_synthSinkB);
+#endif
+    // Melodic voice: skip ch10, never panic it.
+    g_player2.setChannelMask(tdsp::MidiFilePlayer::kMaskNoDrums);
+    g_player2.setPanicMask(tdsp::MidiFilePlayer::kMaskNoDrums);
+#endif
 
     // --- Master clock wiring --------------------------------------------------
     // Register the song + drum players as tempo followers so the one BPM knob
@@ -2204,6 +2556,9 @@ FLASHMEM void setup() {
     g_conductor.begin(g_masterBpm);
     g_conductor.addFollower(&g_songFollow);
     g_conductor.addFollower(&g_drumFollow);
+#if TDSP_VOICE2
+    g_conductor.addFollower(&g_songFollow2);   // player 2 retimes with the master BPM too
+#endif
     g_conductor.addFollower(&g_launchSched);   // flags bar edges so loop() can fire quantized launches
     g_router.addSink(&g_clockSink);
     g_conductor.setTickHook(+[](void*){
@@ -2314,6 +2669,9 @@ void loop() {
     while (g_usbMidi.read()) { /* USB-host MIDI handlers fire per message */ }
 #endif
     g_player.tick();
+#if TDSP_VOICE2
+    g_player2.tick();      // advance the second (voice-2) song player
+#endif
     g_drumPlayer.tick();   // loops internally (setLooping), so no external re-arm needed
     g_arpFilter.tick(micros());   // drain the arp's gate-off queue (note steps fire on onClock)
 #if TDSP_VOICE2 && TDSP_ARP2
@@ -2324,8 +2682,17 @@ void loop() {
 #if TDSP_VOICE2
     g_loop2.poll(); g_loop2.tick();
 #endif
+    recPollClick();   // stop the count-in click the instant the loop is captured
+#endif
+#if TDSP_AUDIOLOOP
+    // Audio loops: foreground service (starts capture on the bar downbeat when armed and
+    // snapshots the clock-follow rate). Playback itself runs in the audio ISR (update()).
+    for (uint8_t i = 0; i < g_aloopN; i++) g_aloop[i].poll();
 #endif
     songLoopTick();   // auto-restart the song if loop mode is on and it just ended
+#if TDSP_VOICE2
+    song2LoopTick();  // same for player 2
+#endif
 
     // @SYNCPROBE: once/second, print the master beat next to each synced player's
     // loop-relative cursor. Relative phase must stay CONSTANT for a drift-free lock
@@ -2353,6 +2720,20 @@ void loop() {
         }
         songPosPrev = songPosNow;
     }
+#if TDSP_VOICE2
+    // Same position feed for player 2 (@SONG2P=), driving the second MIDI-player card's bar.
+    {
+        static elapsedMillis song2PosClock;
+        static bool          song2PosPrev = false;
+        const bool song2PosNow = g_player2.isPlaying();
+        if (song2PosNow) {
+            if (song2PosClock >= 400) { song2PosClock = 0; Serial.printf("@SONG2P=%u\n", g_player2.positionPermille()); }
+        } else if (song2PosPrev) {
+            Serial.println("@SONG2P=-1");
+        }
+        song2PosPrev = song2PosNow;
+    }
+#endif
 
 #if TDSP_RECORDER
     // Live loop-recorder telemetry: "@RECP=<st1>,<p1>,<st2>,<p2>" (state 0=idle 1=armed
@@ -2372,6 +2753,30 @@ void loop() {
             Serial.printf("@RECP=%d,%d,%d,%d\n", st1, p1, st2, p2);
         }
         recPrev = recNow;
+    }
+#endif
+
+#if TDSP_AUDIOLOOP
+    // Live audio-loop telemetry: "@ALP=<st0>,<p0>[,<st1>,<p1>...]" (state 0=idle 1=armed
+    // 2=recording 3=overdub 4=playing; p = permille) ~4x/sec while any loop is active,
+    // plus one edge frame when they all go idle. USB-only push, same as @RECP/@SONGP.
+    {
+        static elapsedMillis alClock;
+        static bool          alPrev = false;
+        bool active = false;
+        for (uint8_t i = 0; i < g_aloopN; i++)
+            if (g_aloop[i].state() != tdsp::AudioLooper::Idle) { active = true; break; }
+        if ((active && alClock >= 250) || (active != alPrev)) {
+            alClock = 0;
+            char b[80]; int o = snprintf(b, sizeof(b), "@ALP=");
+            for (uint8_t i = 0; i < TDSP_AUDIOLOOP_N && o < (int)sizeof(b) - 12; i++) {
+                const int st = (i < g_aloopN) ? (int)g_aloop[i].state() : 0;
+                const int p  = (i < g_aloopN) ? g_aloop[i].positionPermille() : 0;
+                o += snprintf(b + o, sizeof(b) - o, "%s%d,%d", i ? "," : "", st, p);
+            }
+            Serial.println(b);
+        }
+        alPrev = active;
     }
 #endif
 

@@ -62,9 +62,10 @@ public:
     // Bend sensitivity. The router / player already applied the per-channel range and
     // hands us the final semitone value, so we set Dexed's own sensitivity to a FIXED
     // kBendRange and map the semitones into +/-8192 counts. kBendRange must be >= the
-    // widest bend we want to reproduce — a full MPE octave is 12 semitones. (Was 1,
-    // which clamped every per-note bend to +/-1 semitone.)
-    static constexpr int kBendRange = 12;
+    // widest bend we want to reproduce. The LinnStrument's default per-note bend range is
+    // 48 semis (+-24), so use 24 to reproduce a full-surface slide without clamping. (Was
+    // 1, which clamped to +-1 semi; then 12, which clamped slides wider than an octave.)
+    static constexpr int kBendRange = 24;
     void onPitchBend(uint8_t ch, float semitones) override {
         const int16_t counts = clampCounts((int)(semitones / (float)kBendRange * 8192.0f));
         forEachTarget(ch, [&](AudioSynthDexed *e) { e->setPitchbendRange((uint8_t)kBendRange); e->setPitchbend(counts); });

@@ -48,13 +48,26 @@ AudioConnection_F32 cpa0(dxpc0, 0, dxpMixA, 0), cpa1(dxpc1, 0, dxpMixA, 1),
                     cpa2(dxpc2, 0, dxpMixA, 2), cpa3(dxpc3, 0, dxpMixA, 3);
 AudioConnection_F32 cpb0(dxpc4, 0, dxpMixB, 0), cpb1(dxpc5, 0, dxpMixB, 1),
                     cpb2(dxpc6, 0, dxpMixB, 2), cpb3(dxpc7, 0, dxpMixB, 3);
+#if TDSP_VOICE2
+// SPLIT pool: the ReplayGain trim must be PER-HALF, or picking a voice on one synth re-gains
+// the other (voice 1 and voice 2 are independent instruments). So each half gets its own trim
+// BEFORE the sum: dxpTrim = voice 1 (engines 0-3 / mixA), dxpTrimB = voice 2 (engines 4-7 / mixB).
+// The ClipProbe still taps dxpSum and the 'N' sweep stays honest: synthAuditionTrim() returns
+// &dxpTrim, so forcing it to unity makes the sum read RAW voice-1 loudness (voice 2 is silent
+// during a sweep). dxpSum then feeds the limiter directly — the trims are already applied.
+AudioEffectGain_F32 dxpTrim, dxpTrimB;
+AudioConnection_F32 cpTrimA(dxpMixA, 0, dxpTrim, 0);
+AudioConnection_F32 cpTrimB(dxpMixB, 0, dxpTrimB, 0);
+AudioConnection_F32 cps0(dxpTrim, 0, dxpSum, 0), cps1(dxpTrimB, 0, dxpSum, 1);
+#else
+// UNSPLIT: voice 1 owns all 8 engines, so ONE trim on the summed pool is correct. It sits
+// BETWEEN the raw sum and the slot-3 make-up, so normalization happens in a consistent-headroom
+// spot and the ClipProbe below still taps the RAW sum (dxpSum) — the sweep must measure
+// unnormalized voice loudness, independent of the trim it's computing.
 AudioConnection_F32 cps0(dxpMixA, 0, dxpSum, 0), cps1(dxpMixB, 0, dxpSum, 1);
-// Per-voice ReplayGain trim (set on instrument select) sits BETWEEN the raw sum and
-// the slot-3 make-up, so normalization happens in a consistent-headroom spot and the
-// ClipProbe below still taps the RAW sum (dxpSum) — the sweep must measure unnormalized
-// voice loudness, independent of the trim it's computing.
 AudioEffectGain_F32 dxpTrim;
 AudioConnection_F32 cpTrim(dxpSum, 0, dxpTrim, 0);
+#endif
 
 // Soft-limiter safety net on the synth bus, AFTER the ReplayGain trim and BEFORE the
 // mix — the last stage that can catch coincident loud voices summing past full scale
@@ -92,7 +105,11 @@ private:
     volatile float m_thresh = 0.80f, m_ceil = 1.00f;   // synth bus caps at 1.0 -> x0.62 make-up = 0.62 in the mix
 };
 SoftLimit_F32 dxpLimit;
+#if TDSP_VOICE2
+AudioConnection_F32 cpLim(dxpSum, 0, dxpLimit, 0);    // per-half trims already applied pre-sum
+#else
 AudioConnection_F32 cpLim(dxpTrim, 0, dxpLimit, 0);
+#endif
 // limited synth bus -> both mix channels (slot 3; 0.62 make-up applied at the mixer)
 AudioConnection_F32 cpoutL(dxpLimit, 0, outL, 3);
 AudioConnection_F32 cpoutR(dxpLimit, 0, outR, 3);
@@ -415,20 +432,36 @@ FLASHMEM static void synthSetInstrument2(int idx) {
     g_poolSinkB.applyExprConfig();
     g_synthInstrument2 = idx;
     g_curCart2Rel[0] = 0; g_curCart2Voice = -1;
+    // Voice 2's OWN ReplayGain trim (mirrors synthSetInstrument for voice 1). It lands on
+    // dxpTrimB — the voice-2 half only — so picking here never re-gains voice 1.
+    float trim2 = (idx < kNumBundled) ? dexedVoiceTrim(idx) : 1.0f;
+    dxpTrimB.setGain(tdsp::auditionTrim(trim2));
     applyVoice2Vol();
-    Serial.printf("[synth] VOICE2 instrument %d = %s\n", idx, synthInstrumentName(idx));
+    Serial.printf("[synth] VOICE2 instrument %d = %s (trim=%.3f)\n", idx, synthInstrumentName(idx), (double)trim2);
 }
 
 FLASHMEM static const char *synthPickCartVoice2(const char *relCart, int voice) {
     const char *nm = pickCartVoiceRange(relCart, voice, kPoolSplitN, kPoolSplitN);
     if (!nm) return nullptr;
     g_poolSinkB.applyExprConfig();
+    dxpTrimB.setGain(tdsp::auditionTrim(1.0f));   // SD carts ship at unity trim (mirrors voice 1)
     snprintf(g_curCart2Rel, sizeof(g_curCart2Rel), "%s", relCart);
     g_curCart2Voice = voice;
     snprintf(g_curCart2Name, sizeof(g_curCart2Name), "%s", nm);
     applyVoice2Vol();
     Serial.printf("[synth] VOICE2 pick %s v%d = %s\n", relCart, voice, nm);
     return nm;
+}
+
+// Re-apply voice 2's Tier-1 trim under the CURRENT ReplayGain state (the @RG toggle). Recomputes
+// the gain only — no engine reload — so it neither cuts voice 2's sounding notes nor clobbers a
+// picked cart selection (which re-selecting the instrument would). Mirrors the trim rules above:
+// a /dexed cart ships at unity; a bundled voice uses the baked table.
+static void synthReapplyVoice2Trim() {
+    const float t = g_curCart2Rel[0]                    ? 1.0f
+                  : (g_synthInstrument2 < kNumBundled)  ? dexedVoiceTrim(g_synthInstrument2)
+                                                        : 1.0f;
+    dxpTrimB.setGain(tdsp::auditionTrim(t));
 }
 
 static void synthSetVoice2Vol(int pct) {
