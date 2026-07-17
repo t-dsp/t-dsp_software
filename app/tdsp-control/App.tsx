@@ -10,6 +10,8 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { View, Text, Pressable, ScrollView, FlatList, TextInput, Switch, StyleSheet, ActivityIndicator, Platform, Alert, useWindowDimensions } from 'react-native';
 import Slider from '@react-native-community/slider';
 import { createTransport } from './src/transportFactory';
+import { createDiscovery } from './src/discoveryFactory';
+import type { TdspDevice } from './src/discovery';
 import { Catalog, EMPTY_CATALOG, loadCatalog, LoadProgress, Song, songArg } from './src/catalog';
 import type { Transport, DirPage, TransportKind } from './src/transport';
 import ArpStepGrid from './src/ui/ArpStepGrid';
@@ -271,6 +273,13 @@ export default function App() {
     if (!defTpRef.current) defTpRef.current = createTransport('default');
     return defTpRef.current;
   }, [tkind, wifiHost]);
+
+  // mDNS discovery state. The browse effect lives further down — it depends on
+  // connected/connecting, which are declared below (referencing them here would be a TDZ
+  // error, since const bindings aren't usable before their declaration).
+  const discoRef = useRef(createDiscovery());
+  const [found, setFound] = useState<TdspDevice[]>([]);
+  const [scanning, setScanning] = useState(false);
   const { width } = useWindowDimensions();
   const cols = width < 560 ? 1 : width < 900 ? 2 : 3;   // responsive homepage grid columns
   const [connected, setConnected] = useState(false);
@@ -278,6 +287,20 @@ export default function App() {
   const [userDisc, setUserDisc] = useState(false);      // user tapped Disconnect App → suppress auto-reconnect
   const userDiscRef = useRef(false);                    // synchronous mirror of userDisc so an in-flight connect() can see a cancel immediately
   const connectingRef = useRef(false);                  // synchronous guard so the auto-poll can't double-connect
+
+  // mDNS discovery: browse _tdsp._tcp while the Wi-Fi picker is open and disconnected, so
+  // you tap a device instead of hunting for its IP. Each hit carries its RESOLVED address,
+  // so connecting never depends on the platform resolving a .local name — and several
+  // T-DSPs on one LAN all show up. Web has no mDNS (supported === false) → host box only.
+  useEffect(() => {
+    const d = discoRef.current;
+    // Only scan when it's actually usable: Wi-Fi selected, disconnected, not mid-connect.
+    if (!d.supported || tkind !== 'wifi' || connected || connecting) { d.stop(); setScanning(false); return; }
+    setScanning(true); setFound([]);
+    d.start(setFound);
+    return () => { d.stop(); setScanning(false); };
+  }, [tkind, connected, connecting]);
+  useEffect(() => () => discoRef.current.stop(), []);   // release the scanner on unmount
   const [prog, setProg] = useState<LoadProgress | null>(null);   // catalog load progress (drives the loading screen); null when not loading
   const [loadElapsed, setLoadElapsed] = useState(0);             // seconds on the current catalog load — shows it's alive even if a read stalls
   const manualStopRef = useRef(false);                  // set on user Stop so the resulting @SONGP=-1 isn't treated as a natural song end
@@ -1561,11 +1584,34 @@ export default function App() {
           </View>
           {tkind === 'wifi' && (
             <>
+              {/* Discovered devices (mDNS _tdsp._tcp). Tapping one fills in its resolved
+                  address, so you never hunt for an IP — and several T-DSPs on one LAN each
+                  get a row. Hidden on web, which can't browse mDNS. */}
+              {discoRef.current.supported && (
+                <View style={s.devWrap}>
+                  <View style={s.devHead}>
+                    <Text style={s.muted}>{found.length ? `Found ${found.length} device${found.length > 1 ? 's' : ''}` : scanning ? 'Scanning for T-DSP devices…' : 'No devices found'}</Text>
+                    {scanning && <ActivityIndicator color={C.accent} size="small" />}
+                  </View>
+                  {found.map(d => {
+                    const sel = wifiHost.trim() === d.host;
+                    return (
+                      <Pressable key={d.id} style={[s.devRow, sel && s.devRowOn]} disabled={connecting}
+                                 onPress={() => setWifiHost(d.host)}>
+                        <Text style={s.devName}>{d.name}</Text>
+                        <Text style={s.devAddr}>{d.host}:{d.port}{d.a2dp === false ? '  ·  no BT audio' : ''}</Text>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+              )}
               <TextInput style={[s.input, s.hostInput]} value={wifiHost} onChangeText={setWifiHost}
                          editable={!connecting} placeholder="tdsp.local" placeholderTextColor={C.muted}
                          autoCapitalize="none" autoCorrect={false} keyboardType="url" />
               <Text style={s.hostHint}>
-                Blank uses tdsp.local{Platform.OS === 'android' ? ' — Android often can’t resolve .local, so enter the IP (e.g. 192.168.1.42).' : '. You can also enter an IP or host:port.'}
+                {discoRef.current.supported
+                  ? 'Tap a device above, or type a host — blank uses tdsp.local. An IP or host:port works too.'
+                  : 'Blank uses tdsp.local. An IP or host:port works too.'}
               </Text>
             </>
           )}
@@ -1722,6 +1768,13 @@ const s = StyleSheet.create({
   segTextOn: { color: C.text },
   hostInput: { width: 260, marginBottom: 6, textAlign: 'center' },
   hostHint: { color: C.muted, fontSize: 11, textAlign: 'center', maxWidth: 300, marginBottom: 16 },
+  // Discovered-device list (mDNS)
+  devWrap: { width: 280, marginBottom: 12 },
+  devHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginBottom: 8 },
+  devRow: { backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 7, paddingVertical: 8, paddingHorizontal: 12, marginBottom: 6 },
+  devRowOn: { borderColor: C.accent, backgroundColor: C.sel },
+  devName: { color: C.text, fontSize: 14, fontWeight: '600' },
+  devAddr: { color: C.muted, fontSize: 11, marginTop: 2 },
   // catalog loading screen (connected, not yet loaded)
   loadWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, gap: 14 },
   loadTitle: { color: C.text, fontSize: 17, fontWeight: '700' },

@@ -996,9 +996,23 @@ class WifiControlTransport : public ControlTransport {
 
   void startMdns() {
     if (MDNS.begin(TDSP_MDNS_HOST)) {
-      MDNS.addService("ws", "tcp", TDSP_WS_PORT);   // advertise the WS service
+      // Advertise TWO service types on the same port:
+      //  * _tdsp._tcp -- OUR type. The app browses this so it finds T-DSP units and ONLY
+      //    T-DSP units (several may be on one LAN, and _ws._tcp is generic enough that any
+      //    random WebSocket gadget would show up in the picker).
+      //  * _ws._tcp   -- generic, kept so plain WS tooling/browsers can still see it.
+      MDNS.addService("tdsp", "tcp", TDSP_WS_PORT);
+      MDNS.addService("ws", "tcp", TDSP_WS_PORT);
+      // TXT records: let a client label the device in a picker WITHOUT connecting to it,
+      // and skip units it can't talk to. `name` is the friendly label; `proto` guards
+      // against a future wire-format change; `a2dp` says whether this build has Bluetooth
+      // audio at all (the TDSP_A2DP gate).
+      MDNS.addServiceTxt("tdsp", "tcp", "name", BT_DEVICE_NAME);
+      MDNS.addServiceTxt("tdsp", "tcp", "proto", "at-line/1");
+      MDNS.addServiceTxt("tdsp", "tcp", "a2dp", TDSP_A2DP ? "1" : "0");
       mdnsUp = true;
-      Serial.printf("[mdns] advertising %s.local (_ws._tcp:%u)\n", TDSP_MDNS_HOST, (unsigned)TDSP_WS_PORT);
+      Serial.printf("[mdns] advertising %s.local (_tdsp._tcp + _ws._tcp :%u)\n",
+                    TDSP_MDNS_HOST, (unsigned)TDSP_WS_PORT);
     } else {
       Serial.println("[mdns] FAILED to start");
     }
