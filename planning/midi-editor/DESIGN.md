@@ -425,6 +425,37 @@ Edits are **local to the app** until you press Commit. Three reasons, all load-b
 So: `@RECDUMP` on open → edit locally → `@RECLOAD`/`@RD`/`@RECEND` on Commit. The Commit
 button shows dirty state and event headroom (`n/1024`).
 
+### 6.4 Staying out of the hole — what the grid may not know
+
+The phase-3 **arp roll** (§10) reuses this editor's *entire interaction layer* with a different
+Y axis. That stays cheap only if the touch/geometry code never learns MIDI.
+
+**The discipline is NOT "build a generic grid now."** A single concrete `PianoRoll` is the
+right v1; inventing an abstraction before its second consumer exists is its own trap, and a
+worse one — you get the abstraction wrong *and* pay for it. The discipline is to keep the
+seams where extraction is later a **move**, not a rewrite:
+
+| Layer | Knows | Must NOT know |
+|---|---|---|
+| **Geometry + touch** (drag state machine, dead zone, hit slop, selection, zoom, scroll, playhead) | rows × columns, item rects, an opaque item `id` | pitch, MIDI, channels, 24 PPQN, `loopTicks`, transports |
+| **Axis specs** | `rowCount`, `label(row)`, `isAccent(row)`, `unitsPerCol`, `totalUnits` | what a row *means* |
+| **Rail** | renders labels from the row spec | that rows are piano keys — `PianoKeyRail` and `DegreeRail` are two rails over **one** spec |
+| **Model** (`loopClip.ts`, `arpSeq.ts`) | all semantics | touch, layout, pixels |
+| **Commit** | a callback prop | `@RECLOAD` vs `@ARPSEQ` |
+
+Three rules that keep it honest:
+
+1. **Never overload `LoopNote.note` to sometimes mean "degree."** §9.9's source-agnostic rule
+   is about many *sources* of **one** model; a pitch roll and a degree roll are **two models**,
+   and that's a different problem. The mechanism for two models is the **axis spec**, not a
+   union type or a `kind` discriminator. Conflating them puts source-conditional branching back
+   above the codec and quietly undoes §9.9.
+2. **The undo stack is generic over the item type**, not typed to `LoopNote[]`.
+3. **No `import … from './loopClip'` inside the geometry/touch module.** This is the canary,
+   and it's greppable: the day that import appears, a MIDI assumption has leaked into the exact
+   layer the arp roll needs to reuse. Enforce it by review; it costs nothing while there's one
+   consumer and saves the whole phase-3 UI when there are two.
+
 ## 7. Prior art surveyed
 
 ### 7.1 Interaction models (the valuable part)
@@ -524,7 +555,12 @@ mouse-era touch model we'd throw away. What we take is *design* (GarageBand) and
    (no source-conditional code above the codec) and a rewrite later. `decodeSmf` **mirrors**
    `MidiFilePlayer::dispatchCC()` rather than inventing a second mapping.
 
-## 10. Deferred to phase 2
+## 10. Roadmap
+
+**Phase 1 (this doc's scope):** `@RECDUMP` → fixture capture → `loopClip.ts` + `PianoRoll`
+offline → `@RECLOAD` → hardware loopback. Edit a recorded loop.
+
+### Phase 2 — the editor grows up
 
 - **Marquee / multi-select** (long-press empty + drag) and multi-note transforms
   (transpose, nudge, scale-duration).
@@ -548,3 +584,40 @@ mouse-era touch model we'd throw away. What we take is *design* (GarageBand) and
 - **Note preview on drag** (audition the pitch while moving), pending a spare synth path that
   won't fight the loop's own playback.
 - **Pinch-zoom** via `react-native-gesture-handler` (costs an EAS build).
+
+### Phase 3 — the LibreArp-style arp roll
+
+**Goal:** edit the arpeggiator in the same roll, with the Y axis reading *"1st / 2nd / 3rd held
+note"* instead of *"C4 / D4 / E4"* — so a pattern still transposes to whatever chord is held,
+but gets arbitrary note starts and lengths. This is a real, shipped design: **LibreArp** does
+exactly this, and `arpSeq.ts:10` already name-checks it as the model the User Sequence is
+chasing.
+
+**Why it can't be phase 1.** Today's `PatUserSequence` is a **lattice**: `SeqStep` is
+`{degree, octave, velocity}` (`arpSeq.ts:21-25`), every step is exactly one grid unit long,
+**gate is global** (`@ARPGATE`), **rate is global** (`@ARPRATE`), 32 steps max. A piano roll's
+entire vocabulary — arbitrary start, arbitrary length — has no representation there. And a
+degree is *not a pitch*: rendering it on an absolute Y axis needs the held chord, which changes
+as you play. **The abstraction is the feature**, not an omission.
+
+**So this is a firmware change, not a UI feature** — that's why it's a phase of its own:
+
+- **`PatUserPattern`** (a new `Pattern` enum index — `PAT_USER_SEQUENCE = 25` today, so 26),
+  whose step is `(degree, startTick, durTicks, octave, vel)` instead of a lattice cell.
+  `PatUserSequence` stays — it's the right model for a fast tap-to-cycle sketch, and
+  `ArpStepGrid` remains its editor.
+- **`ArpFilter`** schedules note-offs at arbitrary ticks rather than gate-% of a step. It
+  already rides the master `Clock`, so the timing foundation is there.
+- **A new wire format** — near-identical in shape to §4's clip transport, and a good candidate
+  to reuse `streamBytes`/the `@FD` framing rather than growing `@ARPSEQ`'s space-separated
+  tokens into something they were never meant to carry.
+- **`ArpModel`** in `arpSeq.ts` (same *shape* as `LoopModel`, different semantics), plus
+  `DegreeRail` — and **zero new interaction code**, if §6.4 held.
+
+**Bake-and-edit works today and needs none of this.** `MidiLooper` records the arp's **baked**
+output (`MidiLooper.h:1-7` — it sits *downstream* of the arp), so: hold a chord → let the arp
+run → record → edit the result as absolute notes in the phase-1 piano roll. You trade
+chord-following (the pattern freezes at whatever you held) for full editability. Ship phase 1
+before assuming phase 3 is needed; this may be most of what anyone actually wants.
+
+### Phase 4 — unclaimed
