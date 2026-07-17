@@ -216,6 +216,25 @@ const ListBtn = ({ label, sel, onPress }: any) => (
 // body is built).
 // `accent`/`tint`, when given, override each child's own colors so ALL sub-cards match the parent
 // tile — a quick visual cue for which section (e.g. which synthesizer) you're inside.
+// A tab strip INSIDE a page body (e.g. a MIDI player's Player / Looper split). This is not the
+// old page-level tab nav — the router still uses menu > submenu; these just split one card's own
+// content. Tab state is local, so switching never touches the route. Reuses the arp's tab styling.
+function BodyTabs({ tabs }: { tabs: { key: string; label: string; body: React.ReactNode }[] }) {
+  const [active, setActive] = useState(tabs[0]?.key);
+  const cur = tabs.find(t => t.key === active) || tabs[0];
+  return (
+    <View style={{ gap: 10 }}>
+      <View style={s.arpTabs}>
+        {tabs.map(t => (
+          <Pressable key={t.key} style={[s.arpTab, active === t.key && s.arpTabOn]} onPress={() => setActive(t.key)}>
+            <Text style={[s.arpTabTxt, active === t.key && s.arpTabTxtOn]}>{t.label}</Text>
+          </Pressable>
+        ))}
+      </View>
+      {cur?.body}
+    </View>
+  );
+}
 function SubMenu({ getItems, onOpen, accent, tint }: { getItems: () => any[]; onOpen: (id: string) => void; accent?: string; tint?: string }) {
   return (
     <View style={s.submenu}>
@@ -629,24 +648,6 @@ export default function App() {
     setDrums(d => { if (d.playing) { tp.playGrooveFile(grooveFile(g)); return { ...d, sel: g.path, playing: g.name }; } return { ...d, sel: g.path }; });
     persistApp({ groove: g.path });   // remember the pick so it survives an app reconnect
   };
-  // The shared "continue rules": which song a skip (‹ ›) or a natural end advances to, per the
-  // end-mode. Shuffle → a random *other* song; every other mode → the linear neighbor, wrapping
-  // both ways. Both the transport buttons and the auto-advance route through this.
-  const pickNext = (dir: number): Song | null => {
-    const songs = cat.songs;
-    if (!songs.length) return null;
-    const idx = songs.findIndex(sg => sg.name === player.song);
-    if (endMode === 'shuffle' && songs.length > 1) {
-      let r = idx; while (r === idx) r = Math.floor(Math.random() * songs.length);   // never repeat the current song
-      return songs[r];
-    }
-    const base = idx < 0 ? (dir > 0 ? -1 : 0) : idx;
-    return songs[((base + dir) % songs.length + songs.length) % songs.length];   // wrap both ways
-  };
-  const stepSong = (dir: number) => {   // ‹ › skip — follows the end-mode continue rules; plays the new song if one is playing
-    const sg = pickNext(dir); if (!sg) return;
-    setPlayer(p => { if (p.playing) { tp.songRestart(songArg(sg)); return { ...p, song: sg.name, name: sg.name }; } return { ...p, song: sg.name }; });
-  };
   const stepBpm = (delta: number) => { const b = Math.max(20, Math.min(300, Math.round(bpm) + delta)); setBpm(b); tp.masterBpm(b); };
   const stepVol = (delta: number) => { const v = Math.max(0, Math.min(100, Math.round(vol) + delta)); setVol(v); tp.masterVolume(v); };
   // TAC5212 DAC high-pass filter. Picking a preset sets the mode; the Enable switch
@@ -811,39 +812,84 @@ export default function App() {
       )}
     </>
   );
-  const playSong = () => { const sg = cat.songs.find(x => x.name === player.song) || cat.songs[0]; if (!sg) return; tp.songRestart(songArg(sg)); setPlayer(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };  // restart from the top on a fresh downbeat; -1 until the device reports position
-  const stopSong = () => { manualStopRef.current = true; tp.stopSong(); setPlayer(p => ({ ...p, playing: false, prog: 0 })); };
-  const playSongOf = (sg: Song) => { tp.songPlay(songArg(sg)); setPlayer(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };
   // Merge a patch into the persisted app-state and push the whole blob to the device (@APP=)
   // so it survives an app reload/reconnect. The device stores it opaquely; the app owns it.
   const persistApp = (patch: Partial<AppState>) => { appStateRef.current = { ...appStateRef.current, ...patch }; tp.saveAppState(appStateRef.current); };
-  // End-of-song mode. Only 'repeat' arms the firmware's seamless loop; the rest let the song
-  // end (device emits @SONGP=-1) and we advance app-side. The choice is persisted on the device.
-  const applyEndMode = (m: EndMode) => { setEndMode(m); tp.songLoop(m === 'repeat'); persistApp({ end: m }); };
-  const cycleEndMode = () => { const i = END_MODES.findIndex(m => m.key === endMode); applyEndMode(END_MODES[(i + 1) % END_MODES.length].key); };
-  // Runs when a song finishes on its own (not a manual Stop). Kept fresh in a ref so the
-  // one-time @SONGP listener always sees the current mode/song/catalog. Continue/Shuffle
-  // advance per the shared pickNext rules; 'stop' does nothing; 'repeat' loops in firmware.
-  onSongEndRef.current = () => {
-    if (endMode === 'continue' || endMode === 'shuffle') { const nx = pickNext(1); if (nx) playSongOf(nx); }
+
+  // ===== MIDI player deck =====================================================================
+  // ONE definition of what a MIDI player IS — state + every handler — parameterized by the voice
+  // it drives. Deck 1 is voice 1 (@SONG*), deck 2 is voice 2 (@SONG2*). The renderers below
+  // (playerActions / playerSongBody / playerBody / playerValue) take a deck, so both players are
+  // the SAME component: a change to one changes both, and a third synth is one makeSongDeck()
+  // call + one section entry — no cloned UI, no cloned transport logic.
+  type PlayerT = { song: string; playing: boolean; name: string; prog: number };
+  type SongWire = { play: (arg: string) => void; restart: (arg: string) => void; stop: () => void; loop: (on: boolean) => void };
+  type SongDeckT = {
+    v: 1 | 2;
+    player: PlayerT; endMode: EndMode;
+    vol: number; onVol: (n: number) => void; commitVol: (n: number) => void; volNote?: string;
+    setSong: (name: string) => void;
+    play: () => void; stop: () => void; step: (dir: number) => void;
+    applyEnd: (m: EndMode) => void; cycleEnd: () => void;
+    onNaturalEnd: () => void;   // wired into the device's position feed (@SONGP=-1 / @SONG2P=-1)
   };
-  // --- MIDI Player 2 (voice-2 song player) — the same handler set, targeting @SONG2* and the
-  // player2 UI state, so the second MIDI-player card is a full clone of the first. ---
-  const pickNext2 = (dir: number): Song | null => {
-    const songs = cat.songs;
-    if (!songs.length) return null;
-    const idx = songs.findIndex(sg => sg.name === player2.song);
-    if (endMode2 === 'shuffle' && songs.length > 1) { let r = idx; while (r === idx) r = Math.floor(Math.random() * songs.length); return songs[r]; }
-    const base = idx < 0 ? (dir > 0 ? -1 : 0) : idx;
-    return songs[((base + dir) % songs.length + songs.length) % songs.length];
+  const makeSongDeck = (cfg: {
+    v: 1 | 2;
+    player: PlayerT; setPlayer: React.Dispatch<React.SetStateAction<PlayerT>>;
+    endMode: EndMode; setEndMode: (m: EndMode) => void; persistKey: 'end' | 'end2';
+    manualStopRef: React.MutableRefObject<boolean>;
+    vol: number; onVol: (n: number) => void; commitVol: (n: number) => void; volNote?: string;
+    wire: SongWire;
+  }): SongDeckT => {
+    const { player: P, setPlayer: setP, endMode: em, wire } = cfg;
+    // The shared "continue rules": which song a skip (‹ ›) or a natural end advances to, per the
+    // end-mode. Shuffle → a random *other* song; every other mode → the linear neighbour, wrapping
+    // both ways. Both the transport buttons and the auto-advance route through this.
+    const pickNext = (dir: number): Song | null => {
+      const songs = cat.songs;
+      if (!songs.length) return null;
+      const idx = songs.findIndex(sg => sg.name === P.song);
+      if (em === 'shuffle' && songs.length > 1) {
+        let r = idx; while (r === idx) r = Math.floor(Math.random() * songs.length);   // never repeat the current song
+        return songs[r];
+      }
+      const base = idx < 0 ? (dir > 0 ? -1 : 0) : idx;
+      return songs[((base + dir) % songs.length + songs.length) % songs.length];       // wrap both ways
+    };
+    const playOf = (sg: Song) => { wire.play(songArg(sg)); setP(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };
+    // End-of-song mode. Only 'repeat' arms the firmware's seamless loop; the rest let the song end
+    // (the device emits its <player>P=-1) and we advance app-side. Persisted on the device.
+    const applyEnd = (m: EndMode) => { cfg.setEndMode(m); wire.loop(m === 'repeat'); persistApp({ [cfg.persistKey]: m } as Partial<AppState>); };
+    return {
+      v: cfg.v, player: P, endMode: em,
+      vol: cfg.vol, onVol: cfg.onVol, commitVol: cfg.commitVol, volNote: cfg.volNote,
+      setSong: (name: string) => setP(p => ({ ...p, song: name })),
+      // Play = restart from the top on a fresh downbeat; prog -1 until the device reports position.
+      play: () => { const sg = cat.songs.find(x => x.name === P.song) || cat.songs[0]; if (!sg) return; wire.restart(songArg(sg)); setP(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); },
+      stop: () => { cfg.manualStopRef.current = true; wire.stop(); setP(p => ({ ...p, playing: false, prog: 0 })); },
+      step: (dir: number) => { const sg = pickNext(dir); if (!sg) return; setP(p => { if (p.playing) { wire.restart(songArg(sg)); return { ...p, song: sg.name, name: sg.name }; } return { ...p, song: sg.name }; }); },
+      applyEnd, cycleEnd: () => { const i = END_MODES.findIndex(m => m.key === em); applyEnd(END_MODES[(i + 1) % END_MODES.length].key); },
+      // Runs when a song finishes on its own (not a manual Stop). 'stop' does nothing; 'repeat'
+      // loops in firmware; continue/shuffle advance per the same pickNext rules.
+      onNaturalEnd: () => { if (em === 'continue' || em === 'shuffle') { const nx = pickNext(1); if (nx) playOf(nx); } },
+    };
   };
-  const stepSong2 = (dir: number) => { const sg = pickNext2(dir); if (!sg) return; setPlayer2(p => { if (p.playing) { tp.song2Restart(songArg(sg)); return { ...p, song: sg.name, name: sg.name }; } return { ...p, song: sg.name }; }); };
-  const playSong2 = () => { const sg = cat.songs.find(x => x.name === player2.song) || cat.songs[0]; if (!sg) return; tp.song2Restart(songArg(sg)); setPlayer2(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };
-  const stopSong2 = () => { manualStop2Ref.current = true; tp.stopSong2(); setPlayer2(p => ({ ...p, playing: false, prog: 0 })); };
-  const playSong2Of = (sg: Song) => { tp.song2Play(songArg(sg)); setPlayer2(p => ({ ...p, song: sg.name, playing: true, name: sg.name, prog: -1 })); };
-  const applyEndMode2 = (m: EndMode) => { setEndMode2(m); tp.song2Loop(m === 'repeat'); persistApp({ end2: m }); };
-  const cycleEndMode2 = () => { const i = END_MODES.findIndex(m => m.key === endMode2); applyEndMode2(END_MODES[(i + 1) % END_MODES.length].key); };
-  onSong2EndRef.current = () => { if (endMode2 === 'continue' || endMode2 === 'shuffle') { const nx = pickNext2(1); if (nx) playSong2Of(nx); } };
+  const songDeck1 = makeSongDeck({
+    v: 1, player, setPlayer, endMode, setEndMode, persistKey: 'end', manualStopRef,
+    vol: songVol, onVol: setSongVol, commitVol: v => tp.songVol(v),
+    wire: { play: a => tp.songPlay(a), restart: a => tp.songRestart(a), stop: () => tp.stopSong(), loop: on => tp.songLoop(on) },
+  });
+  const songDeck2 = makeSongDeck({
+    v: 2, player: player2, setPlayer: setPlayer2, endMode: endMode2, setEndMode: setEndMode2, persistKey: 'end2', manualStopRef: manualStop2Ref,
+    // Player 2's level IS the voice-2 bus (the two halves share one mixer), so it moves the same
+    // fader as the Synth / Voices 2 card rather than owning a private one.
+    vol: voice2.vol, onVol: v => setVoice2(x => ({ ...x, vol: v })), commitVol: v => tp.voice2Vol(v),
+    volNote: 'Plays on the Synthesizer B (voice-2) side — layered with Player 1. Volume is the shared voice-2 level.',
+    wire: { play: a => tp.song2Play(a), restart: a => tp.song2Restart(a), stop: () => tp.stopSong2(), loop: on => tp.song2Loop(on) },
+  });
+  // Kept fresh in refs so the one-time position listeners never see a stale mode/song/catalog.
+  onSongEndRef.current = songDeck1.onNaturalEnd;
+  onSong2EndRef.current = songDeck2.onNaturalEnd;
   const playGroove = () => { const g = cat.grooves.find(x => x.path === drums.sel); if (g) { tp.playGrooveFile(grooveFile(g)); setDrums(d => ({ ...d, playing: g.name })); } };
   const stopDrums = () => { tp.stopDrums(); setDrums(d => ({ ...d, playing: null })); };
   // Metronome transport, independent Play/Stop (mirrors the arp). Play sends @METRO=1 even
@@ -980,7 +1026,6 @@ export default function App() {
     const armed = d.st === 1, capturing = d.st === 2 || d.st === 3;
     return (
       <>
-        <Text style={s.sectionLbl}>Loop recorder</Text>
         <Row>
           <Pressable style={[s.btn, s.grow1, (armed || capturing) && s.btnRecOn]} onPress={d.record}>
             <Text style={s.btnText}>●  Record</Text>
@@ -1005,61 +1050,50 @@ export default function App() {
   };
 
   // These section bodies (+ their header transport rows) are shared: each drives its own
-  // standalone card/page AND the combined "Synthesizer" tabbed page, so there's a single
-  // source of truth for the MIDI-player, Synth/Voices, and Arpeggiator UIs (see the submenus).
-  const playerActions = (<>
-    <HdrBtn label="‹" stop onPress={() => stepSong(-1)} />
-    <HdrBtn label="›" stop onPress={() => stepSong(1)} />
-    <HdrBtn label="▶" onPress={playSong} />
-    <HdrBtn label="■" stop onPress={stopSong} />
-    <HdrBtn label={(END_MODES.find(m => m.key === endMode) || END_MODES[3]).icon} stop onPress={cycleEndMode} />
+  // standalone card/page AND its submenu entry, so there's a single source of truth for the
+  // MIDI-player, Synth/Voices and Arpeggiator UIs.
+
+  // ---- MIDI player renderers: ONE component set, driven by a deck (see makeSongDeck) --------
+  // Both players render from these. Edit once, both change; a third synth is a new deck.
+  const playerActions = (D: SongDeckT) => (<>
+    <HdrBtn label="‹" stop onPress={() => D.step(-1)} />
+    <HdrBtn label="›" stop onPress={() => D.step(1)} />
+    <HdrBtn label="▶" onPress={D.play} />
+    <HdrBtn label="■" stop onPress={D.stop} />
+    <HdrBtn label={(END_MODES.find(m => m.key === D.endMode) || END_MODES[3]).icon} stop onPress={D.cycleEnd} />
   </>);
-  const playerBody = (
+  // The song half: pick a song, set the player's level, choose what happens when it ends.
+  const playerSongBody = (D: SongDeckT) => (
     <>
-      <VolSlider label="Volume" value={songVol} onChange={setSongVol} onCommit={v => tp.songVol(v)} disabled={!connected} />
+      <VolSlider label="Volume" value={D.vol} onChange={D.onVol} onCommit={D.commitVol} disabled={!connected} />
+      {!!D.volNote && <Text style={s.muted}>{D.volNote}</Text>}
       {cat.songs.length === 0 ? <Text style={s.muted}>No songs indexed.</Text> : (
         <ScrollView style={s.list} nestedScrollEnabled>
-          {cat.songs.map(sg => <ListBtn key={sg.file || sg.name} label={(player.playing && player.song === sg.name ? '♪ ' : '') + sg.name} sel={player.song === sg.name}
-            onPress={() => setPlayer(p => ({ ...p, song: sg.name }))} />)}
+          {cat.songs.map(sg => <ListBtn key={sg.file || sg.name} label={(D.player.playing && D.player.song === sg.name ? '♪ ' : '') + sg.name} sel={D.player.song === sg.name}
+            onPress={() => D.setSong(sg.name)} />)}
         </ScrollView>
       )}
       <Row><Text style={[s.muted, { flex: 1 }]}>When finished</Text>
         {END_MODES.map(m => (
-          <Pressable key={m.key} style={[s.pill, endMode === m.key && s.pillOn]} onPress={() => applyEndMode(m.key)}>
+          <Pressable key={m.key} style={[s.pill, D.endMode === m.key && s.pillOn]} onPress={() => D.applyEnd(m.key)}>
             <Text style={s.text}>{m.icon}  {m.label}</Text>
           </Pressable>
         ))}</Row>
-      {caps.rec && recRow(1)}
     </>
   );
-  // MIDI Player 2 — a clone of the above driving @SONG2* + player2 state. Its Volume is the
-  // voice-2 bus (@VOICE2VOL, shared with the Synth / Voices 2 card), so two songs play at once.
-  const player2Actions = (<>
-    <HdrBtn label="‹" stop onPress={() => stepSong2(-1)} />
-    <HdrBtn label="›" stop onPress={() => stepSong2(1)} />
-    <HdrBtn label="▶" onPress={playSong2} />
-    <HdrBtn label="■" stop onPress={stopSong2} />
-    <HdrBtn label={(END_MODES.find(m => m.key === endMode2) || END_MODES[3]).icon} stop onPress={cycleEndMode2} />
-  </>);
-  const player2Body = (
-    <>
-      <VolSlider label="Volume" value={voice2.vol} onChange={v => setVoice2(x => ({ ...x, vol: v }))} onCommit={v => tp.voice2Vol(v)} disabled={!connected} />
-      <Text style={s.muted}>Plays on the Synthesizer B (voice-2) side — layered with Player 1. Volume is the shared voice-2 level.</Text>
-      {cat.songs.length === 0 ? <Text style={s.muted}>No songs indexed.</Text> : (
-        <ScrollView style={s.list} nestedScrollEnabled>
-          {cat.songs.map(sg => <ListBtn key={sg.file || sg.name} label={(player2.playing && player2.song === sg.name ? '♪ ' : '') + sg.name} sel={player2.song === sg.name}
-            onPress={() => setPlayer2(p => ({ ...p, song: sg.name }))} />)}
-        </ScrollView>
-      )}
-      <Row><Text style={[s.muted, { flex: 1 }]}>When finished</Text>
-        {END_MODES.map(m => (
-          <Pressable key={m.key} style={[s.pill, endMode2 === m.key && s.pillOn]} onPress={() => applyEndMode2(m.key)}>
-            <Text style={s.text}>{m.icon}  {m.label}</Text>
-          </Pressable>
-        ))}</Row>
-      {caps.rec && caps.voice2 && recRow(2)}
-    </>
+  // The player page splits in two: the song selector, and THIS synth's own loop recorder. The
+  // header transport (‹ › ▶ ■) drives the SONG on both tabs; the looper has its own Record/Stop
+  // in its tab. The Looper tab only exists on a recorder build.
+  const playerBody = (D: SongDeckT) => (
+    <BodyTabs tabs={[
+      { key: 'song', label: 'MIDI PLAYER', body: playerSongBody(D) },
+      ...(caps.rec ? [{ key: 'loop', label: 'MIDI LOOPER', body: recRow(D.v) }] : []),
+    ]} />
   );
+  // Card/page subtitle + progress bar (the bar only once the device reports a position).
+  const playerValue = (D: SongDeckT) => (D.player.playing ? '♪ ' : '') + (D.player.song || '—');
+  const playerProgress = (D: SongDeckT) => (D.player.playing && D.player.prog >= 0 ? D.player.prog : undefined);
+
   const synthActions = (<>
     <HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1)} />
     <HdrBtn label="Next ›" stop onPress={() => stepVoice(1)} />
@@ -1373,10 +1407,9 @@ export default function App() {
     // MIDI PLAYER — select a song; Play/Stop in the header. A Synthesizer A sub-page.
     {
       id: 'player', title: 'MIDI Player', show: false, parent: 'synthesizer',
-      value: (player.playing ? '♪ ' : '') + (player.song || '—'),
-      progress: player.playing && player.prog >= 0 ? player.prog : undefined,   // bar shows only once the device reports a position
-      actions: playerActions,
-      body: playerBody,
+      value: playerValue(songDeck1), progress: playerProgress(songDeck1),
+      actions: playerActions(songDeck1),
+      body: playerBody(songDeck1),
     },
     // ARPEGGIATOR — a Synthesizer A sub-page.
     {
@@ -1388,10 +1421,9 @@ export default function App() {
     // B sub-page; caps.voice2 gates the parent card, so this only appears on voice-2 builds.
     {
       id: 'player2', title: 'MIDI Player 2', show: false, parent: caps.voice2 ? 'synthesizerB' : undefined, accent: C.accent2,
-      value: (player2.playing ? '♪ ' : '') + (player2.song || '—'),
-      progress: player2.playing && player2.prog >= 0 ? player2.prog : undefined,
-      actions: player2Actions,
-      body: player2Body,
+      value: playerValue(songDeck2), progress: playerProgress(songDeck2),
+      actions: playerActions(songDeck2),
+      body: playerBody(songDeck2),
     },
     // ARPEGGIATOR 2 — build-flag gated (caps.arp2). A full clone of the arp, on the Voices-2
     // keyboard voice only (@ARP2*); the main arp is untouched.
