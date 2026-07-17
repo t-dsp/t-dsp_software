@@ -195,7 +195,14 @@ export class BleTransport implements Transport {
         this.browseAsm.chunks[seq] = payload;
         let full = '', ok = true;
         for (let i = 0; i < count; i++) { if (this.browseAsm.chunks[i] == null) { ok = false; break; } full += this.browseAsm.chunks[i]; }
-        if (ok) { this.browseAsm = null; this.dispatchBrowse(full); }
+        // Reassembled: @STATE / @APP are full control lines (chunked because they exceed one
+        // MTU) → deliver to onLine() like any line so hydrate() runs; everything else is a
+        // browse reply (@DXLS/@DXVL) for a pending request.
+        if (ok) {
+          this.browseAsm = null;
+          if (full.startsWith('@STATE') || full.startsWith('@APP')) this.emit(full);
+          else this.dispatchBrowse(full);
+        }
         return;
       }
     }

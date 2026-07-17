@@ -237,6 +237,11 @@ static void handleTeensyLine(const char *line) {
   // chunk-framed on the FILE char — the app reassembles (digit-prefixed frames, distinct from
   // the '@'-prefixed file frames). @DXPICKED is a fire-and-forget ack the app doesn't read.
   else if (strncmp(line, "@DXLS=", 6) == 0 || strncmp(line, "@DXVL=", 6) == 0) { setCatalog(g_fileChar, line); }
+  // The full-state snapshot (@STATE, ~2 KB now that it carries voice2/arp2/caps) and the
+  // opaque app-state blob (@APP) also exceed one MTU, so stream them chunk-framed too. The
+  // app reassembles and routes them to its onLine() handler (hydrate). WITHOUT this the phone
+  // never receives @STATE, so build-gated cards (Synth 2 / Arp 2, via caps) stay hidden.
+  else if (strncmp(line, "@STATE=", 7) == 0 || strncmp(line, "@APP=", 5) == 0) { setCatalog(g_fileChar, line); }
 }
 
 // Ask the Teensy to (re)send its catalog over UART.
