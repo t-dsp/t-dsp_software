@@ -2115,6 +2115,31 @@ FLASHMEM static bool handleArpLine(const char* line, Print& reply, tdsp::ArpFilt
     return true;
 }
 
+// Track-indexed command dispatch (Phase 3): "@TRK<i>.<CMD>[=<arg>]" routes a UNIFORM transport
+// interface to any track by index — g_tracks[0..n-1] (synth voices) or g_drumTrack (the drum). This
+// is what lets the app drive N cards from the @STATE tracks[] array with one command family, and a
+// future 4th/5th track needs no new command. Thin aliases over the existing per-voice handlers; the
+// legacy @SONG*/@SONG2*/@DRUM* stay. Arp params keep their @ARP*/@ARP2* commands for now (deferred).
+static void handleTrkCmd(const char* s) {
+    const char* dot = strchr(s, '.');
+    if (!dot) return;
+    const int i = atoi(s);                       // "<i>" before the dot
+    const char* cmd = dot + 1;                   // "<CMD>[=<arg>]"
+    const char* eq = strchr(cmd, '=');
+    const char* arg = eq ? eq + 1 : "";
+    const int nSynth = (int)(sizeof g_tracks / sizeof g_tracks[0]);
+    Track* t = nullptr; bool isDrum = false;
+    if (i >= 0 && i < nSynth) t = &g_tracks[i];
+    else if (i == nSynth)     { t = &g_drumTrack; isDrum = true; }
+    if (!t) return;
+    if      (strncmp(cmd, "PLAY=", 5) == 0 || strncmp(cmd, "SONGF=", 6) == 0) { const char* a = eq + 1; if (isDrum) drumStartFile(a); else trackLaunch(*t, a); }
+    else if (strncmp(cmd, "RESTART=", 8) == 0) { if (isDrum) drumStartFile(arg); else trackRestart(*t, arg); }
+    else if (strncmp(cmd, "STOP", 4) == 0)     { if (isDrum) drumStop(); else songStop(*t); }
+    else if (strncmp(cmd, "VOL=", 4) == 0)     { if (t->setLevel) t->setLevel(atoi(arg)); }
+    else if (strncmp(cmd, "LOOP=", 5) == 0)    { if (!isDrum) { *t->loop = (atoi(arg) != 0); t->player->setLooping(*t->loop); } }   // a groove always loops
+    else if (strncmp(cmd, "ARPON=", 6) == 0)   { if (t->arp) t->arp->setEnabled(atoi(arg) != 0); }
+}
+
 // `reply` is the stream the command arrived on (USB Serial or the ESP32 UART,
 // Serial7). Typed as Stream (not just Print) so commands that need to READ back
 // on the same link — e.g. @FXUP handing the stream to FlasherX — can do so.
@@ -2163,6 +2188,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         reply.printf("@DXPICKED=%s\t%d\t%s\n", buf, voice, nm ? nm : "?");
     }
 #endif
+    else if (strncmp(line, "@TRK", 4) == 0)       handleTrkCmd(line + 4);   // @TRK<i>.<CMD>[=<arg>] — uniform per-track transport (Phase 3)
     else if (strncmp(line, "@SONGF=", 7) == 0)    trackLaunch(g_tracks[0], line + 7);     // @SONGF=<filename|name> (play by name — the app's path; bar-quantized if @QUANTIZE=1)
     else if (strncmp(line, "@SONGRESTART=", 13) == 0) trackRestart(g_tracks[0], line + 13);   // hard restart on a fresh downbeat — the app's Play / ‹ ›
     else if (strncmp(line, "@SONG=", 6) == 0) {
@@ -2605,13 +2631,29 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
                        t.player->isPlaying() ? 1 : 0, t.player->positionPermille(), t.player->isSynced() ? 1 : 0, *t.loop ? 1 : 0);
           tdsp::catdb::jsonStr(reply, t.name); reply.print("}"); }
 #endif
+        // tracks[] — the compiled Track INVENTORY as data (Phase 3): one entry per Track so the app can
+        // render a card per track (kind/name/playing/on/arp) instead of hardcoding Synth A/B/Drums.
+        // Additive alongside the per-voice keys above; the app migrates to this, the old keys retire
+        // later. "on" = the track is currently usable (voice 2 enabled / engine renders ch10 drums).
+        reply.print(",\"tracks\":[");
+        reply.printf("{\"i\":0,\"kind\":\"synth\",\"playing\":%d,\"on\":1,\"arp\":1,\"name\":", g_tracks[0].player->isPlaying() ? 1 : 0);
+        tdsp::catdb::jsonStr(reply, synthInstrumentName(synthInstrument())); reply.print("}");
+#if TDSP_VOICE2
+        reply.printf(",{\"i\":1,\"kind\":\"synth\",\"playing\":%d,\"on\":%d,\"arp\":%d,\"name\":",
+                     g_tracks[1].player->isPlaying() ? 1 : 0, g_voice2On ? 1 : 0, TDSP_ARP2 ? 1 : 0);
+        tdsp::catdb::jsonStr(reply, synthInstrumentName(g_synthInstrument2)); reply.print("}");
+#endif
+        reply.printf(",{\"i\":%d,\"kind\":\"drum\",\"playing\":%d,\"on\":%d,\"arp\":0,\"name\":",
+                     TDSP_VOICE2 ? 2 : 1, g_drumTrack.player->isPlaying() ? 1 : 0, drumEngineOk() ? 1 : 0);
+        tdsp::catdb::jsonStr(reply, g_curDrumName); reply.print("}]");
         // Build-time capabilities so the app SHOWS the Voices-2 / arp-2 cards only on builds
-        // that have them compiled in (both are pool-only, build-flag gated).
+        // that have them compiled in (both are pool-only, build-flag gated). caps.tracks = the
+        // compiled track count (2 synth voices + 1 drum, or 1+1 on a non-voice2 build).
         // caps.audioloop = the number of audio loops that ACTUALLY allocated (0 = the board
         // couldn't spare the RAM -> the app hides the card), not just the build flag.
-        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"audioloop\":%d}",
+        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"tracks\":%d,\"audioloop\":%d}",
                      TDSP_VOICE2 ? 1 : 0, (TDSP_VOICE2 && TDSP_ARP2) ? 1 : 0, TDSP_RECORDER ? 1 : 0,
-                     TDSP_RECORDER_EDIT ? 1 : 0,
+                     TDSP_RECORDER_EDIT ? 1 : 0, (TDSP_VOICE2 ? 2 : 1) + 1,
 #if TDSP_AUDIOLOOP
                      (int)g_aloopN
 #else
