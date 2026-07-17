@@ -2078,12 +2078,13 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         g_recVoice = (uint8_t)v;
         reply.printf("@RECV=%d\n", g_recVoice);
     }
-    else if (strncmp(line, "@RECBARS=", 9) == 0) {              // loop length: 1,2,4,8 bars (both voices)
+    else if (strncmp(line, "@RECBARS=", 9) == 0) {              // loop length: 1,2,4,8 bars
+        // PER-VOICE (was: both). Each synth owns its own loop length — synth A can run a 2-bar
+        // riff under synth B's 8-bar pad. @RECV selects which one this sets, same as the
+        // other record controls. The time signature stays global (it IS the master meter, see
+        // @RECSIG below) — loop LENGTH is per-synth, the grid they lock to is shared.
         int b = atoi(line + 9);
-        g_loop1.setBars((uint8_t)b);
-#if TDSP_VOICE2
-        g_loop2.setBars((uint8_t)b);
-#endif
+        recSel()->setBars((uint8_t)b);
         reply.printf("@RECBARS=%d\n", recSel()->bars());
     }
     else if (strncmp(line, "@RECSIG=", 8) == 0) {               // time signature N/4 -> drives the master meter
@@ -2285,12 +2286,15 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
                        clk.beatInBar() + 1, clk.beatsPerBar(),
                        (int)(clk.barPhase() * 1000.0f + 0.5f), clk.running() ? 1 : 0); }
 #if TDSP_RECORDER
-        // Loop recorder: selected voice, loop length (bars), and per-voice state
-        // (0=idle 1=armed 2=recording 3=overdub 4=playing) + progress permille.
-        reply.printf("\"rec\":{\"v\":%d,\"bars\":%d,\"st1\":%d,\"p1\":%d",
-                     g_recVoice, recSel()->bars(), (int)g_loop1.state(), g_loop1.positionPermille());
+        // Loop recorder, per voice: loop length (bars1/bars2), state (0=idle 1=armed 2=recording
+        // 3=overdub 4=playing) and progress permille. Each synth's MIDI player owns its own
+        // recorder, so every field is per-voice; `v` is just which one the @REC* commands
+        // currently target (each player aims it at its own voice before acting).
+        reply.printf("\"rec\":{\"v\":%d,\"bars1\":%d,\"st1\":%d,\"p1\":%d",
+                     g_recVoice, g_loop1.bars(), (int)g_loop1.state(), g_loop1.positionPermille());
 #if TDSP_VOICE2
-        reply.printf(",\"st2\":%d,\"p2\":%d", (int)g_loop2.state(), g_loop2.positionPermille());
+        reply.printf(",\"bars2\":%d,\"st2\":%d,\"p2\":%d",
+                     g_loop2.bars(), (int)g_loop2.state(), g_loop2.positionPermille());
 #endif
         reply.print("},");
 #endif

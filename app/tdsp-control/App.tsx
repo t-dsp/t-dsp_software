@@ -288,11 +288,13 @@ export default function App() {
   // RAM/PSRAM dependent), not a bool: 0 hides the Audio Loop card entirely.
   const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, audioloop: 0 });
   const [voice2, setVoice2] = useState({ on: false, vol: 100, name: '', path: '' });
-  // Loop recorder (build-flag gated, shown on caps.rec): v = which voice the controls target
-  // (1|2), bars = loop length, st1/st2 = per-voice state (0 idle 1 armed 2 recording 3 overdub
-  // 4 playing), p1/p2 = 0..1000 record-fill / playback-phase permille. Time signature is the
-  // shared master meter (metro.sig), so it isn't tracked here.
-  const [rec, setRec] = useState({ v: 1, bars: 4, st1: 0, st2: 0, p1: 0, p2: 0 });
+  // MIDI loop recorder (build-flag gated, caps.rec). Each synth's MIDI player owns its own
+  // recorder, so every setting is PER-VOICE: bars1/bars2 = that synth's loop length, st1/st2 =
+  // state (0 idle 1 armed 2 recording 3 overdub 4 playing), p1/p2 = record-fill / playback-phase.
+  // `v` is only which voice the firmware's @REC* commands currently target — each player aims it
+  // at its own voice before acting. Time signature is deliberately NOT here: it's the shared
+  // master meter (metro.sig, set on the Metronome card) that both synths lock to.
+  const [rec, setRec] = useState({ v: 1, bars1: 4, bars2: 4, st1: 0, st2: 0, p1: 0, p2: 0 });
   // Audio loop recorder (shown on caps.audioloop > 0): sel = selected loop, bars/mono/follow
   // = the selected loop's config, st[]/p[] = per-loop state (same 0..4 codes as `rec`) and
   // 0..1 progress, capS = the selected loop's capacity in seconds (bars that don't fit are
@@ -363,7 +365,8 @@ export default function App() {
     }));
     if (j.rec) setRec(r => ({
       v: j.rec.v === 2 ? 2 : 1,
-      bars: [1, 2, 4, 8].includes(j.rec.bars | 0) ? (j.rec.bars | 0) : r.bars,
+      bars1: [1, 2, 4, 8].includes(j.rec.bars1 | 0) ? (j.rec.bars1 | 0) : r.bars1,
+      bars2: [1, 2, 4, 8].includes(j.rec.bars2 | 0) ? (j.rec.bars2 | 0) : r.bars2,
       st1: Math.max(0, Math.min(4, j.rec.st1 | 0)),
       st2: Math.max(0, Math.min(4, j.rec.st2 | 0)),
       p1: (j.rec.p1 | 0) / 1000,
@@ -951,16 +954,20 @@ export default function App() {
   // your live keys (the combined post-arp stream) and loops it back into that synth only.
   // The firmware keeps one selected target (recSel()/@RECV), so a player's button points it at
   // its own voice first, then acts — that way the two players' record controls never collide.
-  type RecDeckT = { st: number; prog: number; record: () => void; overdub: () => void; stop: () => void; clear: () => void };
+  type RecDeckT = { st: number; prog: number; bars: number; setBars: (n: number) => void;
+                    record: () => void; overdub: () => void; stop: () => void; clear: () => void };
   const recDeck = (v: 1 | 2): RecDeckT => {
     const st = v === 2 ? rec.st2 : rec.st1;
     const prog = v === 2 ? rec.p2 : rec.p1;
-    // Optimistic local state (the device's @RECP push corrects it); also mirrors the voice
-    // selection so the standalone Loop Recorder card stays in step with whichever player acted.
+    const bars = v === 2 ? rec.bars2 : rec.bars1;
+    // Optimistic local state; the device's @RECP push corrects it.
     const setSt = (s: number) => setRec(r => (v === 2 ? { ...r, v, st2: s } : { ...r, v, st1: s }));
     const aim = () => tp.recVoice(v);   // always send @RECV (idempotent, cheap) — never trust stale rec.v
     return {
-      st, prog,
+      st, prog, bars,
+      // Loop length is per-synth (@RECBARS targets the selected voice), so A can loop a 2-bar
+      // riff under B's 8-bar pad. Takes effect on that synth's next fresh recording.
+      setBars: (n: number) => { aim(); tp.recBars(n); setRec(r => (v === 2 ? { ...r, v, bars2: n } : { ...r, v, bars1: n })); },
       record:  () => { aim(); tp.recArm(true);     setSt(1); },
       overdub: () => { aim(); tp.recOverdub(true); setSt(3); },
       stop:    () => { aim(); tp.recArm(false);    setSt(st === 2 || st === 3 ? 4 : 0); },
@@ -982,8 +989,15 @@ export default function App() {
           <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={d.stop}><Text style={s.btnText}>■  Stop</Text></Pressable>
           <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={d.clear}><Text style={s.btnText}>✕  Clear</Text></Pressable>
         </Row>
+        <Row><Text style={[s.muted, { flex: 1 }]}>Loop length</Text>
+          {[1, 2, 4, 8].map(n => (
+            <Pressable key={n} style={[s.pill, d.bars === n && s.pillOn]} onPress={() => d.setBars(n)}>
+              <Text style={s.text}>{n} {n === 1 ? 'bar' : 'bars'}</Text>
+            </Pressable>
+          ))}</Row>
         <Text style={s.muted}>
           {REC_STATES[d.st]}{d.st === 0 ? ' — captures this synth’s song + your live keys, then loops it.' : ''}
+          {' '}Length is this synth’s own; the time signature is the shared master meter (set it on Metronome).
         </Text>
         {d.st > 0 && <ProgressBar value={d.prog} />}
       </>
@@ -1184,20 +1198,10 @@ export default function App() {
   const alBarsSecs = (n: number) => (n * metro.sig * 60) / Math.max(1, bpm);
   const alFits = (n: number) => aloop.capS <= 0 || alBarsSecs(n) <= aloop.capS + 0.01;
 
-  // ---- Loop recorder controls (see project_midi_loop_recorder) ----------------
-  // Per-voice state; the selected voice (rec.v) is what the transport buttons act on.
-  // Local state is updated optimistically on tap so the card feels instant on every
-  // transport; the device's @RECP push then corrects it (live over USB).
-  const recSt = () => (rec.v === 2 ? rec.st2 : rec.st1);
-  const recProg = () => (rec.v === 2 ? rec.p2 : rec.p1);
-  const setRecSt = (st: number) => setRec(r => (r.v === 2 ? { ...r, st2: st } : { ...r, st1: st }));
-  const setRecVoice = (v: 1 | 2) => { setRec(r => ({ ...r, v })); tp.recVoice(v); };
-  const setRecBars = (n: number) => { setRec(r => ({ ...r, bars: n })); tp.recBars(n); };
-  const setRecSig = (n: number) => { setMetro(m => ({ ...m, sig: n })); tp.recSig(n); };   // record sig == master meter
-  const recRecord = () => { tp.recArm(true); setRecSt(1); };                                 // arm a fresh (replace) take
-  const recOverdub = () => { tp.recOverdub(true); setRecSt(3); };                            // layer onto the existing loop
-  const recStopBtn = () => { const st = recSt(); tp.recArm(false); setRecSt(st === 2 || st === 3 ? 4 : 0); };  // capturing -> loop; else stop
-  const recClearBtn = () => { tp.recClear(); setRecSt(0); };
+  // NOTE: the standalone "Loop Recorder" card is GONE. The MIDI looper now belongs to each
+  // synth's MIDI player (see recDeck/recRow above) — one recorder per synth, with its own loop
+  // length — and the audio loop recorder owns the top-level Audio Loop card. So there's no
+  // shared voice-selector/bars UI here any more; every rec control is per-player.
 
   const sections: Section[] = [
     // CONNECTION — catalog stats. A Settings sub-page (reached from the Settings submenu).
@@ -1366,41 +1370,6 @@ export default function App() {
         </>
       ),
     },
-    // LOOP RECORDER — build-flag gated (caps.rec). Records the active keyboard's baked arp
-    // output into a beat-locked 1/2/4/8-bar loop, per voice; loops it back immediately while
-    // the last-held notes ring out. A top-level performance card. See project_midi_loop_recorder.
-    {
-      id: 'recorder', title: 'Loop Recorder', show: caps.rec, accent: THEME.recorder.accent, tint: THEME.recorder.tint,
-      value: (caps.voice2 ? (rec.v === 2 ? 'Synth B · ' : 'Synth A · ') : '') + REC_STATES[recSt()] + '  ·  ' + rec.bars + ' bar' + (rec.bars > 1 ? 's' : ''),
-      progress: recSt() >= 2 ? recProg() : undefined,   // fill while recording / phase while looping
-      actions: (<>
-        <HdrBtn label="●" onPress={recRecord} />
-        <HdrBtn label="■" stop onPress={recStopBtn} />
-      </>),
-      body: (
-        <>
-          <Text style={s.muted}>Records what the active keyboard plays — with the arpeggiator baked in — into a loop locked to the beat. Hit Record, then play: capture starts on your first note (preserving where it lands in the bar), and at the end the loop starts playing immediately while your last notes ring out.</Text>
-          {caps.voice2 && (
-            <Row><Text style={[s.muted, { flex: 1 }]}>Voice</Text>
-              {([1, 2] as const).map(v => <Pressable key={v} style={[s.pill, rec.v === v && s.pillOn]} onPress={() => setRecVoice(v)}><Text style={s.text}>Synth {v === 1 ? 'A' : 'B'}</Text></Pressable>)}</Row>
-          )}
-          <Row><Text style={[s.muted, { flex: 1 }]}>Bars</Text>
-            {[1, 2, 4, 8].map(n => <Pressable key={n} style={[s.pill, rec.bars === n && s.pillOn]} onPress={() => setRecBars(n)}><Text style={s.text}>{n}</Text></Pressable>)}</Row>
-          <Row><Text style={[s.muted, { flex: 1 }]}>Time signature</Text>
-            {[2, 3, 4, 5, 6, 7].map(n => <Pressable key={n} style={[s.pill, metro.sig === n && s.pillOn]} onPress={() => setRecSig(n)}><Text style={s.text}>{n}/4</Text></Pressable>)}</Row>
-          <Row>
-            <Pressable style={[s.btn, s.grow1, recSt() === 2 && s.btnOn]} onPress={recRecord}><Text style={s.btnText}>●  Record</Text></Pressable>
-            <Pressable style={[s.btn, s.grow1, recSt() === 3 && s.btnOn]} onPress={recOverdub}><Text style={s.btnText}>⊕  Overdub</Text></Pressable>
-            <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={recStopBtn}><Text style={s.btnText}>■  Stop</Text></Pressable>
-          </Row>
-          <Row>
-            <Text style={[s.text, { flex: 1 }]}>{REC_STATES[recSt()]}</Text>
-            <Pressable style={[s.btn, s.btnGhost]} onPress={recClearBtn}><Text style={s.btnText}>Clear</Text></Pressable>
-          </Row>
-          {caps.voice2 && <Text style={s.muted}>Synth A: {REC_STATES[rec.st1]}   ·   Synth B: {REC_STATES[rec.st2]}</Text>}
-        </>
-      ),
-    },
     // MIDI PLAYER — select a song; Play/Stop in the header. A Synthesizer A sub-page.
     {
       id: 'player', title: 'MIDI Player', show: false, parent: 'synthesizer',
@@ -1480,7 +1449,7 @@ export default function App() {
   // (play → pick a voice → tempo → arp → drums), then system (connection, BT, codec).
   // Unlisted ids fall to the end in their definition order (stable sort).
   // Order for the home grid AND for each submenu's children (SubMenu sorts by this too).
-  const SECTION_ORDER = ['synthesizer', 'synthesizerB', 'recorder', 'audioloop', 'tempo', 'bt', 'settings',
+  const SECTION_ORDER = ['synthesizer', 'synthesizerB', 'audioloop', 'tempo', 'bt', 'settings',
     'player', 'synth', 'arp', 'synth2', 'player2', 'arp2', 'bpm', 'drums', 'metro', 'conn', 'codec'];
   const ord = (id: string) => { const i = SECTION_ORDER.indexOf(id); return i < 0 ? 999 : i; };
   const visible = sections.filter(x => x.show).sort((a, b) => ord(a.id) - ord(b.id));
