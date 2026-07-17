@@ -8,8 +8,8 @@ to the push_*_serial.ps1 scripts, speaking the same TDspSdXfer '@WB' protocol.
 
 Each tracked asset category is streamed to its canonical path on the card:
 
-    firmware/mix-kit/assets/songs/*.mid  ->  /songs
-    firmware/mix-kit/assets/drums/*.mid  ->  /drums
+    firmware/mix-kit/assets/midi/songs/**.mid  ->  /midi/songs
+    firmware/mix-kit/assets/midi/drums/**.mid  ->  /midi/drums
 
 Every file is CRC32-verified by the firmware as it lands, so a clean run means
 the card byte-for-byte matches the repo. Flashing the Teensy does NOT wipe the
@@ -55,8 +55,8 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 # Asset manifest: add a row to teach the sync a new category.
 ASSET_SETS = [
-    {"name": "songs", "src": "firmware/mix-kit/assets/songs", "sd_root": "/songs", "glob": ".mid"},
-    {"name": "drums", "src": "firmware/mix-kit/assets/drums", "sd_root": "/drums", "glob": ".mid"},
+    {"name": "songs", "src": "firmware/mix-kit/assets/midi/songs", "sd_root": "/midi/songs", "glob": ".mid"},
+    {"name": "drums", "src": "firmware/mix-kit/assets/midi/drums", "sd_root": "/midi/drums", "glob": ".mid"},
 ]
 
 
