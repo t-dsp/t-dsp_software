@@ -255,6 +255,12 @@ private:
                     evCursorBeat_ += (double)ev_[idx_].deltaMs * beatsPerMs_;
                 // idx_ == count_ -> haveEvent goes false; the boundary wrap below runs.
             } else if (songBeat >= boundaryAbs) {
+                if (!loop_) {                            // ONE-SHOT, grid-locked: reached the end -> stop
+                    playing_ = false;                    // (mirrors the free-running end path above)
+                    if (sink_) sink_->onAllNotesOff(0);
+                    ev_ = nullptr;
+                    break;
+                }
                 // LOOP TAIL: any events left undispatched at/after the boundary are the loop's
                 // tail (data authored longer than loopBeats_). Carry their note-OFFs into the
                 // next iteration at their real time so a note held ACROSS the seam — played near

@@ -304,6 +304,7 @@ export class BleTransport implements Transport {
   song2Loop(on: boolean) { this.relay('@LOOP2=' + (on ? 1 : 0)); }
   launchQuantize(on: boolean) { this.relay('@QUANTIZE=' + (on ? 1 : 0)); }
   metronome(on: boolean) { this.relay('@METRO=' + (on ? 1 : 0)); }
+  metronomeMute(muted: boolean) { this.relay('@METROMUTE=' + (muted ? 1 : 0)); }
   metronomeSig(bpb: number) { this.relay('@METROSIG=' + Math.max(1, Math.min(16, Math.round(bpb)))); }
   metronomeVol(pct: number) { this.relay('@METROVOL=' + Math.max(0, Math.min(150, Math.round(pct)))); }
   arpOn(on: boolean) { this.relay('@ARPON=' + (on ? 1 : 0)); }
