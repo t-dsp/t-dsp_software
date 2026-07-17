@@ -68,6 +68,7 @@ on port **81**. The app opens a WebSocket and exchanges **TEXT frames**:
 |-------|---------|
 | `@...` | Relayed **verbatim** to the Teensy over UART (same `@`-protocol as Web Serial / BLE `CMD_RELAY_LINE`). e.g. `@VOL=50`, `@SONG=3`, `@DXVOICE=7`, `@GETCAT` |
 | `!pair` | Enter A2DP pairing mode (discoverable + connectable) |
+| `!reconnect` | **"Connect Bluetooth Audio"** — dial the last bonded phone. Required: nothing auto-reconnects (see *Explicit-only* below), so this is how audio gets started |
 | `!forget` | Clear the stored bond, then enter pairing mode |
 | `!disconnect` | Drop the current A2DP source |
 | `!status` | Reply with the status JSON to the requesting client |
@@ -141,15 +142,16 @@ Both envs share the pinned platform, the `huge_app.csv` 3 MB partition, the
 
 Pair your phone with the Bluetooth device **"T-DSP"** and play audio. The device
 name is set by `BT_DEVICE_NAME` in [src/main.cpp](src/main.cpp). Note the sink
-boots **idle** (explicit-only): connect it from the app (`!pair` over WiFi, or
-the pairing opcode over BLE) or send `p` over UART.
+boots **idle** (explicit-only): connect it from the app — over WiFi use `!pair`
+for a new phone or `!reconnect` for one already bonded (over BLE, the pairing /
+reconnect opcodes) — or send `p` over UART.
 
 ### Image sizes (3 MB `huge_app` partition)
 
 | Env | Flash | RAM (static) |
 |-----|-------|--------------|
 | `esp32dev` (BLE) | 1,182,957 B — 37.6% | 48,856 B — 14.9% |
-| `esp32dev_wifi` | 1,590,849 B — 50.6% | 72,236 B — 22.0% |
+| `esp32dev_wifi` | 1,591,161 B — 50.6% | 70,996 B — 21.7% |
 
 The WiFi build drops the BLE GATT stack but adds WiFi + lwIP + WebSocket + mDNS,
 netting ~400 KB more flash. Both fit the 3 MB partition with room to spare.
@@ -165,8 +167,10 @@ netting ~400 KB more flash. Both fit the 3 MB partition with room to spare.
 - [ ] **Hardware validation of the WiFi build** — not yet flashed/tested. In
       particular WiFi + A2DP radio coexistence (audio glitching under WS traffic)
       is unverified on real hardware.
+- [x] App-side `WiFiTransport` — `app/tdsp-control/src/transport.wifi.ts`, selected via
+      `createTransport('wifi', host?)`. Speaks this wire contract; typechecks clean.
+      Not yet exercised against real hardware, and no UI picker wires it up yet.
 - [ ] Runtime WiFi provisioning (creds are build flags today)
-- [ ] App-side `WiFiTransport` (the app currently speaks BLE only)
 - [ ] Cloud-relay agent (remote control beyond the LAN)
 - [ ] Phase 2: Teensy programs this firmware over UART2 + EN + IO0
       (esptool protocol; ref [collin80/GEVCU7](https://github.com/collin80/GEVCU7/tree/main/src/devices/esp32))

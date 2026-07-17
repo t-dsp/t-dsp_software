@@ -1,15 +1,23 @@
-// transport.ts — the one interface both platforms implement.
+// transport.ts — the one interface every transport implements.
 //
 //   desktop (react-native-web) -> transport.web.ts   (Web Serial + @-line protocol)
 //   app     (native)           -> transport.native.ts (BLE, react-native-ble-plx)
+//   either platform            -> transport.wifi.ts   (LAN WebSocket to the ESP32)
 //
 // Metro resolves the platform-specific file automatically (`.web.ts` / `.native.ts`).
+// transport.wifi.ts has NO platform siblings — it works on both (browser + RN WebSocket)
+// and is selected explicitly via createTransport('wifi').
 // The UI talks ONLY to this interface, so it is transport-agnostic. Catalog browsing is
 // local (see catalog.ts); the transport carries file reads (@READ) + high-level ACTIONS.
 
 import type { SeqStep, ArpWireParams } from './arpSeq';   // type-only: erased at compile time, so no runtime resolution issue
 
 export type LineHandler = (line: string) => void;
+
+// Which transport createTransport() should build. 'default' = the platform's built-in
+// (USB/Web Serial on desktop, BLE on native); 'wifi' = the LAN WebSocket transport,
+// available on both platforms.
+export type TransportKind = 'default' | 'wifi';
 
 // One level of the /dexed library, fetched LIVE (lazy) via @DXLS — never bulk-downloaded.
 // The full catalog would be ~6 MB (11k carts x 32 inline voice names), too big to @READ on
@@ -29,7 +37,7 @@ export interface DirPage {
 // this one. Types below are erased at compile time, so importing them is safe.
 
 export interface Transport {
-  readonly name: 'USB' | 'BLE';
+  readonly name: 'USB' | 'BLE' | 'WIFI';
   isConnected(): boolean;
 
   connect(): Promise<void>;
@@ -136,6 +144,8 @@ export interface Transport {
   audioLoopPlay(on: boolean): void;                   // resume a stopped loop / stop (@ALPLAY=)
   audioLoopClear(): void;                             // wipe the selected loop (@ALCLR)
   audioLoopSave(name: string): void;                  // save as /loops/<name>.wav (@ALSAVE=)
+  // On USB these are single chars relayed Teensy -> ESP32; on BLE they are opcodes; over
+  // WiFi they are the ESP32's local '!' commands. Same semantics either way.
   espPair(): void;
   espReconnect(): void;      // (re)connect A2DP audio to the last paired source
   espDisconnect(): void;     // drop the current A2DP audio source

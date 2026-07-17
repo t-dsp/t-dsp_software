@@ -276,6 +276,21 @@ static void ctrlDisconnect()   { Serial.println("[cmd] DISCONNECT source"); a2dp
 static void ctrlForget()       { Serial.println("[cmd] FORGET last device, then pairing mode");
                                  a2dp_sink.clean_last_connection(); enterPairingMode("forget"); }
 static void ctrlStatus()       { controlTransport().pushStatus(); }
+// "Connect Bluetooth Audio": dial the last bonded phone. Mirrors the BLE CMD_RECONNECT
+// path -- we boot idle/non-connectable (see goIdle), so the handshake has to be allowed
+// first; with no stored bond there is nothing to dial, so fall back to idle rather than
+// sit there connectable. Without this the WiFi build could never START Bluetooth audio:
+// the explicit-only policy means nothing ever auto-reconnects.
+// WiFi-only: the serial p/f/x/s set has no 'r', and the BLE build reaches the same
+// actions via its own CMD_RECONNECT opcode -- defining it there too would just be an
+// unused static.
+#if defined(TDSP_CTRL_WIFI)
+static void ctrlReconnect()    { a2dp_sink.set_connectable(true);
+                                 bool ok = a2dp_sink.reconnect();
+                                 Serial.printf("[cmd] RECONNECT A2DP -> %s\n",
+                                               ok ? "attempting" : "no last device (pair first)");
+                                 if (!ok) goIdle("reconnect: no bond"); }
+#endif
 
 // ---- A2DP callbacks (transport-agnostic) ----------------------------------
 // A2DP peer name arrived (AVRCP) -> remember it for the connected address.
@@ -775,7 +790,7 @@ ControlTransport &controlTransport() { static BleControlTransport t; return t; }
 //       - a line starting with '@' is relayed VERBATIM to the Teensy (the same
 //         @-protocol Web Serial / BLE CMD_RELAY_LINE use), e.g. "@VOL=50", "@SONG=3".
 //       - a line starting with '!' is a LOCAL A2DP command handled on the ESP32:
-//         "!pair" | "!forget" | "!disconnect" | "!status".
+//         "!pair" | "!reconnect" | "!forget" | "!disconnect" | "!status".
 //       - anything else is ignored (logged).
 //   * Outbound (ESP32 -> app, WS TEXT frame):
 //       - every Teensy @-line is broadcast VERBATIM (no BLE 0x1e chunking; WS frames
@@ -789,6 +804,7 @@ static WebSocketsServer g_ws(TDSP_WS_PORT);
 static void wsHandleText(uint8_t num, const char *msg) {
   if (msg[0] == '!') {
     if      (!strcmp(msg, "!pair"))       { Serial.println("[ws] cmd: PAIR");       ctrlEnterPairing(); }
+    else if (!strcmp(msg, "!reconnect"))  { Serial.println("[ws] cmd: RECONNECT");  ctrlReconnect(); }
     else if (!strcmp(msg, "!forget"))     { Serial.println("[ws] cmd: FORGET");     ctrlForget(); }
     else if (!strcmp(msg, "!disconnect")) { Serial.println("[ws] cmd: DISCONNECT"); ctrlDisconnect(); }
     else if (!strcmp(msg, "!status"))     { char b[96]; buildStatus(b, sizeof(b)); g_ws.sendTXT(num, b); }
