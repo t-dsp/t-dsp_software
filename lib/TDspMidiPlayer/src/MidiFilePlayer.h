@@ -112,7 +112,13 @@ public:
     //   clk       : the master clock (Conductor::clock()); nullptr disables sync.
     //   loopBeats : exact loop length in quarter-note beats (fractional OK: 6/8=3.0, 7/8=3.5).
     //   nativeBpm : the file's authored tempo — converts its ms deltas to beats.
-    void setSyncedMode(tdsp::Clock *clk, double loopBeats, float nativeBpm) {
+    // anchorAtNow: when true, this loop's beat-0 is pinned to NOW (the current clock beat) and
+    // the player begins at its FIRST event — i.e. "start from the top, right here." Use it when
+    // launching a second player onto a bar downbeat while the first keeps running: it starts from
+    // its beginning without re-zeroing the shared clock (which would strand the running player).
+    // When false (default) it anchors to the GLOBAL grid (largest multiple of loopBeats <= now),
+    // so a joining player locks in phase with players already looping on that grid.
+    void setSyncedMode(tdsp::Clock *clk, double loopBeats, float nativeBpm, bool anchorAtNow = false) {
         clock_ptr_ = clk;
         loopBeats_ = (loopBeats > 0.0) ? loopBeats : 0.0;
         beatsPerMs_ = (nativeBpm > 0.0f) ? (double)nativeBpm / 60000.0 : 0.0;
@@ -120,19 +126,21 @@ public:
                    ev_ != nullptr && count_ > 0);
         nPendOff_ = 0;               // fresh sync: no carried loop-tail releases
         if (!synced_) return;
-        // Anchor to the global grid: this loop iteration's beat-0 sits at the
-        // largest multiple of loopBeats <= now (so downbeats of all synced
-        // players coincide). floor(now/loopBeats)*loopBeats == now - phase.
         const double now = clock_ptr_->positionBeats();
         lastMasterBeat_ = now;
+        idx_ = 0;
+        evCursorBeat_ = (double)ev_[0].deltaMs * beatsPerMs_;   // beat of ev_[0]
+        if (anchorAtNow) {           // start from the top at NOW (no fmod, no fast-forward)
+            loopBaseBeat_ = now;
+            return;
+        }
+        // Anchor to the global grid: this loop iteration's beat-0 sits at the largest multiple of
+        // loopBeats <= now (so downbeats of all synced players coincide). now - phase.
         double phase = fmod(now, loopBeats_);
         if (phase < 0.0) phase = 0.0;
         loopBaseBeat_ = now - phase;
-        idx_ = 0;
-        evCursorBeat_ = (double)ev_[0].deltaMs * beatsPerMs_;   // beat of ev_[0]
-        // Joined mid-loop: fast-forward (no dispatch) past events already gone by
-        // this phase — drum one-shots simply catch the next hit; a song joins in
-        // progress. (No-op when starting at the downbeat, phase ~ 0.)
+        // Joined mid-loop: fast-forward (no dispatch) past events already gone by this phase — drum
+        // one-shots catch the next hit; a song joins in progress. (No-op when phase ~ 0.)
         while (idx_ + 1 < count_ && evCursorBeat_ < phase) {
             ++idx_;
             evCursorBeat_ += (double)ev_[idx_].deltaMs * beatsPerMs_;
@@ -255,6 +263,12 @@ private:
                     evCursorBeat_ += (double)ev_[idx_].deltaMs * beatsPerMs_;
                 // idx_ == count_ -> haveEvent goes false; the boundary wrap below runs.
             } else if (songBeat >= boundaryAbs) {
+                if (!loop_) {                            // ONE-SHOT, grid-locked: reached the end -> stop
+                    playing_ = false;                    // (mirrors the free-running end path above)
+                    if (sink_) sink_->onAllNotesOff(0);
+                    ev_ = nullptr;
+                    break;
+                }
                 // LOOP TAIL: any events left undispatched at/after the boundary are the loop's
                 // tail (data authored longer than loopBeats_). Carry their note-OFFs into the
                 // next iteration at their real time so a note held ACROSS the seam — played near

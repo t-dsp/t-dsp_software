@@ -87,7 +87,8 @@ export interface Transport {
   songVol(pct: number): void;                         // MIDI-player level (@SONGVOL=, 0..150 %), independent of the master @VOL
   songLoop(on: boolean): void;                        // loop the current song (@LOOP=)
   launchQuantize(on: boolean): void;                  // defer song/groove starts to the next bar (@QUANTIZE=)
-  metronome(on: boolean): void;                       // on-beat click, follows master BPM + meter (@METRO=)
+  metronome(on: boolean): void;                       // MASTER TRANSPORT play/stop (the metronome is the clock) (@METRO=)
+  metronomeMute(muted: boolean): void;                // is the click AUDIBLE? default muted; transport runs either way (@METROMUTE=)
   metronomeSig(bpb: number): void;                    // metronome/idle time signature = N beats/bar (@METROSIG=)
   metronomeVol(pct: number): void;                    // metronome click level (@METROVOL=, 0..150 %), independent of the master @VOL
   arpOn(on: boolean): void;

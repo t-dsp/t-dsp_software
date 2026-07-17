@@ -662,24 +662,19 @@ static void emitBeat(uint8_t i, uint8_t n) {
     if (Serial.availableForWrite() >= 16) Serial.printf("@BEAT=%u/%u\n", (unsigned)i, (unsigned)n);
 }
 
-// Metronome (opt-in: -D TDSP_METRONOME) — a SELF-TIMED on-beat click, deliberately
-// Keeps its OWN micros-based beat schedule + bar counter once running, so it is immune to
-// the content meter and the clock's catch-up ticks — and stays precise no matter what else
-// runs. It takes the TEMPO from the Conductor (g_conductor.bpm()), and on ENABLE it takes the
-// PHASE too when the transport is already running (see metroSetEnabled): the click joins the
-// grid rather than declaring a new downbeat, so starting it never moves the bar. Only from an
-// idle transport does the first click fire immediately (= this Play defines the downbeat).
-// The accent lands on beat 1 of its own g_metroBpb bar.
-// It emits its own @BEAT (non-blocking) so the app's amber downbeat light counts
-// forward with it. Slot-free: reuses the local test-tone oscillator (testTone, mix
-// slot 1). v1 clicks the quarter-note beat; compound "in-2" pulses are a phase-2 item.
+// Metronome (opt-in: -D TDSP_METRONOME). The metronome is now the AUDIBLE FACE of the master
+// transport: the click is driven straight off the Conductor clock (g_conductor), the same grid
+// the song players, drums, and arp lock to — NOT a private accumulator — so it can never disagree
+// with them. It is MUTED by default: the transport (clock) runs whenever you press Play, but you
+// only hear the click after unmuting (@METROMUTE=0). The accent lands on the shared bar's downbeat
+// (clk.beatInBar()==0). Slot-free: reuses the local test-tone oscillator (testTone, mix slot 1).
+// The @BEAT light feed comes from beatEmitPoll() (the single clock-driven emitter), not from here.
 #ifdef TDSP_METRONOME
-static bool          g_metroOn      = false;
-static uint8_t       g_metroBeatIdx = 0;     // beat within the metronome's OWN bar (0 = downbeat)
-static uint32_t      g_metroNextUs  = 0;     // micros() when the next click is due
+static bool          g_metroMuted   = true;  // is the click AUDIBLE? default MUTED (transport runs silently)
 static float         g_metroPeak    = 0.0f;  // current click's peak amplitude (0 = idle)
 static elapsedMillis g_metroAge;             // ms since the current click fired
-static constexpr float    kMetroGain      = 0.9f;    // mix-slot-1 gain while enabled
+static uint32_t      g_metroLastBeat = 0xFFFFFFFFu;   // beatCount the click last struck on
+static constexpr float    kMetroGain      = 0.9f;    // mix-slot-1 gain while unmuted
 static constexpr float    kMetroAccentAmp = 0.85f;   // beat 1 (downbeat) click level
 static constexpr float    kMetroBeatAmp   = 0.30f;   // other beats (well below the accent)
 static constexpr float    kMetroAccentHz  = 2093.0f; // C7 — accent pitch (an octave over the beat)
@@ -688,61 +683,31 @@ static constexpr float    kMetroDecayMs   = 45.0f;   // percussive click decay
 static int           g_metroVolPct = 100;  // click level 0..150 (% of the default gain), independent of @VOL master
 static float metroSlotGain() { return kMetroGain * (g_metroVolPct / 100.0f); }   // slot-1 gain scaled by the volume
 
-// micros per quarter-note beat at the MASTER tempo (tempo only — not the grid phase).
-static uint32_t metroBeatUs() {
-    float bpm = g_conductor.bpm(); if (bpm < 1.0f) bpm = 1.0f;
-    return (uint32_t)(60000000.0f / bpm);
+// Open/close the click's audio slot (mix slot 1, shared with the test tone) to match the mute
+// state. When muted, also kill any decaying click so it goes silent immediately.
+static void metroApplyMute() {
+    const float g = g_metroMuted ? 0.0f : metroSlotGain();
+    outL.gain(1, g); outR.gain(1, g);
+    if (g_metroMuted) { g_metroPeak = 0.0f; testTone.amplitude(0.0f); }
 }
+static void metroSetMuted(bool m) { g_metroMuted = m; metroApplyMute(); }
 
-static void metroSetEnabled(bool on) {
-    g_metroOn = on;
-    if (on) {
-        // Starting the click must never MOVE the downbeat. When the transport is already running,
-        // JOIN its grid in phase: schedule the next click on the clock's next beat edge and
-        // continue the real bar count, so the accent stays on the true downbeat and the @BEAT
-        // lights don't jump. This matters because arming a loop recorder auto-starts the click:
-        // declaring a fresh beat 1 here made the bar appear to restart, and worse, left the click
-        // disagreeing with latchAnchor() (which anchors to the Conductor's bar) — so a note played
-        // "on the click's one" got recorded against a different downbeat.
-        // Only when the transport is IDLE does Play define a fresh downbeat.
-        const uint8_t bpb = g_metroBpb ? g_metroBpb : 1;
-        tdsp::Clock &clk = g_conductor.clock();
-        if (clk.running()) {
-            const double  pos  = clk.positionBeats();
-            const double  frac = pos - floor(pos);                 // how far into the current beat
-            const int64_t nb   = (int64_t)floor(pos) + 1;          // the beat the next click lands on
-            g_metroBeatIdx = (uint8_t)(((nb % bpb) + bpb) % bpb);  // continue the bar as it stands
-            g_metroNextUs  = micros() + (uint32_t)((1.0 - frac) * (double)metroBeatUs());
-        } else {
-            g_metroBeatIdx = 0;             // next click is beat 1 (the downbeat)...
-            g_metroNextUs  = micros();      // ...and it fires immediately on Play
-        }
-        outL.gain(1, metroSlotGain()); outR.gain(1, metroSlotGain());   // open slot 1 for the click
-    } else {
-        g_metroPeak = 0.0f;
-        testTone.amplitude(0.0f);
-        outL.gain(1, 0.0f); outR.gain(1, 0.0f);               // silence slot 1 again
-    }
-}
-
-// Call once per loop(). Self-timed off micros() at the master tempo — independent
-// of the shared clock's grid, so serial/loop jitter can't drag it off the beat.
+// Call once per loop(). The click follows the MASTER clock: on each new beat, while the transport
+// runs and the click is unmuted, strike (accent on the bar downbeat). No private timebase — the
+// click is sample-aligned with whatever the players/drums/arp are doing.
 static void metroPoll() {
-    if (g_metroOn) {
-        const uint32_t now = micros();
-        if ((int32_t)(now - g_metroNextUs) >= 0) {            // a beat is due
-            const uint8_t bpb = g_metroBpb ? g_metroBpb : 1;
-            const bool accent = (g_metroBeatIdx == 0);        // beat 1 of the metronome's own bar
+    tdsp::Clock &clk = g_conductor.clock();
+    if (clk.running() && !g_metroMuted) {
+        const uint32_t bc = clk.beatCount();
+        if (bc != g_metroLastBeat) {                          // a new beat just happened
+            g_metroLastBeat = bc;
+            const bool accent = (clk.beatInBar() == 0);        // beat 1 of the shared bar
             testTone.frequency(accent ? kMetroAccentHz : kMetroBeatHz);
             g_metroPeak = accent ? kMetroAccentAmp : kMetroBeatAmp;
             g_metroAge  = 0;
-            emitBeat(g_metroBeatIdx, bpb);                    // drive the app lights (non-blocking)
-            if (++g_metroBeatIdx >= bpb) g_metroBeatIdx = 0;
-            const uint32_t mpb = metroBeatUs();
-            g_metroNextUs += mpb;                             // schedule from the accumulator (drift-free)
-            if ((int32_t)(now - g_metroNextUs) >= 0)          // fell >1 beat behind (a stall) -> resync, don't burst
-                g_metroNextUs = now + mpb;
         }
+    } else {
+        g_metroLastBeat = 0xFFFFFFFFu;   // re-arm so the next running & unmuted beat clicks
     }
     if (g_metroPeak > 0.0f) {                                 // percussive linear decay
         float a = g_metroPeak * (1.0f - (float)g_metroAge / kMetroDecayMs);
@@ -751,29 +716,23 @@ static void metroPoll() {
     }
 }
 
-// Metronome click level (0..150 %). Scales slot-1 gain; applied live when running.
+// Metronome click level (0..150 %). Scales slot-1 gain; applied live when unmuted.
 static void setMetroVol(int pct) {
     if (pct < 0) pct = 0; if (pct > 150) pct = 150;
     g_metroVolPct = pct;
-    if (g_metroOn) { outL.gain(1, metroSlotGain()); outR.gain(1, metroSlotGain()); }
+    if (!g_metroMuted) { outL.gain(1, metroSlotGain()); outR.gain(1, metroSlotGain()); }
 }
 #endif  // TDSP_METRONOME
 
 // --- Beat position emit (@BEAT) ---------------------------------------------
-// Drives the app's visual beat lights off the REAL master clock whenever the
-// metronome is OFF. While a song/groove plays it reflects the content's grid (real
-// downbeat + meter); while idle it free-runs at the master tempo and the @METROSIG
-// time signature (clk.beatsPerBar() falls back to g_metroBpb via applyMeter), so the
-// lights ALWAYS show where the system thinks the beat is — even stopped. A running
-// metronome emits its OWN @BEAT from metroPoll() (self-timed), so we skip here when
-// it's on to avoid two sources fighting over the lights. Watches beatCount() change
-// (does NOT consume the beat latch) and emits non-blocking via emitBeat(), so the
-// light feed can never stall loop().
+// The SINGLE @BEAT source: drives the app's visual beat lights off the master clock whenever
+// the transport runs. While a song/groove plays it reflects the content's grid (real downbeat +
+// meter); while idle-but-running it uses the @METROSIG time signature (clk.beatsPerBar() falls
+// back to g_metroBpb via applyMeter). The audible click (metroPoll) reads the same clock but
+// emits no @BEAT, so the two can't fight. Watches beatCount() change (does NOT consume the beat
+// latch) and emits non-blocking via emitBeat(), so the light feed can never stall loop().
 static uint32_t g_lastBeatEmit = 0xFFFFFFFFu;   // force an emit on the first beat seen
 static void beatEmitPoll() {
-#ifdef TDSP_METRONOME
-    if (g_metroOn) return;                       // the metronome owns the lights while running
-#endif
     tdsp::Clock &clk = g_conductor.clock();
     if (!clk.running()) return;                  // clock stalled/stopped -> nothing to show
     const uint32_t bc = clk.beatCount();
@@ -954,6 +913,18 @@ static bool g_songLaunchPending = false;
 static char g_pendingSongArg[64] = {0};
 static bool g_drumLaunchPending = false;
 static char g_pendingDrumFile[80] = {0};
+#if TDSP_VOICE2
+static bool g_song2LaunchPending = false;   // player 2 (@SONG2) armed for the next bar (see song2Restart)
+// PRE-LOADED player-2 launch: the (blocking) SD parse runs when the launch is ARMED, not on the
+// downbeat — so firing on the bar edge is just play()+sync and never stalls loop() right when both
+// players need to hit their downbeat note (that stall was dropping notes). See song2Preload().
+static const tdsp::MidiFileEvent *g_song2PreEv = nullptr;
+static uint32_t g_song2PreCount     = 0;
+static double   g_song2PreLoopBeats = 0.0;
+#endif
+// Set true just before a bar-quantized launch fires, so songApplySync/song2ApplySync anchor the
+// player at the downbeat FROM ITS TOP (never re-zeroing the shared clock under a running player).
+static bool g_syncAnchorNow = false;
 // A tiny tempo follower that just flags each bar edge so loop() can fire pending launches
 // OUTSIDE the conductor's follower fan-out (keeps the heavy SD-load start off the callback).
 struct LaunchScheduler : tdsp::ITempoFollower { volatile bool barHit = false; void onBarEdge() override { barHit = true; } };
@@ -1080,9 +1051,9 @@ static void recArmTransport(bool startClick) {
     applyMeter();                 // bars-up the clock on the current (record) signature
     ensureTransportStarted();     // define the downbeat if the transport is idle
 #ifdef TDSP_METRONOME
-    if (startClick && !g_metroOn && !g_player.isPlaying() && !g_drumPlayer.isPlaying()) {
-        metroSetEnabled(true);
-        g_recClickAuto = true;    // remember WE started it, so we may auto-stop it
+    if (startClick && g_metroMuted && !g_player.isPlaying() && !g_drumPlayer.isPlaying()) {
+        metroSetMuted(false);     // count-in: temporarily un-mute the click (transport is now running)
+        g_recClickAuto = true;    // remember WE un-muted it, so we may re-mute after capture
     }
 #endif
     (void)startClick;
@@ -1093,7 +1064,7 @@ static void recArmTransport(bool startClick) {
 static void recPollClick() {
 #ifdef TDSP_METRONOME
     if (g_recClickAuto && !recFreshCapturing()) {
-        metroSetEnabled(false);
+        metroSetMuted(true);      // re-mute the count-in click we un-muted (never touch a user un-mute)
         g_recClickAuto = false;
     }
 #endif
@@ -1154,14 +1125,19 @@ static void audioArmTransport() { applyMeter(); ensureTransportStarted(); }
 // is no usable loop length.
 static void songApplySync(double parsedLoopBeats) {
     g_songLoopBeats = 0.0;
-    if (!g_loop) return;                         // one-shot / full song -> ms engine
+    // ALWAYS grid-lock the player to the master clock (the metronome), looping or not, so both
+    // players + drums share one phase-aligned, drift-free grid. loopBeats = the exact loop length
+    // (SD parse) else the song's full length derived from its ms at native tempo; when NOT looping,
+    // the player plays through once and stops at that boundary (MidiFilePlayer::tickSynced honours
+    // loop_). Only a song with no usable length falls back to the ms engine.
     double lb = parsedLoopBeats;
-    if (lb <= 0.0)                               // baked stream (no PPQN meta): derive from ms
+    if (lb <= 0.0)                               // baked/full stream (no loop meta): derive from ms
         lb = tdsp::smf::snapLoopBeatsHalf((double)g_player.totalMs() * (double)g_songBpm / 60000.0);
     if (lb <= 0.0) return;
     g_songLoopBeats = lb;
-    g_player.setSyncedMode(&g_conductor.clock(), lb, g_songBpm);
-    Serial.printf("[song] tick-synced: loop=%.2f beats @ %.1f bpm\n", lb, (double)g_songBpm);
+    const bool anchorNow = g_syncAnchorNow; g_syncAnchorNow = false;
+    g_player.setSyncedMode(&g_conductor.clock(), lb, g_songBpm, anchorNow);
+    Serial.printf("[song] grid-locked: len=%.2f beats @ %.1f bpm (%s%s)\n", lb, (double)g_songBpm, g_loop ? "loop" : "one-shot", anchorNow ? ", from top" : "");
 }
 
 // Clean slate before starting ANY song: silence sounding notes + clear latched
@@ -1200,7 +1176,7 @@ FLASHMEM static bool songStartBuiltin(const char *name) {
                       testsong::kTestSongs[i].mpe ? "MPE" : "MIDI", (unsigned long)testsong::kTestSongs[i].count,
                       (double)g_songBpm);
         g_songBpb = 4;   // baked test sequence: no time-sig meta -> common time
-        if (g_loop) ensureTransportStarted();   // first player zeroes the grid; a song joining a groove locks in phase
+        ensureTransportStarted();   // auto-start: define the grid on the first player, else lock in phase
         g_player.play(testsong::kTestSongs[i].ev, testsong::kTestSongs[i].count);
         songApplySync(0.0);   // baked: loopBeats derived from the stream's total ms
         applyMeter();
@@ -1221,7 +1197,7 @@ FLASHMEM static bool songStartBuiltin(const char *name) {
         g_songBpb = 4;   // baked legacy demo: no time-sig meta -> common time
         if (n) {
             applyTempos();
-            if (g_loop) ensureTransportStarted();
+            ensureTransportStarted();
             g_player.play(g_buf, n);
             songApplySync(0.0);   // baked: loopBeats derived from the stream's total ms
             applyMeter(); g_songBarClock = 0;
@@ -1244,7 +1220,7 @@ FLASHMEM static bool songStartSd(const char *path, const char *disp, const char 
                   disp, (unsigned long)got, (double)g_songBpm, (unsigned)g_songBpb,
                   (unsigned)external_psram_size, (unsigned long)(tdsp::smf::ocramHeapFree() / 1024), synthName());
     applyTempos();   // retime the song (and groove) to the master BPM
-    if (g_loop) ensureTransportStarted();       // first player zeroes the grid; else join in phase
+    ensureTransportStarted();       // auto-start: define the grid if idle, else join in phase
     g_player.play(g_buf, (uint32_t)got);
     songApplySync(parsedLoopBeats);             // lock a looping song to the grid (exact length from the parse)
     applyMeter();    // bar length from the song's time signature (song = meter master)
@@ -1312,70 +1288,74 @@ static void songLoopTick() {
 static void song2Prep() { g_synthSinkB->onAllNotesOff(0); }   // silence only voice 2's own notes
 static void song2ApplySync(double parsedLoopBeats) {
     g_song2LoopBeats = 0.0;
-    if (!g_song2Loop) return;                    // one-shot -> free-running ms engine
+    // Always grid-lock player 2 to the master clock too (see songApplySync) so A and B share phase.
     double lb = parsedLoopBeats;
     if (lb <= 0.0)
         lb = tdsp::smf::snapLoopBeatsHalf((double)g_player2.totalMs() * (double)g_song2Bpm / 60000.0);
     if (lb <= 0.0) return;
     g_song2LoopBeats = lb;
-    g_player2.setSyncedMode(&g_conductor.clock(), lb, g_song2Bpm);
-    Serial.printf("[song2] tick-synced: loop=%.2f beats @ %.1f bpm\n", lb, (double)g_song2Bpm);
+    const bool anchorNow = g_syncAnchorNow; g_syncAnchorNow = false;
+    g_player2.setSyncedMode(&g_conductor.clock(), lb, g_song2Bpm, anchorNow);
+    Serial.printf("[song2] grid-locked: len=%.2f beats @ %.1f bpm (%s%s)\n", lb, (double)g_song2Bpm, g_song2Loop ? "loop" : "one-shot", anchorNow ? ", from top" : "");
 }
-FLASHMEM static bool song2StartSd(const char *path, const char *disp, const char *arg) {
-    song2Prep();
-    g_song2Bpm = 120.0f; g_song2Bpb = 4; double parsedLoopBeats = 0.0;
-    int got = tdsp::smf::loadSmfFile(path, g_buf2, MAX_EVENTS2, &g_song2Bpm, &g_song2Bpb, &parsedLoopBeats);
-    if (got <= 0) { Serial.printf("[song2] SD load FAILED: %s\n", path); return false; }
-    snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", disp);
-    snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", arg);
-    Serial.printf("[song2] %s (SD, %lu events, %.1f bpm) -> voice 2 (start)\n", disp, (unsigned long)got, (double)g_song2Bpm);
-    applyTempos();
-    if (g_song2Loop) ensureTransportStarted();   // join the running grid in phase (or define it if idle)
-    g_player2.play(g_buf2, (uint32_t)got);
-    song2ApplySync(parsedLoopBeats);
-    return true;
-}
-FLASHMEM static bool song2StartBuiltin(const char *name) {
-    // Baked test sequences (played verbatim; we do NOT flip the global MPE mode — that belongs to
-    // voice 1). An MPE test song is an edge case on voice 2 and may render as plain multitimbral.
-    for (int i = 0; i < testsong::kNumTestSongs; ++i) {
-        if (strcasecmp(name, testsong::kTestSongs[i].name) != 0) continue;
-        song2Prep();
-        g_song2Bpm = testsong::kTestSongs[i].bpm; g_song2Bpb = 4; applyTempos();
-        snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", testsong::kTestSongs[i].name);
-        snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", testsong::kTestSongs[i].name);
-        if (g_song2Loop) ensureTransportStarted();
-        g_player2.play(testsong::kTestSongs[i].ev, testsong::kTestSongs[i].count);
-        song2ApplySync(0.0);
-        return true;
-    }
-    for (int i = 0; i < kNumBuiltin; ++i) {   // baked legacy demos (expand into g_buf2)
-        if (strcasecmp(name, kBuiltinSongs[i].name) != 0) continue;
-        song2Prep();
-        g_song2Bpm = kBuiltinSongs[i].bpm; g_song2Bpb = 4;
-        uint32_t n = tdsp::expandLegacyNotes(kBuiltinSongs[i].ev, kBuiltinSongs[i].count, g_buf2, MAX_EVENTS2);
-        snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", kBuiltinSongs[i].name);
-        snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", kBuiltinSongs[i].name);
-        if (n) {
-            applyTempos();
-            if (g_song2Loop) ensureTransportStarted();
-            g_player2.play(g_buf2, n);
-            song2ApplySync(0.0);
-        }
-        return true;
-    }
-    return false;
-}
-FLASHMEM static void song2StartArg(const char *arg) {
-    if (!arg || !*arg) return;
+// LOAD (the slow, blocking part) a player-2 song into memory + stash where to play it from.
+// No sink/clock side effects — safe to call while other players run, off the downbeat. Returns
+// false if not found / load failed. song2FirePreloaded() then starts it instantly.
+FLASHMEM static bool song2Preload(const char *arg) {
+    if (!arg || !*arg) return false;
+    g_song2Bpm = 120.0f; g_song2Bpb = 4;
+    g_song2PreEv = nullptr; g_song2PreCount = 0; g_song2PreLoopBeats = 0.0;
     if (endsWithMid(arg)) {
         char path[128]; char disp[64]; songDisp(disp, sizeof disp, arg);
         snprintf(path, sizeof path, "/songs/%s", arg);
         if (!SD.exists(path)) snprintf(path, sizeof path, "/%s", arg);
-        song2StartSd(path, disp, arg);
-    } else if (!song2StartBuiltin(arg)) {
-        Serial.printf("[song2] not found: %s\n", arg);
+        double plb = 0.0;
+        int got = tdsp::smf::loadSmfFile(path, g_buf2, MAX_EVENTS2, &g_song2Bpm, &g_song2Bpb, &plb);
+        if (got <= 0) { Serial.printf("[song2] SD load FAILED: %s\n", path); return false; }
+        snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", disp);
+        snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", arg);
+        g_song2PreEv = g_buf2; g_song2PreCount = (uint32_t)got; g_song2PreLoopBeats = plb;
+        Serial.printf("[song2] preloaded %s (SD, %lu events, %.1f bpm)\n", disp, (unsigned long)got, (double)g_song2Bpm);
+        return true;
     }
+    for (int i = 0; i < testsong::kNumTestSongs; ++i) {   // baked test sequences (play from flash)
+        if (strcasecmp(arg, testsong::kTestSongs[i].name) != 0) continue;
+        g_song2Bpm = testsong::kTestSongs[i].bpm; g_song2Bpb = 4;
+        snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", testsong::kTestSongs[i].name);
+        snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", testsong::kTestSongs[i].name);
+        g_song2PreEv = testsong::kTestSongs[i].ev; g_song2PreCount = testsong::kTestSongs[i].count;
+        return true;
+    }
+    for (int i = 0; i < kNumBuiltin; ++i) {   // baked legacy demos (expand into g_buf2)
+        if (strcasecmp(arg, kBuiltinSongs[i].name) != 0) continue;
+        g_song2Bpm = kBuiltinSongs[i].bpm; g_song2Bpb = 4;
+        uint32_t n = tdsp::expandLegacyNotes(kBuiltinSongs[i].ev, kBuiltinSongs[i].count, g_buf2, MAX_EVENTS2);
+        if (!n) return false;
+        snprintf(g_curSong2Name, sizeof g_curSong2Name, "%s", kBuiltinSongs[i].name);
+        snprintf(g_curSong2Arg,  sizeof g_curSong2Arg,  "%s", kBuiltinSongs[i].name);
+        g_song2PreEv = g_buf2; g_song2PreCount = n;
+        return true;
+    }
+    Serial.printf("[song2] not found: %s\n", arg);
+    return false;
+}
+// PLAY the preloaded song — fast + non-blocking, so it can fire ON the downbeat without stalling
+// loop(). anchorNow=true starts it from its top at the current beat (a quantized bar launch).
+static void song2FirePreloaded(bool anchorNow) {
+    if (!g_song2PreEv || g_song2PreCount == 0) return;
+    song2Prep();
+    applyTempos();
+    ensureTransportStarted();   // join the running grid in phase (or define it if idle)
+    g_player2.play(g_song2PreEv, g_song2PreCount);
+    g_syncAnchorNow = anchorNow;
+    song2ApplySync(g_song2PreLoopBeats);
+}
+FLASHMEM static void song2StartArg(const char *arg) {
+    if (!g_voice2Split) {   // Synth B off -> engines 4..7 belong to Synth A; playing here would collide
+        Serial.println("[song2] ignored: enable Synth B (@VOICE2=1) first");
+        return;
+    }
+    if (song2Preload(arg)) song2FirePreloaded(false);   // immediate start (in phase with the grid)
 }
 static void song2Stop() {
     g_song2WasPlaying = false;   // a manual stop must NOT trigger the loop-restart
@@ -1387,7 +1367,21 @@ static void song2Stop() {
 // Hard restart player 2 from the top on a fresh downbeat (mirrors songRestart for voice 1).
 static void song2Restart(const char *arg) {
     if (!arg || !*arg) return;
-    g_forceTransportZero = true;
+    if (!g_voice2Split) {   // Synth B off -> nothing to launch on voice 2
+        Serial.println("[song2] ignored: enable Synth B (@VOICE2=1) first");
+        return;
+    }
+    // If the master clock is already running (a player, a groove, or just the metronome owns the
+    // grid), DON'T re-zero it — that would strand whatever's running. PRE-LOAD the song now (off the
+    // downbeat, so the SD parse never stalls loop() on the beat) and fire it on the NEXT bar edge,
+    // from its top, while everything else keeps running. Only an idle transport defines the downbeat.
+    if (g_conductor.running()) {
+        if (!song2Preload(arg)) return;
+        g_song2LaunchPending = true; g_launchSched.barHit = false;   // fire on the next bar edge
+        Serial.printf("[sync] song2 launch armed (preloaded): %s -> next bar (from top)\n", arg);
+        return;
+    }
+    g_forceTransportZero = true;   // idle: define the downbeat now and start from the top
     song2StartArg(arg);
     g_forceTransportZero = false;
 }
@@ -1597,6 +1591,39 @@ static void drumStop() {
     Serial.println("[drum] stopped");
     applyMeter();   // groove gave up the meter -> revert to a playing song's, else 4/4
 }
+
+#ifdef TDSP_METRONOME
+// --- Global transport: the metronome IS the master clock --------------------
+// Play defines the shared downbeat and runs the clock; everything (both song players, drums,
+// arps) locks to it. Stop halts the clock and clears the stage — both players, drums, and every
+// held note — so nothing hangs (this is also the clean-silence path for the stuck-note case).
+static void transportPlay() {
+    if (g_conductor.running()) return;      // already running -> don't move the grid
+    g_conductor.start();                    // zero the tick counter -> beat 1 downbeat, clock runs
+    g_arpFilter.resyncToGrid();
+#if TDSP_ARP2
+    g_arpFilter2.resyncToGrid();
+#endif
+    Serial.println("[transport] PLAY (downbeat defined)");
+}
+static void transportStop() {
+    songStop();
+#if TDSP_VOICE2
+    song2Stop();
+#endif
+    drumStop();
+    g_conductor.stop();                     // halt the master clock (players/drums already stopped)
+    g_synthSink->onAllNotesOff(0);          // silence voice 1
+#if TDSP_VOICE2
+    g_synthSinkB->onAllNotesOff(0);         // silence voice 2
+#endif
+    g_arpFilter.panic();                    // clear any arp-held / pending gate-offs
+#if TDSP_ARP2
+    g_arpFilter2.panic();
+#endif
+    Serial.println("[transport] STOP (all silenced)");
+}
+#endif  // TDSP_METRONOME
 static void setDrumKit(int i) {
     if (i < 0) i = 0;
     if (i >= kNumDrumKits) i = kNumDrumKits - 1;
@@ -1623,9 +1650,17 @@ static void songLaunch(const char* arg) {
 // fresh downbeat, so everything restarts in phase. The app's MIDI-player Play / ‹ › use this.
 static void songRestart(const char* arg) {
     if (!arg || !*arg) return;
-    g_forceTransportZero = true;   // ensureTransportStarted() (called right before play()) re-zeroes even mid-playback
+    // Symmetric to song2Restart: if the master clock is already running, quantize player 1 onto the
+    // next bar (from top) instead of re-zeroing the clock under whatever else is playing.
+    if (g_conductor.running()) {
+        snprintf(g_pendingSongArg, sizeof g_pendingSongArg, "%s", arg);
+        g_songLaunchPending = true; g_launchSched.barHit = false;
+        Serial.printf("[sync] song launch armed: %s -> next bar (from top)\n", arg);
+        return;
+    }
+    g_forceTransportZero = true;   // idle: define the downbeat now and start from the top
     songStartArg(arg);
-    g_forceTransportZero = false;  // safety: clear if songStartArg bailed before consuming it (non-looping / not found)
+    g_forceTransportZero = false;  // safety: clear if songStartArg bailed before consuming it
 }
 static void drumLaunchFile(const char* fname) {
     if (g_launchQuantize && g_conductor.running()) {
@@ -2074,7 +2109,11 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
                                  Serial.printf("[drum] synchro start %s\n", g_drumSynchro ? "ON (play a note to start)" : "off (start on Play)"); }
     else if (strncmp(line, "@QUANTIZE=", 10) == 0) {   // launch quantize: defer song/groove start to the next bar edge
         g_launchQuantize = (atoi(line + 10) != 0);
-        if (!g_launchQuantize) { g_songLaunchPending = g_drumLaunchPending = false; }   // dropping the mode cancels any armed launch
+        if (!g_launchQuantize) { g_songLaunchPending = g_drumLaunchPending = false;
+#if TDSP_VOICE2
+                                 g_song2LaunchPending = false;
+#endif
+                               }   // dropping the mode cancels any armed launch
         reply.printf("@QUANTIZE=%d\n", g_launchQuantize ? 1 : 0);
         Serial.printf("[sync] launch quantize %s\n", g_launchQuantize ? "ON (starts land on the next bar)" : "off (start now)");
     }
@@ -2087,15 +2126,18 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         Serial.printf("[sync] probe %s\n", g_syncProbe ? "ON (1 Hz)" : "off");
     }
 #ifdef TDSP_METRONOME
-    else if (strncmp(line, "@METRO=", 7) == 0) {   // click on/off; follows master BPM + meter automatically
-        metroSetEnabled(atoi(line + 7) != 0);
-        reply.printf("@METRO=%d\n", g_metroOn ? 1 : 0);
-        Serial.printf("[metro] %s\n", g_metroOn ? "ON" : "off");
+    else if (strncmp(line, "@METRO=", 7) == 0) {   // MASTER TRANSPORT play/stop (the metronome IS the clock)
+        if (atoi(line + 7) != 0) transportPlay(); else transportStop();
+        reply.printf("@METRO=%d\n", g_conductor.running() ? 1 : 0);
+    }
+    else if (strncmp(line, "@METROMUTE=", 11) == 0) {   // is the click AUDIBLE? (transport runs either way)
+        metroSetMuted(atoi(line + 11) != 0);
+        reply.printf("@METROMUTE=%d\n", g_metroMuted ? 1 : 0);
+        Serial.printf("[metro] click %s\n", g_metroMuted ? "muted" : "on");
     }
     else if (strncmp(line, "@METROSIG=", 10) == 0) {   // metronome time signature = N beats/bar (accent on beat 1)
         int n = atoi(line + 10); if (n < 1) n = 1; if (n > 16) n = 16;
         g_metroBpb = (uint8_t)n;
-        g_metroBeatIdx = 0;   // restart the metronome's own bar so the new signature is heard from beat 1
         applyMeter();         // keep the idle @STATE clock.bpb / arp grid consistent with the chosen signature
         reply.printf("@METROSIG=%d\n", g_metroBpb);
         Serial.printf("[metro] time signature = %d/4\n", g_metroBpb);
@@ -2275,14 +2317,23 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
     else if (handleArpLine(line, reply, g_arpFilter, "@ARP")) { /* handled */ }
 #if TDSP_VOICE2
     // --- Voices 2: a second Dexed voice on the keyboard half of the pool (engines 4..7) ---
-    else if (strncmp(line, "@VOICE2=", 8) == 0) {          // move the USB keyboard's owner (seamless)
+    else if (strncmp(line, "@VOICE2=", 8) == 0) {          // Synth B master enable (dynamic 4/4 pool split)
         bool on = (atoi(line + 8) != 0);
         if (on != g_voice2On) {
 #if TDSP_HAS_USB_MIDI_HOST
-            usbFlushHeld();          // release held keyboard notes on the sink being LEFT (no hang, no song cut)
+            usbFlushHeld();          // release held keyboard notes on the router being LEFT (no hang, no song cut)
 #endif
-            g_voice2On = on;         // usbRouter() now steers the keyboard to the new voice
-            synthSetVoice2Enabled(on);   // clear the keyboard voice's engines (never touches voice 1)
+            if (!on) {
+                // Disabling Synth B: engines 4..7 rejoin Synth A, so nothing may keep driving the
+                // B sink or its notes collide with voice 1. Stop the B song player and silence
+                // arp 2 BEFORE the pool reunifies (while engines 4..7 are still B's).
+                song2Stop();
+#if TDSP_ARP2
+                g_arpFilter2.panic();
+#endif
+            }
+            g_voice2On = on;         // usbRouter() now steers the keyboard to the new owner
+            synthSetVoice2Enabled(on);   // reshape the pool: 4/4 split (on) or unified 8 engines (off)
         }
         reply.printf("@VOICE2=%d\n", g_voice2On ? 1 : 0);
     }
@@ -2314,7 +2365,7 @@ FLASHMEM static bool handleControlLine(const char* line, Print& reply) {
         tdsp::catdb::jsonStr(reply, g_curSongName); reply.print("},");
         reply.printf("\"drums\":{\"kit\":%d,\"playing\":%d,\"sync\":%d,\"vol\":%d},", g_drumKit, g_drumPlayer.isPlaying() ? 1 : 0, g_drumPlayer.isSynced() ? 1 : 0, g_drumVolPct);
 #ifdef TDSP_METRONOME
-        reply.printf("\"metro\":%d,\"metrosig\":%d,\"metrovol\":%d,", g_metroOn ? 1 : 0, g_metroBpb, g_metroVolPct);   // metronome on/off + time sig + click level (feature build only)
+        reply.printf("\"metro\":%d,\"metromuted\":%d,\"metrosig\":%d,\"metrovol\":%d,", g_conductor.running() ? 1 : 0, g_metroMuted ? 1 : 0, g_metroBpb, g_metroVolPct);   // transport running + click mute + time sig + click level
 #endif
         // Master-clock beat/bar so the app can show a downbeat indicator: beat is
         // 1-based (1 == the downbeat), bpb = beats per bar (from the content's time
@@ -2688,19 +2739,10 @@ void loop() {
     g_conductor.update(micros());
 
 #ifdef TDSP_METRONOME
-    metroPoll();   // strike/decay the on-beat click (consumes the clock's beat latch)
+    metroPoll();   // strike/decay the clock-driven click (silent unless unmuted)
 #endif
 
     beatEmitPoll();   // @BEAT=<beatInBar>/<beatsPerBar> once per beat, for the app's beat lights
-
-    // Launch quantize: fire any armed song/groove exactly on a bar edge (flagged by
-    // g_launchSched during the update() above), so they land on the shared downbeat. The
-    // groove fires with rezero=false so it aligns to the free grid instead of resetting it.
-    if (g_launchSched.barHit) {
-        g_launchSched.barHit = false;
-        if (g_songLaunchPending) { g_songLaunchPending = false; songStartArg(g_pendingSongArg); }
-        if (g_drumLaunchPending) { g_drumLaunchPending = false; drumStartFile(g_pendingDrumFile, /*rezero=*/false); }
-    }
 
     // Live MIDI: drain DIN + USB-host controllers, then advance the (non-blocking) song.
 #if TDSP_HAS_DIN_MIDI
@@ -2715,6 +2757,26 @@ void loop() {
     g_player2.tick();      // advance the second (voice-2) song player
 #endif
     g_drumPlayer.tick();   // loops internally (setLooping), so no external re-arm needed
+
+    // Launch quantize: fire armed launches (song / groove / player 2) on the bar edge — but ONLY
+    // AFTER the already-running players ticked this beat's notes above, so a launch (and its
+    // blocking SD load) can NEVER preempt or drop another player's downbeat. That was the bug:
+    // starting the drums / player 2 on a downbeat stole player 1 & 2's first note. Then re-tick the
+    // players so a JUST-launched one still lands its own downbeat in this same iteration.
+    if (g_launchSched.barHit) {
+        g_launchSched.barHit = false;
+        if (g_songLaunchPending)  { g_songLaunchPending  = false; g_syncAnchorNow = true; songStartArg(g_pendingSongArg); }
+        if (g_drumLaunchPending)  { g_drumLaunchPending  = false; drumStartFile(g_pendingDrumFile, /*rezero=*/false); }
+#if TDSP_VOICE2
+        if (g_song2LaunchPending) { g_song2LaunchPending = false; song2FirePreloaded(/*anchorNow=*/true); }   // preloaded -> instant
+#endif
+        g_syncAnchorNow = false;   // defensive: a not-found launch never leaves it armed
+        g_player.tick();           // a just-launched player hits its downbeat now (already-running ones no-op)
+#if TDSP_VOICE2
+        g_player2.tick();
+#endif
+        g_drumPlayer.tick();
+    }
     g_arpFilter.tick(micros());   // drain the arp's gate-off queue (note steps fire on onClock)
 #if TDSP_VOICE2 && TDSP_ARP2
     g_arpFilter2.tick(micros());  // same for the keyboard-path arp
