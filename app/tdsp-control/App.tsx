@@ -15,6 +15,7 @@ import type { TdspDevice } from './src/discovery';
 import { Catalog, EMPTY_CATALOG, loadCatalog, LoadProgress, Song, songArg } from './src/catalog';
 import type { Transport, DirPage, TransportKind } from './src/transport';
 import ArpStepGrid from './src/ui/ArpStepGrid';
+import PianoRoll from './src/ui/PianoRoll';
 import ArpPresetBrowser from './src/ui/ArpPresetBrowser';
 import { ARP_PATTERNS as ARP_PAT, ARP_RATES, rateIndexFromFw, PAT_USER_SEQUENCE, DEFAULT_SHAPE, SeqStep } from './src/arpSeq';
 import { applyArpPreset, ArpPreset, ARP_LIBRARY } from './src/arpLibrary';
@@ -348,7 +349,7 @@ export default function App() {
   // selection + volume + arp state; the folder browser is shared (pickVoice takes a target).
   // caps.audioloop is a COUNT (how many audio loops the device actually allocated —
   // RAM/PSRAM dependent), not a bool: 0 hides the Audio Loop card entirely.
-  const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, audioloop: 0 });
+  const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, recedit: false, audioloop: 0 });
   const [voice2, setVoice2] = useState({ on: false, vol: 100, name: '', path: '' });
   // MIDI loop recorder (build-flag gated, caps.rec). Each synth's MIDI player owns its own
   // recorder, so every setting is PER-VOICE: bars1/bars2 = that synth's loop length, st1/st2 =
@@ -356,7 +357,7 @@ export default function App() {
   // `v` is only which voice the firmware's @REC* commands currently target — each player aims it
   // at its own voice before acting. Time signature is deliberately NOT here: it's the shared
   // master meter (metro.sig, set on the Metronome card) that both synths lock to.
-  const [rec, setRec] = useState({ v: 1, bars1: 4, bars2: 4, st1: 0, st2: 0, p1: 0, p2: 0 });
+  const [rec, setRec] = useState({ v: 1, bars1: 4, bars2: 4, st1: 0, st2: 0, p1: 0, p2: 0, max: 1024 });
   // Audio loop recorder (shown on caps.audioloop > 0): sel = selected loop, bars/mono/follow
   // = the selected loop's config, st[]/p[] = per-loop state (same 0..4 codes as `rec`) and
   // 0..1 progress, capS = the selected loop's capacity in seconds (bars that don't fit are
@@ -414,7 +415,7 @@ export default function App() {
     }
     // Voices 2 / Arp 2 — build capabilities (SHOW the cards) + the keyboard half's state.
     if (j.caps) setCaps({ voice2: !!j.caps.voice2, arp2: !!j.caps.arp2, rec: !!j.caps.rec,
-                          audioloop: Math.max(0, j.caps.audioloop | 0) });
+                          recedit: !!j.caps.recedit, audioloop: Math.max(0, j.caps.audioloop | 0) });
     if (j.aloop) setAloop(a => ({
       ...a,
       sel: Math.max(0, j.aloop.sel | 0),
@@ -433,6 +434,7 @@ export default function App() {
       st2: Math.max(0, Math.min(4, j.rec.st2 | 0)),
       p1: (j.rec.p1 | 0) / 1000,
       p2: (j.rec.p2 | 0) / 1000,
+      max: (j.rec.max | 0) || r.max,
     }));
     if (j.voice2) setVoice2(v => ({
       on: !!j.voice2.on,
@@ -1140,6 +1142,7 @@ export default function App() {
     <BodyTabs tabs={[
       { key: 'song', label: 'MIDI PLAYER', body: playerSongBody(D) },
       ...(caps.rec ? [{ key: 'loop', label: 'MIDI LOOPER', body: recRow(D.v) }] : []),
+      ...(caps.rec && caps.recedit ? [{ key: 'edit', label: 'NOTE EDITOR', body: <PianoRoll tp={tp} voice={D.v} maxEvents={rec.max} /> }] : []),
     ]} />
   );
   // Card/page subtitle + progress bar (the bar only once the device reports a position).
