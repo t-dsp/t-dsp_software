@@ -917,6 +917,9 @@ static char g_appState[256] = "";
 // MidiFileEvent[] (full channel/program/velocity). The player is non-blocking
 // (g_player.tick() in loop) and drives the synth via g_synthSink.
 static void applyMidiMode(bool mpe);   // defined below; test songs flip mode on start
+static void drumApplyKit();            // defined below; the drum Track's prep applies the GM kit
+static void muteSongDrums(bool mute);  // defined below; drum-track start/stop mutes the song's ch10
+static bool drumEngineOk();            // defined below; does the active engine render ch10 drums?
 
 // Drum controls. g_drumSel / g_drumKit are used by the drum section further below.
 static int  g_drumSel      = 0;     // selected / currently-playing groove index
@@ -1169,6 +1172,11 @@ static void songApplySync(Track &t, double parsedLoopBeats) {
 // multitimbral audition trim (a song is multitimbral; the last-picker trim no longer describes it).
 // Voice 2 has a private sink -> a bare all-notes-off.
 static void songPrep(Track &t) {
+    if (t.caps.appliesKit) {                    // drum track: own patch = the GM kit; NO note panic
+        drumApplyKit();                         // (an all-notes-off here would cut the melodic voice on a shared sink)
+        t.player->setVelocityScale(g_drumVolPct / 100.0f);   // per-note drum level (shared-sink lever)
+        return;
+    }
     if (t.caps.prepSpecial && g_drumPlayer.isPlaying()) {
         for (uint8_t ch = 1; ch <= 16; ++ch) if (ch != 10) t.sink->onAllNotesOff(ch);
     } else {
@@ -1197,13 +1205,20 @@ static constexpr size_t kSongArgCap  = sizeof g_curSongArg;
 // built-in (test sequence or legacy demo) by display name. Returns false if not found / load failed.
 FLASHMEM static bool trackPreload(Track &t, const char *arg) {
     if (!arg || !*arg) return false;
+    if (t.caps.drumGated && !drumEngineOk()) {   // a groove needs a channel-10-capable engine
+        Serial.printf("[%s] %s has no channel-10 drum map — use TSF/SF2/OPL3/OPLL\n", t.tag, synthName());
+        return false;
+    }
     *t.bpm = 120.0f; *t.bpb = 4;
     t.preEv = nullptr; t.preCount = 0; t.preLoopBeats = 0.0;
     t.preForceMode = false; t.preMpe = false;   // default (SD / legacy): force normal MIDI only if currently MPE
     if (endsWithMid(arg)) {
         char path[128]; char disp[64]; songDisp(disp, sizeof disp, arg);
-        snprintf(path, sizeof path, "/songs/%s", arg);
-        if (!SD.exists(path)) snprintf(path, sizeof path, "/%s", arg);
+        if (arg[0] == '/') snprintf(path, sizeof path, "%s", arg);   // absolute SD path (drum track / browser sends full paths)
+        else {
+            snprintf(path, sizeof path, "/songs/%s", arg);
+            if (!SD.exists(path)) snprintf(path, sizeof path, "/%s", arg);
+        }
         double plb = 0.0;
         int got = tdsp::smf::loadSmfFile(path, t.buf, t.bufCap, t.bpm, t.bpb, &plb);   // + exact loop length
         if (got <= 0) { Serial.printf("[%s] SD load FAILED: %s\n", t.tag, path); return false; }
@@ -1251,14 +1266,18 @@ FLASHMEM static bool trackPreload(Track &t, const char *arg) {
 // false joins the running grid in phase. The voice-1-only global-mode/meter effects are caps-gated.
 static void trackFire(Track &t, bool anchorNow) {
     if (!t.preEv || t.preCount == 0) return;
-    songPrep(t);
+    // A groove that DEFINES the downbeat (idle transport) also owns the tempo: snap the master BPM
+    // to its native BPM so it plays at its authored feel. Joining a running grid leaves tempo alone.
+    if (t.caps.tempoSourceWhenIdle && !g_conductor.running() && *t.bpm > 1.0f) g_masterBpm = *t.bpm;
+    songPrep(t);                                       // drum: applies the kit (no note panic)
     if (t.caps.ownsGlobalMode && (t.preForceMode || g_mpeMode != t.preMpe)) applyMidiMode(t.preMpe);
+    if (t.caps.mutesSongDrums) muteSongDrums(true);    // the groove IS the beat -> mute the song's own ch10
     applyTempos();              // retime this player (and the groove) to the master BPM
     ensureTransportStarted();   // define the grid if idle, else join the running clock in phase
     t.player->play(t.preEv, t.preCount);
     g_syncAnchorNow = anchorNow;
     songApplySync(t, t.preLoopBeats);   // grid-lock (exact length from the parse, else derived from ms)
-    if (t.caps.ownsMeter) { applyMeter(); g_songBarClock = 0; }   // song = meter master (voice 1)
+    if (t.caps.ownsMeter) { applyMeter(); g_songBarClock = 0; }   // meter master (voice 1 / a groove while it plays)
 }
 
 // trackStartArg: immediate start, in phase with the running grid — preload then fire from the current
