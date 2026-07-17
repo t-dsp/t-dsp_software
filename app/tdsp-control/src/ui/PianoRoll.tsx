@@ -10,8 +10,8 @@
 // the MIDI-FREE geometry/touch helpers in pianoRollGeom. Per DESIGN §6.4 the geometry module
 // never learns MIDI — the pitch<->lane mapping lives HERE, so an arp roll can reuse that module.
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { View, Text, Pressable, ScrollView, PanResponder, StyleSheet } from 'react-native';
+import React, { useEffect, useRef, useState } from 'react';
+import { View, Text, Pressable, ScrollView, PanResponder, StyleSheet, useWindowDimensions } from 'react-native';
 import {
   decode, encode, quantizeStart, GRIDS, MAX_EVENTS,
   LoopModel, LoopNote, LoopEvent,
@@ -63,6 +63,14 @@ export default function PianoRoll({ tp, voice, maxEvents = MAX_EVENTS, onClose }
 
   const undo = useRef<LoopNote[][]>([]);
   const idc = useRef(1);
+
+  // Full-BLEED: the editor lives inside a maxWidth:720 centered page. Measure our left offset
+  // in the window and pull back to the screen edge so the roll uses the FULL window width.
+  const { width: winW } = useWindowDimensions();
+  const [offX, setOffX] = useState(0);
+  const bleedRef = useRef<View>(null);
+  const remeasure = () => bleedRef.current?.measureInWindow?.((x: number) => setOffX(x || 0));
+  useEffect(() => { remeasure(); }, [winW, loading]);
 
   // ---- load the recorded clip on mount / voice change ----
   useEffect(() => {
@@ -216,7 +224,8 @@ export default function PianoRoll({ tp, voice, maxEvents = MAX_EVENTS, onClose }
   const selNote = notes.find(n => n.id === sel) || null;
 
   return (
-    <View style={s.wrap}>
+   <View ref={bleedRef} onLayout={remeasure} style={{ width: '100%' }}>
+    <View style={[s.wrap, { width: winW, marginLeft: -offX, paddingHorizontal: 8 }]}>
       {/* toolbar */}
       <View style={s.toolbar}>
         {(['select', 'add', 'erase'] as Tool[]).map(t => (
@@ -262,8 +271,8 @@ export default function PianoRoll({ tp, voice, maxEvents = MAX_EVENTS, onClose }
               );
             })}
           </View>
-          {/* grid (horizontally scrollable) */}
-          <ScrollView horizontal showsHorizontalScrollIndicator>
+          {/* grid (horizontally scrollable) — flex:1 so it fills the full-bleed width */}
+          <ScrollView horizontal showsHorizontalScrollIndicator style={{ flex: 1 }}>
             <View>
               <View style={{ width: gridW, height: rows * ROW_H }} {...pan.panHandlers}>
                 {/* row shading */}
@@ -313,6 +322,7 @@ export default function PianoRoll({ tp, voice, maxEvents = MAX_EVENTS, onClose }
         </View>
       )}
     </View>
+   </View>
   );
 }
 
