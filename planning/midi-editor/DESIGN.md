@@ -223,6 +223,11 @@ export type LoopModel = {
 `others` is not optional. Dropping it on a round trip would **silently delete a performance's
 MPE expression** the first time you nudge a note.
 
+`LoopModel` is **source-agnostic by construction** — no field records where it came from, and
+the editor must never branch on provenance. That is the seam §5.4 hangs the `.mid` importer
+on, and it is the reason that importer is a deferred *feature* rather than a deferred
+*rewrite*.
+
 ### 5.2 Pairing — the algorithm that matters
 
 Two passes, because a wrapped note's off is seen *before* its on in sorted order:
@@ -269,6 +274,84 @@ artifact. **Minimum duration is 1 tick, enforced everywhere.**
 
 Quantize applies to the **selection**, or to all notes if nothing is selected. Start-only by
 default (a "Quantize ends too" toggle is cheap; ends-only is not a thing anyone wants).
+
+### 5.4 Sources — the import seam
+
+Editing an existing `.mid` **is a wanted feature** (deferred to phase 2, §10). It is designed
+in now because retrofitting it later means rewriting the model; designing for it now costs one
+rule. `LoopModel` is the canonical editor currency and every source is just a decoder:
+
+```
+    @RECDUMP bytes ──decodeClip──┐
+                                 ├──▶ LoopModel ──▶ PianoRoll   (knows nothing about sources)
+    .mid bytes ─────decodeSmf────┘         │
+                                           ├──encodeClip──▶ @RECLOAD bytes
+                                           └──encodeSmf───▶ .mid (export)
+```
+
+**The rule: the editor talks only to `LoopModel`.** No source-conditional code above the codec
+layer, no `if (fromFile)` anywhere. Break it once and the seam is gone.
+
+**Import needs zero new firmware.** `@READ` already streams any SD file to both surfaces
+(`/songs/*.mid`, `/drums/*.mid`, a future `/loops/*.mid`), `decodeSmf` is pure TS, and
+`encodeClip`+`@RECLOAD` is the path the looper editor already requires. So the whole feature is
+`decodeSmf` + a file picker. That is a direct payoff of `CATALOG_TRANSPORT.md`'s "the device is
+a dumb file server; the client owns all semantics."
+
+#### The SMF mapping is already specified — port it, don't invent it
+
+`MidiFilePlayer::dispatchEvent()`/`dispatchCC()`
+(`lib/TDspMidiPlayer/src/MidiFilePlayer.h:310-341`) **already decided** how an SMF maps onto
+the `MidiSink` convention — which is exactly what `LoopEvent` stores. `decodeSmf` must **mirror
+it**, or an imported loop sounds different from the same file under the song player. That's a
+consistency bug users would report as "the editor changed my song."
+
+| SMF | `MidiFilePlayer` does | `LoopEvent` |
+|---|---|---|
+| note on / off | `onNoteOn/Off(ch, note, vel)` | `LNoteOn`/`LNoteOff`, `d2 = vel` |
+| CC#1 | `onModWheel(ch, val/127)` | `LModWheel`, `d2 = round(val/127*255)` |
+| CC#74 | `onTimbre(ch, val/127)` | `LTimbre` |
+| CC#64 | `onSustain(ch, val >= 64)` | `LSustain`, `d2 = 0/1` |
+| CC#101 / 100 / 6 | RPN 0,0 → `pbRange_[ch]` | **consumed, not stored** |
+| pitch bend | `onPitchBend(ch, (v-8192)/8192 * pbRange_[ch])` | `LPitchBend`, `bend = round(semis*256)` |
+| channel pressure | `onPressure(ch, val/127)` | `LPressure` |
+| program change | `onProgramChange(ch, prog)` | `LProgram` |
+| CC#120 / 123 | `onAllNotesOff(ch)` | `LAllOff` |
+| everything else (expression, pan, …) | dropped | dropped |
+
+**The bend-range trap.** `LoopEvent` stores **semitones**; an SMF stores **14-bit** plus a
+*per-channel* range set by RPN 0,0 (`CC101=0, CC100=0, CC6=semis`), default ±2. `decodeSmf`
+must track that RPN exactly as the firmware does — the firmware's own comment
+(`MidiFilePlayer.h:75-78`) warns that many songs raise it to ±12 and *"ignoring that renders
+bends at a fraction of their intended depth."* `encodeSmf` must invert it: pick a range, emit
+the RPN, then scale. **Consequence: `.mid → LoopModel → .mid` is NOT byte-identical**, unlike
+the clip path (§8.1). Don't claim or test for it.
+
+#### Time conversion — the decisions import forces
+
+1. **PPQN.** `tick24 = round(smfTick * 24 / smfPpqn)`. Lossy, and two events can collide on one
+   tick. Accepted: 24 PPQN **is** the target grid, so import implies quantize (§2.6).
+2. **Loop length.** An SMF has none. Derive it: the smallest of {1,2,4,8} bars that holds the
+   content at the current `beatsPerBar`; otherwise the user picks a bar range. `loopTicks =
+   bars * beatsPerBar * 24`.
+3. **Tempo map: dropped.** A clip rides the master `Clock` and has nowhere to put tempo events.
+   Offer "set master BPM from the file's first tempo" as a UI affordance (`@BPM=`), never a
+   model field.
+4. **Multi-track / multi-channel:** flatten to absolute time, merge-sort, then filter to a
+   channel or import all — the 1024 cap decides.
+5. **The 1024 cap.** A song will not fit (Scriabin is ~15.5k events). Import **fails loudly**
+   with `N events, cap 1024` and offers a track/bar-range filter. **Never silently truncate** —
+   that's the `insert()` failure mode (§2.5) surfacing as lost music.
+6. **A note extending past the chosen loop end WRAPS** — `off = (on + dur) % loopTicks`, with
+   `wraps: true` — matching how the recorder treats a deliberate trail (`MidiLooper.h:250`).
+   Do not clip it to `loopTicks-1`.
+
+Rule 6 has a useful consequence, and it corrects a claim made earlier in this design's
+research: an SMF cannot *store* a wrapped note-off, but **importing a file whose note crosses
+the chosen loop boundary CREATES one.** So `.mid` import is a legitimate way to synthesize the
+hardest fixture case (§2.2) without performing a take — once the wrap rule above is what
+defines it. It still isn't a substitute for a real recorder dump (§8.3), because it can't prove
+the firmware and the codec agree about the bytes.
 
 ## 6. The editor UI
 
@@ -436,6 +519,10 @@ mouse-era touch model we'd throw away. What we take is *design* (GarageBand) and
    (`App.tsx:1087-1092`), gated on `caps.rec` **and** a new `caps.recedit` bit (the dump/load
    commands are their own build-flag surface — a board can have the recorder without the
    editor).
+9. **`LoopModel` is source-agnostic; a source is a decoder, not a mode** (§5.4). Editing an
+   existing `.mid` is a wanted feature, deferred but **designed in**: it costs one rule now
+   (no source-conditional code above the codec) and a rewrite later. `decodeSmf` **mirrors**
+   `MidiFilePlayer::dispatchCC()` rather than inventing a second mapping.
 
 ## 10. Deferred to phase 2
 
@@ -446,7 +533,16 @@ mouse-era touch model we'd throw away. What we take is *design* (GarageBand) and
 - **Expression lanes** (draw/edit bend + pressure curves under the velocity lane).
 - **Granular edit ops** (`@RECEV=` insert/erase/modify) for gap-free live editing, if the
   commit dropout proves annoying in practice.
-- **`.mid` export** (one-way, lossy-by-design) for sharing a loop into a DAW.
+- **`.mid` import — edit an existing MIDI loop** (`decodeSmf` + a file picker). Architecturally
+  ready per §5.4, and it needs **no new firmware** — `@READ` already streams the file and
+  `@RECLOAD` already lands the result. Deferred only because the recorder path must prove the
+  round trip first, and because a from-scratch TS SMF parser (chunks, VLQ deltas, running
+  status, tempo map, RPN bend range) is real work that shouldn't gate the editor. The
+  scope-shaped question to answer when it lands: which files are targets? A purpose-made
+  `/loops/*.mid` is a clean fit; a dense multi-track `/songs/*.mid` needs the track/bar-range
+  filter of §5.4/5.
+- **`.mid` export** (`encodeSmf`, one-way, lossy-by-design — §5.4's bend-range inversion) for
+  sharing a loop into a DAW.
 - **SD persistence** — `@RECSAVE=<name>` → `/loops/<name>.tlc`, mirroring `@ALSAVE=`. Cheap
   once §4.1's serializer exists, and it's what stops a good take dying on reboot.
 - **Note preview on drag** (audition the pitch while moving), pending a spare synth path that
