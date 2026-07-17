@@ -815,14 +815,21 @@ static WebSocketsServer g_ws(TDSP_WS_PORT);
 // until it sees one (see app/tdsp-control/src/transport.wifi.ts). That keeps whole-line
 // semantics while staying inside the TCP send buffer.
 static void wsSendLine(int num, const char *line) {
-  static const size_t kWsChunk = 1024;   // comfortably under the lwIP send buffer
+  // 512 B chunks with a real gap. Sizing/pacing is NOT arbitrary: the lwIP send buffer is
+  // ~5.7 KB, and WiFi throughput here is throttled by the modem sleep that BT coexistence
+  // makes mandatory -- so bytes leave slowly and a tight loop fills the buffer long before
+  // it drains. 2 ms gaps were NOT enough (socket still wedged with EAGAIN); ~1 KB/15 ms
+  // keeps us well inside it. g_ws.loop() between chunks services the stack so the TCP
+  // window actually reopens instead of us just sleeping.
+  static const size_t kWsChunk = 512;
+  static const uint32_t kGapMs = 15;
   size_t len = strlen(line);
   for (size_t off = 0; off < len; ) {
     size_t n = (len - off < kWsChunk) ? (len - off) : kWsChunk;
     if (num < 0) g_ws.broadcastTXT((uint8_t *)(line + off), n);
     else         g_ws.sendTXT((uint8_t)num, (uint8_t *)(line + off), n);
     off += n;
-    if (off < len) delay(2);   // let lwIP drain between chunks of a long line
+    if (off < len) { g_ws.loop(); delay(kGapMs); }   // let lwIP actually drain
   }
   if (num < 0) g_ws.broadcastTXT((uint8_t *)"\n", 1);
   else         g_ws.sendTXT((uint8_t)num, (uint8_t *)"\n", 1);
@@ -847,12 +854,17 @@ static void onWsEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t lengt
   switch (type) {
     case WStype_CONNECTED: {
       Serial.printf("[ws] client %u connected\n", num);
-      // Prime the freshly-connected app: current status + ask the Teensy to re-send
-      // its catalog (the app subscribes to the verbatim @SONGS=/@INSTR= that follow).
+      // Prime the freshly-connected app with current status only.
+      //
+      // Deliberately NO requestCatalog() here (the BLE build still does it). @SONGS=/
+      // @INSTR=/@DRUMS= are the LEGACY BLE catalog -- the WiFi app doesn't read them at
+      // all, it fetches /tdsp/*.ndjson via @READ (see app/tdsp-control/src/catalog.ts).
+      // Sending them cost ~9.4 KB of unwanted traffic the instant a client connected,
+      // which flooded lwIP and wedged the socket (EAGAIN) before the app's first @READ
+      // even went out -- so the catalog load timed out. Hardware-verified.
       char buf[96];
       buildStatus(buf, sizeof(buf));
       wsSendLine(num, buf);
-      requestCatalog();
       break;
     }
     case WStype_DISCONNECTED:
