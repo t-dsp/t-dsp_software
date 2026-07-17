@@ -76,13 +76,15 @@ export class WiFiTransport implements Transport {
       ws.onclose = () => { done(() => { this.ws = null; reject(new Error(`Connection to ${this.url} closed`)); }); if (this.ws === ws) this.teardown(); };
       ws.onmessage = (ev: MessageEvent) => {
         if (typeof ev.data !== 'string') return;   // firmware only sends TEXT frames
-        // One frame is normally exactly one line, but split defensively so a coalesced
-        // or newline-terminated frame can't wedge the parser.
+        // Accumulate until '\n' — a line is NOT necessarily one frame. The firmware splits
+        // long lines (a catalog @INSTR is ~7 KB) into ~1 KB chunks and terminates each line
+        // with '\n', because a single oversized frame overruns the ESP32's TCP send buffer
+        // and permanently wedges the socket (hardware-verified: errno 11 EAGAIN, replies
+        // stop forever). So '\n' is the only frame boundary we trust — never treat an
+        // arriving frame as a complete line on its own.
         this.buf += ev.data;
-        if (this.buf.indexOf('\n') < 0) { this.pump(this.buf); this.buf = ''; return; }
         let i: number;
         while ((i = this.buf.indexOf('\n')) >= 0) { this.pump(this.buf.slice(0, i)); this.buf = this.buf.slice(i + 1); }
-        if (this.buf) { this.pump(this.buf); this.buf = ''; }
       };
     });
   }

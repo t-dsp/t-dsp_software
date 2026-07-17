@@ -26,7 +26,12 @@ Why WiFi drops BLE: the ESP32 has one radio and limited RAM. The WiFi build need
 the WiFi/lwIP/WebSocket stacks, so it starts Bluetooth in **classic-only** mode,
 which releases the BLE controller RAM. WiFi and A2DP (Classic) then share the
 radio; the coexistence arbiter is biased toward BT (`esp_coex_preference_set(
-ESP_COEX_PREFER_BT)`) so audio stays glitch-free.
+ESP_COEX_PREFER_BT)`) to protect audio.
+
+**WiFi modem sleep MUST stay enabled** while Bluetooth is up — the arbiter time-slices
+the radio using those sleep windows. `WiFi.setSleep(false)` makes IDF `abort()` at WiFi
+start ("Should enable WiFi modem sleep when both WiFi and Bluetooth are enabled") — a
+boot-loop, verified on hardware. Don't trade it for WS latency.
 
 ### Code shape
 
@@ -40,22 +45,27 @@ singleton.
 
 ### Setting credentials
 
-Credentials are build flags for now (bench/dev). Edit `[env:esp32dev_wifi]` in
-[platformio.ini](platformio.ini):
+Credentials are **secrets** — they live in a **gitignored `.env`** next to
+`platformio.ini`, never in the tracked build flags:
 
-```ini
-build_flags =
-    -D TDSP_CTRL_WIFI
-    -D TDSP_WIFI_SSID='"MyNetwork"'
-    -D TDSP_WIFI_PASS='"MyPassword"'
+```bash
+cd projects/t-dsp_esp32_bt_receiver
+cp .env.example .env      # then edit:
+#   TDSP_WIFI_SSID=MyNetwork
+#   TDSP_WIFI_PASS=MyPassword
 ```
 
-The `'"..."'` quoting passes a C string literal to the compiler. Leaving either
-unset still builds but emits a `#warning` and the device won't join a network.
-Optional overrides: `TDSP_WS_PORT` (default `81`), `TDSP_MDNS_HOST` (default `tdsp`).
+[`tools/load_env.py`](../../tools/load_env.py) (a `pre:` extra_script) reads `.env` at
+build time and injects each `KEY=VALUE` as `-DKEY="VALUE"` — always as a C *string*
+literal, so a purely-numeric password can't become an integer macro. It logs key names
+only, never values. No `.env` = still builds, but emits a `#warning` and the device won't
+join a network. Credentials are baked into the image (runtime provisioning is a later
+phase), so re-flash to change networks.
 
-> Runtime provisioning (captive portal / app-supplied creds) is a **later phase** —
-> today the SSID/password are baked into the image.
+Optional overrides (plain build flags, not secrets): `TDSP_WS_PORT` (default `81`),
+`TDSP_MDNS_HOST` (default `tdsp`).
+
+> Must be a **2.4 GHz** network — the classic ESP32 has no 5 GHz radio.
 
 ### Wire contract
 
@@ -76,13 +86,21 @@ on port **81**. The app opens a WebSocket and exchanges **TEXT frames**:
 
 **Outbound (ESP32 → app)**
 
-- Every `@`-line from the Teensy is `broadcastTXT`'d **verbatim** to all clients —
-  including `@SONGS=` / `@INSTR=` / `@DRUMS=` and the file-transfer frames.
-  **No BLE chunking**: WiFi frames are large, so there is no `0x1e` framing and no
-  512-byte splitting. The client reads whole lines.
+- Every `@`-line from the Teensy is sent to all clients and **terminated with `\n`**.
+  A long line is split into **~1 KB chunks across several WS frames** — so
+  **`\n` is the only frame boundary; a client must accumulate until it sees one** and
+  must NOT treat one frame as one line.
+- There is still **no `0x1e` framing and no reassembly protocol** (unlike BLE) — the
+  chunks are just a byte stream; whole-line semantics are restored by the `\n`.
 - Status is a plain JSON line, e.g.
   `{"conn":1,"disc":0,"vol":50,"hpf":0,"mpe":0,"rg":1,"peer":"Pixel 7"}`
 - The paired-sources list is broadcast as `@SOURCES=<json array>`.
+
+> **Why chunked (hardware-verified, do not "optimize" back):** sending a whole line in
+> one frame **wedges the socket**. `@INSTR` (Dexed's 320-voice list) is ~6.7 KB, which
+> overruns the ESP32's lwIP TCP send buffer (~5.7 KB); `WiFiClient::write()` then fails
+> with `errno 11 EAGAIN` ("No more processes") and the connection **never writes again** —
+> inbound commands still reach the Teensy, but no reply ever comes back. See `wsSendLine()`.
 
 > In the WiFi build the app sends `@`-lines directly, so the ESP32 does not track
 > `vol`/`hpf`/`mpe`/`rg` — those status fields report firmware defaults and the app
@@ -129,7 +147,7 @@ cd projects/t-dsp_esp32_bt_receiver
 python -m platformio run -e esp32dev
 python -m platformio run -e esp32dev --target upload
 
-# WiFi WebSocket control (set your creds in platformio.ini first)
+# WiFi WebSocket control (cp .env.example .env and set your creds first)
 python -m platformio run -e esp32dev_wifi
 python -m platformio run -e esp32dev_wifi --target upload
 
@@ -151,7 +169,7 @@ reconnect opcodes) — or send `p` over UART.
 | Env | Flash | RAM (static) |
 |-----|-------|--------------|
 | `esp32dev` (BLE) | 1,182,957 B — 37.6% | 48,856 B — 14.9% |
-| `esp32dev_wifi` | 1,591,161 B — 50.6% | 70,996 B — 21.7% |
+| `esp32dev_wifi` | 1,591,205 B — 50.6% | 70,996 B — 21.7% |
 
 The WiFi build drops the BLE GATT stack but adds WiFi + lwIP + WebSocket + mDNS,
 netting ~400 KB more flash. Both fit the 3 MB partition with room to spare.
@@ -164,9 +182,13 @@ netting ~400 KB more flash. Both fit the 3 MB partition with room to spare.
 - [x] Build-time selectable control transport (`TDSP_CTRL_BLE` | `TDSP_CTRL_WIFI`)
       behind a `ControlTransport` seam; both envs compile
 - [x] WiFi station + WebSocket control server + mDNS (`tdsp.local`), A2DP kept
-- [ ] **Hardware validation of the WiFi build** — not yet flashed/tested. In
-      particular WiFi + A2DP radio coexistence (audio glitching under WS traffic)
-      is unverified on real hardware.
+- [x] **Hardware-validated on jay-mint (2026-07-17)**: joins WiFi, mDNS resolves,
+      WS control round-trips (`@VOL=77` → `@STATE` reports `"vol":77`), and the 6.7 KB
+      `@INSTR` catalog streams. Two real bugs were found ONLY by flashing:
+      `WiFi.setSleep(false)` → IDF abort/boot-loop (modem sleep is mandatory with BT),
+      and one-frame-per-line → socket wedge (EAGAIN). Both fixed.
+- [ ] **A2DP audio under WiFi load** — still unverified: no phone was paired during the
+      test, so radio coexistence has NOT been proven with audio actually streaming.
 - [x] App-side `WiFiTransport` — `app/tdsp-control/src/transport.wifi.ts`, selected via
       `createTransport('wifi', host?)`. Speaks this wire contract; typechecks clean.
       Not yet exercised against real hardware, and no UI picker wires it up yet.

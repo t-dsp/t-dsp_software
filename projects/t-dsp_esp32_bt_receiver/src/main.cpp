@@ -800,6 +800,34 @@ ControlTransport &controlTransport() { static BleControlTransport t; return t; }
 
 static WebSocketsServer g_ws(TDSP_WS_PORT);
 
+// Send one logical line to a client (num >= 0) or to all (num < 0), '\n'-terminated and
+// split into bounded chunks.
+//
+// HARDWARE-VERIFIED BUG THIS FIXES: broadcasting a whole line in ONE WS frame wedges the
+// socket. A catalog line is big -- @INSTR (Dexed's 320-voice list) is ~7 KB -- which
+// overruns the ESP32's lwIP TCP send buffer (~5.7 KB default). WiFiClient::write() then
+// fails with errno 11 EAGAIN ("No more processes") and the connection never recovers:
+// inbound commands still reach the Teensy, but NOTHING is ever written back. So the
+// original "WiFi frames are large, no chunking needed" assumption was wrong in practice.
+//
+// The chunks are NOT a framing protocol -- there is no 0x1e header and no reassembly
+// state. We simply stream bytes and terminate each line with '\n'; the client accumulates
+// until it sees one (see app/tdsp-control/src/transport.wifi.ts). That keeps whole-line
+// semantics while staying inside the TCP send buffer.
+static void wsSendLine(int num, const char *line) {
+  static const size_t kWsChunk = 1024;   // comfortably under the lwIP send buffer
+  size_t len = strlen(line);
+  for (size_t off = 0; off < len; ) {
+    size_t n = (len - off < kWsChunk) ? (len - off) : kWsChunk;
+    if (num < 0) g_ws.broadcastTXT((uint8_t *)(line + off), n);
+    else         g_ws.sendTXT((uint8_t)num, (uint8_t *)(line + off), n);
+    off += n;
+    if (off < len) delay(2);   // let lwIP drain between chunks of a long line
+  }
+  if (num < 0) g_ws.broadcastTXT((uint8_t *)"\n", 1);
+  else         g_ws.sendTXT((uint8_t)num, (uint8_t *)"\n", 1);
+}
+
 // One inbound WS TEXT message. '!' = local A2DP verb; '@' = verbatim to the Teensy.
 static void wsHandleText(uint8_t num, const char *msg) {
   if (msg[0] == '!') {
@@ -807,7 +835,7 @@ static void wsHandleText(uint8_t num, const char *msg) {
     else if (!strcmp(msg, "!reconnect"))  { Serial.println("[ws] cmd: RECONNECT");  ctrlReconnect(); }
     else if (!strcmp(msg, "!forget"))     { Serial.println("[ws] cmd: FORGET");     ctrlForget(); }
     else if (!strcmp(msg, "!disconnect")) { Serial.println("[ws] cmd: DISCONNECT"); ctrlDisconnect(); }
-    else if (!strcmp(msg, "!status"))     { char b[96]; buildStatus(b, sizeof(b)); g_ws.sendTXT(num, b); }
+    else if (!strcmp(msg, "!status"))     { char b[96]; buildStatus(b, sizeof(b)); wsSendLine(num, b); }
     else Serial.printf("[ws] unknown local cmd: %s\n", msg);
     return;
   }
@@ -823,7 +851,7 @@ static void onWsEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t lengt
       // its catalog (the app subscribes to the verbatim @SONGS=/@INSTR= that follow).
       char buf[96];
       buildStatus(buf, sizeof(buf));
-      g_ws.sendTXT(num, buf);
+      wsSendLine(num, buf);
       requestCatalog();
       break;
     }
@@ -854,7 +882,15 @@ class WifiControlTransport : public ControlTransport {
     WiFi.persistent(false);            // don't wear flash writing creds every boot
     WiFi.mode(WIFI_STA);
     WiFi.setHostname(TDSP_MDNS_HOST);  // DHCP hostname (mDNS name set separately)
-    WiFi.setSleep(false);              // keep WS latency low: no modem sleep
+    // WiFi modem sleep MUST stay ENABLED here. A2DP (Bluetooth Classic) and WiFi share the
+    // one 2.4 GHz radio, and the coexistence arbiter time-slices them using the modem-sleep
+    // windows. With sleep disabled, IDF hard-abort()s the instant WiFi starts:
+    //   "E wifi: Should enable WiFi modem sleep when both WiFi and Bluetooth are enabled"
+    //   abort() ... Rebooting...
+    // -> a boot-loop, verified on hardware. Do NOT "optimize" this to setSleep(false) for
+    // WS latency; it is non-negotiable while Bluetooth is up. (true = WIFI_PS_MIN_MODEM,
+    // which is also the arduino-esp32 default; set explicitly so the reason is on record.)
+    WiFi.setSleep(true);
 #ifdef TDSP_HAVE_COEX
     // Bias the WiFi/BT coexistence arbiter toward Bluetooth so A2DP audio is
     // prioritized over WiFi on the shared radio (best-effort; guarded for portability).
@@ -877,7 +913,9 @@ class WifiControlTransport : public ControlTransport {
   }
 
   // Called from loop() (Arduino task) via handleTeensyLine -> safe to send directly.
-  void sendToApp(const char *line) override { g_ws.broadcastTXT(line); }   // verbatim
+  // Whole line, chunked + '\n'-terminated (see wsSendLine: a 7 KB @INSTR in one frame
+  // wedges the socket). No BLE-style 0x1e framing -- the client just splits on '\n'.
+  void sendToApp(const char *line) override { wsSendLine(-1, line); }
 
   // NOTE: these are called from the A2DP callback, which runs in the *BT task*.
   // arduinoWebSockets is NOT thread-safe and the server is serviced on the Arduino
@@ -896,7 +934,7 @@ class WifiControlTransport : public ControlTransport {
   void broadcastStatus() {
     char buf[96];
     buildStatus(buf, sizeof(buf));
-    g_ws.broadcastTXT(buf);
+    wsSendLine(-1, buf);
   }
 
   void broadcastSources() {
@@ -904,7 +942,7 @@ class WifiControlTransport : public ControlTransport {
     buildSources(src, sizeof(src));
     char buf[640];
     snprintf(buf, sizeof(buf), "@SOURCES=%s", src);   // framed so the app can tell it apart
-    g_ws.broadcastTXT(buf);
+    wsSendLine(-1, buf);
   }
 
   void maintainWifi() {
