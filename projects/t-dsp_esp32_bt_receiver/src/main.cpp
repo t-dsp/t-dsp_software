@@ -61,10 +61,21 @@ static constexpr char BT_DEVICE_NAME[] = "T-DSP";
 #define TDSP_SRC_UUID  "7a9c0004-4a6e-4b7d-8f1a-2d3c4e5f6a70"
 // Device catalog (READ+NOTIFY): '|'-delimited name lists the Teensy streams over
 // UART (@SONGS=/@INSTR=) so the app renders its Dexed pickers dynamically — no
-// app rebuild when songs/instruments change. Each value fits one BLE char (<512B;
-// ~50 names max). NOTIFY signals "changed" -> the app RE-READS the full value.
+// app rebuild when songs/instruments change. A list longer than one BLE value
+// (512 B) is streamed as a burst of framed NOTIFY chunks ("<seq>\x1e<count>\x1e
+// <payload>") that the app reassembles — see setCatalog(). A single-chunk list is
+// just count=1. The app forces a fresh burst (CMD_REFRESH_CAT) after subscribing.
 #define TDSP_SONGS_UUID "7a9c0005-4a6e-4b7d-8f1a-2d3c4e5f6a70"
 #define TDSP_INSTR_UUID "7a9c0006-4a6e-4b7d-8f1a-2d3c4e5f6a70"
+// Drum grooves catalog (READ+NOTIFY): the '|'-delimited groove names the Teensy
+// scans off /drums (@DRUMS=), same chunked-burst contract as songs/instruments.
+#define TDSP_DRUMS_UUID "7a9c0007-4a6e-4b7d-8f1a-2d3c4e5f6a70"
+// Generic file transfer (READ+NOTIFY): the Teensy streams any SD file as base64
+// frames (@FB/@FD/@FE/@FERR) plus the manifest registry (@MANIFESTS). We forward
+// each line VERBATIM as one notification (each @FD fits a ~512 MTU) — NO reassembly
+// on the ESP32; the app reassembles the file. See CATALOG_TRANSPORT.md. This ONE
+// char is the transport for drums (catalog.tsv) and every future catalog type.
+#define TDSP_FILE_UUID  "7a9c0008-4a6e-4b7d-8f1a-2d3c4e5f6a70"
 
 // Command opcodes: the first byte of a write to the command characteristic.
 enum : uint8_t {
@@ -80,6 +91,31 @@ enum : uint8_t {
   CMD_STOP_SONG    = 0x21,  // stop the Dexed demo
   CMD_SET_DX_VOICE = 0x22,  // 2nd byte = Dexed instrument index; relayed to the Teensy
   CMD_REFRESH_CAT  = 0x23,  // re-scan SD + refresh song/instrument catalog (@GETCAT to Teensy)
+  CMD_SET_HPF      = 0x24,  // 2nd byte = TAC5212 DAC highpass mode 0..3; relayed to the Teensy
+  CMD_SET_MIDI_MODE= 0x25,  // 2nd byte = 0 normal MIDI / 1 MPE; relayed to the Teensy
+  CMD_SET_LOOP     = 0x26,  // 2nd byte = 0/1 loop the current song; relayed to the Teensy
+  CMD_SET_PRESSURE = 0x27,  // 2nd byte = MPE pressure routing bitmask (1=vol 2=bright 4=vib 8=trem)
+  CMD_SET_MODWHEEL = 0x28,  // 2nd byte = mod-wheel routing bitmask (2=bright 4=vib 8=trem)
+  CMD_SET_LFOMODE  = 0x29,  // 2nd byte = 0 respect patch LFO / 1 force LFO on any patch
+  CMD_SET_TIMBRE   = 0x2A,  // 2nd byte = CC74 timbre (MPE Y) routing bitmask (2=bright 4=vib 8=trem)
+  CMD_SET_REPLAYGAIN=0x2B,  // 2nd byte = 0 off / 1 on; ReplayGain loudness normalization, relayed to Teensy
+  CMD_PLAY_DRUM    = 0x30,  // + 1 byte: drum groove index; loops until stopped (relayed as @DRUM=<i>)
+  CMD_STOP_DRUM    = 0x31,  // stop the drum groove (@DRUM=stop)
+  CMD_SET_DRUM_KIT = 0x32,  // + 1 byte: GM drum-kit index ("instrument") (@DRUMKIT=<i>)
+  CMD_SET_DRUM_SPEED=0x33,  // RESERVED — drum-speed control removed (drums follow master BPM). Kept so 0x33 isn't reused.
+  CMD_SET_DRUM_VOL = 0x34,  // + 1 byte: drum level 0..150 (%) (@DRUMVOL=<pct>)
+  CMD_SET_BPM      = 0x35,  // + 1 byte: master tempo 40..240 bpm — song+drum (@BPM=<n>)
+  CMD_SET_DRUM_SYNCHRO=0x36,// + 1 byte: 0/1 synchro start (groove begins on first note) (@DRUMSYNCHRO=<0|1>)
+  CMD_SET_ARP_ON   = 0x37,  // + 1 byte: 0/1 arpeggiator enable (@ARPON=<0|1>)
+  CMD_SET_ARP_PATTERN=0x38, // + 1 byte: pattern index 0..24 (@ARPPAT=<n>)
+  CMD_SET_ARP_RATE = 0x39,  // + 1 byte: rate index 0..14 (@ARPRATE=<n>)
+  CMD_SET_ARP_OCT  = 0x3a,  // + 1 byte: octave range 1..4 (@ARPOCT=<n>)
+  CMD_SET_ARP_LATCH= 0x3b,  // + 1 byte: 0/1 latch held notes (@ARPLATCH=<0|1>)
+  CMD_READ_FILE    = 0x40,  // + N bytes: SD path string; Teensy streams it back on the FILE char (@READ=<path>)
+  CMD_PLAY_DRUM_FILE=0x41,  // + N bytes: groove filename; plays /drums/<name> (@DRUMF=<filename>)
+  CMD_RELAY_LINE   = 0x42,  // + N bytes: a literal control line (e.g. "@DXPICK=<cart>\t<v>", "@REINDEX",
+                            //   "@SONG=<i>") relayed VERBATIM to the Teensy. The generic seam the new
+                            //   catalog app uses so BLE speaks the same @-protocol as Web Serial.
 };
 
 BluetoothA2DPSink a2dp_sink;
@@ -90,6 +126,9 @@ static BLECharacteristic *g_statChar = nullptr;
 static volatile bool      g_bleClientConnected = false;
 static bool               g_discoverable = false;  // we track this; the A2DP lib has no getter
 static uint8_t            g_volume = 50;            // master volume 0..100 (%), last set from the app
+static uint8_t            g_hpf    = 0;             // TAC5212 DAC highpass mode 0..3, last set from the app
+static uint8_t            g_midiMode = 0;           // 0 = normal MIDI, 1 = MPE; last set from the app
+static uint8_t            g_replayGain = 1;          // 0 = off, 1 = on; ReplayGain normalization (Teensy default on)
 
 // Relay the master volume to the Teensy over UART0 as a framed line "@VOL=<n>".
 // The Teensy owns the TAC5212 codec; it parses this line and calls setDvol() on
@@ -105,18 +144,78 @@ static void relaySong(uint8_t idx)    { Serial.printf("@SONG=%u\n", idx); }
 static void relaySongStop()           { Serial.printf("@SONG=stop\n"); }
 static void relayDxVoice(uint8_t idx) { Serial.printf("@DXVOICE=%u\n", idx); }
 
+// Relay the TAC5212 DAC highpass mode (0=off, 1=1Hz, 2=12Hz, 3=96Hz) to the
+// Teensy, which owns the codec and calls g_codec.setDacHpf().
+static void relayHpf(uint8_t mode)    { Serial.printf("@HPF=%u\n", mode); }
+static void relayMidiMode(uint8_t m)  { Serial.printf("@MIDIMODE=%u\n", m); }
+static void relayReplayGain(uint8_t on){ Serial.printf("@RG=%u\n", on ? 1 : 0); }
+static void relayLoop(uint8_t on)     { Serial.printf("@LOOP=%u\n", on ? 1 : 0); }
+static void relayPressure(uint8_t m)  { Serial.printf("@PRESSURE=%u\n", m); }
+static void relayModWheel(uint8_t m)  { Serial.printf("@MODWHEEL=%u\n", m); }
+static void relayLfoMode(uint8_t f)   { Serial.printf("@LFOMODE=%u\n", f ? 1 : 0); }
+static void relayTimbre(uint8_t m)    { Serial.printf("@TIMBRE=%u\n", m); }
+// Drum-groove controls: play/stop a looping channel-10 groove and set its GM kit,
+// speed and level. The Teensy owns playback (dedicated looping player) + the SD
+// groove list; these just frame the text commands over UART.
+static void relayDrum(uint8_t idx)    { Serial.printf("@DRUM=%u\n", idx); }
+static void relayDrumStop()           { Serial.printf("@DRUM=stop\n"); }
+static void relayDrumKit(uint8_t idx) { Serial.printf("@DRUMKIT=%u\n", idx); }
+static void relayDrumVol(uint8_t p)   { Serial.printf("@DRUMVOL=%u\n", p); }
+static void relayBpm(uint8_t b)       { Serial.printf("@BPM=%u\n", b); }        // master tempo (song+drum)
+static void relayDrumSynchro(uint8_t s){ Serial.printf("@DRUMSYNCHRO=%u\n", s ? 1 : 0); }
+static void relayArpOn(uint8_t s)      { Serial.printf("@ARPON=%u\n", s ? 1 : 0); }
+static void relayArpPattern(uint8_t p) { Serial.printf("@ARPPAT=%u\n", p); }
+static void relayArpRate(uint8_t r)    { Serial.printf("@ARPRATE=%u\n", r); }
+static void relayArpOct(uint8_t o)     { Serial.printf("@ARPOCT=%u\n", o); }
+static void relayArpLatch(uint8_t s)   { Serial.printf("@ARPLATCH=%u\n", s ? 1 : 0); }
+
 // ---- Paired-source list (multi-device switch) -----------------------------
 static BLECharacteristic *g_srcChar = nullptr;
 
 // ---- Device catalog (Dexed songs + instruments, streamed from the Teensy) --
 static BLECharacteristic *g_songsChar = nullptr;
 static BLECharacteristic *g_instrChar = nullptr;
+static BLECharacteristic *g_drumsChar = nullptr;
+static BLECharacteristic *g_fileChar  = nullptr;   // generic file-transfer frames (pass-through)
+
+// Ask the Teensy to stream an SD file / play a groove by name. Variable-length
+// string args (path / filename) — the generic catalog transport (CATALOG_TRANSPORT.md).
+static void relayReadFile(const char *path)  { Serial.printf("@READ=%s\n", path); }
+static void relayDrumFile(const char *fname) { Serial.printf("@DRUMF=%s\n", fname); }
+// Relay an arbitrary control line verbatim (the generic new-catalog seam). The app
+// sends the same @-lines it would over Web Serial; we just add the newline.
+static void relayLine(const char *line)      { Serial.print(line); Serial.print('\n'); }
+
+// Forward ONE Teensy line verbatim to the app as a single notification. Used for the
+// file-transfer stream: the Teensy already chunked each @FD to fit one MTU, so there
+// is nothing to reassemble here — just relay + pace so the BLE stack doesn't drop it.
+static void notifyRaw(BLECharacteristic *ch, const char *line) {
+  if (!ch) return;
+  ch->setValue((uint8_t *)line, strlen(line));
+  if (g_bleClientConnected) { ch->notify(); delay(12); }
+}
 
 // Store a '|'-delimited name list into a catalog characteristic and notify.
+// A BLE characteristic value caps at 512 B, so a long list (e.g. Dexed's full
+// 320-voice set, ~7 KB) can't be served in one value. We stream it as a burst of
+// framed notifications, each "<seq>\x1e<count>\x1e<payload>" (0x1e = record sep,
+// never appears in names). The app reassembles the chunks in order. Notifications
+// are unacknowledged, so we pace them so the BLE stack doesn't drop chunks.
+static const size_t kCatChunk = 400;   // payload bytes/chunk; safe under a 512 MTU
+
 static void setCatalog(BLECharacteristic *ch, const char *list) {
   if (!ch) return;
-  ch->setValue((uint8_t *)list, strlen(list));
-  if (g_bleClientConnected) ch->notify();
+  size_t len   = strlen(list);
+  size_t count = len ? (len + kCatChunk - 1) / kCatChunk : 1;   // >=1 (empty = one empty chunk)
+  for (size_t seq = 0; seq < count; ++seq) {
+    size_t off = seq * kCatChunk;
+    size_t n   = (len - off < kCatChunk) ? (len - off) : kCatChunk;
+    char   frame[24 + kCatChunk];
+    int    h = snprintf(frame, sizeof(frame), "%u\x1e%u\x1e", (unsigned)seq, (unsigned)count);
+    memcpy(frame + h, list + off, n);
+    ch->setValue((uint8_t *)frame, h + n);
+    if (g_bleClientConnected) { ch->notify(); delay(25); }   // pace so chunks aren't dropped
+  }
 }
 
 // A complete '@'-framed line arrived from the Teensy over UART. The Teensy sends
@@ -124,6 +223,25 @@ static void setCatalog(BLECharacteristic *ch, const char *list) {
 static void handleTeensyLine(const char *line) {
   if      (strncmp(line, "@SONGS=", 7) == 0) { setCatalog(g_songsChar, line + 7); Serial.println("[cat] songs updated"); }
   else if (strncmp(line, "@INSTR=", 7) == 0) { setCatalog(g_instrChar, line + 7); Serial.println("[cat] instruments updated"); }
+  else if (strncmp(line, "@DRUMS=", 7) == 0) { setCatalog(g_drumsChar, line + 7); Serial.println("[cat] drums updated"); }
+  // Generic file transport: the manifest registry + file-read frames go straight to
+  // the FILE characteristic, one line per notification (each already fits one MTU).
+  else if (strncmp(line, "@MANIFESTS=", 11) == 0) { notifyRaw(g_fileChar, line); }
+  else if (strncmp(line, "@FB=", 4) == 0 || strncmp(line, "@FD=", 4) == 0 ||
+           strncmp(line, "@FE=", 4) == 0 || strncmp(line, "@FERR=", 6) == 0) { notifyRaw(g_fileChar, line); }
+  // @REINDEXED marks the end of a catalog rebuild — relay it so the app's reindex()
+  // (which sent @REINDEX via CMD_RELAY_LINE) knows the /tdsp DB is ready to re-read.
+  else if (strncmp(line, "@REINDEXED", 10) == 0) { notifyRaw(g_fileChar, line); }
+  // Lazy /dexed browse replies (the SD library is too big to ship in the catalog): a folder
+  // page (@DXLS) or a cart's 32 voice names (@DXVL) can exceed one 512 B MTU, so stream them
+  // chunk-framed on the FILE char — the app reassembles (digit-prefixed frames, distinct from
+  // the '@'-prefixed file frames). @DXPICKED is a fire-and-forget ack the app doesn't read.
+  else if (strncmp(line, "@DXLS=", 6) == 0 || strncmp(line, "@DXVL=", 6) == 0) { setCatalog(g_fileChar, line); }
+  // The full-state snapshot (@STATE, ~2 KB now that it carries voice2/arp2/caps) and the
+  // opaque app-state blob (@APP) also exceed one MTU, so stream them chunk-framed too. The
+  // app reassembles and routes them to its onLine() handler (hydrate). WITHOUT this the phone
+  // never receives @STATE, so build-gated cards (Synth 2 / Arp 2, via caps) stay hidden.
+  else if (strncmp(line, "@STATE=", 7) == 0 || strncmp(line, "@APP=", 5) == 0) { setCatalog(g_fileChar, line); }
 }
 
 // Ask the Teensy to (re)send its catalog over UART.
@@ -202,8 +320,10 @@ static void buildStatus(char *buf, size_t n) {
   const char *peer = connected ? a2dp_sink.get_peer_name() : "";
   if (!peer) peer = "";
   // conn: A2DP source connected?  disc: discoverable (pairing)?  vol: master 0..100
-  snprintf(buf, n, "{\"conn\":%d,\"disc\":%d,\"vol\":%u,\"peer\":\"%s\"}",
-           connected ? 1 : 0, g_discoverable ? 1 : 0, g_volume, peer);
+  // hpf: TAC5212 DAC highpass mode 0..3 (0=off)  mpe: 0 normal MIDI / 1 MPE
+  // rg: ReplayGain 0 off / 1 on.
+  snprintf(buf, n, "{\"conn\":%d,\"disc\":%d,\"vol\":%u,\"hpf\":%u,\"mpe\":%u,\"rg\":%u,\"peer\":\"%s\"}",
+           connected ? 1 : 0, g_discoverable ? 1 : 0, g_volume, g_hpf, g_midiMode, g_replayGain, peer);
 }
 
 // Refresh the status characteristic value and notify any subscribed client.
@@ -227,6 +347,17 @@ static void enterPairingMode(const char *why) {
                 why, BT_DEVICE_NAME);
 }
 
+// Go fully idle: NOT connectable, NOT discoverable, no auto-reconnect. Bluetooth audio is
+// explicit — it only (re)connects on an app command: "Connect Bluetooth Audio" (reconnect
+// to the last bonded phone) or "Pairing mode" (accept a new phone). Used on boot and after
+// any A2DP disconnect, so a phone can't silently re-attach on its own.
+static void goIdle(const char *why) {
+  a2dp_sink.set_connectable(false);
+  a2dp_sink.set_discoverability(ESP_BT_NON_DISCOVERABLE);
+  g_discoverable = false;
+  Serial.printf("[a2dp] idle (%s) -- Bluetooth audio off until you connect it\n", why);
+}
+
 // A2DP connection state changed (called by the A2DP lib, BT task context).
 // Persistent-pairing policy: whenever NOTHING is connected we stay discoverable
 // so the phone can reconnect after any failure; while a source is connected we
@@ -245,8 +376,8 @@ static void onA2dpConnState(esp_a2d_connection_state_t state, void *) {
       g_hasPendingConnect = false;
       a2dp_sink.connect_to(g_pendingConnect);
     } else {
-      // dropped or failed -> immediately reopen for (re)pairing
-      enterPairingMode("a2dp disconnected");
+      // Dropped or user-disconnected -> stay OFF. Explicit-only: no auto re-pair / re-attach.
+      goIdle("a2dp disconnected");
     }
   }
   pushStatus();
@@ -293,9 +424,11 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
         a2dp_sink.clean_last_connection();
         break;
       case CMD_RECONNECT: {
+        a2dp_sink.set_connectable(true);  // allow the reconnect handshake (we boot idle/non-connectable)
         bool ok = a2dp_sink.reconnect();  // sink -> last paired phone (needs a stored bond)
         Serial.printf("[ble] cmd: RECONNECT A2DP -> %s\n",
                       ok ? "attempting" : "no last device (pair first)");
+        if (!ok) goIdle("reconnect: no bond");   // nothing to connect -> back to idle
         break;
       }
       case CMD_SET_VOLUME:
@@ -356,6 +489,127 @@ class CommandCallbacks : public BLECharacteristicCallbacks {
         Serial.println("[ble] cmd: REFRESH CATALOG");
         requestCatalog();   // -> Teensy re-scans SD + re-sends @SONGS/@INSTR
         break;
+      case CMD_SET_HPF:
+        if (v.size() >= 2) {
+          uint8_t mode = (uint8_t)v[1];
+          if (mode > 3) mode = 0;
+          g_hpf = mode;     // remember for the status readback (pushStatus below)
+          Serial.printf("[ble] cmd: SET HPF %u\n", mode);
+          relayHpf(mode);   // -> Teensy: @HPF=<mode>
+        }
+        break;
+      case CMD_SET_MIDI_MODE:
+        if (v.size() >= 2) {
+          g_midiMode = v[1] ? 1 : 0;
+          Serial.printf("[ble] cmd: SET MIDI MODE %s\n", g_midiMode ? "MPE" : "MIDI");
+          relayMidiMode(g_midiMode);   // -> Teensy: @MIDIMODE=<0|1>
+        }
+        break;
+      case CMD_SET_REPLAYGAIN:
+        if (v.size() >= 2) {
+          g_replayGain = v[1] ? 1 : 0;
+          Serial.printf("[ble] cmd: SET REPLAYGAIN %s\n", g_replayGain ? "on" : "off");
+          relayReplayGain(g_replayGain);   // -> Teensy: @RG=<0|1>
+          pushStatus();                    // mirror new state back to the app
+        }
+        break;
+      case CMD_SET_LOOP:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET LOOP %s\n", v[1] ? "ON" : "off");
+          relayLoop(v[1]);   // -> Teensy: @LOOP=<0|1>
+        }
+        break;
+      case CMD_SET_PRESSURE:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET PRESSURE mask=%u\n", v[1]);
+          relayPressure(v[1]);   // -> Teensy: @PRESSURE=<mask>
+        }
+        break;
+      case CMD_SET_MODWHEEL:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET MODWHEEL mask=%u\n", v[1]);
+          relayModWheel(v[1]);   // -> Teensy: @MODWHEEL=<mask>
+        }
+        break;
+      case CMD_SET_LFOMODE:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET LFOMODE %s\n", v[1] ? "force" : "respect");
+          relayLfoMode(v[1]);    // -> Teensy: @LFOMODE=<0|1>
+        }
+        break;
+      case CMD_SET_TIMBRE:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET TIMBRE mask=%u\n", v[1]);
+          relayTimbre(v[1]);     // -> Teensy: @TIMBRE=<mask>
+        }
+        break;
+      case CMD_PLAY_DRUM: {
+        uint8_t groove = (v.size() >= 2) ? (uint8_t)v[1] : 0;
+        Serial.printf("[ble] cmd: PLAY DRUM %u\n", groove);
+        relayDrum(groove);       // -> Teensy: @DRUM=<index>
+        break;
+      }
+      case CMD_STOP_DRUM:
+        Serial.println("[ble] cmd: STOP DRUM");
+        relayDrumStop();         // -> Teensy: @DRUM=stop
+        break;
+      case CMD_READ_FILE: {
+        std::string path(v.begin() + 1, v.end());   // opcode byte + path string
+        Serial.printf("[ble] cmd: READ FILE %s\n", path.c_str());
+        relayReadFile(path.c_str());   // -> Teensy: @READ=<path>; frames come back on FILE char
+        break;
+      }
+      case CMD_PLAY_DRUM_FILE: {
+        std::string fname(v.begin() + 1, v.end());
+        Serial.printf("[ble] cmd: PLAY DRUM FILE %s\n", fname.c_str());
+        relayDrumFile(fname.c_str());  // -> Teensy: @DRUMF=<filename>
+        break;
+      }
+      case CMD_RELAY_LINE: {
+        std::string ln(v.begin() + 1, v.end());   // opcode byte + literal control line
+        Serial.printf("[ble] cmd: RELAY %s\n", ln.c_str());
+        relayLine(ln.c_str());         // -> Teensy: <line>\n  (verbatim @-protocol)
+        break;
+      }
+      case CMD_SET_DRUM_KIT:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET DRUM KIT %u\n", (uint8_t)v[1]);
+          relayDrumKit((uint8_t)v[1]);   // -> Teensy: @DRUMKIT=<index>
+        }
+        break;
+      case CMD_SET_DRUM_VOL:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET DRUM VOL %u%%\n", (uint8_t)v[1]);
+          relayDrumVol((uint8_t)v[1]);   // -> Teensy: @DRUMVOL=<pct>
+        }
+        break;
+      case CMD_SET_BPM:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET BPM %u\n", (uint8_t)v[1]);
+          relayBpm((uint8_t)v[1]);        // -> Teensy: @BPM=<n>
+        }
+        break;
+      case CMD_SET_DRUM_SYNCHRO:
+        if (v.size() >= 2) {
+          Serial.printf("[ble] cmd: SET DRUM SYNCHRO %u\n", (uint8_t)v[1]);
+          relayDrumSynchro((uint8_t)v[1]); // -> Teensy: @DRUMSYNCHRO=<0|1>
+        }
+        break;
+      case CMD_SET_ARP_ON:
+        if (v.size() >= 2) { Serial.printf("[ble] cmd: SET ARP ON %u\n", (uint8_t)v[1]); relayArpOn((uint8_t)v[1]); }
+        break;
+      case CMD_SET_ARP_PATTERN:
+        if (v.size() >= 2) { Serial.printf("[ble] cmd: SET ARP PATTERN %u\n", (uint8_t)v[1]); relayArpPattern((uint8_t)v[1]); }
+        break;
+      case CMD_SET_ARP_RATE:
+        if (v.size() >= 2) { Serial.printf("[ble] cmd: SET ARP RATE %u\n", (uint8_t)v[1]); relayArpRate((uint8_t)v[1]); }
+        break;
+      case CMD_SET_ARP_OCT:
+        if (v.size() >= 2) { Serial.printf("[ble] cmd: SET ARP OCT %u\n", (uint8_t)v[1]); relayArpOct((uint8_t)v[1]); }
+        break;
+      case CMD_SET_ARP_LATCH:
+        if (v.size() >= 2) { Serial.printf("[ble] cmd: SET ARP LATCH %u\n", (uint8_t)v[1]); relayArpLatch((uint8_t)v[1]); }
+        break;
       default:
         Serial.printf("[ble] cmd: unknown opcode 0x%02X\n", op);
         break;
@@ -372,7 +626,7 @@ static void setupBle() {
   BLEServer *server = BLEDevice::createServer();
   server->setCallbacks(new ServerCallbacks());
 
-  BLEService *svc = server->createService(TDSP_SVC_UUID);
+  BLEService *svc = server->createService(BLEUUID(TDSP_SVC_UUID), 30);   // >=21 handles: 7 chars + CCCDs (default 15 drops DRUMS/FILE)
 
   BLECharacteristic *cmd = svc->createCharacteristic(
       TDSP_CMD_UUID,
@@ -401,6 +655,15 @@ static void setupBle() {
       TDSP_INSTR_UUID,
       BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
   g_instrChar->addDescriptor(new BLE2902());
+  g_drumsChar = svc->createCharacteristic(
+      TDSP_DRUMS_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  g_drumsChar->addDescriptor(new BLE2902());
+  // Generic file-transfer stream (@FB/@FD/@FE/@FERR + @MANIFESTS), forwarded verbatim.
+  g_fileChar = svc->createCharacteristic(
+      TDSP_FILE_UUID,
+      BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+  g_fileChar->addDescriptor(new BLE2902());
 
   svc->start();
 
@@ -421,6 +684,7 @@ static void setupBle() {
 static constexpr int LED_PIN = 2;
 
 void setup() {
+  Serial.setRxBufferSize(16384);   // hold a full @INSTR/@DXLS catalog burst from the Teensy while the loop is busy notifying BLE (default 256 B overflows -> truncated/lost)
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
   Serial.println("T-DSP ESP32: A2DP sink + BLE control, starting...");
@@ -434,7 +698,7 @@ void setup() {
   // The bond can still be wiped on demand -- the 'f' serial command and the BLE
   // FORGET opcode both call clean_last_connection(), after which there is no
   // device to auto-reconnect to and the sink is freshly pairable.
-  a2dp_sink.set_auto_reconnect(true);
+  a2dp_sink.set_auto_reconnect(false);   // explicit only: never auto-reconnect to the last phone
 
   // Mirror A2DP connect/disconnect out to the BLE status characteristic.
   a2dp_sink.set_on_connection_state_changed(onA2dpConnState);
@@ -470,10 +734,10 @@ void setup() {
   a2dp_sink.set_pin_config(pin_config);
 
   a2dp_sink.start(BT_DEVICE_NAME);
-  // Boot straight into pairing mode so a phone can connect immediately, and stay
-  // there any time nothing is connected (see onA2dpConnState).
-  enterPairingMode("boot");
-  Serial.printf("A2DP sink up. Pair with \"%s\".\n", BT_DEVICE_NAME);
+  // Boot IDLE, not pairing: Bluetooth audio is explicit. Tap "Connect Bluetooth Audio"
+  // in the app to reconnect the last phone, or "Pairing mode" to add a new one.
+  goIdle("boot");
+  Serial.printf("A2DP sink up (idle). Connect from the app to start Bluetooth audio.\n");
 
   // BLE control comes up AFTER A2DP so it attaches to the running stack.
   setupBle();
@@ -502,7 +766,9 @@ void loop() {
   // Two framings share this UART: bare single-char commands (p/f/x/s from the
   // Teensy's P/F relay + pairing) and '@'-framed lines (e.g. @SONGS=/@INSTR=
   // catalog). A '@' starts line mode until '\n'; other bytes are single commands.
-  static char line[600];
+  // Big enough for the whole catalog line: Dexed's full 320-voice @INSTR list is
+  // ~7 KB. The value is then chunked out over BLE by setCatalog().
+  static char line[8192];
   static size_t ln = 0;
   static bool inLine = false;
   while (Serial.available()) {

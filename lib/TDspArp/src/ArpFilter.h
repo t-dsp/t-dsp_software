@@ -96,8 +96,26 @@ public:
         PatStair,           // 1 1 2 2 3 3 ...
         PatSpiral,          // cycles with octave lift every pass
         PatEuclidean,       // evenly-distributed hits across stepLength
+        PatUserSequence,    // explicit per-step table (see SeqStep / setSequence)
         PatCount
     };
+
+    // One entry of a user step-sequence pattern (PatUserSequence). Unlike the
+    // generative patterns above — which compute an index from a formula — a
+    // user sequence is DATA: an explicit list of steps, each naming which held
+    // note plays (as a degree into the sorted-ascending held set), an octave
+    // shift, and a velocity. This is the "actual arpeggiator preset" shape used
+    // by Cthulhu / LibreArp / hardware arps: the shape lives in the preset, not
+    // in a C++ case. Held notes are still the raw material, so the same preset
+    // transposes to whatever key/chord is held ("play it in key").
+    struct SeqStep {
+        int8_t  degree;    // >=0: index into sorted-ascending held set (wraps mod count)
+                           //  -1 (SeqRest): silent step   -2 (SeqChord): all held notes
+        int8_t  octave;    // octave shift applied to the emitted note [-3..+3]
+        uint8_t velocity;  // 0 = inherit engine VelMode; else absolute 1..127
+    };
+    static constexpr int8_t SeqRest  = -1;
+    static constexpr int8_t SeqChord = -2;
 
     // Musical rate divisions expressed in 24 PPQN ticks. Short names keep
     // the switch table terse; the presets map enum names to ticks.
@@ -190,6 +208,13 @@ public:
     // Safe to call if _clock is null.
     void tick(uint32_t nowMicros);
 
+    // Re-lock the running pattern to the master beat grid. Call after the
+    // transport re-zeros (Conductor::start()) while the arp is holding a chord,
+    // so the pattern snaps back onto the new downbeat instead of keeping its
+    // old (now-stale) phase. No-op if idle/disabled — a fresh press re-locks on
+    // its own via the grid-aligned cold-start anchor.
+    void resyncToGrid();
+
     // -------- MidiSink overrides (from upstream router) --------
     void onNoteOn      (uint8_t channel, uint8_t note, uint8_t velocity) override;
     void onNoteOff     (uint8_t channel, uint8_t note, uint8_t velocity) override;
@@ -209,6 +234,9 @@ public:
     // -------- Parameter API --------
     void setEnabled(bool on);
     bool enabled()   const { return _enabled; }
+    // Restart the running pattern from step 0 without dropping the held chord — a Play
+    // press that re-triggers the cycle even when the arp is already on. No-op if bypassed.
+    void restart();
 
     void setPattern(Pattern p);
     Pattern pattern() const { return _pattern; }
@@ -276,6 +304,18 @@ public:
     void setRepeat(uint8_t n);             // [1, 8] — repeat each step N times
     uint8_t repeat() const { return _repeat; }
 
+    // -------- User step-sequence (PatUserSequence) --------
+    // Load an explicit step table. Steps beyond kMaxSteps are ignored. Setting
+    // a non-empty sequence also aligns _stepLength to it (so velocity ramps and
+    // the step mask span the sequence) and rewinds to step 0. Does NOT change
+    // the active pattern — call setPattern(PatUserSequence) to play it.
+    void setSequence(const SeqStep *steps, uint8_t count);
+    void setSequenceStep(uint8_t i, int8_t degree, int8_t octave, uint8_t vel);
+    void setSequenceLength(uint8_t count); // [0, kMaxSteps]
+    void clearSequence();
+    uint8_t sequenceLength() const { return _seqLength; }
+    const SeqStep &sequenceStep(uint8_t i) const { return _seq[i < kMaxSteps ? i : 0]; }
+
     // Hard reset — all held notes released, all pending gate-offs flushed.
     void panic();
 
@@ -311,6 +351,10 @@ private:
     uint8_t    _scaleRoot     = 0;
     int8_t     _transpose     = 0;
     uint8_t    _repeat        = 1;
+
+    // User step-sequence table (consumed only when _pattern == PatUserSequence).
+    SeqStep    _seq[kMaxSteps] = {};
+    uint8_t    _seqLength      = 0;
 
 public:
     // Held-note tracking (post-latch). Added on note-on, removed on
@@ -398,6 +442,12 @@ private:
     void removeHeld(uint8_t ch, uint8_t note);
     void clearAllHeld();
 
+    // Compute a _lastStepTick value that locks the step grid to the MASTER
+    // beat grid (via _clock->tickCount()) rather than the keypress phase, so
+    // arp steps land on the beat with the drums / song / metronome. Falls back
+    // to the raw keypress count when no clock is attached.
+    uint32_t gridAlignedStepAnchor() const;
+
     // Step generation — decide what to play this step.
     // Returns count of notes; fills outNotes/outVels/outChans/outSrcChans.
     // outCap must be at least 4 for chord-mode safety.
@@ -418,6 +468,11 @@ private:
 
     // Compute velocity for this step emission.
     uint8_t stepVelocity(uint32_t step, uint8_t sourceVel) const;
+
+    // For PatUserSequence: replace the octave shift and (if the step names a
+    // non-zero velocity) the velocity with the per-step values. No-op for every
+    // other pattern, so both emission loops can call it unconditionally.
+    void applySeqOverride(uint32_t step, int8_t &oct, uint8_t &vel) const;
 
     // Apply scale quantize to an emitted MIDI note.
     uint8_t quantizeToScale(uint8_t note) const;

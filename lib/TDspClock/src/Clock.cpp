@@ -195,6 +195,27 @@ float Clock::barPhase() const {
     return phase;
 }
 
+double Clock::positionBeats() const {
+    // position = (ticks + intra-tick fraction) / PPQN, in quarter-note beats.
+    //
+    // Mirrors beatPhase()'s interpolation, but accumulated onto the ABSOLUTE
+    // tick count instead of wrapping per beat. Monotonic by construction:
+    // _tickCount only ever increments, and `frac` runs [0,1) within the
+    // current tick then resets to ~0 the instant _tickCount advances (the
+    // tick path sets _lastTickMicros = now, so `since` restarts near 0) — so
+    // (_tickCount + frac) is continuous and never steps backward across the
+    // tick/beat edge. Single-threaded (foreground) like every other query.
+    double ticks = (double)_tickCount;
+    if (_measuredIntervalUs > 0 && _lastTickMicros != 0 && _running) {
+        const uint32_t since = _lastUpdateMicros - _lastTickMicros;
+        double frac = (double)since / (double)_measuredIntervalUs;
+        if (frac < 0.0)  frac = 0.0;
+        if (frac >= 1.0) frac = 0.999999;   // never reach the next tick early
+        ticks += frac;
+    }
+    return ticks / (double)kPpqn;
+}
+
 bool Clock::consumeBeatEdge() {
     const bool e = _beatEdge;
     _beatEdge = false;

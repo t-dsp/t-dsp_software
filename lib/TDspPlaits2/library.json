@@ -1,0 +1,16 @@
+{
+  "name": "TDspPlaits2",
+  "version": "0.1.0",
+  "description": "Authentic Mutable Instruments Plaits macro-oscillator (Emilie Gillet, MIT) exposed as a Teensy Audio Library source. Vendors plaits/ + the stmlib DSP subset (dsp + utils only; no fft/midi/programming/ui). AudioSynthPlaits wraps one Plaits Voice as a mono int16 AudioStream node (renders native 48 kHz in kBlockSize=12 chunks); Plaits2Sink is a MidiSink-driven, MPE-aware polyphonic voice pool over N AudioSynthPlaits nodes. Supersedes the stock-primitive lib/TDspPlaits approximation.",
+  "keywords": ["plaits", "mutable", "macro-oscillator", "synth", "mpe", "teensy", "t-dsp"],
+  "frameworks": "arduino",
+  "platforms": "teensy",
+  "dependencies": {
+    "Audio": "*",
+    "TDspMidi": "*"
+  },
+  "license": "MIT",
+  "build": {
+    "flags": ["-I src"]
+  }
+}

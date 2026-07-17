@@ -1,0 +1,813 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>T-DSP USB Control</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 15px/1.4 system-ui, sans-serif; background: #14161a; color: #e6e8ec;
+         overflow-x: hidden; }   /* safety net: never scroll the page sideways */
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 18px;
+           background: #1b1e24; border-bottom: 1px solid #2a2e36; position: sticky; top: 0; }
+  header h1 { font-size: 16px; margin: 0; font-weight: 600; }
+  #synth { color: #8b93a1; font-size: 13px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: #d9534f; flex: 0 0 auto; }
+  .dot.on { background: #5cb85c; }
+  main { max-width: 640px; margin: 0 auto; padding: 18px; display: grid; gap: 16px; }
+  .card { background: #1b1e24; border: 1px solid #2a2e36; border-radius: 10px; padding: 14px 16px; }
+  .card h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+             color: #8b93a1; margin: 0 0 10px; }
+  label { display: block; font-size: 13px; margin-bottom: 6px; color: #b8bec9; }
+  label.cbx { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; margin: 0; }
+  select, input[type=range], input[type=text], button { font: inherit; }
+  select, input[type=text] { width: 100%; min-width: 0; padding: 8px; background: #14161a; color: #e6e8ec;
+           border: 1px solid #333844; border-radius: 6px;
+           text-overflow: ellipsis; }   /* long option/instrument names don't stretch the box */
+  input[type=text]::placeholder { color: #6b7280; }
+  input[type=range] { width: 100%; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .row > * { flex: 1; min-width: 0; }   /* min-width:0 lets flex items shrink instead of
+                                           forcing the page wider on long content */
+  button { padding: 9px 14px; background: #2f6feb; color: #fff; border: none;
+           border-radius: 6px; cursor: pointer; }
+  button.ghost { background: #262a33; }
+  button.step { flex: 0 0 44px; padding: 8px 0; font-size: 18px; font-weight: 700; }
+  button:disabled { opacity: .4; cursor: default; }
+  .seg { display: flex; border: 1px solid #333844; border-radius: 6px; overflow: hidden; }
+  .seg button { border-radius: 0; background: #14161a; color: #b8bec9; }
+  .seg button.active { background: #2f6feb; color: #fff; }
+  #vol-val { flex: 0 0 48px; text-align: right; color: #8b93a1; }
+  pre#log { background: #0e1013; border: 1px solid #2a2e36; border-radius: 8px;
+            padding: 10px; height: 150px; overflow: auto; font-size: 12px;
+            color: #8b93a1; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .note { color: #8b93a1; font-size: 12px; }
+  .lib-row { padding: 8px 12px; cursor: pointer; border-bottom: 1px solid #23262e;
+             display: flex; gap: 8px; align-items: center; }
+  .lib-row:last-child { border-bottom: none; }
+  .lib-row:hover { background: #23262e; }
+  .lib-row .ic { flex: 0 0 18px; text-align: center; color: #8b93a1; }
+  .lib-row.vsel { background: #2f6feb; color: #fff; }
+</style>
+</head>
+<body>
+<header>
+  <span class="dot" id="dot"></span>
+  <h1>T-DSP USB Control</h1>
+  <span id="synth"></span>
+  <span style="flex:1"></span>
+  <button id="connect">Connect</button>
+</header>
+
+<main>
+  <div class="card" id="unsupported" style="display:none">
+    <h2>Web Serial not available</h2>
+    <p class="note">This page needs the Web Serial API — open it in Chrome or Edge (desktop),
+    served from <b>https://</b> or <b>http://localhost</b>. Firefox and Safari don't support it.</p>
+  </div>
+
+  <div class="card">
+    <h2>Master volume</h2>
+    <div class="row">
+      <input type="range" id="vol" min="0" max="100" value="80" disabled>
+      <span id="vol-val">80%</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Tempo</h2>
+    <label>BPM <span id="bpm-val" style="color:#8b93a1">120</span></label>
+    <div class="row">
+      <button id="bpm-dn" class="ghost step" disabled>−</button>
+      <input type="range" id="bpm" min="60" max="200" step="1" value="120" style="flex:6" disabled>
+      <button id="bpm-up" class="ghost step" disabled>+</button>
+    </div>
+    <p class="note">One tempo for the MIDI song AND the drum groove — they lock together and move
+      as you drag. Accurate lock needs a song with real tempo (an SD .mid); built-in demos are estimated.</p>
+  </div>
+
+  <div class="card">
+    <h2>Song</h2>
+    <div class="row">
+      <select id="song" disabled></select>
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button id="play" disabled>Play</button>
+      <button id="stop" class="ghost" disabled>Stop</button>
+      <button id="refresh" class="ghost" disabled>Refresh SD</button>
+      <label style="display:flex; align-items:center; gap:6px; margin:0 0 0 auto; font-size:13px; color:#b8bec9">
+        <input type="checkbox" id="loop" disabled> Loop
+      </label>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Drums</h2>
+    <label>Groove</label>
+    <div class="row" id="drum-sort" style="gap:6px; margin-bottom:8px">
+      <button class="ghost step active" data-sort="genre" disabled style="flex:1">By Genre</button>
+      <button class="ghost step" data-sort="pack" disabled style="flex:1">By Pack</button>
+    </div>
+    <div class="row">
+      <select id="drum-bank" disabled title="Browse a bank (All = every groove)"></select>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <select id="drum" disabled></select>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="drum-prev" class="ghost" disabled>◀ Prev</button>
+      <button id="drum-next" class="ghost" disabled>Next ▶</button>
+      <span id="drum-count" class="note" style="margin-left:auto; align-self:center"></span>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button id="drum-play" disabled>Play</button>
+      <button id="drum-stop" class="ghost" disabled>Stop</button>
+    </div>
+    <label style="display:flex; align-items:center; gap:6px; margin-top:8px; font-size:13px; color:#b8bec9">
+      <input type="checkbox" id="drum-synchro" disabled> Synchro start — begin on your first keyboard note (PSS-140 style)
+    </label>
+    <label style="margin-top:12px">Instrument (kit)</label>
+    <select id="drum-kit" disabled></select>
+    <div class="row" style="margin-top:8px">
+      <button id="drum-kit-prev" class="ghost" disabled>◀ Prev</button>
+      <button id="drum-kit-next" class="ghost" disabled>Next ▶</button>
+    </div>
+    <label style="margin-top:12px">Volume <span id="drum-vol-val" style="color:#8b93a1">100%</span></label>
+    <div class="row">
+      <button id="drum-vol-dn" class="ghost step" disabled>−</button>
+      <input type="range" id="drum-vol" min="0" max="150" step="5" value="100" style="flex:6" disabled>
+      <button id="drum-vol-up" class="ghost step" disabled>+</button>
+    </div>
+    <p class="note" id="drum-note">A looping groove plays under whatever you perform live. Needs a General-MIDI
+      engine (TSF/SF2/OPL3/OPLL) — silent on Dexed/Plaits/Rings/VA. Add grooves with tools/fetch_drums.py.</p>
+  </div>
+
+  <div class="card">
+    <h2>Arpeggiator</h2>
+    <label style="display:flex; align-items:center; gap:6px; margin-bottom:10px; font-size:13px; color:#b8bec9">
+      <input type="checkbox" id="arp-on" disabled> Enable — arpeggiate the notes you hold, locked to the tempo BPM
+    </label>
+    <label>Pattern</label>
+    <select id="arp-pat" disabled></select>
+    <label style="margin-top:10px">Rate</label>
+    <select id="arp-rate" disabled></select>
+    <div class="row" style="margin-top:10px">
+      <div style="flex:2">
+        <label>Octaves</label>
+        <select id="arp-oct" disabled></select>
+      </div>
+      <label style="flex:1; display:flex; align-items:center; gap:6px; align-self:flex-end; margin-bottom:9px; font-size:13px; color:#b8bec9">
+        <input type="checkbox" id="arp-latch" disabled> Latch
+      </label>
+    </div>
+    <p class="note">Hold a chord and it repeats in the chosen pattern. Rates are note divisions — a dot (.) is dotted,
+      a T is a triplet. Needs live MIDI notes (a keyboard) — it doesn't arpeggiate the backing song or groove.</p>
+  </div>
+
+  <div class="card">
+    <h2>Instrument</h2>
+    <input type="text" id="instr-search" placeholder="Search instruments…" disabled autocomplete="off" style="margin-bottom:8px">
+    <select id="instr" disabled></select>
+    <div class="row" style="margin-top:10px">
+      <button id="instr-prev" class="ghost" disabled>◀ Prev</button>
+      <button id="instr-next" class="ghost" disabled>Next ▶</button>
+    </div>
+  </div>
+
+  <div class="card" id="patchlib-card" style="display:none">
+    <h2>SD Patch Library</h2>
+    <div class="row" style="margin-bottom:8px; gap:8px">
+      <button id="lib-back" class="ghost step" disabled title="Up a level">↑</button>
+      <span id="lib-path" class="note" style="flex:1; align-self:center; overflow:hidden;
+            text-overflow:ellipsis; white-space:nowrap">/dexed</span>
+      <button id="lib-refresh" class="ghost" disabled>Reload</button>
+    </div>
+    <div id="lib-list" style="max-height:300px; overflow:auto; border:1px solid #333844;
+         border-radius:6px"></div>
+    <div class="row" style="margin-top:8px">
+      <button id="lib-pprev" class="ghost" disabled>◀ Page</button>
+      <span id="lib-pinfo" class="note" style="flex:1; align-self:center; text-align:center"></span>
+      <button id="lib-pnext" class="ghost" disabled>Page ▶</button>
+    </div>
+    <p class="note">Browse the DX7 cartridge library on the SD card (thousands of voices):
+      folders → carts → voices. Tapping a voice loads it into the Dexed pool. Dexed builds only.</p>
+  </div>
+
+  <div class="card">
+    <h2>MIDI mode</h2>
+    <div class="seg" id="mode">
+      <button data-v="0" class="active" disabled>Normal MIDI</button>
+      <button data-v="1" disabled>MPE</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>ReplayGain</h2>
+    <div class="seg" id="rg">
+      <button data-v="1" class="active" disabled>On</button>
+      <button data-v="0" disabled>Off</button>
+    </div>
+    <p class="note">Loudness normalization across voices &amp; GM programs (K-weighted). Off = raw
+      synth output. Applies to the whole synth.</p>
+  </div>
+
+  <div class="card">
+    <h2>Expression — controller &rarr; sound</h2>
+    <label style="margin:0 0 4px">Mod Wheel (every keyboard)</label>
+    <div class="row" style="flex-wrap:wrap; gap:14px; margin-bottom:12px">
+      <label class="cbx"><input type="checkbox" class="mod" data-bit="4" checked disabled> Vibrato</label>
+      <label class="cbx"><input type="checkbox" class="mod" data-bit="8" disabled> Tremolo</label>
+      <label class="cbx"><input type="checkbox" class="mod" data-bit="2" disabled> Brightness</label>
+    </div>
+    <label style="margin:0 0 4px">Timbre — CC74 slide (MPE&nbsp;Y-axis)</label>
+    <div class="row" style="flex-wrap:wrap; gap:14px; margin-bottom:12px">
+      <label class="cbx"><input type="checkbox" class="tim" data-bit="1" checked disabled> Volume</label>
+      <label class="cbx"><input type="checkbox" class="tim" data-bit="2" checked disabled> Brightness</label>
+      <label class="cbx"><input type="checkbox" class="tim" data-bit="4" disabled> Vibrato</label>
+      <label class="cbx"><input type="checkbox" class="tim" data-bit="8" disabled> Tremolo</label>
+    </div>
+    <label style="margin:0 0 4px">Pressure (aftertouch / MPE&nbsp;Z)</label>
+    <div class="row" style="flex-wrap:wrap; gap:14px; margin-bottom:12px">
+      <label class="cbx"><input type="checkbox" class="press" data-bit="1" checked disabled> Volume</label>
+      <label class="cbx"><input type="checkbox" class="press" data-bit="2" checked disabled> Brightness</label>
+      <label class="cbx"><input type="checkbox" class="press" data-bit="4" disabled> Vibrato</label>
+      <label class="cbx"><input type="checkbox" class="press" data-bit="8" disabled> Tremolo</label>
+    </div>
+    <label style="margin:0 0 4px">LFO for Vibrato / Tremolo</label>
+    <div class="seg" id="lfomode">
+      <button data-v="0" disabled>Respect patch [V]/[T]</button>
+      <button data-v="1" class="active" disabled>Force on any patch</button>
+    </div>
+    <p class="note">Volume &amp; Brightness work on any patch. Vibrato/Tremolo need an LFO —
+      &ldquo;Force&rdquo; adds one to any patch; &ldquo;Respect&rdquo; only sounds on instruments tagged [V]/[T].</p>
+  </div>
+
+  <div class="card">
+    <h2>DAC high-pass</h2>
+    <select id="hpf" disabled>
+      <option value="0">Off</option>
+      <option value="1">Mode 1</option>
+      <option value="2">Mode 2</option>
+      <option value="3">Mode 3</option>
+    </select>
+  </div>
+
+  <div class="card">
+    <h2>Serial log</h2>
+    <pre id="log"></pre>
+  </div>
+</main>
+
+<script>
+// Standard General MIDI program names — used when the device reports a GM engine
+// (@INSTR header carries a "GM" flag instead of streaming 128 names).
+// GM drum kits — the "instrument" for the Drums menu. The index is sent as
+// @DRUMKIT=<i>; the firmware maps it to a channel-10 program change. Must match
+// kDrumKits[] in the mix-kit firmware (and DRUM_KITS in the app).
+const DRUM_KITS = ["Standard","Room","Power","Electronic","TR-808","Jazz","Brush","Orchestra","SFX"];
+// Arpeggiator pattern + rate labels — index = the value sent via @ARPPAT / @ARPRATE.
+// MUST match the Pattern / Rate enums in lib/TDspArp/src/ArpFilter.h.
+const ARP_PATTERNS = ["Up","Down","Up/Down","Down/Up","Up/Down (incl. ends)","Down/Up (incl. ends)",
+  "As Played","As Played Rev","Random","Random Walk","Chord","Chord + Up","Chord Stab","Converge","Diverge",
+  "Thumb","Thumb Up/Down","Pinky","Pinky Up/Down","Ascend 3","Ascend 4","Crab Walk","Stair","Spiral","Euclidean"];
+const ARP_RATES = ["1/1","1/2.","1/2","1/2T","1/4.","1/4","1/4T","1/8.","1/8","1/8T","1/16.","1/16","1/16T","1/32","1/32T"];
+
+const GM_NAMES = ["Acoustic Grand Piano","Bright Acoustic Piano","Electric Grand Piano","Honky-tonk Piano","Electric Piano 1","Electric Piano 2","Harpsichord","Clavinet","Celesta","Glockenspiel","Music Box","Vibraphone","Marimba","Xylophone","Tubular Bells","Dulcimer","Drawbar Organ","Percussive Organ","Rock Organ","Church Organ","Reed Organ","Accordion","Harmonica","Tango Accordion","Acoustic Guitar (nylon)","Acoustic Guitar (steel)","Electric Guitar (jazz)","Electric Guitar (clean)","Electric Guitar (muted)","Overdriven Guitar","Distortion Guitar","Guitar Harmonics","Acoustic Bass","Electric Bass (finger)","Electric Bass (pick)","Fretless Bass","Slap Bass 1","Slap Bass 2","Synth Bass 1","Synth Bass 2","Violin","Viola","Cello","Contrabass","Tremolo Strings","Pizzicato Strings","Orchestral Harp","Timpani","String Ensemble 1","String Ensemble 2","Synth Strings 1","Synth Strings 2","Choir Aahs","Voice Oohs","Synth Voice","Orchestra Hit","Trumpet","Trombone","Tuba","Muted Trumpet","French Horn","Brass Section","Synth Brass 1","Synth Brass 2","Soprano Sax","Alto Sax","Tenor Sax","Baritone Sax","Oboe","English Horn","Bassoon","Clarinet","Piccolo","Flute","Recorder","Pan Flute","Blown Bottle","Shakuhachi","Whistle","Ocarina","Lead 1 (square)","Lead 2 (sawtooth)","Lead 3 (calliope)","Lead 4 (chiff)","Lead 5 (charang)","Lead 6 (voice)","Lead 7 (fifths)","Lead 8 (bass + lead)","Pad 1 (new age)","Pad 2 (warm)","Pad 3 (polysynth)","Pad 4 (choir)","Pad 5 (bowed)","Pad 6 (metallic)","Pad 7 (halo)","Pad 8 (sweep)","FX 1 (rain)","FX 2 (soundtrack)","FX 3 (crystal)","FX 4 (atmosphere)","FX 5 (brightness)","FX 6 (goblins)","FX 7 (echoes)","FX 8 (sci-fi)","Sitar","Banjo","Shamisen","Koto","Kalimba","Bagpipe","Fiddle","Shanai","Tinkle Bell","Agogo","Steel Drums","Woodblock","Taiko Drum","Melodic Tom","Synth Drum","Reverse Cymbal","Guitar Fret Noise","Breath Noise","Seashore","Bird Tweet","Telephone Ring","Helicopter","Applause","Gunshot"];
+
+let port, writer, reader, keepReading = false;
+const $ = id => document.getElementById(id);
+const enc = new TextEncoder();
+
+function log(s) {
+  const el = $('log');
+  el.textContent += s + '\n';
+  el.scrollTop = el.scrollHeight;
+}
+
+async function send(line) {
+  if (!writer) return;
+  await writer.write(enc.encode(line + '\n'));
+  log('> ' + line);
+}
+
+// ---- connection ----
+if (!('serial' in navigator)) { $('unsupported').style.display = 'block'; $('connect').disabled = true; }
+
+// Open (or re-open) a granted serial port and pull the device state.
+async function openPort(p) {
+  port = p;
+  await port.open({ baudRate: 115200 });
+  writer = port.writable.getWriter();
+  setConnected(true);
+  readLoop();
+  await send('@GETCAT');             // pull song + instrument catalog
+  await send('@RG');                 // sync the ReplayGain toggle to the device state
+  libReset();                        // load the SD patch-library root (/dexed)
+}
+
+$('connect').onclick = async () => {
+  if (port) { releasedForFlash = false; await disconnect(); return; }  // manual: no auto-reconnect
+  try {
+    await openPort(await navigator.serial.requestPort());
+  } catch (e) { log('! ' + e.message); port = null; }
+};
+
+// ---- flash hand-off (release.flag) ----------------------------------------
+// The Teensy's USB serial (this port) is held exclusively while we're connected,
+// which blocks `pio run -t upload` (teensy_reboot needs to open the port). An
+// automated agent can't send us a serial command to let go — the port is busy —
+// so instead it drops a `release.flag` file next to this page (served by the same
+// `python -m http.server`). We poll it: "1" => disconnect so the flash can run;
+// cleared/absent => grab the Teensy back once it re-enumerates. getPorts() returns
+// the already-granted port, so reconnecting needs no user gesture.
+let releasedForFlash = false;
+let releaseStartMs = 0;        // when we let go of the port (for the stuck-flag timeout)
+let staleFlag = false;         // a flag we already gave up waiting on — ignore until cleared
+// Safety net: if release.flag is never cleared (a flasher crashed or forgot to delete
+// it), reconnect anyway after this long. A build+upload is well under this; the
+// reconnect just retries harmlessly until the Teensy's port re-appears. Prevents the
+// page from wedging on "Flashing…" forever.
+const FLASH_STUCK_MS = 45000;
+
+function setFlashStatus(on) {
+  $('connect').textContent = on ? 'Flashing…' : (port ? 'Disconnect' : 'Connect');
+  $('connect').disabled = on;
+}
+
+async function pollFlashFlag() {
+  let want = false;
+  try {
+    const res = await fetch('release.flag', { cache: 'no-store' });
+    if (res.ok) want = (await res.text()).trim().startsWith('1');
+  } catch {}                          // no server / missing file => treat as "not releasing"
+
+  if (!want) staleFlag = false;       // flag cleared -> the NEXT set is a fresh, legit request
+
+  if (want && port && !releasedForFlash && !staleFlag) {
+    releasedForFlash = true; releaseStartMs = Date.now();
+    log('* release.flag set — disconnecting for firmware flash…');
+    await disconnect();
+    setFlashStatus(true);
+  } else if (releasedForFlash && !port && (!want || Date.now() - releaseStartMs > FLASH_STUCK_MS)) {
+    // Reconnect when the flag clears, OR when we've waited too long (orphaned flag).
+    // getPorts()[0] is the previously-granted Teensy — no user gesture needed; it just
+    // fails silently until the port re-enumerates.
+    const ports = await navigator.serial.getPorts();
+    if (ports[0]) {
+      try {
+        await openPort(ports[0]); releasedForFlash = false; setFlashStatus(false);
+        if (want) { staleFlag = true;   // flag still set but we bailed — don't re-release it
+          log('* release.flag stuck >' + (FLASH_STUCK_MS / 1000) + 's — reconnected anyway (delete web/release.flag)'); }
+        else log('* reconnected after flash');
+      } catch {}                        // still re-enumerating — retry on the next tick
+    }
+  } else if (!want && releasedForFlash && port) {
+    releasedForFlash = false; setFlashStatus(false);   // reconnected some other way
+  }
+}
+setInterval(pollFlashFlag, 750);
+
+async function disconnect() {
+  keepReading = false;
+  try { await reader?.cancel(); } catch {}
+  try { writer?.releaseLock(); } catch {}
+  try { await port?.close(); } catch {}
+  port = writer = reader = null;
+  setConnected(false);
+}
+
+function setConnected(on) {
+  $('dot').classList.toggle('on', on);
+  $('connect').textContent = on ? 'Disconnect' : 'Connect';
+  ['vol','bpm','bpm-dn','bpm-up','song','play','stop','refresh','instr','instr-search','instr-prev','instr-next','hpf','loop',
+   'drum','drum-bank','drum-prev','drum-next','drum-play','drum-stop','drum-synchro','drum-kit','drum-kit-prev','drum-kit-next',
+   'drum-vol','drum-vol-dn','drum-vol-up',
+   'arp-on','arp-pat','arp-rate','arp-oct','arp-latch',
+   'lib-back','lib-refresh','lib-pprev','lib-pnext'].forEach(id => $(id).disabled = !on);
+  if (on && !$('drum-kit').options.length) {   // populate the fixed GM kit list once
+    $('drum-kit').innerHTML = DRUM_KITS.map((n, i) => `<option value="${i}">${n}</option>`).join('');
+  }
+  if (on && !$('arp-pat').options.length) {   // populate the fixed arp lists once
+    $('arp-pat').innerHTML  = ARP_PATTERNS.map((n, i) => `<option value="${i}">${n}</option>`).join('');
+    $('arp-rate').innerHTML = ARP_RATES.map((n, i) => `<option value="${i}">${n}</option>`).join('');
+    $('arp-rate').value = 11;   // 1/16 — matches the firmware default (ArpFilter Rate_1_16)
+    $('arp-oct').innerHTML  = [1, 2, 3, 4].map(n => `<option value="${n}">${n}</option>`).join('');
+  }
+  document.querySelectorAll('#mode button').forEach(b => b.disabled = !on);
+  document.querySelectorAll('.press, .mod, .tim').forEach(c => c.disabled = !on);
+  document.querySelectorAll('#lfomode button').forEach(b => b.disabled = !on);
+  document.querySelectorAll('#rg button').forEach(b => b.disabled = !on);
+  document.querySelectorAll('#drum-sort button').forEach(b => b.disabled = !on);
+  if (!on) { $('synth').textContent = ''; $('patchlib-card').style.display = 'none'; }
+}
+
+// Reflect the device's ReplayGain state on the segmented toggle.
+function setRgUI(on) {
+  document.querySelectorAll('#rg button').forEach(b =>
+    b.classList.toggle('active', (b.dataset.v === '1') === on));
+}
+
+async function readLoop() {
+  keepReading = true;
+  const dec = new TextDecoder();
+  let buf = '';
+  reader = port.readable.getReader();
+  try {
+    while (keepReading) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).replace(/\r$/, '');
+        buf = buf.slice(nl + 1);
+        handleLine(line);
+      }
+    }
+  } catch (e) { log('! ' + e.message); }
+  finally { try { reader.releaseLock(); } catch {} }
+}
+
+// ---- device -> UI ----
+function handleLine(line) {
+  if (line.startsWith('@SONGS=')) { fillSongs(line.slice(7)); }
+  else if (line.startsWith('@DRUMS=')) { fillDrums(line.slice(7)); }    // legacy flat list (fallback)
+  else if (line.startsWith('@MANIFESTS=')) { onManifests(line.slice(11)); }
+  else if (line.startsWith('@FB=')) { fileBegin(line.slice(4)); }
+  else if (line.startsWith('@FD=')) { fileData(line.slice(4)); }
+  else if (line.startsWith('@FE=')) { fileEnd(line.slice(4)); }
+  else if (line.startsWith('@FERR=')) { fileErr(line.slice(6)); }
+  else if (line.startsWith('@INSTR=')) { fillInstr(line.slice(7)); }
+  else if (line.startsWith('@DXLS=')) { fillLibDir(line.slice(6)); }
+  else if (line.startsWith('@DXVL=')) { fillLibVoices(line.slice(6)); }
+  else if (line.startsWith('@DXPICKED=')) { const p = line.slice(10).split('\t');
+           log('loaded ' + (p[2] || '?') + '  (' + (p[0] || '') + ' v' + (p[1] || '') + ')'); }
+  else if (line.startsWith('@RG=')) { setRgUI(line.slice(4).trim() === '1'); }
+  else if (line) { log(line); }   // debug / heartbeat — just echo
+}
+
+function fillSongs(payload) {
+  const names = payload ? payload.split('|') : [];
+  const sel = $('song');
+  sel.innerHTML = names.map((n, i) => `<option value="${i}">${escapeHtml(n)}</option>`).join('');
+}
+
+// LEGACY flat groove list (@DRUMS=name|name|…). Only used as a fallback when the
+// device advertises no drums manifest — the manifest browser (below) supersedes it.
+function fillDrums(payload) {
+  if (drumMode === 'manifest') return;   // manifest owns the list; ignore the legacy line
+  const names = payload ? payload.split('|').filter(n => n.length) : [];
+  const sel = $('drum');
+  drumMode = 'legacy';
+  sel.innerHTML = names.map((n, i) => `<option value="${i}">${escapeHtml(n)}</option>`).join('');
+  if (!names.length) $('drum-note').textContent =
+    'No grooves on the SD card yet — run tools/fetch_drums.py to add /drums, then Refresh SD.';
+}
+
+// ---- Generic file transfer (@READ -> @FB/@FD/@FE frames, base64) -------------
+// The device streams any SD file as base64 chunks (see CATALOG_TRANSPORT.md). We
+// reassemble by seq, concatenate the base64, and decode once. One in-flight read.
+const US = '\x1f';
+let fileXfer = null;            // { id, path, bytes, chunks:[] }
+let pendingRead = null;        // { path, resolve, reject }
+function readFile(path) {
+  return new Promise((resolve, reject) => {
+    if (pendingRead) { reject(new Error('a file read is already in progress')); return; }
+    pendingRead = { path, resolve, reject };
+    send('@READ=' + path);
+  });
+}
+function fileBegin(s) { const f = s.split(US); fileXfer = { id: f[0], path: f[1], bytes: +f[2], chunks: [] }; }
+function fileData(s)  { const f = s.split(US); if (fileXfer && f[0] === fileXfer.id) fileXfer.chunks[+f[1]] = f[2]; }
+function fileErr(s)   { const f = s.split(US); const p = pendingRead; pendingRead = null; fileXfer = null;
+                        if (p) p.reject(new Error(f[1] || 'read error')); }
+function fileEnd(s) {
+  const f = s.split(US);
+  const p = pendingRead;
+  if (!fileXfer || !p) { fileXfer = null; return; }
+  const count = +f[1];
+  let b64 = '';
+  for (let i = 0; i < count; i++) { if (fileXfer.chunks[i] == null) { pendingRead = null; fileXfer = null; p.reject(new Error('missing chunk ' + i)); return; } b64 += fileXfer.chunks[i]; }
+  let text = '';
+  try {
+    const bin = atob(b64);
+    const bytes = Uint8Array.from(bin, c => c.charCodeAt(0));
+    text = new TextDecoder().decode(bytes);
+  } catch (e) { pendingRead = null; fileXfer = null; p.reject(e); return; }
+  pendingRead = null; fileXfer = null;
+  p.resolve(text);
+}
+
+// ---- Manifest registry + two-axis drum browser ------------------------------
+// The device tells us which source to browse per role (@MANIFESTS). For the drums
+// role we @READ its catalog.tsv, parse it, and build a Genre/Pack browser entirely
+// client-side — the firmware knows nothing about facets or paging.
+let drumMode = 'legacy';       // 'legacy' (@DRUMS list) | 'manifest' (catalog.tsv)
+let drumCatalog = [];          // [{ filename, pack, genre, bpm, display }]
+let drumSort = 'genre';        // active axis
+let drumBank = 'All';          // active bank within the axis
+
+function onManifests(payload) {
+  const reg = {};
+  payload.split('|').forEach(e => { const [role, src] = e.split(US); if (role) reg[role] = src || ''; });
+  const src = reg.drums || 'none';
+  if (src.startsWith('file:')) {
+    readFile(src.slice(5))
+      .then(text => { drumCatalog = parseCatalog(text); drumMode = 'manifest'; buildDrumBrowser(); })
+      .catch(e => log('drum manifest: ' + e.message));   // leave the legacy list in place
+  }
+}
+
+function parseCatalog(text) {
+  const rows = [];
+  for (const ln of text.split('\n')) {
+    if (!ln || ln[0] === '#') continue;
+    const c = ln.split('\t');
+    if (c.length < 5) continue;
+    rows.push({ filename: c[0], pack: c[1], genre: c[2], bpm: c[3], display: c[4] });
+  }
+  return rows;
+}
+
+function buildDrumBrowser() {
+  // Bank list = the distinct values of the active axis, sorted, with "All" first.
+  const vals = [...new Set(drumCatalog.map(r => r[drumSort]).filter(Boolean))].sort();
+  const banks = ['All', ...vals];
+  if (!banks.includes(drumBank)) drumBank = 'All';
+  $('drum-bank').innerHTML = banks.map(b =>
+    `<option value="${escapeHtml(b)}"${b === drumBank ? ' selected' : ''}>${escapeHtml(b)}${
+      b === 'All' ? ` (${drumCatalog.length})` : ''}</option>`).join('');
+  refreshGrooveList();
+}
+
+function refreshGrooveList() {
+  const rows = (drumBank === 'All' ? drumCatalog : drumCatalog.filter(r => r[drumSort] === drumBank))
+    .slice().sort((a, b) => a.display.localeCompare(b.display));
+  $('drum').innerHTML = rows.map(r =>
+    `<option value="${escapeHtml(r.filename)}">${escapeHtml(r.display)}${
+      r.bpm ? `  ·  ${escapeHtml(r.bpm)} bpm` : ''}</option>`).join('');
+  $('drum-count').textContent = rows.length + (rows.length === 1 ? ' groove' : ' grooves');
+}
+
+// Play the current selection by the mode's addressing: filename (manifest) or index.
+function playCurrentGroove() {
+  const v = $('drum').value;
+  if (v === '') return;
+  send(drumMode === 'manifest' ? '@DRUMF=' + v : '@DRUM=' + v);
+}
+
+// Full instrument list, kept so the search box can filter without re-fetching.
+// Each entry: { i: global index, bank: '' | 'Bank A', label: 'voice name' }.
+let instrItems = [];
+
+function fillInstr(payload) {
+  // payload = <0x1F>name<TAB>desc[<TAB>GM]  |inst0|inst1|...
+  if (payload.charCodeAt(0) === 0x1F) payload = payload.slice(1);
+  const parts = payload.split('|');
+  const header = parts.shift().split('\t');
+  const name = header[0], desc = header[1];
+  const isGM = header.includes('GM');       // streams standard GM program names
+  const drumsOk = header.includes('DRUMS'); // renders channel-10 drums (incl. non-GM OPLL)
+  $('synth').textContent = name + (desc ? ' — ' + desc : '');
+  // The SD Patch Library browses DX7 .syx carts into the Dexed pool — only meaningful
+  // on a Dexed build ("Dexed" / "Dexed MPE"). Hide it on every other engine.
+  $('patchlib-card').style.display = /dexed/i.test(name) ? '' : 'none';
+  // Drum KITS (Standard/Room/Power/…) are GM program-changes on ch10 — only the
+  // soundfont GM engines (TSF/SF2) honor them. OPLL has ONE fixed 5-sound hardware
+  // rhythm section, so its kit selector does nothing. Gate the kit control on GM-ness.
+  const kitsOk = isGM;
+  ['drum-kit', 'drum-kit-prev', 'drum-kit-next'].forEach(id => $(id).disabled = !kitsOk);
+  // Drums note reflects the engine's real capability (drumsOk), not GM-ness.
+  $('drum-note').textContent =
+    !drumsOk ? '⚠ ' + name + ' has no channel-10 drum map — grooves are silent. Flash an OPLL / OPL3 / SF2 / TSF build.'
+    : kitsOk ? 'A looping groove plays under whatever you perform live. Pick a kit to change the drum sounds.'
+    : name + ' has ONE fixed rhythm set (5 sounds) — the kit selector applies only to SF2/TSF. Grooves with congas/shakers/toms won’t fully render here.';
+  const names = isGM ? GM_NAMES : parts;
+  // Group by bank when names arrive as "<bank>: <voice>" (Dexed's full 320-voice
+  // set); otherwise a flat list. The <option> value is always the global
+  // instrument index the device expects in @DXVOICE=.
+  instrItems = names.map((n, i) => {
+    const sep = n.indexOf(': ');
+    return {
+      i,
+      bank: sep > 0 ? n.slice(0, sep) : '',
+      label: sep > 0 ? n.slice(sep + 2) : n,
+    };
+  });
+  $('instr-search').value = '';
+  renderInstr('');
+}
+
+// Rebuild the <select> from instrItems, keeping only entries that match the
+// (case-insensitive) filter against the voice label, bank, or index. Preserves
+// the current selection when it survives the filter.
+function renderInstr(filter) {
+  const sel = $('instr');
+  const prev = sel.value;
+  const q = filter.trim().toLowerCase();
+  const match = o => !q ||
+    o.label.toLowerCase().includes(q) ||
+    o.bank.toLowerCase().includes(q) ||
+    String(o.i) === q;
+  const groups = new Map();
+  for (const o of instrItems) {
+    if (!match(o)) continue;
+    if (!groups.has(o.bank)) groups.set(o.bank, []);
+    groups.get(o.bank).push(o);
+  }
+  let html = '';
+  for (const [bank, items] of groups) {
+    const opts = items.map(o => `<option value="${o.i}">${o.i}: ${escapeHtml(o.label)}</option>`).join('');
+    html += bank ? `<optgroup label="${escapeHtml(bank)}">${opts}</optgroup>` : opts;
+  }
+  sel.innerHTML = html;
+  // Keep the prior selection visible if it still matches; otherwise fall back to
+  // the first result (without sending — the device voice is unchanged).
+  if (html && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+}
+
+function escapeHtml(s) { return s.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
+
+// ---- SD patch library browser (lazy folder -> cart -> voice) ----
+// Paths are relative to /dexed. `libCart` non-null => showing that cart's voices;
+// otherwise showing the folder listing for `libPath`.
+let libPath = '';        // current folder rel path ('' = /dexed root)
+let libPage = 0, libNPages = 1;
+let libEntries = [];     // [{ isDir, name }] for the current folder page
+let libCart = null;      // rel path of the open cart, or null
+let libVoices = [];      // that cart's 32 voice names
+
+function libLoad() { send('@DXLS=' + libPath + (libPage ? '\t' + libPage : '')); }
+function libReset() { libPath = ''; libPage = 0; libCart = null; libEntries = []; libVoices = []; libLoad(); }
+
+// @DXLS reply body: <rel>\t<page>\t<npages>|D<dir>|F<cart>...
+function fillLibDir(payload) {
+  const bar = payload.indexOf('|');
+  const head = (bar >= 0 ? payload.slice(0, bar) : payload).split('\t');
+  const rel = head[0] || '';
+  if (rel !== libPath) return;                         // stale reply for a folder we've left
+  libPage = +head[1] || 0;
+  libNPages = +head[2] || 1;
+  libCart = null;
+  const items = bar >= 0 ? payload.slice(bar + 1).split('|').filter(s => s.length) : [];
+  libEntries = items.map(s => ({ isDir: s[0] === 'D', name: s.slice(1) }));
+  renderLib();
+}
+
+// @DXVL reply body: <relCart>|v0|...|v31
+function fillLibVoices(payload) {
+  const parts = payload.split('|');
+  const rc = parts.shift();
+  if (rc !== libCart) return;
+  libVoices = parts;
+  renderLib();
+}
+
+function renderLib() {
+  const list = $('lib-list');
+  const here = '/dexed' + (libPath ? '/' + libPath : '');
+  $('lib-path').textContent = libCart ? here + ' ▸ ' + libCart.split('/').pop() : here;
+  let html;
+  if (libCart) {
+    html = libVoices.map((n, i) =>
+      `<div class="lib-row" data-v="${i}"><span class="ic">♪</span><span>${i}: ${escapeHtml(n)}</span></div>`).join('');
+    $('lib-pinfo').textContent = libVoices.length + ' voices';
+    $('lib-pprev').disabled = $('lib-pnext').disabled = true;
+  } else {
+    html = libEntries.map((e, i) =>
+      `<div class="lib-row" data-i="${i}"><span class="ic">${e.isDir ? '📁' : '🎛'}</span><span>${escapeHtml(e.name)}</span></div>`).join('')
+      || '<div class="note" style="padding:12px">(empty — no folders or carts here)</div>';
+    $('lib-pinfo').textContent = libNPages > 1 ? `page ${libPage + 1} / ${libNPages}` : '';
+    $('lib-pprev').disabled = libPage <= 0;
+    $('lib-pnext').disabled = libPage >= libNPages - 1;
+  }
+  list.innerHTML = html;
+  list.querySelectorAll('.lib-row').forEach(row => {
+    row.onclick = () => {
+      if (libCart) {                                   // pick a voice
+        send('@DXPICK=' + libCart + '\t' + row.dataset.v);
+        list.querySelectorAll('.lib-row').forEach(r => r.classList.remove('vsel'));
+        row.classList.add('vsel');
+      } else {
+        const e = libEntries[+row.dataset.i];
+        const rel = libPath ? libPath + '/' + e.name : e.name;
+        if (e.isDir) { libPath = rel; libPage = 0; libLoad(); }   // descend
+        else { libCart = rel; send('@DXVL=' + rel); }             // open cart
+      }
+    };
+  });
+}
+
+$('lib-back').onclick = () => {
+  if (libCart) { libCart = null; renderLib(); }        // voices -> back to this folder's carts
+  else if (libPath) { const p = libPath.split('/'); p.pop(); libPath = p.join('/'); libPage = 0; libLoad(); }
+};
+$('lib-refresh').onclick = () => libLoad();
+$('lib-pprev').onclick = () => { if (libPage > 0) { libPage--; libLoad(); } };
+$('lib-pnext').onclick = () => { if (libPage < libNPages - 1) { libPage++; libLoad(); } };
+
+// ---- UI -> device ----
+$('vol').oninput = e => { $('vol-val').textContent = e.target.value + '%'; };
+$('vol').onchange = e => send('@VOL=' + e.target.value);
+// Master tempo (BPM) — one knob for the song + the drum groove (they lock).
+$('bpm').oninput = e => { $('bpm-val').textContent = e.target.value; };
+$('bpm').onchange = e => send('@BPM=' + e.target.value);
+function nudgeBpm(d) {
+  const r = $('bpm'), v = Math.max(+r.min, Math.min(+r.max, +r.value + d));
+  if (v === +r.value) return;
+  r.value = v; $('bpm-val').textContent = v; send('@BPM=' + v);
+}
+$('bpm-dn').onclick = () => nudgeBpm(-5);
+$('bpm-up').onclick = () => nudgeBpm(5);
+$('play').onclick = () => send('@SONG=' + $('song').value);
+$('stop').onclick = () => send('@SONG=stop');
+$('loop').onchange = e => send('@LOOP=' + (e.target.checked ? 1 : 0));
+// Drums: groove play/stop + kit / volume. Tempo follows the master BPM.
+$('drum-play').onclick = () => playCurrentGroove();
+$('drum-stop').onclick = () => send('@DRUM=stop');
+// Sort axis toggle (Genre / Pack) — rebuilds the bank list; resets to the All bank.
+document.querySelectorAll('#drum-sort button').forEach(b => b.onclick = () => {
+  if (drumMode !== 'manifest') return;
+  drumSort = b.dataset.sort; drumBank = 'All';
+  document.querySelectorAll('#drum-sort button').forEach(x => x.classList.toggle('active', x === b));
+  buildDrumBrowser();
+});
+// Bank picker — refilter the groove list (no device round-trip).
+$('drum-bank').onchange = e => { drumBank = e.target.value; refreshGrooveList(); };
+$('drum-synchro').onchange = e => send('@DRUMSYNCHRO=' + (e.target.checked ? 1 : 0));
+$('drum-kit').onchange = e => send('@DRUMKIT=' + e.target.value);
+// Prev/Next step a <select> and fire `cb` with the new index. `wrap` cycles at ends.
+function stepSelect(id, delta, cb) {
+  const s = $(id), n = s.options.length;
+  if (!n) return;
+  s.selectedIndex = (s.selectedIndex + delta + n) % n;
+  cb(s.value);
+}
+// Groove prev/next switches the groove LIVE (plays the newly-selected one).
+$('drum-prev').onclick = () => stepSelect('drum', -1, () => playCurrentGroove());
+$('drum-next').onclick = () => stepSelect('drum', 1, () => playCurrentGroove());
+$('drum-kit-prev').onclick = () => stepSelect('drum-kit', -1, v => send('@DRUMKIT=' + v));
+$('drum-kit-next').onclick = () => stepSelect('drum-kit', 1, v => send('@DRUMKIT=' + v));
+// Arpeggiator: enable + pattern/rate/octaves/latch. Steps held notes to the master BPM.
+$('arp-on').onchange    = e => send('@ARPON='    + (e.target.checked ? 1 : 0));
+$('arp-pat').onchange   = e => send('@ARPPAT='   + e.target.value);
+$('arp-rate').onchange  = e => send('@ARPRATE='  + e.target.value);
+$('arp-oct').onchange   = e => send('@ARPOCT='   + e.target.value);
+$('arp-latch').onchange = e => send('@ARPLATCH=' + (e.target.checked ? 1 : 0));
+// Volume: slider + tap −/+ buttons. `nudge` steps the range input by its
+// own `step` (5), clamps, updates the label, and sends the value.
+function bindStepSlider(rangeId, valId, cmd, step) {
+  const r = $(rangeId), lab = $(valId);
+  const show = () => { lab.textContent = r.value + '%'; };
+  const emit = () => send(cmd + '=' + r.value);
+  r.oninput = show;
+  r.onchange = emit;
+  const nudge = d => {
+    const v = Math.max(+r.min, Math.min(+r.max, +r.value + d));
+    if (v === +r.value) return;
+    r.value = v; show(); emit();
+  };
+  $(rangeId + '-dn').onclick = () => nudge(-step);
+  $(rangeId + '-up').onclick = () => nudge(step);
+}
+bindStepSlider('drum-vol', 'drum-vol-val', '@DRUMVOL', 5);
+function bitmaskOf(sel) {
+  let mask = 0;
+  document.querySelectorAll(sel).forEach(x => { if (x.checked) mask |= +x.dataset.bit; });
+  return mask;
+}
+document.querySelectorAll('.press').forEach(c => c.onchange = () => send('@PRESSURE=' + bitmaskOf('.press')));
+document.querySelectorAll('.mod').forEach(c => c.onchange = () => send('@MODWHEEL=' + bitmaskOf('.mod')));
+document.querySelectorAll('.tim').forEach(c => c.onchange = () => send('@TIMBRE=' + bitmaskOf('.tim')));
+document.querySelectorAll('#lfomode button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#lfomode button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  send('@LFOMODE=' + b.dataset.v);
+});
+$('refresh').onclick = () => send('@GETCAT');
+$('instr').onchange = e => send('@DXVOICE=' + e.target.value);
+$('instr-search').oninput = e => renderInstr(e.target.value);
+// Prev/Next step through the flat option list (across bank <optgroup>s) and send
+// the newly-selected global index.
+function stepInstr(delta) {
+  const sel = $('instr');
+  const n = sel.options.length;
+  if (!n) return;
+  sel.selectedIndex = Math.min(n - 1, Math.max(0, sel.selectedIndex + delta));
+  send('@DXVOICE=' + sel.value);
+}
+$('instr-prev').onclick = () => stepInstr(-1);
+$('instr-next').onclick = () => stepInstr(1);
+$('hpf').onchange = e => send('@HPF=' + e.target.value);
+document.querySelectorAll('#mode button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#mode button').forEach(x => x.classList.toggle('active', x === b));
+  send('@MIDIMODE=' + b.dataset.v);
+});
+document.querySelectorAll('#rg button').forEach(b => b.onclick = () => {
+  document.querySelectorAll('#rg button').forEach(x => x.classList.toggle('active', x === b));
+  send('@RG=' + b.dataset.v);
+});
+</script>
+</body>
+</html>

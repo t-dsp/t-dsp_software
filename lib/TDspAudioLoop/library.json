@@ -1,0 +1,11 @@
+{
+  "name": "TDspAudioLoop",
+  "version": "0.1.0",
+  "description": "Audio-domain loop recorder: tdsp::AudioLooper, a stereo AudioStream_F32 node that captures the device's digital audio into an int16 loop, bar-locked to the master Clock, with an equal-power overlap-crossfade at the seam for click-free loops. Overdub + clock-follow. Sibling of the MIDI-domain lib/TDspMidiLoop. PROTOTYPE.",
+  "keywords": ["audio", "looper", "loop", "crossfade", "f32", "clock", "t-dsp"],
+  "frameworks": "arduino",
+  "platforms": "teensy",
+  "dependencies": {
+    "TDspClock": "*"
+  }
+}

@@ -2,9 +2,10 @@
 
 #include "ArpFilter.h"
 
-// We only store a tdsp::Clock* pointer and never dereference it here,
-// so the forward declaration in the header is sufficient — no Clock.h
-// include needed on the implementation side.
+// gridAlignedStepAnchor() dereferences the master clock (tickCount()) to lock
+// arp steps to the beat grid, so we need the full Clock definition here (the
+// header keeps only a forward declaration to stay light for its includers).
+#include <Clock.h>
 
 namespace tdsp {
 
@@ -122,6 +123,10 @@ void ArpFilter::removeAllDownstream() {
 
 void ArpFilter::onNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
     if (!_enabled) {
+        // Track the key even while bypassed. Then enabling the arp knows exactly which
+        // passthrough notes are sounding and can release them (see setEnabled) instead
+        // of leaving them stuck — and it can immediately arpeggiate whatever is held.
+        addHeld(channel, note, velocity);
         forwardNoteOn(channel, note, velocity);
         return;
     }
@@ -153,13 +158,35 @@ void ArpFilter::onNoteOn(uint8_t channel, uint8_t note, uint8_t velocity) {
         for (int i = 0; i < n; ++i) {
             emitNoteOn(chans[i], notes[i], vels[i], (uint32_t)(tps * _gate), srcChans[i]);
         }
-        _lastStepTick = _clockTickCount;
+        _lastStepTick = gridAlignedStepAnchor();   // lock the pattern to the master beat grid
         _stepIndex++;
     }
 }
 
+// Anchor the step grid to the MASTER beat grid instead of the (arbitrary)
+// keypress moment. onClock() advances _clockTickCount 1:1 with the master
+// Clock, but at a constant offset (the arp counter is never re-zeroed on a
+// transport re-zero). We cancel that offset by taking the phase from the
+// master clock's own tick count: with the returned anchor, the next step
+// boundary (_lastStepTick + ticksPerStep) coincides with the next master step
+// boundary (masterTick % ticksPerStep == 0) — i.e. steps land on the beat.
+uint32_t ArpFilter::gridAlignedStepAnchor() const {
+    const uint16_t tps = ticksPerStep();
+    if (!_clock || tps == 0) return _clockTickCount;       // no grid: keypress-relative (legacy)
+    const uint32_t phase = _clock->tickCount() % tps;      // ticks past the last master boundary
+    return _clockTickCount - phase;                        // next boundary is (tps - phase) ticks off
+}
+
+void ArpFilter::resyncToGrid() {
+    // Only meaningful while a pattern is actively running; a fresh press or the
+    // onClock baseline re-locks otherwise (both use gridAlignedStepAnchor()).
+    if (!_enabled || _heldCount == 0 || _lastStepTick == 0xFFFFFFFFu) return;
+    _lastStepTick = gridAlignedStepAnchor();
+}
+
 void ArpFilter::onNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) {
     if (!_enabled) {
+        removeHeld(channel, note);   // keep the bypass held-set in sync with the physical keys
         forwardNoteOff(channel, note, velocity);
         return;
     }
@@ -245,10 +272,11 @@ void ArpFilter::onClock() {
         return;
     }
 
-    // First step under a running clock: baseline _lastStepTick from
-    // current count so the first downbeat lands on a tick boundary.
+    // First step under a running clock (e.g. arp enabled while a chord is
+    // already held): baseline _lastStepTick to the MASTER beat grid so the
+    // pattern locks to the beat, not to this arbitrary tick.
     if (_lastStepTick == 0xFFFFFFFFu) {
-        _lastStepTick = _clockTickCount;
+        _lastStepTick = gridAlignedStepAnchor();
         // Don't emit on this exact tick — wait a full step so the
         // pattern isn't double-triggered when onNoteOn() already fired
         // the cold-start step above.
@@ -337,14 +365,34 @@ void ArpFilter::setEnabled(bool on) {
         _lastStepTick = 0xFFFFFFFFu;
         _stepIndex = 0;
     } else {
-        // Entering active mode: reset step position so the first held
-        // key kicks off a fresh cycle.
+        // Entering active mode: the keys held right now were passed through while
+        // bypassed and are SOUNDING on the synth. Release those passthrough note-ons —
+        // otherwise they ring forever, because their note-offs are now captured by the
+        // arp instead of forwarded (the "stuck note on arp-on" bug). The held set is
+        // KEPT, so the arp immediately arpeggiates whatever chord is being held. These
+        // are exact per-note offs (not an all-notes-off), so a drum groove or song on
+        // another channel — which never routes through the arp — is untouched.
+        for (uint8_t i = 0; i < _heldCount; ++i)
+            forwardNoteOff(_held[i].channel, _held[i].note, 0);
+        // Reset step position so the first step kicks off a fresh cycle.
         _stepIndex = 0;
         _repeatIndex = 0;
         _octavePassIndex = 0;
         _patternStateAscending = true;
         _lastStepTick = 0xFFFFFFFFu;
     }
+}
+
+void ArpFilter::restart() {
+    if (!_enabled) return;                 // nothing to re-trigger while bypassed
+    // Rewind the cycle to step 0 but KEEP the held chord, so a Play press restarts the
+    // pattern from the top. Clearing _lastStepTick makes the next onClock() cold-start the
+    // cycle from a fresh grid-aligned anchor (as if the chord had just been pressed).
+    _stepIndex = 0;
+    _repeatIndex = 0;
+    _octavePassIndex = 0;
+    _patternStateAscending = true;
+    _lastStepTick = 0xFFFFFFFFu;
 }
 
 void ArpFilter::setPattern(Pattern p) {
@@ -482,6 +530,58 @@ void ArpFilter::setRepeat(uint8_t n) {
     if (n < 1) n = 1;
     if (n > 8) n = 8;
     _repeat = n;
+}
+
+// --- User step-sequence ---------------------------------------------------
+
+void ArpFilter::setSequenceLength(uint8_t count) {
+    if (count > kMaxSteps) count = kMaxSteps;
+    _seqLength = count;
+    // Align the generic step machinery to the sequence so velocity ramps and
+    // the step mask cover exactly one lap. Never zero — stepEnabled()/velRamp
+    // divide by _stepLength.
+    if (count > 0) _stepLength = count;
+    _stepIndex   = 0;
+    _repeatIndex = 0;
+}
+
+void ArpFilter::setSequenceStep(uint8_t i, int8_t degree, int8_t octave, uint8_t vel) {
+    if (i >= kMaxSteps) return;
+    if (octave >  3) octave =  3;
+    if (octave < -3) octave = -3;
+    if (vel > 127) vel = 127;   // 0 stays "inherit VelMode"
+    _seq[i].degree   = degree;
+    _seq[i].octave   = octave;
+    _seq[i].velocity = vel;
+    if (i >= _seqLength) setSequenceLength((uint8_t)(i + 1));
+}
+
+void ArpFilter::setSequence(const SeqStep *steps, uint8_t count) {
+    if (!steps) { clearSequence(); return; }
+    if (count > kMaxSteps) count = kMaxSteps;
+    for (uint8_t i = 0; i < count; ++i) {
+        int8_t  oct = steps[i].octave;
+        if (oct >  3) oct =  3;
+        if (oct < -3) oct = -3;
+        uint8_t vel = steps[i].velocity > 127 ? 127 : steps[i].velocity;
+        _seq[i].degree   = steps[i].degree;
+        _seq[i].octave   = oct;
+        _seq[i].velocity = vel;
+    }
+    setSequenceLength(count);
+}
+
+void ArpFilter::clearSequence() {
+    _seqLength = 0;
+    _stepIndex = 0;
+    _repeatIndex = 0;
+}
+
+void ArpFilter::applySeqOverride(uint32_t step, int8_t &oct, uint8_t &vel) const {
+    if (_pattern != PatUserSequence || _seqLength == 0) return;
+    const SeqStep &st = _seq[step % _seqLength];
+    oct = (int8_t)(st.octave * 12);
+    if (st.velocity != 0) vel = st.velocity;
 }
 
 void ArpFilter::panic() {
@@ -869,6 +969,22 @@ int ArpFilter::patternSelect(uint32_t step,
         outIndices[0] = sortedAsc[step % cAsc];
         return 1;
     }
+    case PatUserSequence: {
+        // Explicit per-step table. Each step names a degree into the held
+        // set; SeqRest emits nothing, SeqChord plays every held note. Octave
+        // and velocity overrides are applied later in nextStepNotes(). With no
+        // sequence loaded we degrade gracefully to a plain up-run.
+        if (_seqLength == 0) { outIndices[0] = sortedAsc[step % cAsc]; return 1; }
+        const SeqStep &st = _seq[step % _seqLength];
+        if (st.degree == SeqRest)  return 0;
+        if (st.degree == SeqChord) {
+            const int nn = (cAsc < outCap) ? cAsc : outCap;
+            for (int i = 0; i < nn; ++i) outIndices[i] = sortedAsc[i];
+            return nn;
+        }
+        outIndices[0] = sortedAsc[((uint32_t)(uint8_t)st.degree) % cAsc];
+        return 1;
+    }
     default:
         outIndices[0] = sortedAsc[step % cAsc];
         return 1;
@@ -1028,12 +1144,14 @@ int ArpFilter::nextStepNotes(uint8_t outNotes[], uint8_t outVels[],
             const int n = patternSelect(effectiveStep, perCh, perChCount, perCh, perChCount, selIdx, 8);
             for (int s = 0; s < n && produced < outCap; ++s) {
                 const HeldNote &h = _held[selIdx[s]];
-                int8_t oct = octaveOffset(effectiveStep);
+                int8_t  oct = octaveOffset(effectiveStep);
+                uint8_t vel = stepVelocity(effectiveStep, h.velocity);
+                applySeqOverride(effectiveStep, oct, vel);
                 int finalNote = (int)h.note + oct;
                 if (finalNote < 0)   finalNote = 0;
                 if (finalNote > 127) finalNote = 127;
                 outNotes   [produced] = (uint8_t)finalNote;
-                outVels    [produced] = stepVelocity(effectiveStep, h.velocity);
+                outVels    [produced] = vel;
                 outChans   [produced] = ch;  // PerNote: source channel is output channel
                 outSrcChans[produced] = h.channel;
                 ++produced;
@@ -1055,12 +1173,14 @@ int ArpFilter::nextStepNotes(uint8_t outNotes[], uint8_t outVels[],
     int produced = 0;
     for (int s = 0; s < n && produced < outCap; ++s) {
         const HeldNote &h = _held[selIdx[s]];
-        int8_t oct = octaveOffset(effectiveStep);
+        int8_t  oct = octaveOffset(effectiveStep);
+        uint8_t vel = stepVelocity(effectiveStep, h.velocity);
+        applySeqOverride(effectiveStep, oct, vel);
         int finalNote = (int)h.note + oct;
         if (finalNote < 0)   finalNote = 0;
         if (finalNote > 127) finalNote = 127;
         outNotes   [produced] = (uint8_t)finalNote;
-        outVels    [produced] = stepVelocity(effectiveStep, h.velocity);
+        outVels    [produced] = vel;
         outChans   [produced] = resolveOutputChannel(h.channel);
         outSrcChans[produced] = h.channel;
         ++produced;

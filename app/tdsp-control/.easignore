@@ -1,0 +1,36 @@
+# .easignore — files EXCLUDED from the EAS Build upload archive.
+#
+# When this file exists, EAS uses it INSTEAD of .gitignore for the archive, so it
+# must list everything to omit. Dependencies and build artifacts are regenerated
+# on the EAS servers (npm install + prebuild), so they never need uploading — the
+# previous upload was 221 MB purely because node_modules (323 MB) was included.
+#
+# NOTE: this is a managed Expo app (no android/ios dirs — prebuild runs in the
+# cloud). If you ever commit custom native android/ios dirs, do NOT ignore them.
+
+# dependencies — installed fresh on EAS
+node_modules/
+
+# Expo / JS build artifacts (regenerated)
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# credentials / secrets — must never leave the machine
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# logs / debug
+*.log
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+.metro-health-check*
+
+# VCS + OS cruft
+.git/
+.DS_Store

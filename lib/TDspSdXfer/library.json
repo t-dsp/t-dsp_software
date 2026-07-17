@@ -1,0 +1,8 @@
+{
+  "name": "TDspSdXfer",
+  "version": "0.1.0",
+  "description": "Host->device SD file transfer over any byte Stream. SdWriteReceiver receives a file pushed from the host (an @WB begin frame followed by a raw binary payload) straight onto the SD card over USB CDC at full speed — no base64 overhead, no reflash. The write-direction complement of the '@READ'/streamFile catalog primitive.",
+  "keywords": ["sd", "file-transfer", "usb", "serial", "upload", "t-dsp"],
+  "frameworks": "arduino",
+  "platforms": "teensy"
+}

@@ -1,0 +1,63 @@
+// DrumTsf.h — a small, dedicated TinySoundFont instance that renders GM drums on
+// channel 10, so a MELODIC engine (Dexed pool, Plaits, …) can have drum grooves under it.
+//
+// The mix-kit builds ONE synth engine and the drum-groove player feeds that engine's
+// sink — fine for a GM engine (TSF/SF2/OPL3/OPLL), but a melodic engine has no GM drum
+// map, so drums are gated off (see drumEngineOk()). This adds a SECOND, drum-only TSF on
+// the FREE output mix slot 2 (S/PDIF-in is dropped in the pool build via TDSP_NO_SPDIF_IN),
+// fed by the groove player. The resident drum font needs PSRAM — hence a PSRAM board.
+//
+//   AudioSynthTsf(g_drumTsf, stereo int16) -> I16toF32 L/R -> outL/outR slot 2
+//
+// Enabled with -D TDSP_DRUM_TSF on a melodic build. Included by main.cpp AFTER outL/outR,
+// g_sdReady, and the melodic backend exist. Loads DRUM_TSF_FONT_PATH (default a full GM
+// font; only channel 10 / bank 128 is used — a drum-only SF2 works too and saves PSRAM).
+#pragma once
+#include <Audio.h>
+#include <AudioSynthTsf.h>
+#include "TsfSink.h"
+
+#ifndef DRUM_TSF_FONT_PATH
+#define DRUM_TSF_FONT_PATH "/sf2/gm_tsf.sf2"   // any GM font with a bank-128 kit (TimGM6mb baseline)
+#endif
+
+extern "C" uint8_t external_psram_size;        // Teensy core: detected PSRAM MB (0/8/16)
+
+AudioSynthTsf         g_drumTsf;                        // stereo int16: 0=L, 1=R
+AudioConvert_I16toF32 g_drumTsfToF32L, g_drumTsfToF32R;
+AudioConnection       c_drumTsfBrL(g_drumTsf, 0, g_drumTsfToF32L, 0);
+AudioConnection       c_drumTsfBrR(g_drumTsf, 1, g_drumTsfToF32R, 0);
+AudioConnection_F32   c_drumTsfOutL(g_drumTsfToF32L, 0, outL, 2);   // slot 2 = free (no S/PDIF-in here)
+AudioConnection_F32   c_drumTsfOutR(g_drumTsfToF32R, 0, outR, 2);
+
+tsf            *g_drumTsfHandle = nullptr;
+TsfSink         g_drumTsfSink(&g_drumTsfHandle);        // groove player's ch10 is routed here in setup()
+
+// Load the drum font, set channel 10 as GM drums, and open mix slot 2. Returns true if
+// the font loaded (samples resident in PSRAM). Call from setup() after the melodic
+// synthBegin() ran and g_sdReady is known.
+static bool drumTsfBegin() {
+    if (!g_sdReady) {
+        Serial.println("[drumtsf] no SD card -> drums idle (need " DRUM_TSF_FONT_PATH ")");
+        return false;
+    }
+    Serial.printf("[drumtsf] loading %s for ch10 drums (%d MB PSRAM installed)...\n",
+                  DRUM_TSF_FONT_PATH, (int)external_psram_size);
+    g_drumTsfHandle = tsfLoadFromSD(DRUM_TSF_FONT_PATH);
+    if (!g_drumTsfHandle) {
+        Serial.println("[drumtsf] load FAILED (missing font or too big for PSRAM) -> drums idle");
+        return false;
+    }
+    tsf_set_output(g_drumTsfHandle, TSF_STEREO_UNWEAVED, (int)AUDIO_SAMPLE_RATE_EXACT, -4.0f);
+    tsf_set_max_voices(g_drumTsfHandle, 24);            // drums need fewer voices than a full melodic engine
+    for (int ch = 0; ch < 16; ch++) {
+        tsf_channel_set_presetnumber(g_drumTsfHandle, ch, 0, ch == 9 ? 1 : 0);  // tsf ch9 (MIDI 10) = drum bank 128
+        tsf_channel_set_pitchrange(g_drumTsfHandle, ch, 48.0f);
+    }
+    g_drumTsf.begin(g_drumTsfHandle);
+    g_drumTsf.setGain(1.0f);
+    outL.gain(2, 0.62f); outR.gain(2, 0.62f);           // drum bus make-up (mirrors the synth slot); setMix leaves slot 2 alone under TDSP_DRUM_TSF
+    Serial.printf("[drumtsf] ready: %d presets, ch10 GM drums -> mix slot 2\n",
+                  tsf_get_presetcount(g_drumTsfHandle));
+    return true;
+}

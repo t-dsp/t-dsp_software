@@ -1,0 +1,328 @@
+<!doctype html>
+<!--
+  ui.html — the ONE T-DSP control surface, shared by desktop (Web Serial) and the
+  Android app (WebView + native BLE bridge). Source of truth for the UI.
+
+  Transport (window.TDSP.transport): navigator.serial on desktop (this replaces
+  control.html); window.TDSPNative injected by the RN WebView shell in the app. Same
+  @-line protocol both ways.
+
+  Data: on connect we @READ /tdsp/index.ndjson + each per-type NDJSON (built by @REINDEX
+  on the Teensy) and render every picker from it. Only ACTIONS hit the wire.
+
+  Libs load from CDN (phone/desktop have internet independent of the device link). For a
+  fully-offline build, vendor alpine.min.js + pico.min.css next to this file.
+-->
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>T-DSP</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@picocss/pico@2/css/pico.min.css">
+<style>
+  [x-cloak]{display:none!important}
+  :root{--pico-spacing:.7rem;--pico-form-element-spacing-vertical:.5rem}
+  body{max-width:720px;margin:0 auto;padding:.5rem .7rem 3rem}
+  header.app{position:sticky;top:0;z-index:9;background:var(--pico-background-color);
+             padding:.4rem 0;border-bottom:1px solid var(--pico-muted-border-color)}
+  .brand{display:flex;align-items:center;gap:.5rem;font-weight:700;letter-spacing:.02em}
+  .dot{width:.7rem;height:.7rem;border-radius:50%;background:var(--pico-del-color);flex:0 0 auto}
+  .dot.on{background:#3fb950}
+  .statline{font-size:.8rem;color:var(--pico-muted-color);margin-top:.15rem}
+  article.card{margin:.5rem 0;padding:0}
+  .drawer{display:flex;align-items:center;gap:.5rem;padding:.75rem .9rem;cursor:pointer;
+          font-weight:600;user-select:none;margin:0}
+  .drawer .tag{font-size:.72rem;font-weight:500;color:var(--pico-muted-color);
+               background:var(--pico-code-background-color);padding:.1rem .45rem;border-radius:1rem}
+  .drawer .chev{margin-left:auto;color:var(--pico-muted-color);transition:transform .15s}
+  .drawer .chev.open{transform:rotate(90deg)}
+  .body{padding:0 .9rem .9rem}
+  .row{display:flex;gap:.4rem;align-items:center}
+  .grow{flex:1}
+  .list{max-height:46vh;overflow:auto;margin:.3rem 0;border:1px solid var(--pico-muted-border-color);border-radius:var(--pico-border-radius)}
+  .list button{width:100%;text-align:left;border:0;border-radius:0;margin:0;padding:.5rem .7rem;background:transparent;border-bottom:1px solid var(--pico-muted-border-color);color:var(--pico-color)}
+  .list button.sel{background:var(--pico-primary-focus)}
+  .muted{color:var(--pico-muted-color);font-size:.85rem}
+  .mini{padding:.25rem .55rem;font-size:.8rem;width:auto;margin:0}
+  input[type=search]{margin:.3rem 0}
+  /* floating volume bar: pinned to the top of a drawer body, just under the sticky header */
+  .volbar{position:sticky;top:3.1rem;z-index:8;display:flex;align-items:center;gap:.5rem;
+          padding:.5rem .9rem;margin:0 -.9rem .6rem;background:var(--pico-background-color);
+          border-bottom:1px solid var(--pico-muted-border-color)}
+  .volbar .lbl{font-size:.78rem;font-weight:600;color:var(--pico-muted-color);flex:0 0 auto}
+  .volbar .val{font-size:.78rem;color:var(--pico-muted-color);flex:0 0 auto;min-width:2.6rem;text-align:right}
+  .volbar input[type=range]{flex:1;margin:0}
+</style>
+</head>
+<body x-data="tdsp()" x-init="init()" x-cloak>
+
+<!-- ===== connection header (always visible) ===== -->
+<header class="app">
+  <div class="brand"><span class="dot" :class="{on:connected}"></span> T-DSP
+    <button class="mini" style="margin-left:auto" @click="connected ? disconnect() : connect()"
+            x-text="connected ? 'Disconnect' : (transportName+' • Connect')"></button>
+  </div>
+  <div class="statline" x-text="headerStatus()"></div>
+</header>
+
+<!-- ===== accordions: one open at a time; status shown in each header ===== -->
+
+<!-- CONNECTION -->
+<article class="card">
+  <div class="drawer" @click="toggle('conn')">Connection
+    <span class="tag" x-show="synth.name" x-text="synth.name"></span>
+    <span class="chev" :class="{open:openId==='conn'}">›</span></div>
+  <div class="body" x-show="openId==='conn'">
+    <p class="muted">Synth: <b x-text="synth.name||'—'"></b></p>
+    <p class="muted" x-show="synth.desc" x-text="synth.desc"></p>
+    <div class="row"><span class="grow muted">Transport</span><span x-text="transportName"></span></div>
+    <div class="row"><span class="grow muted">Catalog</span>
+      <span x-text="db.loaded?('loaded'+(db.engine?' • '+db.engine:'')):'not loaded'"></span>
+      <button class="mini" @click="reindex()" :aria-busy="busy.reindex">Rebuild DB</button></div>
+  </div>
+</article>
+
+<!-- BLUETOOTH -->
+<article class="card">
+  <div class="drawer" @click="toggle('bt')">Bluetooth
+    <span class="tag" x-text="bt.conn?('connected'+(bt.peer?': '+bt.peer:'')):'off'"></span>
+    <span class="chev" :class="{open:openId==='bt'}">›</span></div>
+  <div class="body" x-show="openId==='bt'">
+    <p class="muted" x-text="bt.conn?('Connected: '+(bt.peer||'source')):'No audio source connected'"></p>
+    <div class="row">
+      <button class="mini" @click="send('P')">Pairing mode</button>
+      <button class="mini secondary" @click="send('r')">Reconnect / reset ESP32</button>
+      <button class="mini secondary outline" @click="send('F')">Forget bond</button>
+    </div>
+  </div>
+</article>
+
+<!-- SYNTH / VOICES -->
+<article class="card">
+  <div class="drawer" @click="toggle('synth')">Synth / Voices
+    <span class="tag" x-show="voiceLabel" x-text="voiceLabel"></span>
+    <span class="chev" :class="{open:openId==='synth'}">›</span></div>
+  <div class="body" x-show="openId==='synth'">
+    <p class="muted" x-show="!db.loaded">Connect to load the voice catalog.</p>
+    <template x-if="db.loaded">
+      <div>
+        <input type="search" placeholder="Search bundled voices…" x-model="q.voice">
+        <div class="list">
+          <template x-for="v in filteredBundled" :key="'b'+v.i">
+            <button :class="{sel:sel.voice==='b'+v.i}" @click="pickBundled(v)" x-text="v.name"></button>
+          </template>
+        </div>
+        <template x-if="db.dexed.length">
+          <article class="card" style="margin-top:.6rem;border:1px solid var(--pico-muted-border-color)">
+            <div class="drawer" @click="toggle('carts')" style="padding:.55rem .7rem">Cart library
+              <span class="tag" x-text="db.dexed.length+' carts'"></span>
+              <span class="chev" :class="{open:openId==='carts'}">›</span></div>
+            <div class="body" x-show="openId==='carts'" style="padding:0 .7rem .7rem">
+              <input type="search" placeholder="Filter carts…" x-model="q.cart">
+              <div class="list">
+                <template x-for="c in filteredCarts" :key="c.path">
+                  <button :class="{sel:cart&&cart.path===c.path}" @click="cart=c"
+                          x-text="(c.folder?c.folder+' / ':'')+c.name"></button>
+                </template>
+              </div>
+              <template x-if="cart">
+                <div>
+                  <p class="muted" x-text="cart.voices.length+' voices in '+cart.name"></p>
+                  <div class="list">
+                    <template x-for="(vn,idx) in cart.voices" :key="idx">
+                      <button :class="{sel:sel.voice==='c'+cart.path+':'+idx}"
+                              @click="pickCartVoice(cart,idx)" x-text="(idx+1)+'. '+vn"></button>
+                    </template>
+                  </div>
+                </div>
+              </template>
+            </div>
+          </article>
+        </template>
+      </div>
+    </template>
+  </div>
+</article>
+
+<!-- MIDI PLAYER -->
+<article class="card">
+  <div class="drawer" @click="toggle('player')">MIDI Player
+    <span class="tag" x-show="player.playing" x-text="'playing'"></span>
+    <span class="chev" :class="{open:openId==='player'}">›</span></div>
+  <div class="body" x-show="openId==='player'">
+    <div class="volbar">
+      <span class="lbl">Volume</span>
+      <input type="range" min="0" max="150" x-model.number="player.vol" @change="send('@SONGVOL='+player.vol)">
+      <span class="val" x-text="player.vol+'%'"></span>
+    </div>
+    <p class="muted" x-show="!db.songs.length">No songs indexed.</p>
+    <select x-model="sel.song" x-show="db.songs.length">
+      <template x-for="(s,i) in db.songs" :key="s.path"><option :value="i" x-text="s.name"></option></template>
+    </select>
+    <div class="row">
+      <button @click="playSong()" x-show="db.songs.length">Play</button>
+      <button class="secondary" @click="send('@SONG=stop');player.playing=false">Stop</button>
+    </div>
+  </div>
+</article>
+
+<!-- ARPEGGIATOR -->
+<article class="card">
+  <div class="drawer" @click="toggle('arp')">Arpeggiator
+    <span class="tag" x-show="arp.on" x-text="'on'"></span>
+    <span class="chev" :class="{open:openId==='arp'}">›</span></div>
+  <div class="body" x-show="openId==='arp'">
+    <label><input type="checkbox" role="switch" x-model="arp.on" @change="send('@ARPON='+(arp.on?1:0))"> Enabled</label>
+    <div class="row"><span class="grow muted">Pattern</span>
+      <select class="mini" x-model.number="arp.pat" @change="send('@ARPPAT='+arp.pat)">
+        <template x-for="(p,i) in arpPatterns" :key="i"><option :value="i" x-text="p"></option></template></select></div>
+    <div class="row"><span class="grow muted">Rate</span>
+      <select class="mini" x-model.number="arp.rate" @change="send('@ARPRATE='+arp.rate)">
+        <template x-for="(r,i) in arpRates" :key="i"><option :value="i" x-text="r"></option></template></select></div>
+    <div class="row"><span class="grow muted">Octaves</span>
+      <input class="mini" type="number" min="1" max="4" x-model.number="arp.oct" @change="send('@ARPOCT='+arp.oct)"></div>
+    <label><input type="checkbox" role="switch" x-model="arp.latch" @change="send('@ARPLATCH='+(arp.latch?1:0))"> Latch</label>
+  </div>
+</article>
+
+<!-- DRUMS -->
+<article class="card">
+  <div class="drawer" @click="toggle('drums')">Drums
+    <span class="tag" x-show="drums.playing" x-text="drums.playing"></span>
+    <span class="chev" :class="{open:openId==='drums'}">›</span></div>
+  <div class="body" x-show="openId==='drums'">
+    <div class="volbar">
+      <span class="lbl">Volume</span>
+      <input type="range" min="0" max="150" x-model.number="drums.vol" @change="send('@DRUMVOL='+drums.vol)">
+      <span class="val" x-text="drums.vol+'%'"></span>
+    </div>
+    <div class="row"><span class="grow muted">Kit</span>
+      <select class="mini" x-model.number="drums.kit" @change="send('@DRUMKIT='+drums.kit)">
+        <template x-for="(k,i) in db.drumkits" :key="i"><option :value="i" x-text="k.name"></option></template></select></div>
+    <input type="search" placeholder="Search grooves…" x-model="q.groove">
+    <p class="muted" x-show="!db.grooves.length">No grooves indexed.</p>
+    <div class="list" x-show="db.grooves.length">
+      <template x-for="g in filteredGrooves" :key="g.path">
+        <button :class="{sel:drums.playing===g.name}" @click="playGroove(g)" x-text="g.name"></button>
+      </template>
+    </div>
+    <button class="secondary" x-show="drums.playing" @click="send('D');drums.playing=null">Stop drums</button>
+  </div>
+</article>
+
+<!-- TAC5212 -->
+<article class="card">
+  <div class="drawer" @click="toggle('codec')">TAC5212
+    <span class="chev" :class="{open:openId==='codec'}">›</span></div>
+  <div class="body" x-show="openId==='codec'">
+    <p class="muted">Codec master volume + routing. (Controls wired as the command set lands.)</p>
+    <label class="muted">Output volume <span x-text="codec.vol"></span>
+      <input type="range" min="0" max="100" x-model.number="codec.vol" @change="send('@VOL='+codec.vol)"></label>
+  </div>
+</article>
+
+<script src="https://cdn.jsdelivr.net/npm/alpinejs@3/dist/cdn.min.js" defer></script>
+<script>
+// ---- transport: Web Serial (desktop) or native BLE bridge (app) --------------
+function makeTransport(onLine){
+  if(window.TDSPNative){                              // injected by the RN WebView shell
+    window.__tdspLine = onLine;                       // native calls window.__tdspLine(str)
+    return { name:'BLE', connect:()=>window.TDSPNative.connect(),
+             disconnect:()=>window.TDSPNative.disconnect(), send:(l)=>window.TDSPNative.send(l) };
+  }
+  let port, writer, reader, buf='';
+  const enc=new TextEncoder(), dec=new TextDecoder();
+  async function readLoop(){
+    try{ for(;;){ const {value,done}=await reader.read(); if(done) break;
+      buf+=dec.decode(value,{stream:true}); let i;
+      while((i=buf.indexOf('\n'))>=0){ const l=buf.slice(0,i).replace(/\r$/,''); buf=buf.slice(i+1); if(l) onLine(l); } } }
+    catch(e){ /* reader cancelled on disconnect */ }
+  }
+  return { name:'USB',
+    connect: async ()=>{
+      port = await navigator.serial.requestPort();
+      try{ await port.open({baudRate:115200}); }
+      catch(e){ if(e.name!=='InvalidStateError') throw e; }   // already open -> reuse it
+      writer = port.writable.getWriter();
+      reader = port.readable.getReader();
+      readLoop();
+    },
+    disconnect: async ()=>{
+      try{ await reader?.cancel(); reader?.releaseLock(); }catch{}
+      try{ await writer?.close(); writer?.releaseLock(); }catch{}
+      try{ await port?.close(); }catch{}
+      port=writer=reader=undefined; buf='';
+    },
+    send:(l)=> writer && writer.write(enc.encode(l+'\n')) };
+}
+
+function tdsp(){ return {
+  connected:false, transportName:'USB', openId:'conn', busy:{reindex:false},
+  synth:{name:'',desc:''}, bt:{conn:false,peer:'',vol:50}, codec:{vol:80},
+  arp:{on:false,pat:0,rate:0,oct:1,latch:false}, drums:{kit:0,playing:null,vol:100}, player:{playing:false,vol:100},
+  q:{voice:'',cart:'',groove:''}, sel:{voice:null,song:0}, cart:null,
+  db:{loaded:false,engine:'',dexed:[],grooves:[],songs:[],soundfonts:[],instruments:[],drumkits:[]},
+  arpPatterns:['Up','Down','Up/Down','Random'], arpRates:['1/4','1/8','1/8T','1/16','1/16T','1/32'],
+  _tp:null, _file:null,
+
+  init(){ this._tp=makeTransport(l=>this.onLine(l)); this.transportName=this._tp.name; },
+  toggle(id){ this.openId = (this.openId===id ? null : id); },
+
+  get voiceLabel(){ if(!this.sel.voice) return ''; if(this.sel.voice[0]==='b'){ const v=this.db.instruments[+this.sel.voice.slice(1)]; return v?v.name.split(':').pop().trim():''; } return 'cart voice'; },
+
+  async connect(){
+    try{ await this._tp.connect(); }
+    catch(e){ alert('connect failed: '+e+'\n\nIf a control.html tab is open, close it (only one page can own the port), then reload.'); return; }
+    this.connected=true;
+    try{ await this.loadDb(); }catch(e){ console.error('DB load failed',e); }
+  },
+  async disconnect(){ try{ await this._tp.disconnect(); }catch{} this.connected=false; this.db.loaded=false; },
+  send(l){ this._tp.send(l); },
+
+  headerStatus(){ if(!this.connected) return 'Not connected — click Connect'; const p=[];
+    if(this.synth.name)p.push(this.synth.name); p.push(this.transportName);
+    if(this.bt.conn)p.push('BT:'+(this.bt.peer||'on')); if(this.drums.playing)p.push('♪'+this.drums.playing);
+    return p.join('  ·  '); },
+
+  // ---- @READ file transport --------------------------------------------------
+  readFile(path){ return new Promise((resolve,reject)=>{ this._file={path,parts:{},done:resolve,fail:reject};
+    this.send('@READ='+path); setTimeout(()=>{ if(this._file&&this._file.path===path){ this._file=null; reject('timeout'); } },15000); }); },
+  onLine(l){
+    if(l.startsWith('@FB=')){ if(this._file) this._file.parts={}; }
+    else if(l.startsWith('@FD=')){ const p=l.slice(4).split('\x1f'); if(this._file&&p.length===3) this._file.parts[+p[1]]=p[2]; }
+    else if(l.startsWith('@FE=')){ const f=this._file; if(f){ const b64=Object.keys(f.parts).sort((a,b)=>a-b).map(k=>f.parts[k]).join('');
+        let txt; try{ txt=decodeURIComponent(escape(atob(b64))); }catch(e){ txt=atob(b64); } this._file=null; f.done(txt); } }
+    else if(l.startsWith('@FERR=')){ const f=this._file; this._file=null; if(f) f.fail(l.slice(6)); }
+    else if(l.indexOf('"conn"')>=0 && l.indexOf('"vol"')>=0){ this.parseBt(l); }   // ESP32 BLE status json
+  },
+  parseBt(l){ const m=l.match(/\{.*\}/); if(m){ try{ const s=JSON.parse(m[0]); this.bt.conn=!!s.conn; this.bt.peer=s.peer||''; if(s.vol!=null)this.bt.vol=s.vol; }catch{} } },
+
+  // ---- catalog DB ------------------------------------------------------------
+  async loadDb(){
+    let ix;
+    try{ ix=this.ndjson(await this.readFile('/tdsp/index.ndjson')); }
+    catch(e){ if(confirm('No catalog on the card. Build it now (@REINDEX)?')) await this.reindex(); return; }
+    const meta=ix.find(r=>r.v); if(meta) this.db.engine=meta.engine||'';
+    if(meta&&meta.engine) this.synth.name=meta.engine;
+    const load=async(t)=>{ try{ this.db[t]=this.ndjson(await this.readFile('/tdsp/'+t+'.ndjson')); }catch{ this.db[t]=[]; } };
+    await load('instruments'); await load('dexed'); await load('grooves');
+    await load('songs'); await load('soundfonts'); await load('drumkits');
+    this.db.loaded=true;
+  },
+  ndjson(txt){ return (txt||'').split('\n').map(s=>s.trim()).filter(Boolean).map(s=>{ try{return JSON.parse(s);}catch{return null;} }).filter(Boolean); },
+  async reindex(){ this.busy.reindex=true; this.send('@REINDEX'); await new Promise(r=>setTimeout(r,5000)); await this.loadDb(); this.busy.reindex=false; },
+
+  // ---- derived lists ---------------------------------------------------------
+  get filteredBundled(){ const q=this.q.voice.toLowerCase(); return this.db.instruments.filter(v=>!q||(v.name||'').toLowerCase().includes(q)).slice(0,400); },
+  get filteredCarts(){ const q=this.q.cart.toLowerCase(); return this.db.dexed.filter(c=>!q||((c.name||'')+' '+(c.folder||'')).toLowerCase().includes(q)).slice(0,500); },
+  get filteredGrooves(){ const q=this.q.groove.toLowerCase(); return this.db.grooves.filter(g=>!q||(g.name||'').toLowerCase().includes(q)).slice(0,500); },
+
+  // ---- actions ---------------------------------------------------------------
+  pickBundled(v){ this.sel.voice='b'+v.i; this.send('@DXVOICE='+v.i); },
+  pickCartVoice(c,idx){ this.sel.voice='c'+c.path+':'+idx; this.send('@DXPICK='+c.path.replace('/dexed/','')+'\t'+idx); },
+  playSong(){ this.send('@SONG='+this.sel.song); this.player.playing=true; },
+  playGroove(g){ this.send('@DRUMF='+g.name); this.drums.playing=g.name; },
+}; }
+</script>
+</body>
+</html>

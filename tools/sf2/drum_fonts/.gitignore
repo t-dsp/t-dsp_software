@@ -1,0 +1,3 @@
+# staged drum fonts + merged outputs are binaries — do not commit
+*
+!.gitignore

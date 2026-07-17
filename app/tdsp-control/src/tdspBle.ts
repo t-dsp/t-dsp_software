@@ -21,6 +21,13 @@ export const TDSP_SRC_UUID = '7a9c0004-4a6e-4b7d-8f1a-2d3c4e5f6a70';
 // its Dexed pickers dynamically (no app update when songs/instruments change).
 export const TDSP_SONGS_UUID = '7a9c0005-4a6e-4b7d-8f1a-2d3c4e5f6a70';
 export const TDSP_INSTR_UUID = '7a9c0006-4a6e-4b7d-8f1a-2d3c4e5f6a70';
+// Drum grooves catalog — same chunked-burst contract as songs/instruments.
+export const TDSP_DRUMS_UUID = '7a9c0007-4a6e-4b7d-8f1a-2d3c4e5f6a70';
+// Generic file transfer (NOTIFY): the firmware streams any SD file as base64 frames
+// (@FB/@FD/@FE/@FERR) plus the manifest registry (@MANIFESTS), one line per notify.
+// This ONE characteristic is the transport for drums (catalog.tsv) and every future
+// catalog type — the app reassembles + parses. See CATALOG_TRANSPORT.md.
+export const TDSP_FILE_UUID = '7a9c0008-4a6e-4b7d-8f1a-2d3c4e5f6a70';
 
 // Command opcodes — must match the firmware enum.
 export const CMD = {
@@ -37,7 +44,65 @@ export const CMD = {
   SET_DX_VOICE: 0x22, // + 1 byte: Dexed instrument index (into DX_INSTRUMENTS)
   REFRESH_CAT: 0x23, // re-scan SD + refresh the song/instrument catalog
   SET_HPF: 0x24, // + 1 byte: TAC5212 DAC highpass mode (0=off,1=1Hz,2=12Hz,3=96Hz)
+  SET_MIDI_MODE: 0x25, // + 1 byte: 0 = normal MIDI, 1 = MPE (per-note expression)
+  SET_LOOP: 0x26, // + 1 byte: 0/1 — loop the current song when it ends
+  SET_PRESSURE: 0x27, // + 1 byte: MPE pressure routing bitmask (1=vol 2=bright 4=vib 8=trem)
+  SET_MODWHEEL: 0x28, // + 1 byte: mod-wheel routing bitmask (2=bright 4=vib 8=trem)
+  SET_LFOMODE: 0x29, // + 1 byte: 0 respect patch LFO / 1 force LFO on any patch
+  SET_TIMBRE: 0x2a, // + 1 byte: CC74 timbre (MPE Y) routing bitmask (2=bright 4=vib 8=trem)
+  SET_REPLAYGAIN: 0x2b, // + 1 byte: 0 = off, 1 = on — ReplayGain loudness normalization
+  PLAY_DRUM: 0x30, // + 1 byte: drum groove index (loops until stopped)
+  STOP_DRUM: 0x31, // stop the drum groove
+  SET_DRUM_KIT: 0x32, // + 1 byte: GM drum-kit index (into DRUM_KITS)
+  SET_DRUM_SPEED: 0x33, // RESERVED — drum-speed control removed (drums follow master BPM). Kept so 0x33 isn't reused.
+  SET_DRUM_VOL: 0x34, // + 1 byte: drum level 0..150 (%)
+  SET_BPM: 0x35, // + 1 byte: master tempo 40..240 bpm (drives song + drum together)
+  SET_DRUM_SYNCHRO: 0x36, // + 1 byte: 0/1 synchro start (groove begins on first note)
+  SET_ARP_ON: 0x37, // + 1 byte: 0/1 — arpeggiator enable (bypass when off)
+  SET_ARP_PATTERN: 0x38, // + 1 byte: pattern index 0..24 (see ARP_PATTERNS)
+  SET_ARP_RATE: 0x39, // + 1 byte: rate index 0..14 (see ARP_RATES)
+  SET_ARP_OCT: 0x3a, // + 1 byte: octave range 1..4
+  SET_ARP_LATCH: 0x3b, // + 1 byte: 0/1 — latch held notes
+  READ_FILE: 0x40, // + N bytes: SD path string; firmware streams it back on the FILE char
+  PLAY_DRUM_FILE: 0x41, // + N bytes: groove filename; plays /drums/<name> (@DRUMF=<filename>)
+  RELAY_LINE: 0x42, // + N bytes: a literal @-control line relayed verbatim to the Teensy (new-catalog seam)
 } as const;
+
+// GM drum kits — the "instrument" for the Drums menu. The index is sent via
+// SET_DRUM_KIT; the firmware maps it to a channel-10 program change. MUST match
+// kDrumKits[] in the mix-kit firmware.
+export const DRUM_KITS = [
+  'Standard', 'Room', 'Power', 'Electronic', 'TR-808', 'Jazz', 'Brush', 'Orchestra', 'SFX',
+] as const;
+
+// Arpeggiator pattern + rate labels — the index is what's sent via SET_ARP_PATTERN /
+// SET_ARP_RATE. MUST match the Pattern / Rate enums in lib/TDspArp/src/ArpFilter.h.
+export const ARP_PATTERNS = [
+  'Up', 'Down', 'Up/Down', 'Down/Up', 'Up/Down (incl. ends)', 'Down/Up (incl. ends)',
+  'As Played', 'As Played Rev', 'Random', 'Random Walk', 'Chord', 'Chord + Up', 'Chord Stab',
+  'Converge', 'Diverge', 'Thumb', 'Thumb Up/Down', 'Pinky', 'Pinky Up/Down',
+  'Ascend 3', 'Ascend 4', 'Crab Walk', 'Stair', 'Spiral', 'Euclidean',
+] as const;
+export const ARP_RATES = [
+  '1/1', '1/2.', '1/2', '1/2T', '1/4.', '1/4', '1/4T', '1/8.', '1/8', '1/8T',
+  '1/16.', '1/16', '1/16T', '1/32', '1/32T',
+] as const;
+
+// One groove row from the device's /drums/catalog.tsv manifest (fetched via the
+// generic file transport). The two browse axes are the `genre` and `pack` columns;
+// `display` is shown, `filename` is what we play (PLAY_DRUM_FILE). See CATALOG_TRANSPORT.md.
+export type DrumGroove = { filename: string; pack: string; genre: string; bpm: string; display: string };
+
+function parseDrumCatalog(text: string): DrumGroove[] {
+  const rows: DrumGroove[] = [];
+  for (const ln of text.split('\n')) {
+    if (!ln || ln[0] === '#') continue;
+    const c = ln.split('\t');
+    if (c.length < 5) continue;
+    rows.push({ filename: c[0], pack: c[1], genre: c[2], bpm: c[3], display: c[4] });
+  }
+  return rows;
+}
 
 // TAC5212 DAC highpass filter modes — byte sent via SET_HPF. Maps to the
 // tac5212::DacHpf enum on the Teensy (0=Programmable/all-pass = off).
@@ -84,6 +149,38 @@ export const DX_INSTRUMENTS = [
   'Voice', 'Choir',
 ] as const;
 
+// Standard General MIDI program names (0..127). A GM engine (SF2 / TSF / OPL3)
+// doesn't stream its instrument names — the firmware just flags "GM" on the catalog
+// header (a 3rd \t-field) and the app renders these standard names locally. This
+// avoids streaming ~2 KB of names over the UART/BLE (a BLE characteristic caps at
+// 512 B, so only ~30 names would otherwise fit). See sendCatalog() / readCatalog().
+export const GM_INSTRUMENTS = [
+  'Acoustic Grand Piano', 'Bright Acoustic Piano', 'Electric Grand Piano', 'Honky-tonk Piano',
+  'Electric Piano 1', 'Electric Piano 2', 'Harpsichord', 'Clavinet',
+  'Celesta', 'Glockenspiel', 'Music Box', 'Vibraphone', 'Marimba', 'Xylophone', 'Tubular Bells', 'Dulcimer',
+  'Drawbar Organ', 'Percussive Organ', 'Rock Organ', 'Church Organ', 'Reed Organ',
+  'Accordion', 'Harmonica', 'Tango Accordion',
+  'Acoustic Guitar (nylon)', 'Acoustic Guitar (steel)', 'Electric Guitar (jazz)', 'Electric Guitar (clean)',
+  'Electric Guitar (muted)', 'Overdriven Guitar', 'Distortion Guitar', 'Guitar Harmonics',
+  'Acoustic Bass', 'Electric Bass (finger)', 'Electric Bass (pick)', 'Fretless Bass',
+  'Slap Bass 1', 'Slap Bass 2', 'Synth Bass 1', 'Synth Bass 2',
+  'Violin', 'Viola', 'Cello', 'Contrabass', 'Tremolo Strings', 'Pizzicato Strings', 'Orchestral Harp', 'Timpani',
+  'String Ensemble 1', 'String Ensemble 2', 'Synth Strings 1', 'Synth Strings 2',
+  'Choir Aahs', 'Voice Oohs', 'Synth Voice', 'Orchestra Hit',
+  'Trumpet', 'Trombone', 'Tuba', 'Muted Trumpet', 'French Horn', 'Brass Section', 'Synth Brass 1', 'Synth Brass 2',
+  'Soprano Sax', 'Alto Sax', 'Tenor Sax', 'Baritone Sax', 'Oboe', 'English Horn', 'Bassoon', 'Clarinet',
+  'Piccolo', 'Flute', 'Recorder', 'Pan Flute', 'Blown Bottle', 'Shakuhachi', 'Whistle', 'Ocarina',
+  'Lead 1 (square)', 'Lead 2 (sawtooth)', 'Lead 3 (calliope)', 'Lead 4 (chiff)',
+  'Lead 5 (charang)', 'Lead 6 (voice)', 'Lead 7 (fifths)', 'Lead 8 (bass + lead)',
+  'Pad 1 (new age)', 'Pad 2 (warm)', 'Pad 3 (polysynth)', 'Pad 4 (choir)',
+  'Pad 5 (bowed)', 'Pad 6 (metallic)', 'Pad 7 (halo)', 'Pad 8 (sweep)',
+  'FX 1 (rain)', 'FX 2 (soundtrack)', 'FX 3 (crystal)', 'FX 4 (atmosphere)',
+  'FX 5 (brightness)', 'FX 6 (goblins)', 'FX 7 (echoes)', 'FX 8 (sci-fi)',
+  'Sitar', 'Banjo', 'Shamisen', 'Koto', 'Kalimba', 'Bagpipe', 'Fiddle', 'Shanai',
+  'Tinkle Bell', 'Agogo', 'Steel Drums', 'Woodblock', 'Taiko Drum', 'Melodic Tom', 'Synth Drum', 'Reverse Cymbal',
+  'Guitar Fret Noise', 'Breath Noise', 'Seashore', 'Bird Tweet', 'Telephone Ring', 'Helicopter', 'Applause', 'Gunshot',
+] as const;
+
 // Built-in Dexed songs — index sent via PLAY_SONG. MUST stay in sync (order)
 // with kSongs[] in projects/spike_esp32_bt_spdif_mix_kit/src/main.cpp.
 export const DX_SONGS = [
@@ -98,6 +195,8 @@ export type TdspStatus = {
   disc: boolean; // receiver is discoverable (pairing mode)
   vol: number; // master headphone volume 0..100 (%)
   hpf: number; // TAC5212 DAC highpass mode 0..3 (0=off) — reported by the device
+  mpe: boolean; // false = normal MIDI, true = MPE (per-note expression)
+  rg: boolean; // ReplayGain loudness normalization on/off (device default on)
   peer: string; // connected source name, if any
 };
 
@@ -151,6 +250,8 @@ function parseStatus(raw: string | null | undefined): TdspStatus | null {
       disc: !!j.disc,
       vol: typeof j.vol === 'number' ? j.vol : 50,
       hpf: typeof j.hpf === 'number' ? j.hpf : 0,
+      mpe: !!j.mpe,
+      rg: j.rg === undefined ? true : !!j.rg,
       peer: typeof j.peer === 'string' ? j.peer : '',
     };
   } catch {
@@ -210,6 +311,11 @@ export function useTdsp() {
   const srcSubRef = useRef<Subscription | null>(null);
   const songsSubRef = useRef<Subscription | null>(null);
   const instrSubRef = useRef<Subscription | null>(null);
+  const drumsSubRef = useRef<Subscription | null>(null);
+  const fileSubRef = useRef<Subscription | null>(null);
+  // Generic file transfer: assembling frames + the single in-flight read's promise.
+  const fileAsmRef = useRef<{ id?: string; chunks: (string | undefined)[] } | null>(null);
+  const filePendingRef = useRef<{ resolve: (t: string) => void; reject: (e: Error) => void } | null>(null);
 
   const [state, setState] = useState<ConnState>('idle');
   const [status, setStatus] = useState<TdspStatus | null>(null);
@@ -218,8 +324,12 @@ export function useTdsp() {
   const [volume, setVolumeState] = useState(50); // slider position 0..100
   const [sources, setSources] = useState<TdspSource[]>([]); // paired phones
   const [catSongs, setCatSongs] = useState<string[]>([]); // songs fetched from device
+  const [catDrums, setCatDrums] = useState<string[]>([]); // drum grooves fetched from device
   const [catInstruments, setCatInstruments] = useState<string[]>([]); // instruments fetched
   const [catSynth, setCatSynth] = useState<SynthInfo | null>(null); // engine the firmware was built with
+  const [catIsGM, setCatIsGM] = useState(false); // engine streams 128 GM program names
+  const [catDrumsOk, setCatDrumsOk] = useState(false); // engine renders channel-10 drums (incl. OPLL)
+  const [catDrumManifest, setCatDrumManifest] = useState<DrumGroove[]>([]); // parsed /drums/catalog.tsv
 
   // Coalescing volume writer: rapid slider drags collapse to the latest value so
   // we never flood the BLE link; a write always converges to the final position.
@@ -238,6 +348,8 @@ export function useTdsp() {
       srcSubRef.current?.remove();
       songsSubRef.current?.remove();
       instrSubRef.current?.remove();
+      drumsSubRef.current?.remove();
+      fileSubRef.current?.remove();
       deviceRef.current?.cancelConnection().catch(() => {});
       mgr.destroy();
     };
@@ -252,6 +364,10 @@ export function useTdsp() {
     songsSubRef.current = null;
     instrSubRef.current?.remove();
     instrSubRef.current = null;
+    drumsSubRef.current?.remove();
+    drumsSubRef.current = null;
+    fileSubRef.current?.remove();
+    fileSubRef.current = null;
     try {
       await deviceRef.current?.cancelConnection();
     } catch {}
@@ -261,6 +377,8 @@ export function useTdsp() {
     setStatus(null);
     setSources([]);
     setCatSynth(null); // next device re-reports its own engine
+    setCatIsGM(false);
+    setCatDrumsOk(false);
   }, []);
 
   // Read the full sources list (ATT read-blob returns the whole JSON value).
@@ -273,41 +391,190 @@ export function useTdsp() {
     } catch {}
   }, []);
 
-  // Read the device catalog (song + instrument name lists). Each is a single
-  // '|'-delimited value; empty is left untouched so the UI keeps its fallback.
+  // ---- Catalog reassembly (chunked over BLE) --------------------------------
+  // A catalog list longer than one BLE value (~512 B) — e.g. Dexed's full 320-
+  // voice set — arrives as a burst of framed notifications, each
+  // "<seq>\x1e<count>\x1e<payload>" (0x1e = record separator). We reassemble the
+  // chunks in order and apply the joined list once all have arrived. A value with
+  // no framing (old firmware, or a list that fit in one value) is applied as-is.
+  const RS = '\x1e';
+  type CatAsm = { count: number; parts: (string | undefined)[]; got: number };
+  const songsAsmRef = useRef<CatAsm | null>(null);
+  const instrAsmRef = useRef<CatAsm | null>(null);
+  const drumsAsmRef = useRef<CatAsm | null>(null);
+
+  const applySongsStr = useCallback((full: string) => {
+    const list = full.split('|').filter((x) => x.length > 0);
+    if (list.length) setCatSongs(list);
+  }, []);
+
+  // Drum grooves — the device may report an EMPTY list (no /drums on the card),
+  // so unlike songs we apply even when empty to clear a stale list.
+  const applyDrumsStr = useCallback((full: string) => {
+    setCatDrums(full.split('|').filter((x) => x.length > 0));
+  }, []);
+
+  const applyInstrStr = useCallback((full: string) => {
+    // The instrument list may carry an optional synth header as its FIRST
+    // '|'-field, so the MIDI page labels itself from the engine the firmware was
+    // built with:  "\x1F<name>\t<description>|inst0|inst1|..."  The header is
+    // marked by a leading 0x1F (unit separator); a 3rd \t-field "GM" means a
+    // General-MIDI engine sends NO names and we render GM_INSTRUMENTS locally.
+    const parts = full.split('|').filter((x) => x.length > 0);
+    let isGM = false;
+    let drumsOk = false;
+    if (parts.length && parts[0].startsWith('\x1f')) {
+      const fields = parts.shift()!.slice(1).split('\t');
+      const name = (fields[0] ?? '').trim();
+      const description = (fields[1] ?? '').trim();
+      // GM = streams 128 standard program names; DRUMS = renders channel-10 drums.
+      // These are independent: OPLL is NOT GM (15 timbres) yet DOES play drums.
+      isGM = fields.some((f) => f.trim() === 'GM');
+      drumsOk = fields.some((f) => f.trim() === 'DRUMS');
+      if (name) setCatSynth({ name, description: description || DEFAULT_SYNTH.description });
+    }
+    setCatIsGM(isGM);
+    setCatDrumsOk(drumsOk); // drives the Drums menu's "audible on this engine?" hint
+    if (isGM) setCatInstruments(GM_INSTRUMENTS as unknown as string[]);
+    else if (parts.length) setCatInstruments(parts);
+  }, []);
+
+  // Feed one raw characteristic value (base64) into a reassembler; apply the
+  // joined list once every chunk of the burst has been collected.
+  const feedCatalog = useCallback(
+    (
+      ref: { current: CatAsm | null },
+      value: string | null | undefined,
+      apply: (full: string) => void
+    ) => {
+      const s = value ? base64ToString(value) : '';
+      if (!s) return;
+      const i1 = s.indexOf(RS);
+      const i2 = i1 >= 0 ? s.indexOf(RS, i1 + 1) : -1;
+      if (i1 < 0 || i2 < 0) {
+        // Unframed value (old firmware / single value) — treat as the whole list.
+        ref.current = null;
+        apply(s);
+        return;
+      }
+      const seq = parseInt(s.slice(0, i1), 10);
+      const count = parseInt(s.slice(i1 + 1, i2), 10);
+      const payload = s.slice(i2 + 1);
+      if (!Number.isFinite(seq) || !Number.isFinite(count) || count < 1 || seq < 0 || seq >= count) return;
+      let asm = ref.current;
+      if (!asm || asm.count !== count) {
+        asm = { count, parts: new Array(count).fill(undefined), got: 0 };
+        ref.current = asm;
+      }
+      if (asm.parts[seq] === undefined) asm.got++;
+      asm.parts[seq] = payload;
+      if (asm.got >= count) {
+        const full = asm.parts.join('');
+        ref.current = null;
+        apply(full);
+      }
+    },
+    []
+  );
+
+  // Read each catalog characteristic once and feed it into the reassembler. For a
+  // single-chunk (or legacy) value this completes immediately; for a multi-chunk
+  // burst the notify subscription + a forced refresh deliver the rest.
   const readCatalog = useCallback(async () => {
     const device = deviceRef.current;
     if (!device) return;
-    const parseList = (v: string | null | undefined): string[] => {
-      const s = v ? base64ToString(v) : '';
-      return s ? s.split('|').filter((x) => x.length > 0) : [];
-    };
     try {
       const c = await device.readCharacteristicForService(TDSP_SVC_UUID, TDSP_SONGS_UUID);
-      const list = parseList(c.value);
-      if (list.length) setCatSongs(list);
+      feedCatalog(songsAsmRef, c.value, applySongsStr);
     } catch {}
     try {
       const c = await device.readCharacteristicForService(TDSP_SVC_UUID, TDSP_INSTR_UUID);
-      // The instrument value may carry an optional synth header as its FIRST
-      // '|'-field, so the MIDI page labels itself from the engine the firmware
-      // was built with:  "\x1F<name>\t<description>|inst0|inst1|..."
-      // The header is marked by a leading 0x1F (unit separator). It can't be '@'
-      // (the Teensy->ESP32 relay treats '@' as a line-start and would truncate
-      // the catalog) nor '\n' (that line is newline-framed); 0x1F never appears
-      // in patch names. Old firmware sends no header -> synth stays default.
-      const raw = c.value ? base64ToString(c.value) : '';
-      const parts = raw.split('|').filter((x) => x.length > 0);
-      if (parts.length && parts[0].startsWith('\x1f')) {
-        const header = parts.shift()!.slice(1);
-        const tab = header.indexOf('\t');
-        const name = (tab >= 0 ? header.slice(0, tab) : header).trim();
-        const description = tab >= 0 ? header.slice(tab + 1).trim() : '';
-        if (name) setCatSynth({ name, description: description || DEFAULT_SYNTH.description });
-      }
-      if (parts.length) setCatInstruments(parts);
+      feedCatalog(instrAsmRef, c.value, applyInstrStr);
+    } catch {}
+    try {
+      const c = await device.readCharacteristicForService(TDSP_SVC_UUID, TDSP_DRUMS_UUID);
+      feedCatalog(drumsAsmRef, c.value, applyDrumsStr);
+    } catch {}
+  }, [feedCatalog, applySongsStr, applyInstrStr, applyDrumsStr]);
+
+  // ---- Generic file transfer (@READ -> @FB/@FD/@FE frames) -------------------
+  const FUS = '\x1f'; // field separator inside file/manifest frames
+  // Write a command whose payload is a string (path / filename), ASCII bytes after
+  // the opcode. Used for READ_FILE and PLAY_DRUM_FILE.
+  const writeStrCmd = useCallback(async (opcode: number, str: string) => {
+    const device = deviceRef.current;
+    if (!device) return;
+    const bytes = [opcode & 0xff];
+    for (let i = 0; i < str.length; i++) bytes.push(str.charCodeAt(i) & 0xff);
+    try {
+      await device.writeCharacteristicWithResponseForService(TDSP_SVC_UUID, TDSP_CMD_UUID, bytesToBase64(bytes));
     } catch {}
   }, []);
+
+  // Fetch an SD file over BLE. Sends READ_FILE; the FILE-char notifications carry the
+  // base64 frames that handleFileLine reassembles and resolves here. One in-flight read.
+  const readFile = useCallback(
+    (path: string) =>
+      new Promise<string>((resolve, reject) => {
+        if (!deviceRef.current) { reject(new Error('not connected')); return; }
+        if (filePendingRef.current) { reject(new Error('a file read is already in progress')); return; }
+        filePendingRef.current = { resolve, reject };
+        fileAsmRef.current = { id: undefined, chunks: [] };
+        writeStrCmd(CMD.READ_FILE, path).catch((e) => {
+          filePendingRef.current = null;
+          reject(e instanceof Error ? e : new Error(String(e)));
+        });
+      }),
+    [writeStrCmd]
+  );
+
+  // The device advertises which source each role should browse (@MANIFESTS). For the
+  // drums role we @READ its catalog.tsv, parse it, and hand the app a rich groove list.
+  const onManifests = useCallback(
+    (payload: string) => {
+      const reg: Record<string, string> = {};
+      payload.split('|').forEach((e) => { const [role, src] = e.split(FUS); if (role) reg[role] = src || ''; });
+      const src = reg.drums || 'none';
+      if (src.startsWith('file:')) {
+        readFile(src.slice(5))
+          .then((text) => setCatDrumManifest(parseDrumCatalog(text)))
+          .catch(() => {}); // leave the legacy @DRUMS list in place on failure
+      }
+    },
+    [readFile]
+  );
+
+  // Dispatch one line arriving on the FILE characteristic.
+  const handleFileLine = useCallback(
+    (line: string) => {
+      if (line.startsWith('@MANIFESTS=')) { onManifests(line.slice(11)); return; }
+      if (line.startsWith('@FB=')) {
+        const f = line.slice(4).split(FUS);
+        fileAsmRef.current = { id: f[0], chunks: [] };
+      } else if (line.startsWith('@FD=')) {
+        const f = line.slice(4).split(FUS);
+        const a = fileAsmRef.current;
+        if (a && f[0] === a.id) a.chunks[parseInt(f[1], 10)] = f[2];
+      } else if (line.startsWith('@FE=')) {
+        const f = line.slice(4).split(FUS);
+        const a = fileAsmRef.current;
+        const p = filePendingRef.current;
+        filePendingRef.current = null;
+        if (a && p) {
+          const count = parseInt(f[1], 10);
+          let b64 = '';
+          let ok = true;
+          for (let i = 0; i < count; i++) { if (a.chunks[i] == null) { ok = false; break; } b64 += a.chunks[i]; }
+          if (ok) p.resolve(base64ToString(b64)); else p.reject(new Error('missing file chunk'));
+        }
+      } else if (line.startsWith('@FERR=')) {
+        const p = filePendingRef.current;
+        filePendingRef.current = null;
+        if (p) p.reject(new Error(line.slice(6)));
+      }
+    },
+    [onManifests]
+  );
 
   const subscribeStatus = useCallback(async (device: Device) => {
     // Bigger MTU so the status JSON fits one notification and the sources list
@@ -342,25 +609,57 @@ export function useTdsp() {
         readSources();
       }
     );
-    // Catalog (Dexed songs + instruments): read once, re-read on "changed" notify.
-    // The ESP32 requests fresh lists from the Teensy on connect, so a notify fires
-    // shortly after we subscribe.
+    // Catalog (Dexed songs + instruments): read once, then reassemble the chunked
+    // burst the device streams on each "changed" notify (a long list — e.g. the
+    // full 320-voice Dexed set — spans several notifications).
     await readCatalog();
     songsSubRef.current = device.monitorCharacteristicForService(
       TDSP_SVC_UUID,
       TDSP_SONGS_UUID,
-      (err) => {
-        if (!err) readCatalog();
+      (err, ch) => {
+        if (!err) feedCatalog(songsAsmRef, ch?.value, applySongsStr);
       }
     );
     instrSubRef.current = device.monitorCharacteristicForService(
       TDSP_SVC_UUID,
       TDSP_INSTR_UUID,
-      (err) => {
-        if (!err) readCatalog();
+      (err, ch) => {
+        if (!err) feedCatalog(instrAsmRef, ch?.value, applyInstrStr);
       }
     );
-  }, [readSources, readCatalog]);
+    drumsSubRef.current = device.monitorCharacteristicForService(
+      TDSP_SVC_UUID,
+      TDSP_DRUMS_UUID,
+      (err, ch) => {
+        if (!err) feedCatalog(drumsAsmRef, ch?.value, applyDrumsStr);
+      }
+    );
+    // Generic file transport: manifest registry (@MANIFESTS) + file-read frames
+    // (@FB/@FD/@FE/@FERR) arrive here one line per notification. Drives the drum browser.
+    fileSubRef.current = device.monitorCharacteristicForService(
+      TDSP_SVC_UUID,
+      TDSP_FILE_UUID,
+      (err, ch) => {
+        if (!err && ch?.value) handleFileLine(base64ToString(ch.value));
+      }
+    );
+    // Force a fresh catalog burst now that our notify subscriptions are live: the
+    // ESP32's on-connect send can fire before we've subscribed, so its chunks
+    // would be lost. Re-request, then retry once if a chunk went missing (an
+    // in-flight reassembler that never completed leaves its ref non-null).
+    const kickCatalog = () =>
+      device
+        .writeCharacteristicWithResponseForService(
+          TDSP_SVC_UUID,
+          TDSP_CMD_UUID,
+          bytesToBase64([CMD.REFRESH_CAT])
+        )
+        .catch(() => {});
+    await kickCatalog();
+    setTimeout(() => {
+      if (songsAsmRef.current || instrAsmRef.current || drumsAsmRef.current) kickCatalog();
+    }, 2500);
+  }, [readSources, readCatalog, feedCatalog, applySongsStr, applyInstrStr, applyDrumsStr]);
 
   const scanAndConnect = useCallback(async () => {
     const mgr = managerRef.current;
@@ -393,6 +692,10 @@ export function useTdsp() {
           songsSubRef.current = null;
           instrSubRef.current?.remove();
           instrSubRef.current = null;
+          drumsSubRef.current?.remove();
+          drumsSubRef.current = null;
+          fileSubRef.current?.remove();
+          fileSubRef.current = null;
           deviceRef.current = null;
           volInitedRef.current = false;
           setStatus(null);
@@ -489,6 +792,83 @@ export function useTdsp() {
     (mode: number) => writeByteCmd(CMD.SET_HPF, mode),
     [writeByteCmd]
   );
+  // Switch the device between normal MIDI and MPE (per-note expression, e.g. LinnStrument).
+  const setMidiMode = useCallback(
+    (mpe: boolean) => writeByteCmd(CMD.SET_MIDI_MODE, mpe ? 1 : 0),
+    [writeByteCmd]
+  );
+  // ReplayGain loudness normalization for the whole synth: false = off (raw), true = on.
+  const setReplayGain = useCallback(
+    (on: boolean) => writeByteCmd(CMD.SET_REPLAYGAIN, on ? 1 : 0),
+    [writeByteCmd]
+  );
+  // Loop the current song when it reaches the end (great for the built-in test sequences).
+  const setLoop = useCallback(
+    (on: boolean) => writeByteCmd(CMD.SET_LOOP, on ? 1 : 0),
+    [writeByteCmd]
+  );
+  // --- Drums: a looping channel-10 groove under the live synth (GM engines) ----
+  const playDrum = useCallback((index: number = 0) => writeByteCmd(CMD.PLAY_DRUM, index), [writeByteCmd]);
+  const stopDrum = useCallback(() => sendCommand(CMD.STOP_DRUM), [sendCommand]);
+  const setDrumKit = useCallback(
+    (index: number) => writeByteCmd(CMD.SET_DRUM_KIT, index),
+    [writeByteCmd]
+  );
+  // Drum level 0..150 (%), clamped to the byte payload. (Drum tempo follows the
+  // master BPM — there is no separate drum-speed control.)
+  const setDrumVol = useCallback(
+    (pct: number) => writeByteCmd(CMD.SET_DRUM_VOL, Math.max(0, Math.min(150, Math.round(pct)))),
+    [writeByteCmd]
+  );
+  // Arpeggiator — steps held live notes to the master BPM (see @ARP* in the firmware).
+  const setArpOn = useCallback((on: boolean) => writeByteCmd(CMD.SET_ARP_ON, on ? 1 : 0), [writeByteCmd]);
+  const setArpPattern = useCallback(
+    (idx: number) => writeByteCmd(CMD.SET_ARP_PATTERN, Math.max(0, Math.min(ARP_PATTERNS.length - 1, Math.round(idx)))),
+    [writeByteCmd]
+  );
+  const setArpRate = useCallback(
+    (idx: number) => writeByteCmd(CMD.SET_ARP_RATE, Math.max(0, Math.min(ARP_RATES.length - 1, Math.round(idx)))),
+    [writeByteCmd]
+  );
+  const setArpOct = useCallback(
+    (oct: number) => writeByteCmd(CMD.SET_ARP_OCT, Math.max(1, Math.min(4, Math.round(oct)))),
+    [writeByteCmd]
+  );
+  const setArpLatch = useCallback((on: boolean) => writeByteCmd(CMD.SET_ARP_LATCH, on ? 1 : 0), [writeByteCmd]);
+  // Play a groove by filename (from the catalog.tsv manifest) — decoupled from the
+  // firmware's SD-scan order, so the full library browses/plays without a 48-slot cap.
+  const playDrumFile = useCallback((filename: string) => writeStrCmd(CMD.PLAY_DRUM_FILE, filename), [writeStrCmd]);
+  // Master tempo (BPM) — one knob for the song AND the drum groove; they lock together.
+  const setBpm = useCallback(
+    (bpm: number) => writeByteCmd(CMD.SET_BPM, Math.max(40, Math.min(240, Math.round(bpm)))),
+    [writeByteCmd]
+  );
+  // Synchro start: the groove begins on your first keyboard note (PSS-140 style).
+  const setDrumSynchro = useCallback(
+    (on: boolean) => writeByteCmd(CMD.SET_DRUM_SYNCHRO, on ? 1 : 0),
+    [writeByteCmd]
+  );
+
+  // MPE pressure routing bitmask: 1=volume 2=brightness 4=vibrato 8=tremolo (combine).
+  const setPressure = useCallback(
+    (mask: number) => writeByteCmd(CMD.SET_PRESSURE, mask & 0xff),
+    [writeByteCmd]
+  );
+  // Mod-wheel routing bitmask: 2=brightness 4=vibrato 8=tremolo (volume bit ignored).
+  const setModWheel = useCallback(
+    (mask: number) => writeByteCmd(CMD.SET_MODWHEEL, mask & 0xff),
+    [writeByteCmd]
+  );
+  // LFO mode for vibrato/tremolo: false = respect the patch's own LFO, true = force one.
+  const setLfoMode = useCallback(
+    (force: boolean) => writeByteCmd(CMD.SET_LFOMODE, force ? 1 : 0),
+    [writeByteCmd]
+  );
+  // CC74 timbre (MPE Y-axis / slide) routing bitmask: 2=brightness 4=vibrato 8=tremolo.
+  const setTimbre = useCallback(
+    (mask: number) => writeByteCmd(CMD.SET_TIMBRE, mask & 0xff),
+    [writeByteCmd]
+  );
   // Ask the device to re-scan its SD card and re-send the catalog. The device
   // NOTIFYs the songs/instruments chars, which re-reads via the subscription; we
   // also re-read after a short delay in case the notify is missed.
@@ -565,6 +945,14 @@ export function useTdsp() {
     // if the firmware is older / hasn't reported yet.
     songs: catSongs.length ? catSongs : (DX_SONGS as unknown as string[]),
     instruments: catInstruments.length ? catInstruments : (DX_INSTRUMENTS as unknown as string[]),
+    // Drum grooves scanned off the SD /drums folder (empty until the device reports some).
+    drums: catDrums,
+    // Rich groove manifest (catalog.tsv) fetched via the file transport — drives the
+    // genre/pack browser. Empty on older firmware (falls back to the flat `drums` list).
+    drumManifest: catDrumManifest,
+    drumKits: DRUM_KITS as unknown as string[],
+    isGM: catIsGM,
+    drumsOk: catDrumsOk,
     // Synth engine the connected firmware was built with (Dexed / ymfm OPM / …),
     // reported by the device; falls back to Dexed for firmware without the header.
     synth: catSynth ?? DEFAULT_SYNTH,
@@ -579,6 +967,26 @@ export function useTdsp() {
     stopSong,
     setDxVoice,
     setHpf,
+    setMidiMode,
+    setReplayGain,
+    setLoop,
+    playDrum,
+    playDrumFile,
+    readFile,
+    stopDrum,
+    setDrumKit,
+    setDrumVol,
+    setArpOn,
+    setArpPattern,
+    setArpRate,
+    setArpOct,
+    setArpLatch,
+    setBpm,
+    setDrumSynchro,
+    setPressure,
+    setModWheel,
+    setLfoMode,
+    setTimbre,
     refreshCatalog,
   };
 }

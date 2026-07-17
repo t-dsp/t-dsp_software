@@ -1,0 +1,12 @@
+{
+  "name": "TDspMidiLoop",
+  "version": "0.1.0",
+  "description": "Beat-aware MIDI loop recorder + player. tdsp::MidiLooper is a MidiSink that captures the arp's baked output, locks the loop to the master Clock downbeat (2/4..7/4, 1/2/4/8 bars), and plays it back synced with seam-wrapped note-off tails. Replace + overdub. Distinct from the audio-sample TDspLooper.",
+  "keywords": ["midi", "looper", "recorder", "mpe", "clock", "t-dsp"],
+  "frameworks": "arduino",
+  "platforms": "teensy",
+  "dependencies": {
+    "TDspMidi": "*",
+    "TDspClock": "*"
+  }
+}

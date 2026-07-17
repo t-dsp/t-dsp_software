@@ -24,6 +24,10 @@ Loaded via:
 See planning/osc-mixer-foundation/05-vendoring-strategy.md for design notes.
 """
 
+# PEP 604 `X | None` annotations below are evaluated lazily so this runs on the
+# Python 3.8 that ships on older Linux flash hosts (e.g. jay-mint / Mint 20).
+from __future__ import annotations
+
 import os
 import shutil
 import subprocess
@@ -174,19 +178,21 @@ def override_toolchain_to_teensy_gcc11() -> None:
     # prepend is what actually causes the gcc 11 binaries to be picked up.
     env.PrependENVPath("PATH", str(bin_dir))
     # Belt + suspenders: also Replace the explicit tool variables in case
-    # any build step references them by SCons env var name.
+    # any build step references them by SCons env var name. The binaries carry
+    # a `.exe` suffix on Windows but not on Linux flash hosts.
     prefix = "arm-none-eabi-"
+    exe = ".exe" if os.name == "nt" else ""
     env.Replace(
-        CC=str(bin_dir / f"{prefix}gcc.exe"),
-        CXX=str(bin_dir / f"{prefix}g++.exe"),
-        AS=str(bin_dir / f"{prefix}gcc.exe"),
-        AR=str(bin_dir / f"{prefix}gcc-ar.exe"),
-        RANLIB=str(bin_dir / f"{prefix}gcc-ranlib.exe"),
-        LD=str(bin_dir / f"{prefix}gcc.exe"),
-        OBJCOPY=str(bin_dir / f"{prefix}objcopy.exe"),
-        OBJDUMP=str(bin_dir / f"{prefix}objdump.exe"),
-        SIZETOOL=str(bin_dir / f"{prefix}size.exe"),
-        NM=str(bin_dir / f"{prefix}gcc-nm.exe"),
+        CC=str(bin_dir / f"{prefix}gcc{exe}"),
+        CXX=str(bin_dir / f"{prefix}g++{exe}"),
+        AS=str(bin_dir / f"{prefix}gcc{exe}"),
+        AR=str(bin_dir / f"{prefix}gcc-ar{exe}"),
+        RANLIB=str(bin_dir / f"{prefix}gcc-ranlib{exe}"),
+        LD=str(bin_dir / f"{prefix}gcc{exe}"),
+        OBJCOPY=str(bin_dir / f"{prefix}objcopy{exe}"),
+        OBJDUMP=str(bin_dir / f"{prefix}objdump{exe}"),
+        SIZETOOL=str(bin_dir / f"{prefix}size{exe}"),
+        NM=str(bin_dir / f"{prefix}gcc-nm{exe}"),
     )
     print(f"framework_overlay: toolchain override -> gcc 11 PATH prepended {bin_dir}")
 

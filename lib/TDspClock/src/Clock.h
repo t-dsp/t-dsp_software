@@ -107,6 +107,16 @@ public:
     // 0..1 phase within the current bar.
     float barPhase() const;
 
+    // Absolute, monotonic musical position in BEATS (quarter notes) since
+    // the last Start — integer beats plus the intra-beat phase, returned as
+    // ONE double computed from a single snapshot of the tick counter (so it
+    // never tears across a beat edge the way separate beatCount()+beatPhase()
+    // reads can). This is the position authority for tick-synced loop players:
+    // two players that dispatch against the same positionBeats() cannot drift
+    // apart. Frozen at the last tick when stopped; exactly 0 right after
+    // Start (no forward interpolation until the first interval is known).
+    double positionBeats() const;
+
     // Edge latches. Each returns `true` at most once per beat/bar,
     // clearing on read. Designed for a single foreground consumer;
     // if multiple consumers need the same edge, build a fan-out.
