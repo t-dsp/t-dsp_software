@@ -1266,7 +1266,7 @@ export default function App() {
       {D.v === 2 && !voice2.on && <Text style={s.muted}>Synth B is off — this player is silent until you enable it (● / ○ in the Synthesizer B header).</Text>}
       <VolSlider label="Volume" value={D.vol} onChange={D.onVol} onCommit={D.commitVol} disabled={!connected} />
       {!!D.volNote && <Text style={s.muted}>{D.volNote}</Text>}
-      <View style={s.list}>
+      <View style={s.browseBox}>
         <FolderBrowser tp={tp} root="/midi/songs" ext="mid" enabled={connected && loaded}
           selected={D.player.song} playing={D.player.playing ? D.player.song : undefined}
           onSelectFile={(full, disp) => D.playFile(full, disp)} injectFolders={songInjectFolders} />
@@ -1400,7 +1400,7 @@ export default function App() {
         value={q.groove} onChangeText={t => setQ(x => ({ ...x, groove: t }))} />
       {/* Recursive /midi/drums file picker (the @LS browser). A tap plays the groove now via
           @DRUMF with the FULL SD path; drums.sel/playing keep the header ‹ › ▶ ■ + Stop working. */}
-      <View style={s.list}>
+      <View style={s.browseBox}>
         <FolderBrowser tp={tp} root="/midi/drums" ext="mid" enabled={connected && loaded}
           selected={drums.sel ?? undefined} playing={drums.playing ? (drums.sel ?? undefined) : undefined}
           onSelectFile={(full, disp) => { tp.playGrooveFile(full); setDrums(d => ({ ...d, sel: full, playing: disp })); persistApp({ groove: full }); }} />
@@ -1974,6 +1974,7 @@ const s = StyleSheet.create({
   btnText: { color: C.text, fontSize: 13, fontWeight: '600' },
   input: { backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 7, color: C.text, paddingHorizontal: 10, paddingVertical: 8, fontSize: 14 },
   list: { maxHeight: 300, borderWidth: 1, borderColor: C.border, borderRadius: 7 },
+  browseBox: { height: 340 },   // fixed height so <FolderBrowser>'s flex picker lays out inside a card body
   listBtn: { paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.border },
   listBtnSel: { backgroundColor: C.sel },
   // Pattern picker: a wrapping GRID so every one of the 26 patterns is reachable at once
