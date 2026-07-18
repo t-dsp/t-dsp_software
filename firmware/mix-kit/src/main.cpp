@@ -1461,6 +1461,49 @@ static const DrumKit kDrumKits[] = {
 };
 static const int kNumDrumKits = sizeof(kDrumKits) / sizeof(kDrumKits[0]);
 
+// Runtime drum-kit table. When an ACOUSTIC multi-kit drum font (/sf2/drumkits.sf2,
+// fetch_drumkits.py) is loaded, its kits are bank-128 presets addressed by program — the
+// same mechanism as GM kits — so we swap the Drums menu to that font's kit list, read from
+// /sf2/drumkits.tsv (cols: program, name, license, pieces, display). g_numRtKits > 0 means
+// "use this table instead of kDrumKits[]"; it stays 0 on GM/OPLL builds so behavior is
+// unchanged there. Accessors below funnel every kDrumKits reader through one seam.
+struct RtDrumKit { char name[24]; uint8_t prog; };
+static RtDrumKit g_rtKits[24];
+static int       g_numRtKits = 0;
+static inline int         numDrumKits()      { return g_numRtKits > 0 ? g_numRtKits : kNumDrumKits; }
+static inline const char *drumKitName(int i) { return g_numRtKits > 0 ? g_rtKits[i].name : kDrumKits[i].name; }
+static inline uint8_t     drumKitProg(int i) { return g_numRtKits > 0 ? g_rtKits[i].prog : kDrumKits[i].prog; }
+
+#if TDSP_HAS_SDCARD
+// Populate g_rtKits from /sf2/drumkits.tsv (written by fetch_drumkits.py alongside the font).
+// Only called when the acoustic font actually loaded (g_drumFontIsKits), so the menu always
+// matches what will sound. Silent no-op if the manifest is absent/empty (keeps GM kits).
+static void loadDrumKitsTsv() {
+    File f = SD.open("/sf2/drumkits.tsv");
+    if (!f) { Serial.println("[drum] drumkits.sf2 loaded but /sf2/drumkits.tsv missing -> keeping GM kit names"); return; }
+    int n = 0;
+    while (f.available() && n < (int)(sizeof(g_rtKits) / sizeof(g_rtKits[0]))) {
+        String line = f.readStringUntil('\n');
+        line.trim();
+        if (line.length() == 0 || line[0] == '#') continue;      // skip blank + header comment
+        // program \t name \t license \t pieces \t display
+        int t1 = line.indexOf('\t');            if (t1 < 0) continue;
+        int prog = line.substring(0, t1).toInt();
+        int tLast = line.lastIndexOf('\t');      // display is the final column
+        String disp = (tLast > t1) ? line.substring(tLast + 1) : line.substring(t1 + 1);
+        disp.trim();
+        if (disp.length() == 0 || prog < 0 || prog > 127) continue;
+        strncpy(g_rtKits[n].name, disp.c_str(), sizeof(g_rtKits[n].name) - 1);
+        g_rtKits[n].name[sizeof(g_rtKits[n].name) - 1] = 0;
+        g_rtKits[n].prog = (uint8_t)prog;
+        ++n;
+    }
+    f.close();
+    g_numRtKits = n;
+    Serial.printf("[drum] loaded %d acoustic kit(s) from /sf2/drumkits.tsv\n", n);
+}
+#endif
+
 // Catalog DB (CatalogDb.h) bundled-list hook: the engine's compile-time voice names +
 // the GM drum-kit table live here, so the indexer calls back into main.cpp to emit
 // /tdsp/instruments.ndjson + /tdsp/drumkits.ndjson alongside the SD-scanned sources.
@@ -1481,9 +1524,9 @@ FLASHMEM static void catdbWriteBundled() {
     SD.remove("/tdsp/drumkits.ndjson");
     File k = SD.open("/tdsp/drumkits.ndjson", FILE_WRITE);
     if (k) {
-        for (int i = 0; i < kNumDrumKits; ++i) {
-            k.print("{\"name\":"); tdsp::catdb::jsonStr(k, kDrumKits[i].name);
-            k.print(",\"prog\":"); k.print(kDrumKits[i].prog); k.print("}\n");
+        for (int i = 0; i < numDrumKits(); ++i) {
+            k.print("{\"name\":"); tdsp::catdb::jsonStr(k, drumKitName(i));
+            k.print(",\"prog\":"); k.print(drumKitProg(i)); k.print("}\n");
         }
         k.close();
     }
@@ -1559,12 +1602,13 @@ static void muteSongDrums(bool mute) {
 }
 
 static void drumApplyKit() {
+    const uint8_t prog = drumKitProg(g_drumKit);
 #if defined(TDSP_DRUM_TSF)
-    g_drumTsfSink.onProgramChange(10, kDrumKits[g_drumKit].prog);   // kit lives on the dedicated drum TSF
+    g_drumTsfSink.onProgramChange(10, prog);   // kit lives on the dedicated drum TSF
 #elif defined(TDSP_DRUM_VOICE)
-    g_drumVoiceSink.onProgramChange(10, kDrumKits[g_drumKit].prog); // OPLL rhythm ignores it, but stays consistent
+    g_drumVoiceSink.onProgramChange(10, prog); // OPLL rhythm ignores it, but stays consistent
 #else
-    g_synthSink->onProgramChange(10, kDrumKits[g_drumKit].prog);
+    g_synthSink->onProgramChange(10, prog);
 #endif
 }
 
@@ -1639,10 +1683,10 @@ static void transportStop() {
 #endif  // TDSP_METRONOME
 static void setDrumKit(int i) {
     if (i < 0) i = 0;
-    if (i >= kNumDrumKits) i = kNumDrumKits - 1;
+    if (i >= numDrumKits()) i = numDrumKits() - 1;
     g_drumKit = i;
     if (drumEngineOk()) drumApplyKit();
-    Serial.printf("[drum] kit -> %s (prog %u)\n", kDrumKits[i].name, kDrumKits[i].prog);
+    Serial.printf("[drum] kit -> %s (prog %u)\n", drumKitName(i), drumKitProg(i));
 }
 
 // --- Launch quantize: the user-facing START entry points. When quantize is on they PRELOAD now
@@ -2395,6 +2439,15 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     }
     else if (strncmp(line, "@DRUMF=", 7) == 0)    drumLaunchFile(line + 7); // @DRUMF=<filename> (browser, via catalog.tsv; bar-quantized if @QUANTIZE=1)
     else if (strncmp(line, "@DRUMKIT=", 9) == 0)   setDrumKit(atoi(line + 9));    // GM kit ("instrument")
+    else if (strncmp(line, "@DRUMMAP=", 9) == 0) {   // ch10 note-map mode: 0=GmReduce (fold Roland 22/26->42/46), 1=Passthrough
+        // Passthrough is ONLY correct on a font that has real regions at 22/26 (a V-Drums/TD-11
+        // kit); on a plain GM font it re-drops the edge hi-hats silent. Default GmReduce; this
+        // is set automatically when an authentic drum font loads (see setup()), and exposed here
+        // for diagnostics / an app toggle. See planning/drum-note-map/DESIGN.md.
+        g_drumNoteMapper.setMode(atoi(line + 9) ? tdsp::DrumNoteMapper::Passthrough
+                                                : tdsp::DrumNoteMapper::GmReduce);
+        Serial.printf("@DRUMMAP=%d\n", (int)g_drumNoteMapper.mode());
+    }
     else if (strncmp(line, "@DRUMVOL=", 9) == 0)    setDrumVol(atoi(line + 9));    // 0..150 %
     else if (strncmp(line, "@SONGVOL=", 9) == 0)    setSongVol(atoi(line + 9));    // 0..150 %, MIDI player level (independent of @VOL master)
     else if (strncmp(line, "@BPM=", 5) == 0)        setMasterBpm(atoi(line + 5));  // master tempo (song+drum)
@@ -2747,7 +2800,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         { Track &t = g_tracks[0];
           reply.printf("\"song\":{\"playing\":%d,\"p\":%d,\"sync\":%d,\"vol\":%d,\"name\":", t.player->isPlaying() ? 1 : 0, t.player->positionPermille(), t.player->isSynced() ? 1 : 0, g_songVolPct);
           tdsp::catdb::jsonStr(reply, t.name); reply.print("},"); }
-        reply.printf("\"drums\":{\"kit\":%d,\"playing\":%d,\"sync\":%d,\"vol\":%d},", g_drumKit, g_drumPlayer.isPlaying() ? 1 : 0, g_drumPlayer.isSynced() ? 1 : 0, g_drumVolPct);
+        reply.printf("\"drums\":{\"kit\":%d,\"playing\":%d,\"sync\":%d,\"vol\":%d,\"map\":%d},", g_drumKit, g_drumPlayer.isPlaying() ? 1 : 0, g_drumPlayer.isSynced() ? 1 : 0, g_drumVolPct, (int)g_drumNoteMapper.mode());
 #ifdef TDSP_METRONOME
         reply.printf("\"metro\":%d,\"metromuted\":%d,\"metrosig\":%d,\"metrovol\":%d,", g_conductor.running() ? 1 : 0, g_metroMuted ? 1 : 0, g_metroBpb, g_metroVolPct);   // transport running + click mute + time sig + click level
 #endif
@@ -3156,6 +3209,9 @@ FLASHMEM void setup() {
         g_drumNoteMapper.setDownstream(&g_drumTsfSink);
         g_drumPlayer.setSink(&g_drumNoteMapper); g_drumTrack.sink = &g_drumTsfSink;
         g_engineHasDrums = true;
+        // If the acoustic multi-kit font loaded, swap the Drums menu to ITS kit list
+        // (/sf2/drumkits.tsv) so @DRUMKIT / the app select real kits by program.
+        if (g_drumFontIsKits) loadDrumKitsTsv();
     }
 #endif
 #ifdef TDSP_DRUM_VOICE
