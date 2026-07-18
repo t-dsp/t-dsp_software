@@ -73,3 +73,18 @@ own ch10 stays muted while a groove plays and returns on stop; `@STATE` "drums" 
 The drum Track plays a `.mid` via `trackPreload(drumTrack, <path>)`. Today the path is `/drums/<f>`;
 after the browser's `/midi` hard-cut it's `/midi/drums/<f>`. The drum module does not hardcode the
 directory beyond what `trackPreload` resolves — so when the browser lands, drums follow for free.
+
+## Cross-ref — drum-note-map (ch10 Roland->GM remap)
+
+The ch10 groove stream now passes through a `tdsp::DrumNoteMapper` shim
+(`firmware/mix-kit/src/DrumNoteMap.h`) inserted between `g_drumPlayer` and the real
+drum sink in `setup()` — it rescues GMD's Roland hi-hat notes 22/26 (below GM range,
+else dropped silent) by folding them to 42/46 in `GmReduce` mode. See
+`planning/drum-note-map/DESIGN.md`.
+
+**When P2.4 retires the hand-wired drum block for `trackWireSetup(drumTrack)`, the
+mapper MUST stay in the drum Track's sink chain** (route the track's sink through
+`g_drumNoteMapper`, not straight to `g_drumTsfSink`/`g_drumVoiceSink`/`g_synthSink`),
+or the silent-hi-hat bug returns. The Track's `sink` field currently points at the
+REAL sink (the mapper only wraps `g_drumPlayer.setSink`), because the drum Track is
+still inert; that is the seam to reconcile.
