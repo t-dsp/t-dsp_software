@@ -515,6 +515,15 @@ export default function App() {
   // the 4 fixed voices. `preset` 0=4voices 1=2voices 2=1voice 3=4+2+2; `engines[v]` = engines that voice
   // owns (0 = absorbed/idle); `active[v]` = voice is live. `has` gates the picker card to pool builds.
   const [pool, setPool] = useState({ has: false, preset: 0, engines: [2, 2, 2, 2], active: [true, true, true, true] });
+  // Per-track mixer strip (handoff §E, @STATE.mix): one {level,mute} per track, indexed like @TRK<i>
+  // (synth voices first, then the drum track as the last entry). `has` gates the Mixer card to builds
+  // that ship the strip (TDSP_MIXER_STRIP = 4-voice pool or any hetero board). Faders write
+  // @TRK<i>.LEVEL, the mute toggles write @TRK<i>.MUTE — both mute-aware in the firmware.
+  const [mix, setMix] = useState<{ has: boolean; strips: { level: number; mute: boolean }[] }>({ has: false, strips: [] });
+  // Per-track engine kind (handoff §C, @STATE tracks[].eng), keyed by firmware track index. Absent on a
+  // homogeneous board (every voice is Dexed → undefined); on a HETERO board an OPLL voice reports
+  // "opll" so its card swaps the Dexed cart browser for the OPLL ROM instrument list.
+  const [trkEng, setTrkEng] = useState<Record<number, string>>({});
   // Per-track live-MIDI subscription (Phase 3, Thread C), keyed by firmware track index i. `src` =
   // which input device feeds that synth ("none"/"din"/"usb"/"multi"/…), `srcch` = channel filter
   // (0 = all). Hydrated from @STATE tracks[]; the MIDI-Input selector on each synth card writes it
@@ -650,16 +659,25 @@ export default function App() {
     if (Array.isArray(j.tracks)) {
       const next: Record<number, { src: string; srcch: number }> = {};
       const names: Record<number, string> = {};
+      const engs: Record<number, string> = {};
       let nSynth = 0;
       for (const t of j.tracks) if (t && t.kind === 'synth' && t.i != null) {
         next[t.i | 0] = { src: t.src || 'none', srcch: t.srcch | 0 };
         if (typeof t.name === 'string') names[t.i | 0] = t.name;
+        if (typeof t.eng === 'string') engs[t.i | 0] = t.eng;   // §C: engine kind on a hetero board (else undefined = Dexed)
         nSynth++;
       }
       setTrkSubs(next);
       setTrkNames(names);
+      setTrkEng(engs);
       if (nSynth > 0) setSynthCount(nSynth);   // how many synth cards to render (data-driven)
     }
+    // Per-track mixer strip (§E): the fader %/mute for every track. Present only on TDSP_MIXER_STRIP
+    // builds; its presence flips mix.has so the Mixer card shows. Rebuild wholesale so track count changes.
+    if (Array.isArray(j.mix)) setMix({
+      has: true,
+      strips: j.mix.map((m: any) => ({ level: Math.max(0, Math.min(100, m?.level | 0)), mute: !!(m?.mute) })),
+    });
   }
 
   // Restore the opaque app-owned state (@APP=). This is the authoritative source for settings
@@ -1234,7 +1252,7 @@ export default function App() {
   // `value`/`status` = the subtitle; `actions` = the header controls; `body` = the page.
   // `parent` (a section id) makes this a SUB-page reached from that parent's submenu instead of a
   // home card — its Back button returns to the parent, not home (see the render's onBack).
-  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; accent?: string; tint?: string; topRight?: React.ReactNode; parent?: string };
+  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; accent?: string; tint?: string; topRight?: React.ReactNode; parent?: string; dim?: boolean };
 
   // The card/page subtitle: the currently-loaded instrument if one is picked, else a
   // summary of where the browser is (folder name or catalog counts).
@@ -1281,6 +1299,24 @@ export default function App() {
     const sel = target >= 3 ? (selVoiceX[target - 1] ?? '') : target === 2 ? selVoice2 : selVoice;
     const lref = target >= 3 ? refFor(voiceRefX, target - 1) : target === 2 ? voiceRef2 : voiceRef;
     const bref = target >= 3 ? refFor(browseRefX, target - 1) : target === 2 ? browseRef2 : browseRef;
+    // §C — slot/engine picker: on a HETERO board a voice may be a DIFFERENT engine (@STATE tracks[].eng,
+    // keyed by firmware track index = target-1). An OPLL voice has no /dexed cart library, so swap the
+    // whole cart browser for its 15 built-in ROM voices. Selecting one sends @TRK<i>.INSTR=<idx> (the
+    // firmware maps idx→OPLL ROM idx+1). Names mirror lib/TDspYmfm kInstNames[1..15] so the list matches
+    // the "OPLL: <name>" the device reports back in @STATE.
+    if (trkEng[target - 1] === 'opll') {
+      const OPLL_ROM = ['Violin', 'Guitar', 'Piano', 'Flute', 'Clarinet', 'Oboe', 'Trumpet', 'Organ',
+                        'Horn', 'Synthesizer', 'Harpsichord', 'Vibraphone', 'Synth Bass', 'Acoustic Bass', 'Electric Guitar'];
+      const curName = (trkNames[target - 1] || '').replace(/^OPLL:\s*/, '');
+      return (
+        <ScrollView style={s.picker} nestedScrollEnabled>
+          <Text style={[s.muted, { padding: 8 }]}>OPLL melodic engine — pick a built-in ROM voice. This track is a YM2413 (OPLL), not a Dexed voice, so it has no cart library.</Text>
+          {OPLL_ROM.map((nm, idx) => (
+            <ListBtn key={nm} label={nm} sel={curName === nm} onPress={() => tp.trk(target - 1, 'INSTR=' + idx)} />
+          ))}
+        </ScrollView>
+      );
+    }
     return (
       <>
         {/* nav bar: up-one-level on the left, breadcrumb trail beside it */}
@@ -1651,8 +1687,12 @@ export default function App() {
       setLatch: b => { setA({ latch: b }); tp.trk(v, 'ARPLATCH=' + (b ? 1 : 0)); setPid(''); },
     };
     // Top card = a submenu (like Synthesizer A/B); its three children are the sub-pages.
+    // §B: a voice absorbed by the current @POOL preset (pool.active[v]==0) is idle — its engines belong
+    // to a group lead, so the firmware rejects its launches. Grey the card + label it so it reads "off".
+    const poolIdle = pool.has && pool.active[v] === false;
     extraSynthCards.push({
       id: parentId, title: 'Synthesizer ' + letter, show: synthCount > v, accent: theme.accent, tint: theme.tint,
+      dim: poolIdle,
       value: trkNames[v] || 'None',
       subtitle: trkNames[v] ? <Text style={s.drawerValue} numberOfLines={1}>{trkNames[v]}</Text> : undefined,
       body: <SubMenu getItems={() => sections.filter(x => x.parent === parentId).sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={theme.accent} tint={theme.tint} />,
@@ -1697,6 +1737,41 @@ export default function App() {
           <Text style={s.muted}>{pr.sub}</Text>
         </Pressable>
       ))}
+    </View>
+  );
+
+  // Per-track mixer strip (handoff §E): one fader + mute per track (synth voices, then the drum as the
+  // last entry), reading @STATE.mix. The mute silences a track WITHOUT stopping it (the fader still shows
+  // its level); dragging a muted track's fader trims its stored level but keeps it silent. Faders write
+  // @TRK<i>.LEVEL, mutes write @TRK<i>.MUTE — both mute-aware in firmware. Optimistic local echo so the
+  // controls feel live; the next @STATE reconciles. Reuses VolSlider + the pill toggle (no new styles).
+  const mixerBody = (
+    <View style={s.synthWrap}>
+      <Text style={s.muted}>Level + mute for every track. Mute silences a track without stopping it; the fader trims its level in the master mix.</Text>
+      {mix.strips.map((strip, i) => {
+        const isDrum = i === mix.strips.length - 1;
+        const label = isDrum ? 'Drums' : ('Synth ' + String.fromCharCode(65 + i));
+        const nm = !isDrum && trkNames[i] ? ' · ' + trkNames[i] : '';
+        const toggleMute = () => {
+          const next = !strip.mute;
+          setMix(mm => ({ ...mm, strips: mm.strips.map((x, k) => (k === i ? { ...x, mute: next } : x)) }));
+          tp.trk(i, 'MUTE=' + (next ? 1 : 0));
+        };
+        return (
+          <View key={'mix' + i} style={{ marginBottom: 10 }}>
+            <Row>
+              <Text style={[s.text, { flex: 1 }]} numberOfLines={1}>{label}{nm}</Text>
+              <Pressable onPress={toggleMute} style={[s.pill, strip.mute && s.pillOn]} disabled={!connected}
+                accessibilityLabel={label + (strip.mute ? ' muted' : ' unmuted')}>
+                <Text style={s.text}>{strip.mute ? 'Muted' : 'Mute'}</Text>
+              </Pressable>
+            </Row>
+            <VolSlider label="Level" value={strip.level} disabled={!connected || strip.mute}
+              onChange={n => setMix(mm => ({ ...mm, strips: mm.strips.map((x, k) => (k === i ? { ...x, level: n } : x)) }))}
+              onCommit={n => tp.trk(i, 'LEVEL=' + Math.round(n))} />
+          </View>
+        );
+      })}
     </View>
   );
 
@@ -1801,6 +1876,7 @@ export default function App() {
     // submenu when caps.arp2 is compiled in (its parent is set conditionally below).
     {
       id: 'synthesizerB', title: 'Synthesizer B', show: caps.voice2, accent: THEME.synthB.accent, tint: THEME.synthB.tint,
+      dim: pool.has && pool.active[1] === false,   // §B: greyed when the @POOL preset absorbs voice 1 (e.g. 4+2+2 → "B off")
       topRight: kbdBtn(2),
       value: (voice2.name || 'None'),
       subtitle: voice2.name ? (
@@ -1817,6 +1893,13 @@ export default function App() {
       id: 'voicepool', title: 'Voice Pool', show: pool.has, accent: THEME.synthA.accent, tint: THEME.synthA.tint,
       value: poolValue,
       body: poolBody,
+    },
+    // MIXER — per-track level + mute (handoff §E; @STATE.mix). Shown only on builds that ship the strip
+    // (the 4-voice pool + any hetero board). A real fader + mute per track, sitting over the master limiter.
+    {
+      id: 'mixer', title: 'Mixer', show: mix.has, accent: THEME.synthA.accent, tint: THEME.synthA.tint,
+      value: (() => { const muted = mix.strips.filter(x => x.mute).length; return mix.strips.length + ' tracks' + (muted ? ' · ' + muted + ' muted' : ''); })(),
+      body: mixerBody,
     },
     // AUDIO LOOP — gated on caps.audioloop (the COUNT of loops the device could allocate;
     // 0 on a board with no spare RAM). Records the MASTER MIX as audio (not MIDI) into
@@ -2101,8 +2184,10 @@ export default function App() {
               <View style={s.home}>
                 {visible.map(sec => (
                   <View key={sec.id} style={[s.cell, { width: `${100 / cols}%` }]}>
-                    <Card title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions}
-                      onPress={() => setRoute(sec.id)} style={s.cardGrid} accent={sec.accent} topRight={sec.topRight} />
+                    {/* §B: a pool-absorbed voice card is greyed and reads "off — idle (pool)". */}
+                    <Card title={sec.title} value={sec.dim ? 'off — idle (pool)' : sec.value} status={sec.status}
+                      subtitle={sec.dim ? undefined : sec.subtitle} progress={sec.progress} actions={sec.actions}
+                      onPress={() => setRoute(sec.id)} style={[s.cardGrid, sec.dim && { opacity: 0.45 }]} accent={sec.accent} topRight={sec.topRight} />
                   </View>
                 ))}
               </View>
