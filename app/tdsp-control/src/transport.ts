@@ -97,6 +97,7 @@ export interface Transport {
   metronomeMute(muted: boolean): void;                // is the click AUDIBLE? default muted; transport runs either way (@METROMUTE=)
   metronomeSig(bpb: number): void;                    // metronome/idle time signature = N beats/bar (@METROSIG=)
   metronomeVol(pct: number): void;                    // metronome click level (@METROVOL=, 0..150 %), independent of the master @VOL
+  metronomeLock(on: boolean): void;                   // tempo lock: when ON, loading content stops auto-setting the master BPM (@METROLOCK=)
   arpOn(on: boolean): void;
   arpRestart(): void;                                 // re-trigger the running arp cycle from step 0 (@ARPRESTART)
   arpPattern(i: number): void;

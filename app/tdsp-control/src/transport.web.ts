@@ -254,6 +254,7 @@ export class WebSerialTransport implements Transport {
   metronomeMute(muted: boolean) { this.send('@METROMUTE=' + (muted ? 1 : 0)); }
   metronomeSig(bpb: number) { this.send('@METROSIG=' + Math.max(1, Math.min(16, Math.round(bpb)))); }
   metronomeVol(pct: number) { this.send('@METROVOL=' + Math.max(0, Math.min(150, Math.round(pct)))); }
+  metronomeLock(on: boolean) { this.send('@METROLOCK=' + (on ? 1 : 0)); }
   arpOn(on: boolean) { this.send('@ARPON=' + (on ? 1 : 0)); }
   arpRestart() { this.send('@ARPRESTART'); }
   arpPattern(i: number) { this.send('@ARPPAT=' + i); }

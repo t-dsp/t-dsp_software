@@ -340,6 +340,7 @@ export class BleTransport implements Transport {
   metronomeMute(muted: boolean) { this.relay('@METROMUTE=' + (muted ? 1 : 0)); }
   metronomeSig(bpb: number) { this.relay('@METROSIG=' + Math.max(1, Math.min(16, Math.round(bpb)))); }
   metronomeVol(pct: number) { this.relay('@METROVOL=' + Math.max(0, Math.min(150, Math.round(pct)))); }
+  metronomeLock(on: boolean) { this.relay('@METROLOCK=' + (on ? 1 : 0)); }
   arpOn(on: boolean) { this.relay('@ARPON=' + (on ? 1 : 0)); }
   arpRestart() { this.relay('@ARPRESTART'); }
   arpPattern(i: number) { this.relay('@ARPPAT=' + i); }

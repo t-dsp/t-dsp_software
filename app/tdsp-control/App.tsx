@@ -495,7 +495,9 @@ export default function App() {
   // The metronome IS the master transport: `on` = the clock/transport is RUNNING (everything locks
   // to it); `muted` = whether the click is audible (default muted — the transport runs silently).
   // cap=true once the device reports metronome support; sig = beats/bar; vol = click level 0..150 %.
-  const [metro, setMetro] = useState({ on: false, muted: true, cap: false, sig: 4, vol: 100 });
+  // locked = tempo lock: when true the device holds the master BPM (loading a song/groove no longer
+  // auto-sets it); when false the sole piece of content to start sets the tempo. Default off.
+  const [metro, setMetro] = useState({ on: false, muted: true, cap: false, sig: 4, vol: 100, locked: false });
   const [songBpm, setSongBpm] = useState(120);            // tempo of the last song that played
   const [selVoice, setSelVoice] = useState('');
   const [selVoiceName, setSelVoiceName] = useState('');   // last-picked instrument name (shown on the card, persists across browsing)
@@ -553,6 +555,7 @@ export default function App() {
     if (j.vol != null) setVol(j.vol);
     if (j.hpf != null) { const m = clampIdx(j.hpf, HPF_MODES.length); setHpf(m); if (m) lastHpfRef.current = m; }
     if (j.bpm != null) setBpm(j.bpm);
+    if (j.metrolock != null) setMetro(m => ({ ...m, locked: !!j.metrolock }));   // tempo lock (content stops auto-setting the BPM)
     // Fallback end-mode guess from the loop flag, for firmware without @APP: loop on ⇒ Repeat;
     // loop off ⇒ keep the app's mode unless it was Repeat (then fall back to Stop). When @APP is
     // present its stored value arrives right after and overrides this (see hydrateApp).
@@ -691,6 +694,12 @@ export default function App() {
         // the local clock between beats.
         beatStaleRef.current = setTimeout(() => setBeatFeed(null), 3500);
       }
+    } else if (line.startsWith('@BPM=')) {
+      // The device pushed a new master tempo — the tempo auto-follow: the sole piece of content to
+      // start (song / loop / groove) set the master BPM to its own native tempo (unless the tempo
+      // lock is on). Reflect it in the readout. App-initiated @BPM changes aren't echoed, so this
+      // only fires for firmware-side changes — no feedback loop.
+      const b = parseInt(line.slice(5), 10); if (b >= 20 && b <= 300) setBpm(b);
     } else if (line.startsWith('[song]')) {
       // Record the song's detected tempo (for the "Reset → song bpm" affordance), but DON'T touch
       // the master: the metronome is the tempo authority now, and songs lock to IT (not the reverse).
@@ -1495,6 +1504,11 @@ export default function App() {
           <Text style={s.muted}>The transport clock runs either way — this just plays the click out the speakers. Off by default.</Text>
         </View>
         <Switch value={!metro.muted} onValueChange={v => { setMetro(m => ({ ...m, muted: !v })); tp.metronomeMute(!v); }} /></Row>
+      <Row><View style={{ flex: 1 }}>
+          <Text style={s.text}>{metro.locked ? '🔒' : '🔓'}  Lock tempo</Text>
+          <Text style={s.muted}>Off: the first song, loop, or groove you start sets the tempo to its own BPM. On: the tempo stays put — loading content no longer changes it. Off by default.</Text>
+        </View>
+        <Switch value={metro.locked} onValueChange={v => { setMetro(m => ({ ...m, locked: v })); tp.metronomeLock(v); }} /></Row>
       <Text style={s.muted}>Play defines the downbeat and starts the master clock — both MIDI players, the drums, and the arps lock to it. Runs at the master tempo ({Math.round(bpm)} BPM); set it on the top bar or the Tempo tab. Stop clears everything.</Text>
       <Text style={[s.text, { marginTop: 6 }]}>Click volume</Text>
       <VolSlider label="Volume" value={metro.vol} onChange={v => setMetro(m => ({ ...m, vol: v }))} onCommit={v => tp.metronomeVol(v)} disabled={!connected} />
@@ -1853,6 +1867,11 @@ export default function App() {
           <Pressable style={s.tBtn} onPress={() => stepBpm(-1)} disabled={!connected}><Text style={s.tBtnText}>−</Text></Pressable>
           <Text style={s.tBpm}>{Math.round(bpm)}<Text style={s.tBpmUnit}> BPM</Text></Text>
           <Pressable style={s.tBtn} onPress={() => stepBpm(1)} disabled={!connected}><Text style={s.tBtnText}>＋</Text></Pressable>
+          {/* Tempo lock: off ⇒ the sole piece of content you start sets the BPM; on ⇒ the tempo is held. */}
+          <Pressable style={[s.tBtn, s.tBtnGhost, metro.locked && s.tBtnOn]} disabled={!connected}
+            onPress={() => { const locked = !metro.locked; setMetro(m => ({ ...m, locked })); tp.metronomeLock(locked); }}
+            accessibilityLabel={metro.locked ? 'Tempo locked — tap to let content set the BPM' : 'Tempo follows content — tap to lock'}>
+            <Text style={[s.tBtnText, metro.locked && s.tBtnOnText]}>{metro.locked ? '🔒' : '🔓'}</Text></Pressable>
         </View>
         <View style={s.volRow}>
           <Text style={s.volLbl}>VOL</Text>

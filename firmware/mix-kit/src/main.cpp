@@ -233,6 +233,10 @@ tdsp::PlayerFollower   g_drumFollow{g_drumPlayer};  // declared above (lines ~92
 #if TDSP_VOICE2
 tdsp::PlayerFollower   g_songFollow2{g_player2};    // player 2 follows the same master tempo grid
 #endif
+#if TDSP_SYNTH_VOICES >= 4
+tdsp::PlayerFollower   g_songFollow3{g_playerV[2]};   // voices 3/4 (4-voice pool) retime to the same grid
+tdsp::PlayerFollower   g_songFollow4{g_playerV[3]};
+#endif
 tdsp::ClockSink        g_clockSink{&g_conductor.clock()};
 tdsp::ArpFilter       &g_arpFilter = g_arpFilterV[0];        // alias: voice 0 arp (live MIDI -> arp -> synth, bypass by default)
 static bool            g_mpeMode = false;    // false = normal MIDI (bend +-2, ch10 drums), true = MPE
@@ -254,11 +258,7 @@ static bool            g_recClickAuto = false; // WE turned the count-in click o
 // The tracks: [0] = Voice 1, [1] = Voice 2 (VOICE2 builds). A thin binding view over the
 // per-voice objects above + per-voice state; populated by tracksInit() in setup(). Phase 1
 // only DECLARES these; nothing reads them yet (see Track.h / planning/tracks/DESIGN.md).
-#if TDSP_VOICE2
-static const int kNumTracks = 2;
-#else
-static const int kNumTracks = 1;
-#endif
+static const int kNumTracks = kSynthVoices;   // one Track per synth voice (1 / 2 / 4)
 static Track g_tracks[kNumTracks];
 
 AudioMixer4_F32        outL, outR;           // F32 mix: 0=BT, 1=local tone, 2=S/PDIF-in, 3=synth
@@ -820,6 +820,13 @@ DMAMEM static tdsp::MidiFileEvent g_buf[MAX_EVENTS];  // ~144KB in OCRAM (off th
 static const int MAX_EVENTS2 = 12000;
 DMAMEM static tdsp::MidiFileEvent g_buf2[MAX_EVENTS2];
 #endif
+#if TDSP_SYNTH_VOICES >= 4
+// Voices 3/4 each need their OWN event buffer (the player holds a pointer, no copy). Same
+// half-size window as player 2 to keep OCRAM in budget on the no-PSRAM 4-voice pool build.
+static const int MAX_EVENTS3 = 12000;
+DMAMEM static tdsp::MidiFileEvent g_buf3[MAX_EVENTS3];
+DMAMEM static tdsp::MidiFileEvent g_buf4[MAX_EVENTS3];
+#endif
 
 static bool endsWithMid(const char *s) {
     size_t n = strlen(s);
@@ -932,6 +939,18 @@ static float  g_song2Bpm = 120.0f;      // player-2 song native tempo (retimed t
 static uint8_t g_song2Bpb = 4;
 static double g_song2LoopBeats = 0.0;
 #endif
+#if TDSP_SYNTH_VOICES >= 4
+// Voices 3/4 (4-voice pool): each an independent song player -> its own name/arg/loop/tempo/meter/
+// sync/launch state (mirrors the voice-1/2 slots). Bound to tracks[2]/[3] in tracksInit.
+static char   g_curSong3Name[64] = "";      static char   g_curSong4Name[64] = "";
+static char   g_curSong3Arg[100] = "";      static char   g_curSong4Arg[100] = "";
+static bool   g_song3Loop = false;          static bool   g_song4Loop = false;
+static bool   g_song3WasPlaying = false;    static bool   g_song4WasPlaying = false;
+static float  g_song3Bpm = 120.0f;          static float  g_song4Bpm = 120.0f;
+static uint8_t g_song3Bpb = 4;              static uint8_t g_song4Bpb = 4;
+static double g_song3LoopBeats = 0.0;       static double g_song4LoopBeats = 0.0;
+static bool   g_song3LaunchPending = false; static bool   g_song4LaunchPending = false;
+#endif
 static bool          g_syncProbe = false;   // @SYNCPROBE: 1 Hz drift probe (PLAN §9)
 static elapsedMillis g_syncProbeClock;      // throttle for the probe print
 
@@ -995,6 +1014,11 @@ static LaunchScheduler g_launchSched;
 // NOTE accurate lock needs the song's REAL tempo -> use an SD .mid; the baked
 // built-ins only carry an estimate.
 static float         g_masterBpm     = TDSP_DEFAULT_BPM;  // the one tempo knob (40..240), board-configurable
+// Tempo auto-follow lock (the metronome's lock-icon button; default OFF). When OFF, the FIRST piece
+// of content to start on an otherwise-empty transport (song / loop / groove) snaps the master BPM to
+// its own native tempo — the box plays at the content's authored feel. Once anything else is already
+// playing (a second source keeps the established grid) OR the lock is ON, the tempo is held. @METROLOCK.
+static bool          g_tempoLock     = false;
 static float         g_songBpm       = 120.0f;  // playing/last song NATIVE tempo
 static float         g_drumFileBpm   = 120.0f;  // selected groove's NATIVE tempo
 static uint8_t       g_songBpb       = 4;       // playing/last song's beats-per-bar (quarter beats)
@@ -1018,6 +1042,12 @@ static void applyTempos() {
 #endif
     g_conductor.setBpm(g_masterBpm);
 }
+
+// Push the current master BPM to the app so its tempo readout tracks a firmware-side change (the
+// auto-follow snap, below). The app parses an incoming "@BPM=<n>" line into its BPM display; @BEAT/
+// @SONGP already prove firmware->app pushes relay over both USB and BLE. App-initiated @BPM= changes
+// don't need this echo (the app already knows the value it sent), so only the auto-follow path emits.
+static void emitMasterBpm() { Serial.printf("@BPM=%d\n", (int)(g_masterBpm + 0.5f)); }
 
 // Set the master bar length from the CONTENT's time signature so the downbeat
 // (beatInBar()==0 / barPhase()==0) and consumeBarEdge() land on real bar 1 for
@@ -1053,22 +1083,31 @@ static inline bool loopHoldsGrid(const tdsp::MidiLooper &L) {
     return st == tdsp::MidiLooper::Recording || st == tdsp::MidiLooper::Overdub || st == tdsp::MidiLooper::Playing;
 }
 #endif
-static void ensureTransportStarted() {
-    bool anyPlaying = g_player.isPlaying() || g_drumPlayer.isPlaying();
+// True when SOMETHING already holds the master grid — any song player, the drum groove, or a
+// live/looping recorder loop. This is the "is anything else playing" test shared by the transport
+// zero (the first starter defines the downbeat) and the tempo auto-follow (only the SOLE content
+// snaps the master BPM; a second source keeps the established tempo). A bare metronome click is NOT
+// content — it just ticks the shared clock, so it does not count here (the lock is the way to pin a
+// hand-dialled tempo). Call BEFORE the newly-firing track's play(), so it reflects only the OTHERS.
+static bool transportHasContent() {
+    bool any = g_player.isPlaying() || g_drumPlayer.isPlaying();
 #if TDSP_VOICE2
-    anyPlaying = anyPlaying || g_player2.isPlaying();   // player 2 also holds the grid
+    any = any || g_player2.isPlaying();     // player 2 also holds the grid
 #endif
 #if TDSP_RECORDER
-    // ...and so does a running loop. Without this, arming synth B's recorder while only synth
-    // A's loop is going looks "idle" here and re-zeroes the clock — restarting A's loop. Each
-    // recorder anchors to the bar of its own first note, so the two loops may sit out of phase
-    // with each other; that's fine and intended. They still share the one bar grid.
-    anyPlaying = anyPlaying || loopHoldsGrid(g_loop1);
+    // A running loop holds the grid too. Without this, arming synth B's recorder while only synth
+    // A's loop is going looks "idle" and re-zeroes the clock — restarting A's loop. Each recorder
+    // anchors to the bar of its own first note, so the two loops may sit out of phase with each
+    // other; that's fine and intended. They still share the one bar grid.
+    any = any || loopHoldsGrid(g_loop1);
 #if TDSP_VOICE2
-    anyPlaying = anyPlaying || loopHoldsGrid(g_loop2);
+    any = any || loopHoldsGrid(g_loop2);
 #endif
 #endif
-    if (g_forceTransportZero || !anyPlaying) {
+    return any;
+}
+static void ensureTransportStarted() {
+    if (g_forceTransportZero || !transportHasContent()) {
         g_conductor.start();
         g_arpFilter.resyncToGrid();   // a chord held on the arp re-locks to the new downbeat
     }
@@ -1297,15 +1336,15 @@ FLASHMEM static bool trackPreload(Track &t, const char *arg) {
 // false joins the running grid in phase. The voice-1-only global-mode/meter effects are caps-gated.
 static void trackFire(Track &t, bool anchorNow) {
     if (!t.preEv || t.preCount == 0) return;
-    // A groove that DEFINES the downbeat also owns the tempo: snap the master BPM to its native BPM so
-    // it plays at its authored feel. Only on an immediate/synchro start (NOT a quantized bar-join,
-    // anchorNow) with NO song holding the grid — a groove under a playing song joins the song's tempo.
-    if (t.caps.tempoSourceWhenIdle && !anchorNow && *t.bpm > 1.0f) {
-        bool songHeld = g_player.isPlaying();
-#if TDSP_VOICE2
-        songHeld = songHeld || g_player2.isPlaying();
-#endif
-        if (!songHeld) g_masterBpm = *t.bpm;
+    // Content that DEFINES the downbeat also owns the tempo: snap the master BPM to this song/groove's
+    // native BPM so the box plays at its authored feel, and push the new tempo to the app. Gated four
+    // ways: (1) the track opts in (caps.tempoSourceWhenIdle — every song + the groove); (2) it's an
+    // immediate/synchro start, not a quantized bar-join (anchorNow joins a running grid, keep its
+    // tempo); (3) it's the SOLE content — nothing else already playing, so a second source keeps the
+    // established grid; (4) the tempo isn't LOCKED (the metronome lock-icon pins a hand-dialled tempo).
+    if (t.caps.tempoSourceWhenIdle && !anchorNow && !g_tempoLock && *t.bpm > 1.0f && !transportHasContent()) {
+        g_masterBpm = *t.bpm;
+        emitMasterBpm();   // reflect the followed tempo in the app's BPM readout (applyTempos() pushes it to the clock)
     }
     songPrep(t);                                       // drum: applies the kit (no note panic)
     if (t.caps.ownsGlobalMode && (t.preForceMode || g_mpeMode != t.preMpe)) applyMidiMode(t.preMpe);
@@ -2357,6 +2396,11 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     else if (strncmp(line, "@DRUMVOL=", 9) == 0)    setDrumVol(atoi(line + 9));    // 0..150 %
     else if (strncmp(line, "@SONGVOL=", 9) == 0)    setSongVol(atoi(line + 9));    // 0..150 %, MIDI player level (independent of @VOL master)
     else if (strncmp(line, "@BPM=", 5) == 0)        setMasterBpm(atoi(line + 5));  // master tempo (song+drum)
+    else if (strncmp(line, "@METROLOCK=", 11) == 0) {   // tempo lock: when ON, content stops auto-loading its BPM (the metronome lock-icon)
+        g_tempoLock = (atoi(line + 11) != 0);
+        reply.printf("@METROLOCK=%d\n", g_tempoLock ? 1 : 0);
+        Serial.printf("[tempo] lock %s\n", g_tempoLock ? "ON (tempo held)" : "off (sole content sets BPM)");
+    }
     else if (strncmp(line, "@DRUMSYNCHRO=", 13) == 0) { g_drumSynchro = (atoi(line + 13) != 0);   // start-on-first-note
                                  Serial.printf("[drum] synchro start %s\n", g_drumSynchro ? "ON (play a note to start)" : "off (start on Play)"); }
     else if (strncmp(line, "@QUANTIZE=", 10) == 0) {   // launch quantize: defer song/groove start to the next bar edge
@@ -2639,6 +2683,9 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     else if (handleArpLine(line, reply, g_arpFilter, "@ARP")) { /* handled */ }
 #if TDSP_VOICE2
     // --- Voices 2: a second Dexed voice on the keyboard half of the pool (engines 4..7) ---
+#if TDSP_SYNTH_VOICES < 4
+    // The runtime Synth-B enable is a DYNAMIC 4/4 split (repatches engines). A fixed 4-way pool
+    // (N=4) has no toggle — all four voices are always live — so this command is retired there.
     else if (strncmp(line, "@VOICE2=", 8) == 0) {          // Synth B master enable (dynamic 4/4 pool split)
         bool on = (atoi(line + 8) != 0);
         if (on != g_voice2On) {
@@ -2666,6 +2713,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         }
         reply.printf("@VOICE2=%d\n", g_voice2On ? 1 : 0);
     }
+#endif  // TDSP_SYNTH_VOICES < 4 (runtime @VOICE2 split toggle)
     else if (strncmp(line, "@VOICE2VOL=", 11) == 0) {      // Voices-2 level 0..150 %
         synthSetVoice2Vol(atoi(line + 11));
         reply.printf("@VOICE2VOL=%d\n", g_voice2VolPct);
@@ -2686,7 +2734,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     else if (strcmp(line, "@STATE") == 0) {
         int volPct = g_appMasterPct;   // app-facing master is the digital gain
         if (volPct < 0) volPct = 0; if (volPct > 100) volPct = 100;
-        reply.printf("@STATE={\"vol\":%d,\"hpf\":%d,\"bpm\":%d,\"loop\":%d,\"quant\":%d,", volPct, g_hpf, (int)(g_masterBpm + 0.5f), *g_tracks[0].loop ? 1 : 0, g_launchQuantize ? 1 : 0);
+        reply.printf("@STATE={\"vol\":%d,\"hpf\":%d,\"bpm\":%d,\"metrolock\":%d,\"loop\":%d,\"quant\":%d,", volPct, g_hpf, (int)(g_masterBpm + 0.5f), g_tempoLock ? 1 : 0, *g_tracks[0].loop ? 1 : 0, g_launchQuantize ? 1 : 0);
         reply.printf("\"arp\":{\"on\":%d,\"pat\":%d,\"rate\":%d,\"oct\":%d,\"latch\":%d},",
                      g_arpFilter.enabled() ? 1 : 0, (int)g_arpFilter.pattern(), (int)g_arpFilter.rate(),
                      g_arpFilter.octaveRange(), g_arpFilter.latch() ? 1 : 0);
@@ -2772,13 +2820,25 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
                      g_tracks[0].player->isPlaying() ? 1 : 0, midihub::srcName(g_tracks[0].liveSrcMask), midihub::chNum(g_tracks[0].srcChMask));
         tdsp::catdb::jsonStr(reply, synthInstrumentName(synthInstrument())); reply.print("}");
 #if TDSP_VOICE2
+        // Voice 1 is "on" once Synth B is enabled (@VOICE2), OR always on a fixed 4-way pool build.
         reply.printf(",{\"i\":1,\"kind\":\"synth\",\"playing\":%d,\"on\":%d,\"arp\":%d,\"src\":\"%s\",\"srcch\":%d,\"name\":",
-                     g_tracks[1].player->isPlaying() ? 1 : 0, g_voice2On ? 1 : 0, TDSP_ARP2 ? 1 : 0,
+                     g_tracks[1].player->isPlaying() ? 1 : 0, ((TDSP_SYNTH_VOICES >= 4) || g_voice2On) ? 1 : 0, TDSP_ARP2 ? 1 : 0,
                      midihub::srcName(g_tracks[1].liveSrcMask), midihub::chNum(g_tracks[1].srcChMask));
         tdsp::catdb::jsonStr(reply, synthInstrumentName(g_synthInstrument2)); reply.print("}");
 #endif
+#if TDSP_SYNTH_VOICES >= 4
+        // Voices 3/4 of the fixed 4-way Dexed pool: always on, each with its own arp + subscription.
+        // Name = the picked cart voice if any, else the bundled instrument (per-voice arrayed state).
+        for (int v = 2; v < kSynthVoices; ++v) {
+            Track &t = g_tracks[v];
+            reply.printf(",{\"i\":%d,\"kind\":\"synth\",\"playing\":%d,\"on\":1,\"arp\":1,\"src\":\"%s\",\"srcch\":%d,\"name\":",
+                         v, t.player->isPlaying() ? 1 : 0, midihub::srcName(t.liveSrcMask), midihub::chNum(t.srcChMask));
+            const char *nm = g_curCartNameV[v][0] ? g_curCartNameV[v] : synthInstrumentName(g_synthInstrumentV[v]);
+            tdsp::catdb::jsonStr(reply, nm); reply.print("}");
+        }
+#endif
         reply.printf(",{\"i\":%d,\"kind\":\"drum\",\"playing\":%d,\"on\":%d,\"arp\":0,\"name\":",
-                     TDSP_VOICE2 ? 2 : 1, g_drumTrack.player->isPlaying() ? 1 : 0, drumEngineOk() ? 1 : 0);
+                     kSynthVoices, g_drumTrack.player->isPlaying() ? 1 : 0, drumEngineOk() ? 1 : 0);
         tdsp::catdb::jsonStr(reply, g_curDrumName); reply.print("}]");
         // Build-time capabilities so the app SHOWS the Voices-2 / arp-2 cards only on builds
         // that have them compiled in (both are pool-only, build-flag gated). caps.tracks = the
@@ -2787,7 +2847,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         // couldn't spare the RAM -> the app hides the card), not just the build flag.
         reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"tracks\":%d,\"audioloop\":%d}",
                      TDSP_VOICE2 ? 1 : 0, (TDSP_VOICE2 && TDSP_ARP2) ? 1 : 0, TDSP_RECORDER ? 1 : 0,
-                     TDSP_RECORDER_EDIT ? 1 : 0, (TDSP_VOICE2 ? 2 : 1) + 1,
+                     TDSP_RECORDER_EDIT ? 1 : 0, kSynthVoices + 1,   // N synth voices + the drum track
 #if TDSP_AUDIOLOOP
                      (int)g_aloopN
 #else
@@ -2814,7 +2874,9 @@ FLASHMEM static void tracksInit() {
 #endif
     t0.sink = g_synthSink; t0.buf = g_buf; t0.bufCap = MAX_EVENTS; t0.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
     t0.setLevel = setSongVol; t0.tag = "song";
-    t0.caps = { /*ownsGlobalMode*/true, /*ownsMeter*/true, /*prepSpecial*/true, /*splitGuarded*/false };
+    t0.caps = { /*ownsGlobalMode*/true, /*ownsMeter*/true, /*prepSpecial*/true, /*splitGuarded*/false,
+                /*loopsSeamless*/false, /*ownsPatch*/false, /*drumGated*/false, /*appliesKit*/false,
+                /*mutesSongDrums*/false, /*tempoSourceWhenIdle*/true };   // a song is content: it sets the master BPM when it's the sole thing playing
     t0.name = g_curSongName; t0.arg = g_curSongArg; t0.loop = &g_loop; t0.wasPlaying = &g_songWasPlaying;
     t0.bpm = &g_songBpm; t0.bpb = &g_songBpb; t0.loopBeats = &g_songLoopBeats; t0.launchPending = &g_songLaunchPending;
     t0.liveSrcMask = srcMaskAllLocal(); t0.srcChMask = 0;   // voice 0 hears BOTH local inputs (DIN + USB) by default
@@ -2834,10 +2896,36 @@ FLASHMEM static void tracksInit() {
 #endif
     t1.sink = g_synthSinkB; t1.buf = g_buf2; t1.bufCap = MAX_EVENTS2; t1.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
     t1.setLevel = synthSetVoice2Vol; t1.tag = "song2";
-    t1.caps = { false, false, false, /*splitGuarded*/true };
+    t1.caps = { false, false, false, /*splitGuarded*/true,
+                /*loopsSeamless*/false, /*ownsPatch*/false, /*drumGated*/false, /*appliesKit*/false,
+                /*mutesSongDrums*/false, /*tempoSourceWhenIdle*/true };   // voice-2 song also sets the master BPM when it's the sole content
     t1.name = g_curSong2Name; t1.arg = g_curSong2Arg; t1.loop = &g_song2Loop; t1.wasPlaying = &g_song2WasPlaying;
     t1.bpm = &g_song2Bpm; t1.bpb = &g_song2Bpb; t1.loopBeats = &g_song2LoopBeats; t1.launchPending = &g_song2LaunchPending;
     t1.liveSrcMask = 0; t1.srcChMask = 0;   // idle until @VOICE2 moves the keyboard here, or @TRK1.SRC assigns a device
+#endif
+#if TDSP_SYNTH_VOICES >= 4
+    // Voices 3/4 (indices 2/3) of the fixed 4-way Dexed pool: full Track peers of voices 0/1, each
+    // its own player/arp/router/sink/bus/level. No split-guard (the 4-way split is always active).
+    // Loopers are null initially (the MIDI recorder targets voices 0/1). liveSrcMask=0: idle until
+    // the app assigns a device via @TRK2/3.SRC. Both are melodic (no drum/mode/meter ownership).
+    { Track &t2 = g_tracks[2];
+      t2.player = &g_playerV[2]; t2.arp = &g_arpFilterV[2]; t2.router = &g_routerV[2]; t2.follow = &g_songFollow3; t2.looper = nullptr;
+      t2.sink = g_synthSink2; t2.buf = g_buf3; t2.bufCap = MAX_EVENTS3; t2.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
+      t2.setLevel = synthSetVoice3Vol; t2.tag = "song3";
+      t2.caps = { false, false, false, /*splitGuarded*/false,
+                  false, false, false, false, false, /*tempoSourceWhenIdle*/true };
+      t2.name = g_curSong3Name; t2.arg = g_curSong3Arg; t2.loop = &g_song3Loop; t2.wasPlaying = &g_song3WasPlaying;
+      t2.bpm = &g_song3Bpm; t2.bpb = &g_song3Bpb; t2.loopBeats = &g_song3LoopBeats; t2.launchPending = &g_song3LaunchPending;
+      t2.liveSrcMask = 0; t2.srcChMask = 0; }
+    { Track &t3 = g_tracks[3];
+      t3.player = &g_playerV[3]; t3.arp = &g_arpFilterV[3]; t3.router = &g_routerV[3]; t3.follow = &g_songFollow4; t3.looper = nullptr;
+      t3.sink = g_synthSink3; t3.buf = g_buf4; t3.bufCap = MAX_EVENTS3; t3.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
+      t3.setLevel = synthSetVoice4Vol; t3.tag = "song4";
+      t3.caps = { false, false, false, /*splitGuarded*/false,
+                  false, false, false, false, false, /*tempoSourceWhenIdle*/true };
+      t3.name = g_curSong4Name; t3.arg = g_curSong4Arg; t3.loop = &g_song4Loop; t3.wasPlaying = &g_song4WasPlaying;
+      t3.bpm = &g_song4Bpm; t3.bpb = &g_song4Bpb; t3.loopBeats = &g_song4LoopBeats; t3.launchPending = &g_song4LaunchPending;
+      t3.liveSrcMask = 0; t3.srcChMask = 0; }
 #endif
 
     // Drum track (Phase 2): a Track peer of the voices, bound to the looping ch10 groove player.
@@ -3025,6 +3113,10 @@ FLASHMEM void setup() {
     // applyMidiMode() call below sets it, so an MPE controller's per-note slides aren't clamped.
     trackWireSetup(g_tracks[1]);
 #endif
+#if TDSP_SYNTH_VOICES >= 4
+    trackWireSetup(g_tracks[2]);   // voices 3/4 of the 4-way pool (own router/arp/sink)
+    trackWireSetup(g_tracks[3]);
+#endif
 
     // --- Master clock wiring --------------------------------------------------
     // Register the song + drum players as tempo followers so the one BPM knob
@@ -3188,6 +3280,10 @@ void loop() {
 #if TDSP_VOICE2
         if (*g_tracks[1].launchPending) { *g_tracks[1].launchPending = false; trackFire(g_tracks[1], /*anchorNow=*/true); }
 #endif
+#if TDSP_SYNTH_VOICES >= 4
+        if (*g_tracks[2].launchPending) { *g_tracks[2].launchPending = false; trackFire(g_tracks[2], /*anchorNow=*/true); }
+        if (*g_tracks[3].launchPending) { *g_tracks[3].launchPending = false; trackFire(g_tracks[3], /*anchorNow=*/true); }
+#endif
         g_syncAnchorNow = false;   // defensive: a not-found launch never leaves it armed
         for (Track &t : g_tracks) t.player->tick();   // a just-launched player hits its downbeat now (already-running ones no-op)
         g_drumPlayer.tick();
@@ -3209,6 +3305,9 @@ void loop() {
 #if TDSP_VOICE2
     trackLoopTick(g_tracks[1]);   // same for player 2
 #endif
+#if TDSP_SYNTH_VOICES >= 4
+    trackLoopTick(g_tracks[2]); trackLoopTick(g_tracks[3]);   // voices 3/4 loop re-arm
+#endif
 
     // @SYNCPROBE: once/second, print the master beat next to each synced player's
     // loop-relative cursor. Relative phase must stay CONSTANT for a drift-free lock
@@ -3226,6 +3325,10 @@ void loop() {
     { static elapsedMillis clk; static bool prev = false; emitTrackPos(g_tracks[0], "@SONGP", clk, prev); }
 #if TDSP_VOICE2
     { static elapsedMillis clk; static bool prev = false; emitTrackPos(g_tracks[1], "@SONG2P", clk, prev); }
+#endif
+#if TDSP_SYNTH_VOICES >= 4
+    { static elapsedMillis clk; static bool prev = false; emitTrackPos(g_tracks[2], "@TRK2.P", clk, prev); }
+    { static elapsedMillis clk; static bool prev = false; emitTrackPos(g_tracks[3], "@TRK3.P", clk, prev); }
 #endif
 
 #if TDSP_RECORDER
