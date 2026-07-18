@@ -155,7 +155,21 @@ AudioSynthWaveformSine spdifTone;                                // int16 tone -
 // (C)/(D) local DAC self-test tone (F32). The synth engine itself (slot 3) is
 // declared by the build-selected backend header, included after the mixers.
 AudioSynthWaveformSine_F32 testTone;         // local DAC self-test source (F32)
-tdsp::MidiFilePlayer   g_player;             // non-blocking, synth-agnostic song player
+
+// --- Synth-voice count (Phase 3): how many independent Dexed synth voices this build has. Default
+// preserves today (1 unified, or 2 on a split/voice2 build); a 4-voice env sets -D TDSP_SYNTH_VOICES=4.
+// The per-voice objects below are declared as arrays of this size; g_player/g_player2 alias [0]/[1]
+// so all existing (voice 0/1) references keep working unchanged, while g_tracks[] binds every index.
+#ifndef TDSP_VOICE2
+#define TDSP_VOICE2 0
+#endif
+#ifndef TDSP_SYNTH_VOICES
+#define TDSP_SYNTH_VOICES (TDSP_VOICE2 ? 2 : 1)
+#endif
+static const int kSynthVoices = TDSP_SYNTH_VOICES;
+
+tdsp::MidiFilePlayer   g_playerV[kSynthVoices];   // one song player per synth voice
+tdsp::MidiFilePlayer  &g_player = g_playerV[0];   // alias: voice 0 (all existing g_player refs)
 tdsp::MidiFilePlayer   g_drumPlayer;         // dedicated LOOPING drum-groove player (channel 10)
 
 // Live MIDI: a USB-host controller (LinnStrument etc.) + the DIN MIDI IN both feed
@@ -199,7 +213,7 @@ tdsp::MidiRouter       g_router;
 #endif
 #if TDSP_VOICE2
 tdsp::MidiRouter       g_kbdRouter;          // USB-host keyboard -> (arp2 ->) g_synthSinkB
-tdsp::MidiFilePlayer   g_player2;            // SECOND song player, routed to voice 2 (engines 4..7) so two songs play at once
+tdsp::MidiFilePlayer  &g_player2 = g_playerV[1];   // alias: voice 1's song player is g_playerV[1]
 static bool            g_voice2On = false;   // runtime split enable (@VOICE2=1)
 #if TDSP_ARP2
 tdsp::ArpFilter        g_arpFilter2;         // optional arp on the keyboard/Voices-2 path
