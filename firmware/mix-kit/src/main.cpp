@@ -170,6 +170,8 @@ static const int kSynthVoices = TDSP_SYNTH_VOICES;
 
 tdsp::MidiFilePlayer   g_playerV[kSynthVoices];   // one song player per synth voice
 tdsp::MidiFilePlayer  &g_player = g_playerV[0];   // alias: voice 0 (all existing g_player refs)
+tdsp::ArpFilter        g_arpFilterV[kSynthVoices];   // one arp per synth voice (bypassed by default)
+tdsp::MidiRouter       g_routerV[kSynthVoices];      // one live-MIDI router per synth voice
 tdsp::MidiFilePlayer   g_drumPlayer;         // dedicated LOOPING drum-groove player (channel 10)
 
 // Live MIDI: a USB-host controller (LinnStrument etc.) + the DIN MIDI IN both feed
@@ -178,7 +180,7 @@ tdsp::MidiFilePlayer   g_drumPlayer;         // dedicated LOOPING drum-groove pl
 USBHost                g_usbHost;
 MIDIDevice             g_usbMidi(g_usbHost);
 #endif
-tdsp::MidiRouter       g_router;
+tdsp::MidiRouter      &g_router = g_routerV[0];   // alias: voice 0 live-MIDI router
 
 // --- Voices 2 (build-flag gated) ------------------------------------------------
 // Optional second synth voice driven by a SEPARATE MIDI source (the USB-host keyboard),
@@ -212,11 +214,11 @@ tdsp::MidiRouter       g_router;
 #define TDSP_AUDIOLOOP_N 2          // number of independent audio loops (<=3: final mixer slots 1..N)
 #endif
 #if TDSP_VOICE2
-tdsp::MidiRouter       g_kbdRouter;          // USB-host keyboard -> (arp2 ->) g_synthSinkB
+tdsp::MidiRouter      &g_kbdRouter = g_routerV[1];   // alias: voice 1 (keyboard) router -> (arp2 ->) g_synthSinkB
 tdsp::MidiFilePlayer  &g_player2 = g_playerV[1];   // alias: voice 1's song player is g_playerV[1]
 static bool            g_voice2On = false;   // runtime split enable (@VOICE2=1)
 #if TDSP_ARP2
-tdsp::ArpFilter        g_arpFilter2;         // optional arp on the keyboard/Voices-2 path
+tdsp::ArpFilter       &g_arpFilter2 = g_arpFilterV[1];   // alias: voice 1 arp (keyboard/Voices-2 path)
 #endif
 #endif
 
@@ -232,7 +234,7 @@ tdsp::PlayerFollower   g_drumFollow{g_drumPlayer};  // declared above (lines ~92
 tdsp::PlayerFollower   g_songFollow2{g_player2};    // player 2 follows the same master tempo grid
 #endif
 tdsp::ClockSink        g_clockSink{&g_conductor.clock()};
-tdsp::ArpFilter        g_arpFilter;                 // live MIDI -> arp -> synth (bypass by default)
+tdsp::ArpFilter       &g_arpFilter = g_arpFilterV[0];        // alias: voice 0 arp (live MIDI -> arp -> synth, bypass by default)
 static bool            g_mpeMode = false;    // false = normal MIDI (bend +-2, ch10 drums), true = MPE
 
 // --- MIDI loop recorder (build-flag gated) --------------------------------------
