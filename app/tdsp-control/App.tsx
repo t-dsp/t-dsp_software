@@ -36,6 +36,8 @@ const th = (accent: string, a: number) => ({ accent, tint: accent + Math.round(a
 const THEME = {
   synthA:   th('#3fb950', 0.14),   // green
   synthB:   th('#a371f7', 0.15),   // purple
+  synthC:   th('#2dd4bf', 0.14),   // teal (voice 3, 4-voice pool)
+  synthD:   th('#e3b341', 0.14),   // gold (voice 4)
   tempo:    th('#e3b341', 0.14),   // amber
   bt:       th('#58a6ff', 0.14),   // blue
   settings: th('#ff7b72', 0.13),   // coral
@@ -515,6 +517,13 @@ export default function App() {
   // (0 = all). Hydrated from @STATE tracks[]; the MIDI-Input selector on each synth card writes it
   // via @TRK<i>.SRC / SRCCH. Data-driven: a new voice's entry just appears here, no per-voice field.
   const [trkSubs, setTrkSubs] = useState<Record<number, { src: string; srcch: number }>>({});
+  // Data-driven synth voices (Phase 3): how many synth cards to render + each voice's name/level,
+  // all from @STATE tracks[]. Voices 0/1 keep their bespoke cards (Synth A/B); voices 2+ get a
+  // generated card driven by @TRK<i>.* (selVoiceX = the browser selection per extra voice index).
+  const [synthCount, setSynthCount] = useState(1);
+  const [trkNames, setTrkNames] = useState<Record<number, string>>({});
+  const [selVoiceX, setSelVoiceX] = useState<Record<number, string>>({});   // browser sel key, keyed by 0-based voice index (>=2)
+  const [trkVolX, setTrkVolX] = useState<Record<number, number>>({});       // per-extra-voice level (@TRK<i>.VOL), local echo
   // MIDI loop recorder (build-flag gated, caps.rec). Each synth's MIDI player owns its own
   // recorder, so every setting is PER-VOICE: bars1/bars2 = that synth's loop length, st1/st2 =
   // state (0 idle 1 armed 2 recording 3 overdub 4 playing), p1/p2 = record-fill / playback-phase.
@@ -620,8 +629,16 @@ export default function App() {
     // device + channel filter. Rebuild the whole map so a removed/added track is reflected exactly.
     if (Array.isArray(j.tracks)) {
       const next: Record<number, { src: string; srcch: number }> = {};
-      for (const t of j.tracks) if (t && t.kind === 'synth' && t.i != null) next[t.i | 0] = { src: t.src || 'none', srcch: t.srcch | 0 };
+      const names: Record<number, string> = {};
+      let nSynth = 0;
+      for (const t of j.tracks) if (t && t.kind === 'synth' && t.i != null) {
+        next[t.i | 0] = { src: t.src || 'none', srcch: t.srcch | 0 };
+        if (typeof t.name === 'string') names[t.i | 0] = t.name;
+        nSynth++;
+      }
       setTrkSubs(next);
+      setTrkNames(names);
+      if (nSynth > 0) setSynthCount(nSynth);   // how many synth cards to render (data-driven)
     }
   }
 
@@ -807,6 +824,9 @@ export default function App() {
   // The voices currently listed in Synth/Voices (a cart's voices, or the bundled set).
   const voiceRef = useRef<FlatList<VItem>>(null);
   const voiceRef2 = useRef<FlatList<VItem>>(null);         // Voices-2 page has its own list ref (both pages stay mounted)
+  const voiceRefX = useRef<Record<number, React.RefObject<FlatList<VItem>>>>({});   // per-extra-voice (>=2) list refs
+  const browseRefX = useRef<Record<number, React.RefObject<ScrollView>>>({});
+  const refFor = (m: React.MutableRefObject<Record<number, any>>, i: number) => (m.current[i] ??= React.createRef());
   const browseRef = useRef<ScrollView>(null);              // the folder-browse list
   const browseRef2 = useRef<ScrollView>(null);
   const pickerY = useRef<Record<string, number>>({});      // saved scroll offset per list, so we can restore on return
@@ -818,10 +838,17 @@ export default function App() {
   // Pick a voice for slot `target` (1 = main synth, 2 = the keyboard's Voices-2). Both share
   // the same browse state (cart/folder position) but have independent selection + device
   // targets (@DXVOICE/@DXPICK vs @DXVOICE2/@DXPICK2).
-  const pickVoice = (it: VItem, target: 1 | 2 = 1) => {
+  const pickVoice = (it: VItem, target: number = 1) => {
     const nm = it.label.replace(/^\d+\.\s*/, '');
     const isCart = it.key[0] === 'c' && !!cart;
     const path = isCart ? '/dexed/' + cart!.rel : 'Bundled';
+    if (target >= 3) {   // voices 2+ (0-based i = target-1) drive the uniform @TRK<i>.DX* interface
+      const i = target - 1;
+      setSelVoiceX(m => ({ ...m, [i]: it.key }));
+      setTrkNames(m => ({ ...m, [i]: nm }));
+      if (isCart) tp.trk(i, 'DXPICK=' + cart!.rel + '\t' + it.i); else if (it.key[0] === 'b') tp.trk(i, 'DXVOICE=' + it.i);
+      return;
+    }
     if (target === 2) {
       setSelVoice2(it.key);
       setVoice2(v => ({ ...v, name: nm, path }));
@@ -832,8 +859,8 @@ export default function App() {
     if (isCart) { setSelVoicePath('/dexed/' + cart!.rel); tp.dxPick(cart!.rel, it.i); }
     else if (it.key[0] === 'b') { setSelVoicePath('Bundled'); tp.dxVoice(it.i); }
   };
-  const stepVoice = (dir: number, target: 1 | 2 = 1) => {
-    const sel = target === 2 ? selVoice2 : selVoice;
+  const stepVoice = (dir: number, target: number = 1) => {
+    const sel = target >= 3 ? (selVoiceX[target - 1] ?? '') : target === 2 ? selVoice2 : selVoice;
     // In a visible list (a cart's voices or the bundled set), step within it so the
     // selection stays scrolled into view.
     if (voiceData.length) {
@@ -1231,10 +1258,10 @@ export default function App() {
   // The folder browser (nav bar + picker), shared by the Synth and Synth/Voices 2 pages.
   // Both share the browse position (cart/folder) but keep their own selection + list ref, and
   // pick into their own voice slot. `target` routes taps to voice 1 or voice 2.
-  const voiceBrowserBody = (target: 1 | 2) => {
-    const sel = target === 2 ? selVoice2 : selVoice;
-    const lref = target === 2 ? voiceRef2 : voiceRef;
-    const bref = target === 2 ? browseRef2 : browseRef;
+  const voiceBrowserBody = (target: number) => {
+    const sel = target >= 3 ? (selVoiceX[target - 1] ?? '') : target === 2 ? selVoice2 : selVoice;
+    const lref = target >= 3 ? refFor(voiceRefX, target - 1) : target === 2 ? voiceRef2 : voiceRef;
+    const bref = target >= 3 ? refFor(browseRefX, target - 1) : target === 2 ? browseRef2 : browseRef;
     return (
       <>
         {/* nav bar: up-one-level on the left, breadcrumb trail beside it */}
@@ -1565,7 +1592,35 @@ export default function App() {
   // length — and the audio loop recorder owns the top-level Audio Loop card. So there's no
   // shared voice-selector/bars UI here any more; every rec control is per-player.
 
+  // Extra synth voices (Phase 3, data-driven): voices 2+ of a 4-voice pool get a GENERATED card
+  // each — no hand-instantiation, so a firmware with more voices grows the UI with zero edits. Each
+  // reuses the SAME components as Synth A/B (the folder voice browser + level + MIDI-input selector),
+  // driven by the uniform @TRK<i>.* wire. Rendered only when @STATE tracks[] reports that many synth
+  // voices (synthCount). Voices 0/1 keep their richer bespoke cards (song player, full arp, split).
+  const extraSynthBody = (v: number) => (   // v = 0-based voice index (>=2)
+    <View style={s.synthWrap}>
+      <VolSlider label="Volume" value={trkVolX[v] ?? 100} disabled={!connected}
+        onChange={n => setTrkVolX(m => ({ ...m, [v]: n }))} onCommit={n => tp.trk(v, 'VOL=' + n)} />
+      {voiceBrowserBody(v + 1)}
+      {midiInputBody(v)}
+    </View>
+  );
+  const extraSynthCards: Section[] = [];
+  for (let v = 2; v < synthCount; v++) {
+    const theme = v === 2 ? THEME.synthC : THEME.synthD;
+    const letter = String.fromCharCode(65 + v);   // C, D, …
+    extraSynthCards.push({
+      id: 'synthX' + v, title: 'Synthesizer ' + letter, show: synthCount > v, fullHeight: true,
+      accent: theme.accent, tint: theme.tint,
+      value: trkNames[v] || 'None',
+      subtitle: trkNames[v] ? <Text style={s.drawerValue} numberOfLines={1}>{trkNames[v]}</Text> : undefined,
+      actions: <><HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1, v + 1)} /><HdrBtn label="Next ›" stop onPress={() => stepVoice(1, v + 1)} /></>,
+      body: extraSynthBody(v),
+    });
+  }
+
   const sections: Section[] = [
+    ...extraSynthCards,
     // CONNECTION — catalog stats. A Settings sub-page (reached from the Settings submenu).
     {
       id: 'conn', title: 'Connection', show: false, parent: 'settings', status: cat.engine || 'connected',
@@ -1822,7 +1877,7 @@ export default function App() {
   // (play → pick a voice → tempo → arp → drums), then system (connection, BT, codec).
   // Unlisted ids fall to the end in their definition order (stable sort).
   // Order for the home grid AND for each submenu's children (SubMenu sorts by this too).
-  const SECTION_ORDER = ['synthesizer', 'synthesizerB', 'drumtrack', 'audioloop', 'tempo', 'bt', 'settings',
+  const SECTION_ORDER = ['synthesizer', 'synthesizerB', 'synthX2', 'synthX3', 'drumtrack', 'audioloop', 'tempo', 'bt', 'settings',
     'player', 'synth', 'arp', 'synth2', 'player2', 'arp2', 'drumloops', 'drumkit', 'bpm', 'metro', 'conn', 'codec'];
   const ord = (id: string) => { const i = SECTION_ORDER.indexOf(id); return i < 0 ? 999 : i; };
   const visible = sections.filter(x => x.show).sort((a, b) => ord(a.id) - ord(b.id));
