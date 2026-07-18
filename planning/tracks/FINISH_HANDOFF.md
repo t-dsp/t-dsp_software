@@ -37,7 +37,8 @@ engine repartition all exist. "Finish" = the threads in §3, gated so nothing re
   Serial-verified all 4 presets on COM4.
 - **Deployed / verified:** local board **SN 18402920, COM4** runs `teensy41_dexed_pool_4voice` (+`@POOL`), user
   audio-loved the 4 voices in lockstep + master transport. **The EAS APK is STALE** (pre-dates every app change
-  above). `drum-smooth` branch = a parallel TSF-drum-stutter investigation (committed `951f8eb`, NOT merged).
+  above). The TSF-drum-stutter fix (loop-seam + one-shot decay + `@DRUMJIT` jitter probe) was USER-verified and
+  **MERGED to master** (`ce97e53`); the `drum-smooth` branch is deleted.
 
 ## 2. THE VERIFICATION CONTRACT (unchanged — read twice)
 You can **build (green)**, **serial-test** (`@`-commands over USB; the board prints `@STATE` JSON + a 1 Hz
@@ -163,4 +164,4 @@ refuse/grey configs that exceed RAM.
   **DONE**. Synth-B switch removal: **DONE**. Runtime `@POOL` repartition (fw+app): **DONE**, serial-verified.
 - **NEXT:** §A EAS rebuild + jay-mint → §B grey pool cards → §C app slot/engine picker → §D firmware inventory
   generalization (multi-engine) → §E per-track mixer strip → §F BT/serial inputs → §G PSRAM soundfont slots.
-- Parallel/separate owner: `drum-smooth` TSF-drum-stutter (committed `951f8eb`, not merged).
+- TSF-drum-stutter fix: **DONE**, user-verified + merged to master (`ce97e53`).
