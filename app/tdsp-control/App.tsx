@@ -1045,9 +1045,11 @@ export default function App() {
     play: () => void; stop: () => void; step: (dir: number) => void;
     applyEnd: (m: EndMode) => void; cycleEnd: () => void;
     onNaturalEnd: () => void;   // wired into the device's position feed (@SONGP=-1 / @SONG2P=-1)
-    // Per-track browse target, so the SAME player component serves any track (voice 1/2 -> /midi/songs,
-    // drums -> /midi/drums). undefined = the /midi/songs defaults. noEndMode hides the end-mode row
-    // (a drum groove always loops). This is what makes the deck replicable across tracks.
+    // Per-track browse target, so the SAME player component serves any track. Every deck now roots
+    // the browser at /midi so any synth can reach ALL folders (songs, drums, loops, tests, custom),
+    // not just one — undefined falls back to the /midi default (see FolderBrowser root below).
+    // noEndMode hides the end-mode row (a drum groove always loops). This makes the deck replicable
+    // across tracks.
     browseRoot?: string; injectFolders?: InjFolder[]; noEndMode?: boolean;
   };
   const makeSongDeck = (cfg: {
@@ -1057,7 +1059,7 @@ export default function App() {
     manualStopRef: React.MutableRefObject<boolean>;
     vol: number; onVol: (n: number) => void; commitVol: (n: number) => void; volNote?: string;
     wire: SongWire;
-    // Per-track browse target + step catalog, so the SAME deck serves any track. Default = songs.
+    // Per-track browse target + step catalog, so the SAME deck serves any track. Browser default = /midi.
     catalog?: Song[]; browseRoot?: string; injectFolders?: InjFolder[]; noEndMode?: boolean;
   }): SongDeckT => {
     const { player: P, setPlayer: setP, endMode: em, wire } = cfg;
@@ -1119,7 +1121,7 @@ export default function App() {
   onSong2EndRef.current = songDeck2.onNaturalEnd;
   const stopDrums = () => { tp.stopDrums(); setDrums(d => ({ ...d, playing: null })); };
   // ---- DRUM DECK — the groove player as the SAME reusable deck the synths use, so Drums is a
-  // Track peer: it browses /midi/drums, plays via @DRUMF, always loops. A thin PlayerT VIEW over the
+  // Track peer: it browses /midi (all folders), plays via @DRUMF, always loops. A thin PlayerT VIEW over the
   // drums {sel,playing} state gives the shared deck API without a parallel state store. This is the
   // whole point — a drum track is just another synth with props (root, catalog, always-loop).
   const drumPlayerView: PlayerT = { song: drums.sel ?? '', playing: !!drums.playing, name: drums.playing || grooveDisp(drums.sel) || '—', prog: -1 };
@@ -1133,7 +1135,7 @@ export default function App() {
     v: 1, player: drumPlayerView, setPlayer: setDrumPlayerView, endMode: 'repeat', setEndMode: () => {}, persistKey: 'end', manualStopRef: drumStopRef,
     vol: drumVol, onVol: setDrumVol, commitVol: v => tp.drumVol(v),
     wire: { play: a => { tp.playGrooveFile(a); persistApp({ groove: a }); }, restart: a => { tp.playGrooveFile(a); persistApp({ groove: a }); }, stop: () => tp.stopDrums(), loop: () => {} },
-    catalog: drumSongs, browseRoot: '/midi/drums', injectFolders: [], noEndMode: true,   // a groove always loops
+    catalog: drumSongs, browseRoot: '/midi', injectFolders: [], noEndMode: true,   // a groove always loops
   });
   // Master transport Play/Stop. Play (@METRO=1) starts the clock + defines the downbeat if idle
   // (idempotent while running); everything locks to it. Stop (@METRO=0) halts + clears the stage.
@@ -1327,10 +1329,12 @@ export default function App() {
     {!D.noEndMode && <HdrBtn label={(END_MODES.find(m => m.key === D.endMode) || END_MODES[3]).icon} stop onPress={D.cycleEnd} />}
   </>);
   // Baked test/demo songs live in flash (no `file` field — they play by NAME on the firmware's
-  // non-.mid branch). Surface them as a synthetic "tests" folder injected into the /midi/songs
-  // root, so the browser shows real card folders (songs subfolders) PLUS the baked tests.
+  // non-.mid branch). Surface them as a synthetic "built-ins" folder injected at the /midi root,
+  // so the browser shows every real card folder (songs, drums, loops, tests, …) PLUS the baked
+  // demos. Named "built-ins" (not "tests") so it can't collide with the real /midi/tests folder
+  // that the browser now lists alongside it.
   const bakedSongLeaves = cat.songs.filter(s => !s.file).map(s => ({ name: s.name, arg: s.name }));
-  const songInjectFolders = bakedSongLeaves.length ? [{ name: 'tests', leaves: bakedSongLeaves }] : [];
+  const songInjectFolders = bakedSongLeaves.length ? [{ name: 'built-ins', leaves: bakedSongLeaves }] : [];
   // The song half: pick a song via the recursive folder browser, set the player's level, choose
   // what happens when it ends. A tap plays the file immediately (restart on a fresh downbeat).
   const playerSongBody = (D: SongDeckT) => (
@@ -1339,7 +1343,7 @@ export default function App() {
       <VolSlider label="Volume" value={D.vol} onChange={D.onVol} onCommit={D.commitVol} disabled={!connected} />
       {!!D.volNote && <Text style={s.muted}>{D.volNote}</Text>}
       <View style={s.browseBox}>
-        <FolderBrowser tp={tp} root={D.browseRoot ?? '/midi/songs'} ext="mid" enabled={connected && loaded}
+        <FolderBrowser tp={tp} root={D.browseRoot ?? '/midi'} ext="mid" enabled={connected && loaded}
           selected={D.player.song} playing={D.player.playing ? D.player.song : undefined}
           onSelectFile={(full, disp) => D.playFile(full, disp)} injectFolders={D.injectFolders ?? songInjectFolders} />
       </View>
@@ -1700,8 +1704,8 @@ export default function App() {
       value: playerValue(drumDeck), progress: playerProgress(drumDeck), actions: playerActions(drumDeck),
       body: <SubMenu getItems={() => sections.filter(x => x.parent === 'drumtrack').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.drums.accent} tint={THEME.drums.tint} />,
     },
-    // DRUM LOOPS — mirrors the synth's MIDI Player (playerSongBody(drumDeck)): browse /midi/drums +
-    // Play/Stop. Same reusable deck component as the synths — a Drums sub-page.
+    // DRUM LOOPS — mirrors the synth's MIDI Player (playerSongBody(drumDeck)): browse /midi (all
+    // folders) + Play/Stop. Same reusable deck component as the synths — a Drums sub-page.
     {
       id: 'drumloops', title: 'Drum Loops', show: false, parent: 'drumtrack', accent: THEME.drums.accent, tint: THEME.drums.tint,
       value: playerValue(drumDeck), actions: playerActions(drumDeck), body: playerSongBody(drumDeck),
