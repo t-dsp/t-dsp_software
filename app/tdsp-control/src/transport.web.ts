@@ -266,6 +266,7 @@ export class WebSerialTransport implements Transport {
   arpSequence(steps: SeqStep[]) { this.send('@ARPSEQ=' + encodeSequence(steps)); }
   arpPreset(params: ArpWireParams) { this.send('@ARPPRESET=' + encodeArpParams(params)); }
   // ---- Voices 2 ----
+  poolPreset(preset: number) { this.send('@POOL=' + (preset | 0)); }
   voice2Enable(on: boolean) { this.send('@VOICE2=' + (on ? 1 : 0)); }
   voice2Vol(pct: number) { this.send('@VOICE2VOL=' + Math.max(0, Math.min(150, Math.round(pct)))); }
   dxVoice2(i: number) { this.send('@DXVOICE2=' + i); }

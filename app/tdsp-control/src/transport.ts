@@ -108,6 +108,8 @@ export interface Transport {
   arpLatch(on: boolean): void;
   arpSequence(steps: SeqStep[]): void;   // upload the User Sequence step table (@ARPSEQ=)
   arpPreset(params: ArpWireParams): void; // apply a whole preset atomically (@ARPPRESET=)
+  // ---- Runtime pool partition (4-voice pool builds; @STATE.pool) ----
+  poolPreset(preset: number): void;                   // redistribute the 8 engines: 0=4voices 1=2voices 2=1voice 3=4+2+2 (@POOL=)
   // ---- Voices 2 (build-flag gated; the app shows these only when @STATE caps.voice2) ----
   voice2Enable(on: boolean): void;                    // split the pool so a USB keyboard gets its own voice (@VOICE2=)
   voice2Vol(pct: number): void;                       // Voices-2 level (@VOICE2VOL=, 0..150 %)

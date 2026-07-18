@@ -511,6 +511,10 @@ export default function App() {
   // RAM/PSRAM dependent), not a bool: 0 hides the Audio Loop card entirely.
   const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, recedit: false, audioloop: 0 });
   const [voice2, setVoice2] = useState({ on: false, vol: 100, name: '', path: '' });
+  // Runtime pool partition (4-voice pool builds, @STATE.pool): the 8 Dexed engines redistributed among
+  // the 4 fixed voices. `preset` 0=4voices 1=2voices 2=1voice 3=4+2+2; `engines[v]` = engines that voice
+  // owns (0 = absorbed/idle); `active[v]` = voice is live. `has` gates the picker card to pool builds.
+  const [pool, setPool] = useState({ has: false, preset: 0, engines: [2, 2, 2, 2], active: [true, true, true, true] });
   // Per-track live-MIDI subscription (Phase 3, Thread C), keyed by firmware track index i. `src` =
   // which input device feeds that synth ("none"/"din"/"usb"/"multi"/…), `srcch` = channel filter
   // (0 = all). Hydrated from @STATE tracks[]; the MIDI-Input selector on each synth card writes it
@@ -604,6 +608,13 @@ export default function App() {
     // Voices 2 / Arp 2 — build capabilities (SHOW the cards) + the keyboard half's state.
     if (j.caps) setCaps({ voice2: !!j.caps.voice2, arp2: !!j.caps.arp2, rec: !!j.caps.rec,
                           recedit: !!j.caps.recedit, audioloop: Math.max(0, j.caps.audioloop | 0) });
+    // Runtime pool partition (only 4-voice pool builds emit j.pool).
+    if (j.pool) setPool({
+      has: true,
+      preset: j.pool.preset | 0,
+      engines: Array.isArray(j.pool.engines) ? j.pool.engines.map((x: number) => x | 0) : [2, 2, 2, 2],
+      active: Array.isArray(j.pool.active) ? j.pool.active.map((x: number) => !!x) : [true, true, true, true],
+    });
     if (j.aloop) setAloop(a => ({
       ...a,
       sel: Math.max(0, j.aloop.sel | 0),
@@ -1666,6 +1677,29 @@ export default function App() {
     );
   }
 
+  // Runtime pool partition (4-voice pool builds): redistribute the 8 Dexed engines among the 4 voices
+  // live (no reflash). Fewer voices = more polyphony per voice. Sends @POOL via tp.poolPreset.
+  const POOL_PRESETS = [
+    { p: 0, label: '4 voices', sub: '2 engines each · 2-note MPE / 4-note poly' },
+    { p: 1, label: '2 voices', sub: '4 engines each · 4-note MPE / 8-note poly' },
+    { p: 2, label: '1 voice',  sub: '8 engines · 8-note MPE / 16-note poly' },
+    { p: 3, label: '4 + 2 + 2', sub: 'Synth A = 4 engines; C & D = 2; B off' },
+  ];
+  const poolValue = ['4 voices', '2 voices', '1 voice', '4+2+2'][pool.preset] || '4 voices';
+  const poolBody = (
+    <View style={s.synthWrap}>
+      <Text style={s.muted}>How the 8 Dexed engines are shared. Fewer voices = more notes per voice. Changes live — no reflash. (Voices with no engines are shown "off".)</Text>
+      {POOL_PRESETS.map(pr => (
+        <Pressable key={pr.p} onPress={() => { setPool(v => ({ ...v, preset: pr.p })); tp.poolPreset(pr.p); }}
+          style={[s.listBtn, pool.preset === pr.p && s.listBtnSel]} disabled={!connected}
+          accessibilityLabel={pr.label + ' — ' + pr.sub}>
+          <Text style={s.text}>{(pool.preset === pr.p ? '● ' : '○ ') + pr.label}</Text>
+          <Text style={s.muted}>{pr.sub}</Text>
+        </Pressable>
+      ))}
+    </View>
+  );
+
   const sections: Section[] = [
     ...extraSynthCards,
     ...extraChildCards,
@@ -1776,6 +1810,13 @@ export default function App() {
         </>
       ) : undefined,
       body: <SubMenu getItems={() => sections.filter(x => x.parent === 'synthesizerB').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.synthB.accent} tint={THEME.synthB.tint} />,
+    },
+    // VOICE POOL — runtime engine allocation (4-voice pool builds only; @STATE.pool). Redistribute the
+    // 8 Dexed engines among the 4 voices live, trading voice count for per-voice polyphony. No reflash.
+    {
+      id: 'voicepool', title: 'Voice Pool', show: pool.has, accent: THEME.synthA.accent, tint: THEME.synthA.tint,
+      value: poolValue,
+      body: poolBody,
     },
     // AUDIO LOOP — gated on caps.audioloop (the COUNT of loops the device could allocate;
     // 0 on a board with no spare RAM). Records the MASTER MIX as audio (not MIDI) into

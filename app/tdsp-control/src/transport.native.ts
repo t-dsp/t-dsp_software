@@ -352,6 +352,7 @@ export class BleTransport implements Transport {
   arpSequence(steps: SeqStep[]) { this.relay('@ARPSEQ=' + encodeSequence(steps)); }
   arpPreset(params: ArpWireParams) { this.relay('@ARPPRESET=' + encodeArpParams(params)); }
   // ---- Voices 2 (identical @-lines over the relay) ----
+  poolPreset(preset: number) { this.relay('@POOL=' + (preset | 0)); }
   voice2Enable(on: boolean) { this.relay('@VOICE2=' + (on ? 1 : 0)); }
   voice2Vol(pct: number) { this.relay('@VOICE2VOL=' + Math.max(0, Math.min(150, Math.round(pct)))); }
   dxVoice2(i: number) { this.relay('@DXVOICE2=' + i); }
