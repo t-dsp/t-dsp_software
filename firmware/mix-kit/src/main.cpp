@@ -57,6 +57,7 @@
 // this file is engine-specific.
 #include <MidiFilePlayer.h>
 #include <MidiSmfFile.h>          // runtime SD .mid parser -> MidiFileEvent[]
+#include "DrumNoteMap.h"         // ch10 Roland/TD-11 -> GM note remap shim (rescues GMD hi-hats 22/26)
 // Master clock system (lib/TDspTempo): one Conductor owns the BPM + transport;
 // the song + drum players follow it via PlayerFollower adapters so a single
 // tempo knob retimes both and they share a downbeat. Its 24-PPQN tick is fanned
@@ -173,6 +174,7 @@ tdsp::MidiFilePlayer  &g_player = g_playerV[0];   // alias: voice 0 (all existin
 tdsp::ArpFilter        g_arpFilterV[kSynthVoices];   // one arp per synth voice (bypassed by default)
 tdsp::MidiRouter       g_routerV[kSynthVoices];      // one live-MIDI router per synth voice
 tdsp::MidiFilePlayer   g_drumPlayer;         // dedicated LOOPING drum-groove player (channel 10)
+tdsp::DrumNoteMapper   g_drumNoteMapper;     // ch10 note-map shim between g_drumPlayer and the real drum sink
 
 // Live MIDI: a USB-host controller (LinnStrument etc.) + the DIN MIDI IN both feed
 // one MPE-aware router that normalizes bend/timbre/pressure into the synth sink.
@@ -2646,9 +2648,13 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         // instrument here would needlessly stomp the song's per-channel programs.
         if (!g_player.isPlaying()) synthSetInstrument(g_synthInstrument);
 #if defined(TDSP_SYNTH_DEXED_POOL) && TDSP_VOICE2
-        // Voice 2 carries its OWN Tier-1 trim (dxpTrimB), so re-gate it too — otherwise the
-        // toggle would only re-gain synth A. Gain-only (no reload), so it's safe mid-play.
+        // Every other voice carries its OWN Tier-1 trim, so re-gate them too — otherwise the toggle
+        // would only re-gain synth A. Gain-only (no reload), so it's safe mid-play.
+#if TDSP_SYNTH_VOICES >= 4
+        for (int v = 1; v < kSynthVoices; ++v) synthReapplyVoiceTrimV(v);   // voices 1..3
+#else
         synthReapplyVoice2Trim();
+#endif
 #endif
         reply.printf("@RG=%d\n", tdsp::g_replayGainOn ? 1 : 0);
         Serial.printf("[synth] ReplayGain %s\n", tdsp::g_replayGainOn ? "ON" : "off");
@@ -3104,7 +3110,10 @@ FLASHMEM void setup() {
     // Dedicated drum-groove player (still hand-wired — P2 folds it into a Track): channel 10 only,
     // loops, ignores the file's program changes (we own the kit via @DRUMKIT). Feeds the GM sink
     // DIRECTLY, bypassing the arp, so a groove backs the melodic voice but is never arpeggiated.
-    g_drumPlayer.setSink(g_synthSink); g_drumTrack.sink = g_synthSink;   // default; a dedicated drum engine overrides below
+    // Route ch10 through the note-map shim (rescues GMD Roland hi-hats 22/26 on GM engines;
+    // default GmReduce). g_drumTrack.sink keeps the REAL sink -- the P2 track path is still inert.
+    g_drumNoteMapper.setDownstream(g_synthSink);
+    g_drumPlayer.setSink(&g_drumNoteMapper); g_drumTrack.sink = g_synthSink;   // default; a dedicated drum engine overrides below
     g_drumPlayer.setChannelMask((uint16_t)(1u << 9));   // MIDI channel 10 (index 9)
     g_drumPlayer.setProgramChangeEnabled(false);
     g_drumPlayer.setLooping(true);
@@ -3144,14 +3153,16 @@ FLASHMEM void setup() {
     // player's channel 10 to it (instead of the melodic sink), and mark drums available
     // regardless of the melodic engine's own no-drum song mask.
     if (drumTsfBegin()) {
-        g_drumPlayer.setSink(&g_drumTsfSink); g_drumTrack.sink = &g_drumTsfSink;
+        g_drumNoteMapper.setDownstream(&g_drumTsfSink);
+        g_drumPlayer.setSink(&g_drumNoteMapper); g_drumTrack.sink = &g_drumTsfSink;
         g_engineHasDrums = true;
     }
 #endif
 #ifdef TDSP_DRUM_VOICE
     // Same idea with the OPLL rhythm voice (no PSRAM): route ch10 to it + mark drums OK.
     if (drumVoiceBegin()) {
-        g_drumPlayer.setSink(&g_drumVoiceSink); g_drumTrack.sink = &g_drumVoiceSink;
+        g_drumNoteMapper.setDownstream(&g_drumVoiceSink);
+        g_drumPlayer.setSink(&g_drumNoteMapper); g_drumTrack.sink = &g_drumVoiceSink;
         g_engineHasDrums = true;
     }
 #endif
