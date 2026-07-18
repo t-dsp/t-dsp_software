@@ -823,9 +823,12 @@ static const int MAX_EVENTS2 = 12000;
 DMAMEM static tdsp::MidiFileEvent g_buf2[MAX_EVENTS2];
 #endif
 #if TDSP_SYNTH_VOICES >= 4
-// Voices 3/4 each need their OWN event buffer (the player holds a pointer, no copy). Same
-// half-size window as player 2 to keep OCRAM in budget on the no-PSRAM 4-voice pool build.
-static const int MAX_EVENTS3 = 12000;
+// Voices 3/4 each need their OWN event buffer (the player holds a pointer, no copy). These are
+// the EXTRA pool voices — primarily live-played (a keyboard on voice 2/3), so their song player is
+// secondary. Keep the buffers SMALL: g_buf(24000)+g_buf2(12000)+two big buffers here would fill
+// OCRAM and starve the lean-RAM SD-song heap (~82 KB) → boot crash. A short backing loop fits 2000
+// events; a longer song truncates on voices 3/4 only (voices 0/1 keep their full buffers).
+static const int MAX_EVENTS3 = 2000;
 DMAMEM static tdsp::MidiFileEvent g_buf3[MAX_EVENTS3];
 DMAMEM static tdsp::MidiFileEvent g_buf4[MAX_EVENTS3];
 #endif
