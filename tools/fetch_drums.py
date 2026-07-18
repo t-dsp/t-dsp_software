@@ -73,6 +73,15 @@ import sys
 import urllib.request
 import zipfile
 
+# NOTE ON NOTE INTEGRITY (see planning/drum-note-map/DESIGN.md): imported GMD
+# grooves carry NATIVE Roland/TD-11 note numbers -- including the edge hi-hats on
+# notes 22/26, which are BELOW GM's percussion range. We deliberately leave those
+# untouched here: the .mid on the card is the lossless source of truth, and the
+# Roland->GM fold (22->42, 26->46) happens at PLAYBACK via the firmware's
+# DrumNoteMapper shim, where the active engine/font decides. Do NOT bake the remap
+# into the assets -- it is lossy and one-way. _force_channel10 rewrites only the
+# channel nibble, never the note number.
+#
 # --- General MIDI percussion (channel 10) note numbers we use ----------------
 KICK, RIM, SNARE, CLAP = 36, 37, 38, 39
 CLHAT, PDHAT, OPHAT = 42, 44, 46          # closed / pedal / open hi-hat
