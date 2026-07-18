@@ -3241,7 +3241,10 @@ FLASHMEM void setup() {
         if (engineChanged || versionChanged) {
             Serial.printf("[catdb] catalog stale (engine %s->%s, v %d->%d) -> auto-reindex\n",
                           have ? stored : "(none)", synthName(), storedVer, tdsp::catdb::kCatalogVersion);
-            tdsp::catdb::buildCatalog(engineCaps(), catdbWriteBundled, millis());
+            // forceAll: a builder-version bump can change the WRITER output without changing the
+            // per-source signature (grooves went recursive), so rebuild every source, not just
+            // the ones whose file count/bytes moved.
+            tdsp::catdb::buildCatalog(engineCaps(), catdbWriteBundled, millis(), /*forceAll=*/true);
         }
     }
 #endif

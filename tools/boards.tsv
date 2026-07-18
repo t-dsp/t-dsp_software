@@ -6,9 +6,18 @@
 # Columns are TAB-separated. Lines starting with '#' are ignored.
 # Get a board's serial:  pio device list   (USB "Serial Number" of the Teensy)
 #
-# serial	env	board_header	notes
-18402920	teensy41_dexed_pool_nobt_drumvoice	boards/digital_audio_board_nobt.h	local dev board (COM4), ESP32 NOT populated; Dexed MPE pool + OPLL drum voice, Bluetooth flagged out (header pins nobt)
+# esp32_env: the PlatformIO env for the box's companion ESP32 control MCU, in
+# projects/t-dsp_esp32_bt_receiver ('-' = no ESP32 populated). flash.py does NOT
+# flash the ESP32 (it's a separate MCU/project); this column just records which
+# control build the box runs so it's reproducible. Flash the ESP32 separately:
+#   pio run -d projects/t-dsp_esp32_bt_receiver -e <esp32_env> -t upload
+# esp32dev = BLE control; esp32dev_wifi = WiFi LAN WebSocket control (tdsp.local:81,
+# needs a .env with TDSP_WIFI_SSID/PASS next to that project's platformio.ini).
+#
+# serial	env	board_header	esp32_env	notes
+18402920	teensy41_dexed_pool_nobt_drumvoice	boards/digital_audio_board_nobt.h	-	local dev board (COM4), ESP32 NOT populated; Dexed MPE pool + OPLL drum voice, Bluetooth flagged out (header pins nobt)
 # jay-mint PSRAM board: flashed over SSH from the Windows box (tools/linux-flash-host.md),
 # not by local flash.py serial detection. Builds+flashes clean; has a boot power-contention
 # hang on good firmware (run it off ONE 5V source). See project_jaymint_flash_host memory.
-7681380	teensy41_sf2_tsf_jaymint	boards/jaymint.h	jay-mint PSRAM board (SN 7681380), LINE OUT; TSF GM engine = TSF synth + its own GM drums
+# ESP32 = WiFi control build (esp32dev_wifi): joins Pancakehouse 2.4GHz, serves tdsp.local:81.
+7681380	teensy41_sf2_tsf_jaymint	boards/jaymint.h	esp32dev_wifi	jay-mint PSRAM board (SN 7681380), LINE OUT; TSF GM engine = TSF synth + its own GM drums

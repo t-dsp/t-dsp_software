@@ -23,7 +23,6 @@ import { ARP_PATTERNS as ARP_PAT, ARP_RATES, rateIndexFromFw, PAT_USER_SEQUENCE,
 import { applyArpPreset, ArpPreset, ARP_LIBRARY } from './src/arpLibrary';
 
 const EMPTY_DIR: DirPage = { path: '', page: 0, npages: 1, folders: [], carts: [] };
-const grooveFile = (g: { path: string; name: string }) => g.path.split('/').pop() || (g.name + '.mid');   // @DRUMF wants filename WITH .mid
 // Display name for a groove SD path (basename minus .mid) — the drum-track card's "value".
 const grooveDisp = (p: string | null | undefined) => (p ? (p.split('/').pop() || '').replace(/\.mid$/i, '') : '');
 const kb = (n: number) => (n / 1024).toFixed(1);   // bytes -> "12.3" KB, for the load progress readout
@@ -803,8 +802,6 @@ export default function App() {
   }
   async function reindex() { setBusy(true); try { await tp.reindex(); await load(); } finally { setBusy(false); } }
 
-  const grooves = useMemo(() => { const t = q.groove.toLowerCase(); return cat.grooves.filter(g => !t || g.name.toLowerCase().includes(t)).slice(0, 500); }, [cat.grooves, q.groove]);
-
   // Lazy /dexed browse: fetch the current folder level via @DXLS whenever the path changes
   // (skip the synthetic '@bundled' view). @DXLS is paged (32 entries/page), so walk all pages
   // and concatenate — a folder can hold hundreds of carts. The `alive` gate drops a stale
@@ -915,17 +912,6 @@ export default function App() {
     return () => clearTimeout(t);
   }, [route]);
 
-  const stepGroove = (dir: number) => {   // step the drum preset; if one is playing, switch to the new one
-    if (!grooves.length) return;
-    const idx = grooves.findIndex(g => g.path === drums.sel);
-    // From no selection (idx<0) the first ‹/› lands on the first/last groove instead of skipping
-    // one — same cursor rule the song player's pickNext() uses, so ‹/› work right at startup.
-    const base = idx < 0 ? (dir > 0 ? -1 : 0) : idx;
-    const ni = Math.max(0, Math.min(grooves.length - 1, base + dir));
-    const g = grooves[ni]; if (!g) return;
-    setDrums(d => { if (d.playing) { tp.playGrooveFile(grooveFile(g)); return { ...d, sel: g.path, playing: g.name }; } return { ...d, sel: g.path }; });
-    persistApp({ groove: g.path });   // remember the pick so it survives an app reconnect
-  };
   const stepBpm = (delta: number) => { const b = Math.max(20, Math.min(300, Math.round(bpm) + delta)); setBpm(b); tp.masterBpm(b); };
   const stepVol = (delta: number) => { const v = Math.max(0, Math.min(100, Math.round(vol) + delta)); setVol(v); tp.masterVolume(v); };
   // TAC5212 DAC high-pass filter. Picking a preset sets the mode; the Enable switch
@@ -1126,10 +1112,16 @@ export default function App() {
     manualStopRef: React.MutableRefObject<boolean>;
     vol: number; onVol: (n: number) => void; commitVol: (n: number) => void; volNote?: string;
     wire: SongWire;
+    // Called whenever the SELECTED song/groove changes (tap, ‹/›, auto-advance) — even while
+    // stopped. Lets a track that the device can't report (the drum groove) remember its pick in
+    // @APP so it survives leaving the page / reconnecting. Undefined for song decks (the device
+    // reports their current song in @STATE, so there's nothing extra to persist).
+    persistSel?: (arg: string) => void;
     // Per-track browse target + step catalog, so the SAME deck serves any track. Browser default = /midi.
     catalog?: Song[]; browseRoot?: string; injectFolders?: InjFolder[]; noEndMode?: boolean;
   }): SongDeckT => {
     const { player: P, setPlayer: setP, endMode: em, wire } = cfg;
+    const persistSel = cfg.persistSel ?? (() => {});
     const catalog = cfg.catalog ?? cat.songs;   // the list ‹ ›/auto-advance step through (songs or grooves)
     // The shared "continue rules": which song a skip (‹ ›) or a natural end advances to, per the
     // end-mode. Shuffle → a random *other* song; every other mode → the linear neighbour, wrapping
@@ -1149,7 +1141,7 @@ export default function App() {
       const base = idx < 0 ? (dir > 0 ? -1 : 0) : idx;
       return songs[((base + dir) % songs.length + songs.length) % songs.length];       // wrap both ways
     };
-    const playOf = (sg: Song) => { wire.play(songArg(sg)); setP(p => ({ ...p, song: songArg(sg), playing: true, name: sg.name, prog: -1 })); };
+    const playOf = (sg: Song) => { wire.play(songArg(sg)); persistSel(songArg(sg)); setP(p => ({ ...p, song: songArg(sg), playing: true, name: sg.name, prog: -1 })); };
     // End-of-song mode. Only 'repeat' arms the firmware's seamless loop; the rest let the song end
     // (the device emits its <player>P=-1) and we advance app-side. Persisted on the device.
     const applyEnd = (m: EndMode) => { cfg.setEndMode(m); wire.loop(m === 'repeat'); persistApp({ [cfg.persistKey]: m } as Partial<AppState>); };
@@ -1158,11 +1150,13 @@ export default function App() {
       vol: cfg.vol, onVol: cfg.onVol, commitVol: cfg.commitVol, volNote: cfg.volNote,
       setSong: (name: string) => setP(p => ({ ...p, song: name })),
       // FolderBrowser tap: restart THIS file/baked song now (arg = full SD path, or a baked name).
-      playFile: (arg: string, disp: string) => { wire.restart(arg); setP(p => ({ ...p, song: arg, playing: true, name: disp, prog: -1 })); },
+      playFile: (arg: string, disp: string) => { wire.restart(arg); persistSel(arg); setP(p => ({ ...p, song: arg, playing: true, name: disp, prog: -1 })); },
       // Play = restart from the top on a fresh downbeat; prog -1 until the device reports position.
-      play: () => { const sg = catalog.find(x => songArg(x) === P.song) || catalog[0]; if (!sg) return; wire.restart(songArg(sg)); setP(p => ({ ...p, song: songArg(sg), playing: true, name: sg.name, prog: -1 })); },
+      play: () => { const sg = catalog.find(x => songArg(x) === P.song) || catalog[0]; if (!sg) return; wire.restart(songArg(sg)); persistSel(songArg(sg)); setP(p => ({ ...p, song: songArg(sg), playing: true, name: sg.name, prog: -1 })); },
       stop: () => { cfg.manualStopRef.current = true; wire.stop(); setP(p => ({ ...p, playing: false, prog: 0 })); },
-      step: (dir: number) => { const sg = pickNext(dir); if (!sg) return; setP(p => { if (p.playing) { wire.restart(songArg(sg)); return { ...p, song: songArg(sg), name: sg.name }; } return { ...p, song: songArg(sg), name: sg.name }; }); },
+      // ‹/› step through the catalog. Persist the new pick even when stopped, so leaving the page
+      // (or reconnecting) reopens on the groove you stepped to — not the last one that played.
+      step: (dir: number) => { const sg = pickNext(dir); if (!sg) return; persistSel(songArg(sg)); setP(p => { if (p.playing) { wire.restart(songArg(sg)); return { ...p, song: songArg(sg), name: sg.name }; } return { ...p, song: songArg(sg), name: sg.name }; }); },
       applyEnd, cycleEnd: () => { const i = END_MODES.findIndex(m => m.key === em); applyEnd(END_MODES[(i + 1) % END_MODES.length].key); },
       // Runs when a song finishes on its own (not a manual Stop). 'stop' does nothing; 'repeat'
       // loops in firmware; continue/shuffle advance per the same pickNext rules.
@@ -1201,7 +1195,10 @@ export default function App() {
   const drumDeck = makeSongDeck({
     v: 1, player: drumPlayerView, setPlayer: setDrumPlayerView, endMode: 'repeat', setEndMode: () => {}, persistKey: 'end', manualStopRef: drumStopRef,
     vol: drumVol, onVol: setDrumVol, commitVol: v => tp.drumVol(v),
-    wire: { play: a => { tp.playGrooveFile(a); persistApp({ groove: a }); }, restart: a => { tp.playGrooveFile(a); persistApp({ groove: a }); }, stop: () => tp.stopDrums(), loop: () => {} },
+    wire: { play: a => tp.playGrooveFile(a), restart: a => tp.playGrooveFile(a), stop: () => tp.stopDrums(), loop: () => {} },
+    // The device reports the drum KIT in @STATE but not which groove is picked, so remember the
+    // selection ourselves (in @APP) on every pick/step — that's what lets Drums reopen where you left it.
+    persistSel: a => persistApp({ groove: a }),
     catalog: drumSongs, browseRoot: '/midi', injectFolders: [], noEndMode: true,   // a groove always loops
   });
   // Master transport Play/Stop. Play (@METRO=1) starts the clock + defines the downbeat if idle
@@ -1890,7 +1887,9 @@ export default function App() {
     // DRUM LOOPS — mirrors the synth's MIDI Player (playerSongBody(drumDeck)): browse /midi (all
     // folders) + Play/Stop. Same reusable deck component as the synths — a Drums sub-page.
     {
-      id: 'drumloops', title: 'Drum Loops', show: false, parent: 'drumtrack', accent: THEME.drums.accent, tint: THEME.drums.tint,
+      id: 'drumloops', title: 'Drum Loops', show: false, parent: 'drumtrack', fullHeight: true, accent: THEME.drums.accent, tint: THEME.drums.tint,
+      // fullHeight keeps this page MOUNTED (hidden when inactive), like Synth / Voices — so the
+      // groove browser reopens on the folder you left instead of snapping back to the /midi root.
       value: playerValue(drumDeck), actions: playerActions(drumDeck), body: playerSongBody(drumDeck),
     },
     // KIT — mirrors the synth's Synth / Voices: the drum instrument (GM kit) + level. A Drums sub-page.
