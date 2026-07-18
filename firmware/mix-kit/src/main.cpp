@@ -169,6 +169,31 @@ AudioSynthWaveformSine_F32 testTone;         // local DAC self-test source (F32)
 #endif
 static const int kSynthVoices = TDSP_SYNTH_VOICES;
 
+// --- Heterogeneous engine inventory (Phase 4, Thread D) ------------------------------------------
+// Normally every synth voice is the SAME engine (the Dexed pool). A HETERO build declares a COUNT
+// per engine kind (build flags), and the voices split by kind: voices [0, kDexedVoices) are Dexed
+// pool windows; voices [kDexedVoices, kSynthVoices) are melodic OPLL engines (HeteroOpll.h). A Track
+// binds to whichever — proving "N synths of DIFFERENT kinds." See planning/tracks/DESIGN.md.
+#ifndef TDSP_HETERO
+#define TDSP_HETERO 0
+#endif
+#ifndef TDSP_DEXED_VOICES
+#define TDSP_DEXED_VOICES (TDSP_VOICE2 ? 2 : 1)   // Dexed pool windows (== kSynthVoices on a non-hetero build)
+#endif
+#ifndef TDSP_OPLL_ENGINES
+#define TDSP_OPLL_ENGINES 0                       // melodic OPLL voices appended after the Dexed ones
+#endif
+#if TDSP_HETERO
+static const int kDexedVoices = TDSP_DEXED_VOICES;     // tracks [0, kDexedVoices) are Dexed
+static_assert(TDSP_DEXED_VOICES + TDSP_OPLL_ENGINES == TDSP_SYNTH_VOICES,
+              "TDSP_SYNTH_VOICES must equal TDSP_DEXED_VOICES + TDSP_OPLL_ENGINES");
+#else
+static const int kDexedVoices = kSynthVoices;          // homogeneous: every voice is Dexed (or the sole backend)
+#endif
+// Compile-time engine kind for voice v (used by the per-track command dispatch + @STATE "eng").
+static inline const char *voiceEngineName(int v) { return (v >= kDexedVoices) ? "opll" : "dexed"; }
+static inline bool        voiceIsOpll(int v)      { return TDSP_HETERO && v >= kDexedVoices; }
+
 tdsp::MidiFilePlayer   g_playerV[kSynthVoices];   // one song player per synth voice
 tdsp::MidiFilePlayer  &g_player = g_playerV[0];   // alias: voice 0 (all existing g_player refs)
 tdsp::ArpFilter        g_arpFilterV[kSynthVoices];   // one arp per synth voice (bypassed by default)
@@ -235,8 +260,10 @@ tdsp::PlayerFollower   g_drumFollow{g_drumPlayer};  // declared above (lines ~92
 #if TDSP_VOICE2
 tdsp::PlayerFollower   g_songFollow2{g_player2};    // player 2 follows the same master tempo grid
 #endif
+#if TDSP_SYNTH_VOICES >= 3
+tdsp::PlayerFollower   g_songFollow3{g_playerV[2]};   // voice index 2 (4-voice pool OR the hetero OPLL voice) retimes to the grid
+#endif
 #if TDSP_SYNTH_VOICES >= 4
-tdsp::PlayerFollower   g_songFollow3{g_playerV[2]};   // voices 3/4 (4-voice pool) retime to the same grid
 tdsp::PlayerFollower   g_songFollow4{g_playerV[3]};
 #endif
 tdsp::ClockSink        g_clockSink{&g_conductor.clock()};
@@ -414,6 +441,9 @@ static bool g_sdReady = false;
 #endif
 #ifdef TDSP_DRUM_VOICE
   #include "DrumVoice.h"    // OPLL 5-sound rhythm; ~9 KB, no PSRAM
+#endif
+#if TDSP_HETERO
+  #include "HeteroOpll.h"   // Thread D: melodic OPLL voice(s) ALONGSIDE the Dexed pool (heterogeneous inventory)
 #endif
 
 #include "CatalogDb.h"   // on-demand /tdsp/ catalog database (@REINDEX); client-triggered
@@ -822,15 +852,18 @@ DMAMEM static tdsp::MidiFileEvent g_buf[MAX_EVENTS];  // ~144KB in OCRAM (off th
 static const int MAX_EVENTS2 = 12000;
 DMAMEM static tdsp::MidiFileEvent g_buf2[MAX_EVENTS2];
 #endif
-#if TDSP_SYNTH_VOICES >= 4
-// Voices 3/4 each need their OWN event buffer (the player holds a pointer, no copy). These are
-// the EXTRA pool voices — primarily live-played (a keyboard on voice 2/3), so their song player is
-// secondary. Keep the buffers SMALL: g_buf(24000)+g_buf2(12000)+two big buffers here would fill
-// OCRAM and starve the lean-RAM SD-song heap (~82 KB) → boot crash. A short backing loop fits 2000
-// events; a longer song truncates on voices 3/4 only (voices 0/1 keep their full buffers).
+#if TDSP_SYNTH_VOICES >= 3
+// Voices 3/4 (and the hetero OPLL voice at index 2) each need their OWN event buffer (the player
+// holds a pointer, no copy). These are the EXTRA voices — primarily live-played (a keyboard on
+// voice 2/3), so their song player is secondary. Keep the buffers SMALL: g_buf(24000)+g_buf2(12000)+
+// two big buffers here would fill OCRAM and starve the lean-RAM SD-song heap (~82 KB) → boot crash.
+// A short backing loop fits 2000 events; a longer song truncates on voices 3/4 only (voices 0/1
+// keep their full buffers).
 static const int MAX_EVENTS3 = 2000;
 DMAMEM static tdsp::MidiFileEvent g_buf3[MAX_EVENTS3];
+#if TDSP_SYNTH_VOICES >= 4
 DMAMEM static tdsp::MidiFileEvent g_buf4[MAX_EVENTS3];
+#endif
 #endif
 
 static bool endsWithMid(const char *s) {
@@ -944,17 +977,29 @@ static float  g_song2Bpm = 120.0f;      // player-2 song native tempo (retimed t
 static uint8_t g_song2Bpb = 4;
 static double g_song2LoopBeats = 0.0;
 #endif
+#if TDSP_SYNTH_VOICES >= 3
+// Voice index 2 (the 4-voice pool's voice 3, OR the hetero OPLL voice): an independent song
+// player -> its own name/arg/loop/tempo/meter/sync/launch state (mirrors the voice-1/2 slots).
+// Bound to tracks[2] in tracksInit.
+static char   g_curSong3Name[64] = "";
+static char   g_curSong3Arg[100] = "";
+static bool   g_song3Loop = false;
+static bool   g_song3WasPlaying = false;
+static float  g_song3Bpm = 120.0f;
+static uint8_t g_song3Bpb = 4;
+static double g_song3LoopBeats = 0.0;
+static bool   g_song3LaunchPending = false;
+#endif
 #if TDSP_SYNTH_VOICES >= 4
-// Voices 3/4 (4-voice pool): each an independent song player -> its own name/arg/loop/tempo/meter/
-// sync/launch state (mirrors the voice-1/2 slots). Bound to tracks[2]/[3] in tracksInit.
-static char   g_curSong3Name[64] = "";      static char   g_curSong4Name[64] = "";
-static char   g_curSong3Arg[100] = "";      static char   g_curSong4Arg[100] = "";
-static bool   g_song3Loop = false;          static bool   g_song4Loop = false;
-static bool   g_song3WasPlaying = false;    static bool   g_song4WasPlaying = false;
-static float  g_song3Bpm = 120.0f;          static float  g_song4Bpm = 120.0f;
-static uint8_t g_song3Bpb = 4;              static uint8_t g_song4Bpb = 4;
-static double g_song3LoopBeats = 0.0;       static double g_song4LoopBeats = 0.0;
-static bool   g_song3LaunchPending = false; static bool   g_song4LaunchPending = false;
+// Voice index 3 (4-voice pool's voice 4).
+static char   g_curSong4Name[64] = "";
+static char   g_curSong4Arg[100] = "";
+static bool   g_song4Loop = false;
+static bool   g_song4WasPlaying = false;
+static float  g_song4Bpm = 120.0f;
+static uint8_t g_song4Bpb = 4;
+static double g_song4LoopBeats = 0.0;
+static bool   g_song4LaunchPending = false;
 #endif
 static bool          g_syncProbe = false;   // @SYNCPROBE: 1 Hz drift probe (PLAN §9)
 static elapsedMillis g_syncProbeClock;      // throttle for the probe print
@@ -2324,6 +2369,36 @@ static void handleTrkCmd(const char* s, Stream& reply) {
     // filter. Pure field writes the hub reads per event — no audio-graph repatch, zero switch latency.
     else if (strncmp(cmd, "SRC=", 4) == 0)     { midihub::setSources(*t, midihub::parseSrcMask(arg)); reply.printf("@TRK%d.SRC=%s\n", i, midihub::srcName(t->liveSrcMask)); }
     else if (strncmp(cmd, "SRCCH=", 6) == 0)   { int n = atoi(arg); t->srcChMask = (n <= 0 || n > 16) ? 0 : (uint16_t)(1u << (n - 1)); reply.printf("@TRK%d.SRCCH=%d\n", i, midihub::chNum(t->srcChMask)); }
+#if TDSP_HETERO
+    // Engine-agnostic instrument select (Slot abstraction, Thread D): on a HETERO build a track may
+    // be a Dexed pool window OR a melodic OPLL, so the app picks by index without knowing the engine
+    // — INSTR=<idx> routes to the track's actual engine kind. For an OPLL voice INSTR/DXVOICE/DXPICK
+    // are all handled here (the OPLL has no /dexed carts); a Dexed voice's DXVOICE/DXPICK fall through
+    // to the unchanged Dexed block below. This whole block is HETERO-only so non-hetero builds are
+    // byte-identical.
+    else if (voiceIsOpll(i) && !isDrum &&
+             (strncmp(cmd, "INSTR=", 6) == 0 || strncmp(cmd, "DXVOICE=", 8) == 0)) {
+        heteroOpllSetInstrument(atoi(strchr(cmd, '=') + 1));
+        reply.printf("@TRK%d.INSTR=%d\n", i, heteroOpllInstrument());
+    }
+    else if (voiceIsOpll(i) && !isDrum && strncmp(cmd, "DXPICK=", 7) == 0) {
+        // OPLL has no cart library — ignore the pick but echo so the app doesn't hang on a reply.
+        reply.printf("@TRK%d.DXPICKED=\t0\t%s\n", i, heteroOpllInstrumentName(heteroOpllInstrument()));
+    }
+    else if (!voiceIsOpll(i) && !isDrum && strncmp(cmd, "INSTR=", 6) == 0) {
+        // INSTR alias on a DEXED voice == DXVOICE (bundled index). Kept HETERO-only so the app can
+        // use one engine-agnostic command family across a mixed board.
+        int idx = atoi(strchr(cmd, '=') + 1);
+#if TDSP_SYNTH_VOICES >= 4
+        synthSetInstrumentV(i, idx);
+#elif TDSP_VOICE2
+        if (i == 1) synthSetInstrument2(idx); else synthSetInstrument(idx);
+#else
+        synthSetInstrument(idx);
+#endif
+        reply.printf("@TRK%d.INSTR=%d\n", i, idx);
+    }
+#endif
 #if defined(TDSP_SYNTH_DEXED) || defined(TDSP_SYNTH_DEXED_POOL)
     // Voice select for this track. DXPICK=<relCart>\t<voice> (library pick) / DXVOICE=<idx> (bundled).
     else if (strncmp(cmd, "DXPICK=", 7) == 0 && !isDrum) {
@@ -2898,6 +2973,16 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
             const char *nm = g_curCartNameV[v][0] ? g_curCartNameV[v] : synthInstrumentName(g_synthInstrumentV[v]);
             tdsp::catdb::jsonStr(reply, nm); reply.print("}");
         }
+#elif TDSP_HETERO
+        // HETERO inventory (Thread D): the melodic OPLL voice(s) after the Dexed ones. "eng":"opll"
+        // tells the app this track is a DIFFERENT engine kind (the Dexed voices carry no eng — the
+        // app infers them from caps.engines: tracks [0,dexed) are Dexed, the rest OPLL). Always on.
+        for (int v = kDexedVoices; v < kSynthVoices; ++v) {
+            Track &t = g_tracks[v];
+            reply.printf(",{\"i\":%d,\"kind\":\"synth\",\"eng\":\"opll\",\"playing\":%d,\"on\":1,\"arp\":1,\"src\":\"%s\",\"srcch\":%d,\"name\":",
+                         v, t.player->isPlaying() ? 1 : 0, midihub::srcName(t.liveSrcMask), midihub::chNum(t.srcChMask));
+            tdsp::catdb::jsonStr(reply, heteroOpllInstrumentName(heteroOpllInstrument())); reply.print("}");
+        }
 #endif
         reply.printf(",{\"i\":%d,\"kind\":\"drum\",\"playing\":%d,\"on\":%d,\"arp\":0,\"name\":",
                      kSynthVoices, g_drumTrack.player->isPlaying() ? 1 : 0, drumEngineOk() ? 1 : 0);
@@ -2916,6 +3001,12 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
                      0
 #endif
                      );
+#if TDSP_HETERO
+        // The compiled engine INVENTORY (Thread D): how many voices of each engine kind, so the app
+        // knows this board is heterogeneous and which track index maps to which engine (tracks
+        // [0,dexed) = Dexed pool windows, the next opll = melodic OPLL). Slot binding is a build fact.
+        reply.printf(",\"engines\":{\"dexed\":%d,\"opll\":%d}", kDexedVoices, kSynthVoices - kDexedVoices);
+#endif
         reply.print("}\n");   // close root object
         reply.printf("@APP=%s\n", g_appState);   // opaque app-owned state, emitted with @STATE so one connect rehydrates both
     }
@@ -2988,6 +3079,23 @@ FLASHMEM static void tracksInit() {
       t3.name = g_curSong4Name; t3.arg = g_curSong4Arg; t3.loop = &g_song4Loop; t3.wasPlaying = &g_song4WasPlaying;
       t3.bpm = &g_song4Bpm; t3.bpb = &g_song4Bpb; t3.loopBeats = &g_song4LoopBeats; t3.launchPending = &g_song4LaunchPending;
       t3.liveSrcMask = 0; t3.srcChMask = 0; }
+#elif TDSP_HETERO
+    // HETEROGENEOUS inventory (Thread D): voice index 2 is a MELODIC OPLL engine, NOT a Dexed
+    // pool window — a full Track peer of the Dexed voices 0/1 with its own player/arp/router, but
+    // its sink is the OPLL (HeteroOpll.h). This is the per-track engine binding the whole thread
+    // exists to prove: switching @TRK2's input feeds the SAME uniform stack into a different engine
+    // kind. Reuses the index-2 extra-voice state (g_songFollow3/g_buf3/g_curSong3*). One OPLL voice
+    // today (TDSP_OPLL_ENGINES==1, static_assert in HeteroOpll.h).
+    { Track &t2 = g_tracks[kDexedVoices];
+      t2.player = &g_playerV[kDexedVoices]; t2.arp = &g_arpFilterV[kDexedVoices]; t2.router = &g_routerV[kDexedVoices];
+      t2.follow = &g_songFollow3; t2.looper = nullptr;
+      t2.sink = g_hoOpllVoiceSink[0]; t2.buf = g_buf3; t2.bufCap = MAX_EVENTS3; t2.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
+      t2.setLevel = heteroOpllSetVol; t2.tag = "song3";
+      t2.caps = { false, false, false, /*splitGuarded*/false,
+                  false, false, false, false, false, /*tempoSourceWhenIdle*/true };
+      t2.name = g_curSong3Name; t2.arg = g_curSong3Arg; t2.loop = &g_song3Loop; t2.wasPlaying = &g_song3WasPlaying;
+      t2.bpm = &g_song3Bpm; t2.bpb = &g_song3Bpb; t2.loopBeats = &g_song3LoopBeats; t2.launchPending = &g_song3LaunchPending;
+      t2.liveSrcMask = 0; t2.srcChMask = 0; }
 #endif
 
     // Drum track (Phase 2): a Track peer of the voices, bound to the looping ch10 groove player.
@@ -3181,6 +3289,8 @@ FLASHMEM void setup() {
 #if TDSP_SYNTH_VOICES >= 4
     trackWireSetup(g_tracks[2]);   // voices 3/4 of the 4-way pool (own router/arp/sink)
     trackWireSetup(g_tracks[3]);
+#elif TDSP_HETERO
+    trackWireSetup(g_tracks[kDexedVoices]);   // the melodic OPLL voice (own router/arp -> OPLL sink)
 #endif
 
     // --- Master clock wiring --------------------------------------------------
@@ -3200,6 +3310,16 @@ FLASHMEM void setup() {
         for (tdsp::MidiRouter &r : g_routerV) r.handleClock();   // step every voice's arp on the master grid
     }, nullptr);
     synthBegin();
+#if TDSP_HETERO
+    // Heterogeneous inventory (Thread D): bring up the melodic OPLL voice (mix slot TDSP_HO_SLOT),
+    // then force the Dexed pool's 4/4 split ON so both Dexed voices (0/1) are always live alongside
+    // it — the hetero build has no runtime @VOICE2 toggle; all three voices are permanent Tracks.
+    heteroOpllBegin();
+#if TDSP_VOICE2 && TDSP_SYNTH_VOICES < 4
+    g_voice2On = true;
+    synthSetVoice2Enabled(true);   // split engines 4..7 off as Dexed voice 1 (g_synthSinkB)
+#endif
+#endif
     // Capture the engine's drum capability NOW (synthBegin set the song mask to
     // kMaskAll on drum-capable engines). drumEngineOk() reads this, so we're free to
     // toggle g_player's live channel mask later to mute a song's drums under a groove.
@@ -3402,6 +3522,8 @@ void loop() {
 #if TDSP_SYNTH_VOICES >= 4
     { static elapsedMillis clk; static bool prev = false; emitTrackPos(g_tracks[2], "@TRK2.P", clk, prev); }
     { static elapsedMillis clk; static bool prev = false; emitTrackPos(g_tracks[3], "@TRK3.P", clk, prev); }
+#elif TDSP_HETERO
+    { static elapsedMillis clk; static bool prev = false; emitTrackPos(g_tracks[kDexedVoices], "@TRK2.P", clk, prev); }
 #endif
 
 #if TDSP_RECORDER
