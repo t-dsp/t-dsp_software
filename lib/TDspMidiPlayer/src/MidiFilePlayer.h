@@ -156,10 +156,40 @@ public:
     double syncCursorBeat()  const { return evCursorBeat_; }
     double syncMasterBeat()  const { return lastMasterBeat_; }
 
+    // --- Jitter probe (opt-in dispatch-lateness telemetry) ---
+    // How late each note-ON fires relative to its scheduled beat, in BEATS (tempo-
+    // independent; multiply by 60000/bpm for ms). Captures loop()-polling latency +
+    // loop() stalls, which is exactly the drum "sometimes off" we're chasing. Off by
+    // default (zero overhead). Enable, let a groove run, then read the stats.
+    void setJitterProbe(bool en) { jitterProbe_ = en; }
+    void resetJitter() { jitCount_ = 0; jitSumBeats_ = 0.0; jitSumSqBeats_ = 0.0; jitMaxBeats_ = 0.0; }
+    uint32_t jitterCount()    const { return jitCount_; }
+    double   jitterMaxBeats() const { return jitMaxBeats_; }
+    double   jitterMeanBeats()const { return jitCount_ ? (jitSumBeats_ / (double)jitCount_) : 0.0; }
+    double   jitterStdBeats() const {
+        if (jitCount_ < 2) return 0.0;
+        double m = jitSumBeats_ / (double)jitCount_;
+        double var = jitSumSqBeats_ / (double)jitCount_ - m * m;
+        return var > 0.0 ? sqrt(var) : 0.0;
+    }
+
     // Which channels this player panics on stop() (bit i => MIDI channel i+1).
     // Default = all. The song player sets this to spare channel 10 so stopping /
     // restarting a song never cuts a separately-looping drum groove on ch10.
     void setPanicMask(uint16_t m) { panicMask_ = m; }
+
+    // ONE-SHOT-TAIL mode (drum grooves): at the loop seam, DON'T carry the loop's
+    // trailing note-offs into the next iteration. Exported drum MIDI closes every
+    // hit with a note-off bunched at the exact loop boundary (the file's end-of-track
+    // cleanup) — including the fill notes struck in the last fraction of the bar.
+    // Firing those seam offs releases those hits the instant the loop wraps, so the
+    // ending fill/crash is chopped every bar (audible as a stutter at the loop point).
+    // Percussion is one-shot: a hit should ring its natural sample decay regardless of
+    // note-off. With this set, mid-loop note-offs still fire normally (so hi-hat chokes
+    // etc. are preserved — TSF has no exclusive-class support, so those rely on note-off),
+    // but the seam-cleanup offs are dropped and the last note rings through. Melodic song
+    // players leave this OFF so a pad genuinely held across the seam still releases.
+    void setOneShotTail(bool en) { oneShotTail_ = en; }
 
     // Stop and release every held note (sink panic). Safe to call when idle.
     void stop() {
@@ -258,6 +288,17 @@ private:
             const bool   haveEvent   = (idx_ < count_) && (evCursorBeat_ < loopBeats_);
             const double nextAbs     = loopBaseBeat_ + evCursorBeat_;
             if (haveEvent && songBeat >= nextAbs) {
+                // JITTER PROBE (opt-in): how far the master beat had already advanced PAST
+                // this event's scheduled beat when we finally dispatched it = the dispatch
+                // lateness (loop()-polling latency + any loop() stall). Measured on note-ONs
+                // only — the audible hits. Zero-cost when the probe is off. (setJitterProbe)
+                if (jitterProbe_ && ev_[idx_].kind == kNoteOn) {
+                    double lateBeats = songBeat - nextAbs;   // >= 0 by the guard above
+                    jitCount_++;
+                    jitSumBeats_   += lateBeats;
+                    jitSumSqBeats_ += lateBeats * lateBeats;
+                    if (lateBeats > jitMaxBeats_) jitMaxBeats_ = lateBeats;
+                }
                 dispatch(ev_[idx_]);
                 if (++idx_ < count_)
                     evCursorBeat_ += (double)ev_[idx_].deltaMs * beatsPerMs_;
@@ -274,12 +315,20 @@ private:
                 // next iteration at their real time so a note held ACROSS the seam — played near
                 // the loop end and released past it — turns off correctly instead of sticking.
                 // Their absolute release beat = old loopBaseBeat_ + the event's own cursor.
-                double cur = evCursorBeat_;
-                for (uint32_t j = idx_; j < count_ && nPendOff_ < kMaxPendingOff; ++j) {
-                    if (j > idx_) cur += (double)ev_[j].deltaMs * beatsPerMs_;
-                    if (ev_[j].kind == kNoteOff && (chMask_ & (uint16_t)(1u << ev_[j].channel)))
-                        pendOff_[nPendOff_++] = { (uint8_t)(ev_[j].channel + 1), ev_[j].data1,
-                                                  ev_[j].data2, loopBaseBeat_ + cur };
+                // ONE-SHOT-TAIL (drums): skip the carry entirely — exported grooves bunch a
+                // note-off for every hit at the exact boundary (end-of-track cleanup), so firing
+                // them chops the fill/crash struck in the last fraction of the bar every loop.
+                // Percussion is one-shot; let those hits ring their natural decay. Mid-loop
+                // note-offs (dispatched above, before the boundary) are unaffected, so hi-hat
+                // chokes still work. (setOneShotTail)
+                if (!oneShotTail_) {
+                    double cur = evCursorBeat_;
+                    for (uint32_t j = idx_; j < count_ && nPendOff_ < kMaxPendingOff; ++j) {
+                        if (j > idx_) cur += (double)ev_[j].deltaMs * beatsPerMs_;
+                        if (ev_[j].kind == kNoteOff && (chMask_ & (uint16_t)(1u << ev_[j].channel)))
+                            pendOff_[nPendOff_++] = { (uint8_t)(ev_[j].channel + 1), ev_[j].data1,
+                                                      ev_[j].data2, loopBaseBeat_ + cur };
+                    }
                 }
                 idx_          = 0;                       // seam: wrap to the loop top
                 loopBaseBeat_ += loopBeats_;             // exact musical length (no round)
@@ -371,6 +420,12 @@ private:
     bool                 tookLoop_  = false;           // set on each loop wrap (consumeLooped)
     bool                 playing_   = false;
     bool                 pcEnabled_ = true;
+    bool                 oneShotTail_ = false;           // drums: drop seam note-offs, let last hit ring (setOneShotTail)
+    bool                 jitterProbe_ = false;           // opt-in dispatch-lateness telemetry (setJitterProbe)
+    uint32_t             jitCount_    = 0;                // # note-ONs measured
+    double               jitSumBeats_ = 0.0;             // sum of lateness (beats) — for mean
+    double               jitSumSqBeats_ = 0.0;           // sum of lateness^2 — for stddev
+    double               jitMaxBeats_ = 0.0;             // worst single-hit lateness (beats)
     float                pbDefault_ = 2.0f;              // fallback bend range (no RPN in file)
     uint16_t             panicMask_ = 0xFFFF;            // 0xFFFF = panic all; else per-channel bits (setPanicMask)
     float                pbRange_[16] = {2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2};  // per-channel, RPN-settable
