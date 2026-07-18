@@ -84,6 +84,22 @@ Build the synth+drum card sections from a `trackDefs[]` derived from `@STATE tra
 card, no app edit. Needs @TRK extended to cover voice-select + full arp params (P3.2 did transport
 only) — add `@TRK<i>.DXPICK=`, `@TRK<i>.ARP<PAT|RATE|OCT|LATCH>=`. tsc-verified here; USER UI-tests.
 
+## STATUS — Threads A/B/C IMPLEMENTED (branch `tracks-phase3-voices`, NOT merged; all green)
+Executed PHASE3_HANDOFF.md top-to-bottom. NOT merged to master — audio/UI are USER-gated.
+- **Thread C DONE** (1aad980): `midihub::` source/channel subscription replaces the `usbRouter()` owner
+  switch — no audio repatch on a MIDI-source switch. `@TRK<i>.SRC`/`SRCCH` + @STATE `src`/`srcch`. DIN +
+  USB-host wired; BT/serial deferred. @TRK<i>.* extended to the full arp surface + DXPICK/DXVOICE.
+- **Thread B PARTIAL** (6228df6): the MIDI-Input selector control (device + channel) on each synth card via
+  `tp.trk(i,…)` + `@STATE tracks[]` src/srcch parse; generic `Transport.trk()`. **DEFERRED:** full N-card
+  auto-generation from tracks[] (app still hand-instantiates 2 synth + drum) — needs on-device UI test vs 4voice.
+- **Thread A DONE** (333ea0f): 4 independent Dexed voices, fixed 2+2+2+2 pool split, per-voice bus/level/
+  ReplayGain, all gated `#if TDSP_SYNTH_VOICES>=4` (N<=2 byte-identical). New env `teensy41_dexed_pool_4voice`
+  (diagnostics OFF to fit DTCM). Indexed synth*V family; @STATE emits all N synth + drum; caps.tracks=N+1.
+- **GREEN:** opll, dexed_pool_nobt_voice2, dexed_pool_nobt_drumvoice, dexed_pool, teensy41_dexed_pool_4voice.
+  tsc clean. (Pre-existing, unrelated: sf2_tsf −24KB / opll_pool −64KB RAM1 overflow on master too.)
+- **USER-TEST GATES (before merge):** flash `teensy41_dexed_pool_4voice` → 4-voice balance/MPE/no-clip by ear
+  (needs COM4 freed — held all session); app zero-dropout live source switch. Agent couldn't serial/audio/UI-verify.
+
 ## Non-goals (unchanged)
 Not unlimited synths — a bounded, configurable slot set by RAM/CPU. Not a DSP-engine rewrite. Not a
 big-bang cutover — each Pn independently green + shippable (`teensy41_opll` + `..._voice2`).
