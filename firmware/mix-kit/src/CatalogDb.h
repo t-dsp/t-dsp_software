@@ -148,15 +148,26 @@ static bool readStoredSig(const char *key, Sig &out) {
 }
 #endif // TDSP_CATDB_DEXED
 
-// ---- flat scan: one line per matching file in `dir` ------------------------
-// kind: emits {"type":kind,"path":...,"name":...[,"bytes":n]}
+// ---- recursive scan: one line per matching file under `dir` (all subfolders) --
+// kind: emits {"type":kind,"path":...,"name":...[,"bytes":n]}. RECURSES into subdirs
+// (like the songs scan) so genre-foldered grooves — /midi/drums/<genre>/Foo.mid — are
+// indexed too; without this the app's flat groove catalog (and thus ‹/› stepping) misses
+// everything not directly in the root. `path` is the FULL SD path so it round-trips through
+// @DRUMF and matches the browser's fullPath verbatim.
 static uint32_t flatScan(Print &out, const char *dir, const char *ext, const char *kind, bool withBytes) {
     File d = SD.open(dir);
     if (!d || !d.isDirectory()) { if (d) d.close(); return 0; }
     uint32_t n = 0;
     for (File f = d.openNextFile(); f; f = d.openNextFile()) {
         const char *nm = f.name();
-        if (!f.isDirectory() && endsWithCI(nm, ext)) {
+        if (nm && nm[0] == '.') { f.close(); continue; }   // skip dotfiles / hidden entries
+        if (f.isDirectory()) {
+            char sub[160]; snprintf(sub, sizeof sub, "%s/%s", dir, nm);   // build before close (nm is invalidated)
+            f.close();
+            n += flatScan(out, sub, ext, kind, withBytes);   // recurse into the subfolder
+            continue;
+        }
+        if (endsWithCI(nm, ext)) {
             char base[80]; stripExt(base, sizeof base, nm);
             out.print("{\"type\":"); jsonStr(out, kind);
             out.print(",\"path\":\""); out.print(dir); out.write('/'); out.print(nm);
@@ -215,7 +226,10 @@ static long buildSource(const char *key, const char *outPath, const char *srcDir
 // changes (e.g. GM engines now ship instrument names) so setup()'s auto-reindex rebuilds
 // a stale catalog even when the engine name is unchanged. v2: GM instrument names written.
 // v3: meta gains "sf"/"dexed" capability flags (app fetches only relevant catalogs).
-static const int kCatalogVersion = 3;
+// v4: grooves.ndjson scanned RECURSIVELY (genre-foldered grooves indexed). NOTE: the per-source
+// signature (sigOf) is already recursive, so a bump alone won't rebuild grooves — the stale-catalog
+// boot path forces a full rebuild (buildCatalog forceAll) to pick up the new writer output.
+static const int kCatalogVersion = 4;
 
 // Read the engine name ("engine":"...") and schema version ("v":N) stored in
 // /tdsp/index.ndjson. `out` is set empty and *outVer is set 0 if the file/field is
@@ -259,11 +273,17 @@ struct EngineCaps {
 };
 typedef void (*BundledFn)();
 
-FLASHMEM static bool buildCatalog(const EngineCaps &caps, BundledFn buildBundled, uint32_t nowMs) {
+FLASHMEM static bool buildCatalog(const EngineCaps &caps, BundledFn buildBundled, uint32_t nowMs, bool forceAll = false) {
     if (!::g_sdReady) { Serial.println("[catdb] no SD -> cannot build"); return false; }
     ensureRoot();
     Serial.println("[catdb] building /tdsp/ catalog...");
     uint32_t t0 = millis();
+
+    // forceAll: drop the stored signatures so EVERY source rebuilds, even when its file
+    // count/bytes are unchanged. Needed when the WRITER changed but sigOf() would report the
+    // same signature (e.g. grooves went recursive: same files, different rows). The boot
+    // stale-catalog path passes this; plain @REINDEX keeps the fast upsert (force=false).
+    if (forceAll) SD.remove("/tdsp/.sig");
 
     // New signature file is accumulated as we build each source.
     SD.remove("/tdsp/.sig.tmp");

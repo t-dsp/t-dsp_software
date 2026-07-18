@@ -52,6 +52,54 @@ Do it AFTER Half A so the surface is already data-driven and a new engine just a
 - Per-track sub-bus vs shared bus for the mixer (P3.5).
 - Default env preset (`..._4dexed_1opll` etc.) once the engine-count flags exist.
 
+## P3.4 executable plan — 4 independent Dexed voices (decided: 2+2+2+2, own busses)
+Branch `tracks-phase3-voices`. Generalize the pool header to **N synth voices** (`kSynthVoices`,
+default preserves today: drumvoice=1 unified, voice2=2 split; NEW `teensy41_dexed_pool_4voice`=4).
+8 engines / N voices, 2 engines each at N=4 (poly ~2 MPE / 4 normal per voice — thin, accepted).
+
+**SynthBackendDexedPool.h (the intricate part — audio-verify by ear):**
+- Graph: replace `dxpMixA/dxpMixB` (2× 4-in) with `dxpMix[N]` (each sums its 2 engine converters:
+  dxpc[2i],dxpc[2i+1] → dxpMix[i]); `dxpTrim[N]` (dxpMix[i]→dxpTrim[i]); `dxpSum` 4-in (dxpTrim[i]→
+  dxpSum(i)). At N<4 keep today's exact wiring (guarded) so drumvoice/voice2 are byte-identical.
+- Sinks: `g_poolSink[N]` over `&g_pool[2i]` (2 engines, kPoolVpe). `g_synthSink`=&g_poolSink[0];
+  main.cpp binds track i's sink = &g_poolSink[i].
+- State → arrays: `g_synthInstrument[N]`, `g_curCart{Rel,Voice,Name}[N]`, `g_voiceVolPct[N]`.
+  `loadInstrumentRange`/`pickCartVoiceRange` already take (start,count) → call with (2i,2). Per-voice
+  `synthSetInstrumentV(i,idx)` / `synthPickCartVoiceV(i,...)` / `synthSetVoiceVolV(i,pct)` fold the
+  existing voice-1/voice-2 twins into one indexed family. `applyPoolVols`: dxpTrim[i].gain =
+  replayGain[i]·userVol[i]; slot-3 = makeup. Audition/ClipProbe tap dxpSum; `synthAuditionTrim()` →
+  &dxpTrim[currentAuditionVoice]. Retire the runtime @VOICE2 split toggle at N=4 (fixed 4-way).
+**main.cpp:** `g_player[N]`, `g_arpFilter[N]`, `g_kbdRouter[N]` (or 1 owner-routed), `g_tracks[N]`;
+bind + `trackWireSetup(g_tracks[i])` in a loop (already generic). @STATE tracks[] loops 0..N-1 (already
+data). @TRK<i>.* already index-routes. Keyboard owner: which voice gets live MIDI (generalize the
+Voices-2 owner switch to N). Recorder loops per voice (g_loop[N]). MPE: each g_poolSink[i] independent.
+**Env:** `teensy41_dexed_pool_4voice` = pool + `-D TDSP_SYNTH_VOICES=4` (+ drumvoice + serial as fits).
+**Verify:** green all envs; serial: @TRK0..3.PLAY each drives its own voice, @STATE tracks[]=4 synth+drum;
+USER audio-tests balance/timbre/MPE/no-clip before merge.
+
+## P3.3 executable plan — data-driven app cards (decided: yes)
+Build the synth+drum card sections from a `trackDefs[]` derived from `@STATE tracks[]`: one
+`<TrackCard>` per entry, reusing the existing components indexed by i (deck[i]=makeSongDeck with
+`@TRK<i>` wire, arpSlot[i], voiceBrowser target=i). New firmware voice → new tracks[] entry → new
+card, no app edit. Needs @TRK extended to cover voice-select + full arp params (P3.2 did transport
+only) — add `@TRK<i>.DXPICK=`, `@TRK<i>.ARP<PAT|RATE|OCT|LATCH>=`. tsc-verified here; USER UI-tests.
+
+## STATUS — Threads A/B/C IMPLEMENTED (branch `tracks-phase3-voices`, NOT merged; all green)
+Executed PHASE3_HANDOFF.md top-to-bottom. NOT merged to master — audio/UI are USER-gated.
+- **Thread C DONE** (1aad980): `midihub::` source/channel subscription replaces the `usbRouter()` owner
+  switch — no audio repatch on a MIDI-source switch. `@TRK<i>.SRC`/`SRCCH` + @STATE `src`/`srcch`. DIN +
+  USB-host wired; BT/serial deferred. @TRK<i>.* extended to the full arp surface + DXPICK/DXVOICE.
+- **Thread B PARTIAL** (6228df6): the MIDI-Input selector control (device + channel) on each synth card via
+  `tp.trk(i,…)` + `@STATE tracks[]` src/srcch parse; generic `Transport.trk()`. **DEFERRED:** full N-card
+  auto-generation from tracks[] (app still hand-instantiates 2 synth + drum) — needs on-device UI test vs 4voice.
+- **Thread A DONE** (333ea0f): 4 independent Dexed voices, fixed 2+2+2+2 pool split, per-voice bus/level/
+  ReplayGain, all gated `#if TDSP_SYNTH_VOICES>=4` (N<=2 byte-identical). New env `teensy41_dexed_pool_4voice`
+  (diagnostics OFF to fit DTCM). Indexed synth*V family; @STATE emits all N synth + drum; caps.tracks=N+1.
+- **GREEN:** opll, dexed_pool_nobt_voice2, dexed_pool_nobt_drumvoice, dexed_pool, teensy41_dexed_pool_4voice.
+  tsc clean. (Pre-existing, unrelated: sf2_tsf −24KB / opll_pool −64KB RAM1 overflow on master too.)
+- **USER-TEST GATES (before merge):** flash `teensy41_dexed_pool_4voice` → 4-voice balance/MPE/no-clip by ear
+  (needs COM4 freed — held all session); app zero-dropout live source switch. Agent couldn't serial/audio/UI-verify.
+
 ## Non-goals (unchanged)
 Not unlimited synths — a bounded, configurable slot set by RAM/CPU. Not a DSP-engine rewrite. Not a
 big-bang cutover — each Pn independently green + shippable (`teensy41_opll` + `..._voice2`).

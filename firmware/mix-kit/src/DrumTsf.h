@@ -33,6 +33,13 @@ AudioConnection_F32   c_drumTsfOutR(g_drumTsfToF32R, 0, outR, 2);
 tsf            *g_drumTsfHandle = nullptr;
 TsfSink         g_drumTsfSink(&g_drumTsfHandle);        // groove player's ch10 is routed here in setup()
 
+// True once a font loaded; g_drumFontIsKits reports whether it was the acoustic
+// /sf2/drumkits.sf2 (fetch_drumkits.py) rather than the GM baseline. setup() uses this to
+// swap the Drums menu to the acoustic kit list (loadDrumKitsTsv) — the kits are bank-128
+// presets by program, exactly like GM kits, so ch10 program-change selection is unchanged.
+bool g_drumFontIsKits = false;
+#define DRUM_KITS_FONT_PATH "/sf2/drumkits.sf2"        // acoustic multi-kit font (fetch_drumkits.py)
+
 // Load the drum font, set channel 10 as GM drums, and open mix slot 2. Returns true if
 // the font loaded (samples resident in PSRAM). Call from setup() after the melodic
 // synthBegin() ran and g_sdReady is known.
@@ -41,11 +48,17 @@ static bool drumTsfBegin() {
         Serial.println("[drumtsf] no SD card -> drums idle (need " DRUM_TSF_FONT_PATH ")");
         return false;
     }
+    // Prefer the acoustic multi-kit font if it's on the card; else the GM baseline. The
+    // acoustic kits are GM-note-layout, so the DrumNoteMapper's GmReduce still rescues the
+    // Roland 22/26 hi-hats onto the real closed/open hat samples.
+    const char *fontPath = DRUM_TSF_FONT_PATH;
+    if (SD.exists((char *)DRUM_KITS_FONT_PATH)) { fontPath = DRUM_KITS_FONT_PATH; g_drumFontIsKits = true; }
     Serial.printf("[drumtsf] loading %s for ch10 drums (%d MB PSRAM installed)...\n",
-                  DRUM_TSF_FONT_PATH, (int)external_psram_size);
-    g_drumTsfHandle = tsfLoadFromSD(DRUM_TSF_FONT_PATH);
+                  fontPath, (int)external_psram_size);
+    g_drumTsfHandle = tsfLoadFromSD(fontPath);
     if (!g_drumTsfHandle) {
         Serial.println("[drumtsf] load FAILED (missing font or too big for PSRAM) -> drums idle");
+        g_drumFontIsKits = false;
         return false;
     }
     tsf_set_output(g_drumTsfHandle, TSF_STEREO_UNWEAVED, (int)AUDIO_SAMPLE_RATE_EXACT, -4.0f);

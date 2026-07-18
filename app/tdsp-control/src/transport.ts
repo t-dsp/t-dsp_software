@@ -97,6 +97,7 @@ export interface Transport {
   metronomeMute(muted: boolean): void;                // is the click AUDIBLE? default muted; transport runs either way (@METROMUTE=)
   metronomeSig(bpb: number): void;                    // metronome/idle time signature = N beats/bar (@METROSIG=)
   metronomeVol(pct: number): void;                    // metronome click level (@METROVOL=, 0..150 %), independent of the master @VOL
+  metronomeLock(on: boolean): void;                   // tempo lock: when ON, loading content stops auto-setting the master BPM (@METROLOCK=)
   arpOn(on: boolean): void;
   arpRestart(): void;                                 // re-trigger the running arp cycle from step 0 (@ARPRESTART)
   arpPattern(i: number): void;
@@ -130,6 +131,11 @@ export interface Transport {
   song2Restart(arg: string): void;                    // hard restart from the top on a fresh downbeat (@SONG2RESTART=)
   stopSong2(): void;                                  // stop player 2 (@SONG2=stop)
   song2Loop(on: boolean): void;                       // loop player 2's current song (@LOOP2=)
+  // ---- Track-indexed interface (Phase 3): @TRK<i>.<cmd> drives ANY track uniformly. `cmd` is the
+  // full suffix incl any '=arg' — e.g. 'SRC=usb', 'SRCCH=3' (live-MIDI input subscription, Thread C),
+  // 'ARPPAT=2', 'DXPICK=<rel>\t<v>', 'PLAY=<name>'. One method for every per-track control, so a new
+  // synth voice needs no new API — the app drives its card from the @STATE tracks[] entry. ----
+  trk(index: number, cmd: string): void;              // @TRK<index>.<cmd>
   // ---- Loop recorder (build-flag gated; shown only when @STATE caps.rec) ----
   recVoice(v: number): void;                          // which voice the record controls target (@RECV=, 1|2)
   recBars(n: number): void;                           // loop length in bars (@RECBARS=, 1|2|4|8)

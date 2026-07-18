@@ -41,7 +41,11 @@ DEFAULT_PROJECT_DIR = os.path.normpath(
 
 
 def load_map(path=TSV):
-    """serial -> {env, board_header, notes}. Skips comment/blank lines."""
+    """serial -> {env, board_header, esp32_env, notes}. Skips comment/blank lines.
+
+    esp32_env is the companion ESP32's control build ('-'/'' = none); it is
+    informational here (flash.py flashes only the Teensy), added as column 4 so
+    older 4-column rows (serial/env/board_header/notes) still need migrating."""
     rows = {}
     with open(path, newline="") as f:
         reader = csv.reader((l for l in f if l.strip() and not l.startswith("#")),
@@ -50,10 +54,14 @@ def load_map(path=TSV):
             if len(parts) < 2:
                 continue
             serial = parts[0].strip()
+            esp32_env = parts[3].strip() if len(parts) > 3 else ""
+            if esp32_env == "-":
+                esp32_env = ""
             rows[serial] = {
                 "env": parts[1].strip() if len(parts) > 1 else "",
                 "board_header": parts[2].strip() if len(parts) > 2 else "",
-                "notes": parts[3].strip() if len(parts) > 3 else "",
+                "esp32_env": esp32_env,
+                "notes": parts[4].strip() if len(parts) > 4 else "",
             }
     return rows
 
@@ -85,6 +93,9 @@ def resolve_and_run(serial, row, project_dir, upload):
     print(f"  board serial {serial}")
     print(f"    -> env          {env}")
     print(f"    -> board profile {header or '(pinned in env)'}")
+    if row.get("esp32_env"):
+        print(f"    -> esp32 ctrl   {row['esp32_env']} (flash separately: "
+              f"pio run -d projects/t-dsp_esp32_bt_receiver -e {row['esp32_env']} -t upload)")
     if row["notes"]:
         print(f"    -> notes        {row['notes']}")
     cmd = ["pio", "run", "-d", project_dir, "-e", env, "-t", "upload"]
@@ -179,9 +190,10 @@ def main():
     rows = load_map(args.tsv)
 
     if args.list:
-        print(f"{'serial':<12} {'env':<24} {'board_header':<32} notes")
+        print(f"{'serial':<12} {'env':<24} {'board_header':<32} {'esp32_env':<15} notes")
         for s, r in rows.items():
-            print(f"{s:<12} {r['env']:<24} {r['board_header']:<32} {r['notes']}")
+            print(f"{s:<12} {r['env']:<24} {r['board_header']:<32} "
+                  f"{(r['esp32_env'] or '-'):<15} {r['notes']}")
         return 0
 
     if args.serial:

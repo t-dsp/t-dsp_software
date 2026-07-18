@@ -19,11 +19,10 @@ import type { BrowseEntry } from './src/browse';
 import ArpStepGrid from './src/ui/ArpStepGrid';
 import PianoRoll from './src/ui/PianoRoll';
 import ArpPresetBrowser from './src/ui/ArpPresetBrowser';
-import { ARP_PATTERNS as ARP_PAT, ARP_RATES, rateIndexFromFw, PAT_USER_SEQUENCE, DEFAULT_SHAPE, SeqStep } from './src/arpSeq';
+import { ARP_PATTERNS as ARP_PAT, ARP_RATES, rateIndexFromFw, PAT_USER_SEQUENCE, DEFAULT_SHAPE, SeqStep, encodeSequence, encodeArpParams } from './src/arpSeq';
 import { applyArpPreset, ArpPreset, ARP_LIBRARY } from './src/arpLibrary';
 
 const EMPTY_DIR: DirPage = { path: '', page: 0, npages: 1, folders: [], carts: [] };
-const grooveFile = (g: { path: string; name: string }) => g.path.split('/').pop() || (g.name + '.mid');   // @DRUMF wants filename WITH .mid
 // Display name for a groove SD path (basename minus .mid) — the drum-track card's "value".
 const grooveDisp = (p: string | null | undefined) => (p ? (p.split('/').pop() || '').replace(/\.mid$/i, '') : '');
 const kb = (n: number) => (n / 1024).toFixed(1);   // bytes -> "12.3" KB, for the load progress readout
@@ -36,6 +35,8 @@ const th = (accent: string, a: number) => ({ accent, tint: accent + Math.round(a
 const THEME = {
   synthA:   th('#3fb950', 0.14),   // green
   synthB:   th('#a371f7', 0.15),   // purple
+  synthC:   th('#2dd4bf', 0.14),   // teal (voice 3, 4-voice pool)
+  synthD:   th('#e3b341', 0.14),   // gold (voice 4)
   tempo:    th('#e3b341', 0.14),   // amber
   bt:       th('#58a6ff', 0.14),   // blue
   settings: th('#ff7b72', 0.13),   // coral
@@ -495,7 +496,9 @@ export default function App() {
   // The metronome IS the master transport: `on` = the clock/transport is RUNNING (everything locks
   // to it); `muted` = whether the click is audible (default muted — the transport runs silently).
   // cap=true once the device reports metronome support; sig = beats/bar; vol = click level 0..150 %.
-  const [metro, setMetro] = useState({ on: false, muted: true, cap: false, sig: 4, vol: 100 });
+  // locked = tempo lock: when true the device holds the master BPM (loading a song/groove no longer
+  // auto-sets it); when false the sole piece of content to start sets the tempo. Default off.
+  const [metro, setMetro] = useState({ on: false, muted: true, cap: false, sig: 4, vol: 100, locked: false });
   const [songBpm, setSongBpm] = useState(120);            // tempo of the last song that played
   const [selVoice, setSelVoice] = useState('');
   const [selVoiceName, setSelVoiceName] = useState('');   // last-picked instrument name (shown on the card, persists across browsing)
@@ -508,6 +511,28 @@ export default function App() {
   // RAM/PSRAM dependent), not a bool: 0 hides the Audio Loop card entirely.
   const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, recedit: false, audioloop: 0 });
   const [voice2, setVoice2] = useState({ on: false, vol: 100, name: '', path: '' });
+  // Per-track live-MIDI subscription (Phase 3, Thread C), keyed by firmware track index i. `src` =
+  // which input device feeds that synth ("none"/"din"/"usb"/"multi"/…), `srcch` = channel filter
+  // (0 = all). Hydrated from @STATE tracks[]; the MIDI-Input selector on each synth card writes it
+  // via @TRK<i>.SRC / SRCCH. Data-driven: a new voice's entry just appears here, no per-voice field.
+  const [trkSubs, setTrkSubs] = useState<Record<number, { src: string; srcch: number }>>({});
+  // Data-driven synth voices (Phase 3): how many synth cards to render + each voice's name/level,
+  // all from @STATE tracks[]. Voices 0/1 keep their bespoke cards (Synth A/B); voices 2+ get a
+  // generated card driven by @TRK<i>.* (selVoiceX = the browser selection per extra voice index).
+  const [synthCount, setSynthCount] = useState(1);
+  const [trkNames, setTrkNames] = useState<Record<number, string>>({});
+  const [selVoiceX, setSelVoiceX] = useState<Record<number, string>>({});   // browser sel key, keyed by 0-based voice index (>=2)
+  const [trkVolX, setTrkVolX] = useState<Record<number, number>>({});       // per-extra-voice level (@TRK<i>.VOL), local echo
+  // Per-extra-voice (index >=2) MIDI-player + arp state, so Synth C/D get the SAME submenu as A/B
+  // (Synth/Voices + MIDI Player + Arpeggiator). Map-keyed by 0-based voice index; the deck/arp
+  // slots are built from these in a loop and wired to @TRK<i>.{PLAY,RESTART,STOP,LOOP,ARP*}.
+  const [playerX, setPlayerX] = useState<Record<number, { song: string; playing: boolean; name: string; prog: number }>>({});
+  const [endModeX, setEndModeX] = useState<Record<number, EndMode>>({});
+  const [arpX, setArpX] = useState<Record<number, { on: boolean; pat: number; rate: number; oct: number; latch: boolean }>>({});
+  const [arpModeX, setArpModeX] = useState<Record<number, 'preset' | 'manual'>>({});
+  const [arpPresetIdX, setArpPresetIdX] = useState<Record<number, string>>({});
+  const [seqX, setSeqX] = useState<Record<number, SeqStep[]>>({});
+  const manualStopRefX = useRef<Record<number, React.MutableRefObject<boolean>>>({});
   // MIDI loop recorder (build-flag gated, caps.rec). Each synth's MIDI player owns its own
   // recorder, so every setting is PER-VOICE: bars1/bars2 = that synth's loop length, st1/st2 =
   // state (0 idle 1 armed 2 recording 3 overdub 4 playing), p1/p2 = record-fill / playback-phase.
@@ -548,6 +573,7 @@ export default function App() {
     if (j.vol != null) setVol(j.vol);
     if (j.hpf != null) { const m = clampIdx(j.hpf, HPF_MODES.length); setHpf(m); if (m) lastHpfRef.current = m; }
     if (j.bpm != null) setBpm(j.bpm);
+    if (j.metrolock != null) setMetro(m => ({ ...m, locked: !!j.metrolock }));   // tempo lock (content stops auto-setting the BPM)
     // Fallback end-mode guess from the loop flag, for firmware without @APP: loop on ⇒ Repeat;
     // loop off ⇒ keep the app's mode unless it was Repeat (then fall back to Stop). When @APP is
     // present its stored value arrives right after and overrides this (see hydrateApp).
@@ -608,6 +634,21 @@ export default function App() {
     // MIDI Player 2 (voice-2 song player): restore what's playing + its loop flag → end-mode guess.
     if (j.song2) setPlayer2(p => ({ ...p, playing: !!j.song2.playing, song: j.song2.name ? songArgByName(j.song2.name) : p.song, name: j.song2.name || p.name, prog: j.song2.p != null ? j.song2.p / 1000 : (j.song2.playing ? -1 : 0) }));
     if (j.song2?.loop != null) setEndMode2(m => j.song2.loop ? 'repeat' : (m === 'repeat' ? 'stop' : m));
+    // Per-track live-MIDI subscription (Thread C): each synth entry in tracks[] carries its input
+    // device + channel filter. Rebuild the whole map so a removed/added track is reflected exactly.
+    if (Array.isArray(j.tracks)) {
+      const next: Record<number, { src: string; srcch: number }> = {};
+      const names: Record<number, string> = {};
+      let nSynth = 0;
+      for (const t of j.tracks) if (t && t.kind === 'synth' && t.i != null) {
+        next[t.i | 0] = { src: t.src || 'none', srcch: t.srcch | 0 };
+        if (typeof t.name === 'string') names[t.i | 0] = t.name;
+        nSynth++;
+      }
+      setTrkSubs(next);
+      setTrkNames(names);
+      if (nSynth > 0) setSynthCount(nSynth);   // how many synth cards to render (data-driven)
+    }
   }
 
   // Restore the opaque app-owned state (@APP=). This is the authoritative source for settings
@@ -648,6 +689,15 @@ export default function App() {
         if (manualStop2Ref.current) manualStop2Ref.current = false;
         else onSong2EndRef.current();
       } else setPlayer2(p => ({ ...p, playing: true, prog: Math.max(0, Math.min(1, v / 1000)) }));
+    } else if (/^@TRK\d+\.P=/.test(line)) {
+      // Extra synth voices (>=2) MIDI-player position feed: @TRK<i>.P=<permille> (-1 = ended).
+      const m = line.match(/^@TRK(\d+)\.P=(-?\d+)/);
+      if (m) {
+        const i = parseInt(m[1], 10), pv = parseInt(m[2], 10);
+        setPlayerX(mp => { const cur = mp[i] ?? { song: '', playing: false, name: '', prog: 0 };
+          return { ...mp, [i]: pv < 0 ? { ...cur, playing: false, prog: 0 } : { ...cur, playing: true, prog: Math.max(0, Math.min(1, pv / 1000)) } }; });
+        if (pv < 0) { const r = manualStopRefX.current[i]; if (r) r.current = false; }   // clear manual-stop flag; no auto-advance for extra voices yet
+      }
     } else if (line.startsWith('@ALP=')) {
       // Live audio-loop telemetry: "@ALP=<st0>,<p0>[,<st1>,<p1>...]" — one state+permille pair per loop.
       const n = line.slice(5).split(',').map(x => parseInt(x, 10));
@@ -679,6 +729,12 @@ export default function App() {
         // the local clock between beats.
         beatStaleRef.current = setTimeout(() => setBeatFeed(null), 3500);
       }
+    } else if (line.startsWith('@BPM=')) {
+      // The device pushed a new master tempo — the tempo auto-follow: the sole piece of content to
+      // start (song / loop / groove) set the master BPM to its own native tempo (unless the tempo
+      // lock is on). Reflect it in the readout. App-initiated @BPM changes aren't echoed, so this
+      // only fires for firmware-side changes — no feedback loop.
+      const b = parseInt(line.slice(5), 10); if (b >= 20 && b <= 300) setBpm(b);
     } else if (line.startsWith('[song]')) {
       // Record the song's detected tempo (for the "Reset → song bpm" affordance), but DON'T touch
       // the master: the metronome is the tempo authority now, and songs lock to IT (not the reverse).
@@ -746,8 +802,6 @@ export default function App() {
   }
   async function reindex() { setBusy(true); try { await tp.reindex(); await load(); } finally { setBusy(false); } }
 
-  const grooves = useMemo(() => { const t = q.groove.toLowerCase(); return cat.grooves.filter(g => !t || g.name.toLowerCase().includes(t)).slice(0, 500); }, [cat.grooves, q.groove]);
-
   // Lazy /dexed browse: fetch the current folder level via @DXLS whenever the path changes
   // (skip the synthetic '@bundled' view). @DXLS is paged (32 entries/page), so walk all pages
   // and concatenate — a folder can hold hundreds of carts. The `alive` gate drops a stale
@@ -786,6 +840,9 @@ export default function App() {
   // The voices currently listed in Synth/Voices (a cart's voices, or the bundled set).
   const voiceRef = useRef<FlatList<VItem>>(null);
   const voiceRef2 = useRef<FlatList<VItem>>(null);         // Voices-2 page has its own list ref (both pages stay mounted)
+  const voiceRefX = useRef<Record<number, React.RefObject<FlatList<VItem>>>>({});   // per-extra-voice (>=2) list refs
+  const browseRefX = useRef<Record<number, React.RefObject<ScrollView>>>({});
+  const refFor = (m: React.MutableRefObject<Record<number, any>>, i: number) => (m.current[i] ??= React.createRef());
   const browseRef = useRef<ScrollView>(null);              // the folder-browse list
   const browseRef2 = useRef<ScrollView>(null);
   const pickerY = useRef<Record<string, number>>({});      // saved scroll offset per list, so we can restore on return
@@ -797,10 +854,17 @@ export default function App() {
   // Pick a voice for slot `target` (1 = main synth, 2 = the keyboard's Voices-2). Both share
   // the same browse state (cart/folder position) but have independent selection + device
   // targets (@DXVOICE/@DXPICK vs @DXVOICE2/@DXPICK2).
-  const pickVoice = (it: VItem, target: 1 | 2 = 1) => {
+  const pickVoice = (it: VItem, target: number = 1) => {
     const nm = it.label.replace(/^\d+\.\s*/, '');
     const isCart = it.key[0] === 'c' && !!cart;
     const path = isCart ? '/dexed/' + cart!.rel : 'Bundled';
+    if (target >= 3) {   // voices 2+ (0-based i = target-1) drive the uniform @TRK<i>.DX* interface
+      const i = target - 1;
+      setSelVoiceX(m => ({ ...m, [i]: it.key }));
+      setTrkNames(m => ({ ...m, [i]: nm }));
+      if (isCart) tp.trk(i, 'DXPICK=' + cart!.rel + '\t' + it.i); else if (it.key[0] === 'b') tp.trk(i, 'DXVOICE=' + it.i);
+      return;
+    }
     if (target === 2) {
       setSelVoice2(it.key);
       setVoice2(v => ({ ...v, name: nm, path }));
@@ -811,8 +875,8 @@ export default function App() {
     if (isCart) { setSelVoicePath('/dexed/' + cart!.rel); tp.dxPick(cart!.rel, it.i); }
     else if (it.key[0] === 'b') { setSelVoicePath('Bundled'); tp.dxVoice(it.i); }
   };
-  const stepVoice = (dir: number, target: 1 | 2 = 1) => {
-    const sel = target === 2 ? selVoice2 : selVoice;
+  const stepVoice = (dir: number, target: number = 1) => {
+    const sel = target >= 3 ? (selVoiceX[target - 1] ?? '') : target === 2 ? selVoice2 : selVoice;
     // In a visible list (a cart's voices or the bundled set), step within it so the
     // selection stays scrolled into view.
     if (voiceData.length) {
@@ -848,17 +912,6 @@ export default function App() {
     return () => clearTimeout(t);
   }, [route]);
 
-  const stepGroove = (dir: number) => {   // step the drum preset; if one is playing, switch to the new one
-    if (!grooves.length) return;
-    const idx = grooves.findIndex(g => g.path === drums.sel);
-    // From no selection (idx<0) the first ‹/› lands on the first/last groove instead of skipping
-    // one — same cursor rule the song player's pickNext() uses, so ‹/› work right at startup.
-    const base = idx < 0 ? (dir > 0 ? -1 : 0) : idx;
-    const ni = Math.max(0, Math.min(grooves.length - 1, base + dir));
-    const g = grooves[ni]; if (!g) return;
-    setDrums(d => { if (d.playing) { tp.playGrooveFile(grooveFile(g)); return { ...d, sel: g.path, playing: g.name }; } return { ...d, sel: g.path }; });
-    persistApp({ groove: g.path });   // remember the pick so it survives an app reconnect
-  };
   const stepBpm = (delta: number) => { const b = Math.max(20, Math.min(300, Math.round(bpm) + delta)); setBpm(b); tp.masterBpm(b); };
   const stepVol = (delta: number) => { const v = Math.max(0, Math.min(100, Math.round(vol) + delta)); setVol(v); tp.masterVolume(v); };
   // TAC5212 DAC high-pass filter. Picking a preset sets the mode; the Enable switch
@@ -1045,9 +1098,11 @@ export default function App() {
     play: () => void; stop: () => void; step: (dir: number) => void;
     applyEnd: (m: EndMode) => void; cycleEnd: () => void;
     onNaturalEnd: () => void;   // wired into the device's position feed (@SONGP=-1 / @SONG2P=-1)
-    // Per-track browse target, so the SAME player component serves any track (voice 1/2 -> /midi/songs,
-    // drums -> /midi/drums). undefined = the /midi/songs defaults. noEndMode hides the end-mode row
-    // (a drum groove always loops). This is what makes the deck replicable across tracks.
+    // Per-track browse target, so the SAME player component serves any track. Every deck now roots
+    // the browser at /midi so any synth can reach ALL folders (songs, drums, loops, tests, custom),
+    // not just one — undefined falls back to the /midi default (see FolderBrowser root below).
+    // noEndMode hides the end-mode row (a drum groove always loops). This makes the deck replicable
+    // across tracks.
     browseRoot?: string; injectFolders?: InjFolder[]; noEndMode?: boolean;
   };
   const makeSongDeck = (cfg: {
@@ -1057,10 +1112,16 @@ export default function App() {
     manualStopRef: React.MutableRefObject<boolean>;
     vol: number; onVol: (n: number) => void; commitVol: (n: number) => void; volNote?: string;
     wire: SongWire;
-    // Per-track browse target + step catalog, so the SAME deck serves any track. Default = songs.
+    // Called whenever the SELECTED song/groove changes (tap, ‹/›, auto-advance) — even while
+    // stopped. Lets a track that the device can't report (the drum groove) remember its pick in
+    // @APP so it survives leaving the page / reconnecting. Undefined for song decks (the device
+    // reports their current song in @STATE, so there's nothing extra to persist).
+    persistSel?: (arg: string) => void;
+    // Per-track browse target + step catalog, so the SAME deck serves any track. Browser default = /midi.
     catalog?: Song[]; browseRoot?: string; injectFolders?: InjFolder[]; noEndMode?: boolean;
   }): SongDeckT => {
     const { player: P, setPlayer: setP, endMode: em, wire } = cfg;
+    const persistSel = cfg.persistSel ?? (() => {});
     const catalog = cfg.catalog ?? cat.songs;   // the list ‹ ›/auto-advance step through (songs or grooves)
     // The shared "continue rules": which song a skip (‹ ›) or a natural end advances to, per the
     // end-mode. Shuffle → a random *other* song; every other mode → the linear neighbour, wrapping
@@ -1080,7 +1141,7 @@ export default function App() {
       const base = idx < 0 ? (dir > 0 ? -1 : 0) : idx;
       return songs[((base + dir) % songs.length + songs.length) % songs.length];       // wrap both ways
     };
-    const playOf = (sg: Song) => { wire.play(songArg(sg)); setP(p => ({ ...p, song: songArg(sg), playing: true, name: sg.name, prog: -1 })); };
+    const playOf = (sg: Song) => { wire.play(songArg(sg)); persistSel(songArg(sg)); setP(p => ({ ...p, song: songArg(sg), playing: true, name: sg.name, prog: -1 })); };
     // End-of-song mode. Only 'repeat' arms the firmware's seamless loop; the rest let the song end
     // (the device emits its <player>P=-1) and we advance app-side. Persisted on the device.
     const applyEnd = (m: EndMode) => { cfg.setEndMode(m); wire.loop(m === 'repeat'); persistApp({ [cfg.persistKey]: m } as Partial<AppState>); };
@@ -1089,11 +1150,13 @@ export default function App() {
       vol: cfg.vol, onVol: cfg.onVol, commitVol: cfg.commitVol, volNote: cfg.volNote,
       setSong: (name: string) => setP(p => ({ ...p, song: name })),
       // FolderBrowser tap: restart THIS file/baked song now (arg = full SD path, or a baked name).
-      playFile: (arg: string, disp: string) => { wire.restart(arg); setP(p => ({ ...p, song: arg, playing: true, name: disp, prog: -1 })); },
+      playFile: (arg: string, disp: string) => { wire.restart(arg); persistSel(arg); setP(p => ({ ...p, song: arg, playing: true, name: disp, prog: -1 })); },
       // Play = restart from the top on a fresh downbeat; prog -1 until the device reports position.
-      play: () => { const sg = catalog.find(x => songArg(x) === P.song) || catalog[0]; if (!sg) return; wire.restart(songArg(sg)); setP(p => ({ ...p, song: songArg(sg), playing: true, name: sg.name, prog: -1 })); },
+      play: () => { const sg = catalog.find(x => songArg(x) === P.song) || catalog[0]; if (!sg) return; wire.restart(songArg(sg)); persistSel(songArg(sg)); setP(p => ({ ...p, song: songArg(sg), playing: true, name: sg.name, prog: -1 })); },
       stop: () => { cfg.manualStopRef.current = true; wire.stop(); setP(p => ({ ...p, playing: false, prog: 0 })); },
-      step: (dir: number) => { const sg = pickNext(dir); if (!sg) return; setP(p => { if (p.playing) { wire.restart(songArg(sg)); return { ...p, song: songArg(sg), name: sg.name }; } return { ...p, song: songArg(sg), name: sg.name }; }); },
+      // ‹/› step through the catalog. Persist the new pick even when stopped, so leaving the page
+      // (or reconnecting) reopens on the groove you stepped to — not the last one that played.
+      step: (dir: number) => { const sg = pickNext(dir); if (!sg) return; persistSel(songArg(sg)); setP(p => { if (p.playing) { wire.restart(songArg(sg)); return { ...p, song: songArg(sg), name: sg.name }; } return { ...p, song: songArg(sg), name: sg.name }; }); },
       applyEnd, cycleEnd: () => { const i = END_MODES.findIndex(m => m.key === em); applyEnd(END_MODES[(i + 1) % END_MODES.length].key); },
       // Runs when a song finishes on its own (not a manual Stop). 'stop' does nothing; 'repeat'
       // loops in firmware; continue/shuffle advance per the same pickNext rules.
@@ -1119,7 +1182,7 @@ export default function App() {
   onSong2EndRef.current = songDeck2.onNaturalEnd;
   const stopDrums = () => { tp.stopDrums(); setDrums(d => ({ ...d, playing: null })); };
   // ---- DRUM DECK — the groove player as the SAME reusable deck the synths use, so Drums is a
-  // Track peer: it browses /midi/drums, plays via @DRUMF, always loops. A thin PlayerT VIEW over the
+  // Track peer: it browses /midi (all folders), plays via @DRUMF, always loops. A thin PlayerT VIEW over the
   // drums {sel,playing} state gives the shared deck API without a parallel state store. This is the
   // whole point — a drum track is just another synth with props (root, catalog, always-loop).
   const drumPlayerView: PlayerT = { song: drums.sel ?? '', playing: !!drums.playing, name: drums.playing || grooveDisp(drums.sel) || '—', prog: -1 };
@@ -1132,8 +1195,11 @@ export default function App() {
   const drumDeck = makeSongDeck({
     v: 1, player: drumPlayerView, setPlayer: setDrumPlayerView, endMode: 'repeat', setEndMode: () => {}, persistKey: 'end', manualStopRef: drumStopRef,
     vol: drumVol, onVol: setDrumVol, commitVol: v => tp.drumVol(v),
-    wire: { play: a => { tp.playGrooveFile(a); persistApp({ groove: a }); }, restart: a => { tp.playGrooveFile(a); persistApp({ groove: a }); }, stop: () => tp.stopDrums(), loop: () => {} },
-    catalog: drumSongs, browseRoot: '/midi/drums', injectFolders: [], noEndMode: true,   // a groove always loops
+    wire: { play: a => tp.playGrooveFile(a), restart: a => tp.playGrooveFile(a), stop: () => tp.stopDrums(), loop: () => {} },
+    // The device reports the drum KIT in @STATE but not which groove is picked, so remember the
+    // selection ourselves (in @APP) on every pick/step — that's what lets Drums reopen where you left it.
+    persistSel: a => persistApp({ groove: a }),
+    catalog: drumSongs, browseRoot: '/midi', injectFolders: [], noEndMode: true,   // a groove always loops
   });
   // Master transport Play/Stop. Play (@METRO=1) starts the clock + defines the downbeat if idle
   // (idempotent while running); everything locks to it. Stop (@METRO=0) halts + clears the stage.
@@ -1208,10 +1274,10 @@ export default function App() {
   // The folder browser (nav bar + picker), shared by the Synth and Synth/Voices 2 pages.
   // Both share the browse position (cart/folder) but keep their own selection + list ref, and
   // pick into their own voice slot. `target` routes taps to voice 1 or voice 2.
-  const voiceBrowserBody = (target: 1 | 2) => {
-    const sel = target === 2 ? selVoice2 : selVoice;
-    const lref = target === 2 ? voiceRef2 : voiceRef;
-    const bref = target === 2 ? browseRef2 : browseRef;
+  const voiceBrowserBody = (target: number) => {
+    const sel = target >= 3 ? (selVoiceX[target - 1] ?? '') : target === 2 ? selVoice2 : selVoice;
+    const lref = target >= 3 ? refFor(voiceRefX, target - 1) : target === 2 ? voiceRef2 : voiceRef;
+    const bref = target >= 3 ? refFor(browseRefX, target - 1) : target === 2 ? browseRef2 : browseRef;
     return (
       <>
         {/* nav bar: up-one-level on the left, breadcrumb trail beside it */}
@@ -1327,10 +1393,12 @@ export default function App() {
     {!D.noEndMode && <HdrBtn label={(END_MODES.find(m => m.key === D.endMode) || END_MODES[3]).icon} stop onPress={D.cycleEnd} />}
   </>);
   // Baked test/demo songs live in flash (no `file` field — they play by NAME on the firmware's
-  // non-.mid branch). Surface them as a synthetic "tests" folder injected into the /midi/songs
-  // root, so the browser shows real card folders (songs subfolders) PLUS the baked tests.
+  // non-.mid branch). Surface them as a synthetic "built-ins" folder injected at the /midi root,
+  // so the browser shows every real card folder (songs, drums, loops, tests, …) PLUS the baked
+  // demos. Named "built-ins" (not "tests") so it can't collide with the real /midi/tests folder
+  // that the browser now lists alongside it.
   const bakedSongLeaves = cat.songs.filter(s => !s.file).map(s => ({ name: s.name, arg: s.name }));
-  const songInjectFolders = bakedSongLeaves.length ? [{ name: 'tests', leaves: bakedSongLeaves }] : [];
+  const songInjectFolders = bakedSongLeaves.length ? [{ name: 'built-ins', leaves: bakedSongLeaves }] : [];
   // The song half: pick a song via the recursive folder browser, set the player's level, choose
   // what happens when it ends. A tap plays the file immediately (restart on a fresh downbeat).
   const playerSongBody = (D: SongDeckT) => (
@@ -1339,7 +1407,7 @@ export default function App() {
       <VolSlider label="Volume" value={D.vol} onChange={D.onVol} onCommit={D.commitVol} disabled={!connected} />
       {!!D.volNote && <Text style={s.muted}>{D.volNote}</Text>}
       <View style={s.browseBox}>
-        <FolderBrowser tp={tp} root={D.browseRoot ?? '/midi/songs'} ext="mid" enabled={connected && loaded}
+        <FolderBrowser tp={tp} root={D.browseRoot ?? '/midi'} ext="mid" enabled={connected && loaded}
           selected={D.player.song} playing={D.player.playing ? D.player.song : undefined}
           onSelectFile={(full, disp) => D.playFile(full, disp)} injectFolders={D.injectFolders ?? songInjectFolders} />
       </View>
@@ -1365,6 +1433,43 @@ export default function App() {
   const playerValue = (D: SongDeckT) => (D.player.playing ? '♪ ' : '') + (D.player.name || '—');
   const playerProgress = (D: SongDeckT) => (D.player.playing && D.player.prog >= 0 ? D.player.prog : undefined);
 
+  // MIDI Input selector (Phase 3, Thread C) — which physical device plays THIS synth, plus an
+  // optional channel filter. `i` is the firmware track index (synth card N -> track N-1). Switching
+  // is a pure @TRK<i>.SRC subscription write on the device: no repatch, no audio/loop/clock impact —
+  // you can move a keyboard between synths mid-performance with no dropout. Reuses the shared pill
+  // styles so it's ONE control every synth card renders (data-driven; a new voice reuses it verbatim).
+  // BT/Serial inputs aren't wired as sources yet (deferred), so the picker offers the real local
+  // devices: Off / DIN / USB / Both. "Both" (all local) reads back from the device as "multi".
+  const midiInputBody = (i: number) => {
+    const sub = trkSubs[i] || { src: 'none', srcch: 0 };
+    const active = sub.src === 'multi' ? 'all' : sub.src;   // both-local reports as "multi"
+    const devs = [{ k: 'none', l: 'Off' }, { k: 'din', l: 'DIN' }, { k: 'usb', l: 'USB' }, { k: 'all', l: 'Both' }];
+    const setSrc = (k: string) => { setTrkSubs(m => ({ ...m, [i]: { src: k, srcch: (m[i]?.srcch ?? 0) } })); tp.trk(i, 'SRC=' + k); };
+    const setCh  = (c: number) => { setTrkSubs(m => ({ ...m, [i]: { src: (m[i]?.src ?? 'none'), srcch: c } })); tp.trk(i, 'SRCCH=' + c); };
+    return (
+      <View style={{ marginTop: 10 }}>
+        <Text style={s.muted}>MIDI Input — which device plays this synth (switches live, no dropout)</Text>
+        <Row>
+          {devs.map(d => (
+            <Pressable key={d.k} style={[s.pill, s.grow1, active === d.k && s.pillOn]} disabled={!connected} onPress={() => setSrc(d.k)}>
+              <Text style={s.text}>{d.l}</Text>
+            </Pressable>
+          ))}
+        </Row>
+        {active !== 'none' && (<>
+          <Text style={[s.muted, { marginTop: 6 }]}>Channel filter</Text>
+          <View style={s.patGrid}>
+            {Array.from({ length: 17 }, (_, c) => (
+              <Pressable key={c} style={[s.pill, sub.srcch === c && s.pillOn]} disabled={!connected} onPress={() => setCh(c)}>
+                <Text style={s.text}>{c === 0 ? 'All' : String(c)}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </>)}
+      </View>
+    );
+  };
+
   const synthActions = (<>
     <HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1)} />
     <HdrBtn label="Next ›" stop onPress={() => stepVoice(1)} />
@@ -1375,6 +1480,7 @@ export default function App() {
           @SONGVOL, the synth mix-bus fader), surfaced here since this is the synth page. */}
       <VolSlider label="Volume" value={songVol} onChange={setSongVol} onCommit={v => tp.songVol(v)} disabled={!connected} />
       {voiceBrowserBody(1)}
+      {midiInputBody(0)}
     </View>
   );
   // Voices-2 (keyboard-split) body/actions — shared by the standalone Synth/Voices 2 card and
@@ -1391,6 +1497,7 @@ export default function App() {
       {!voice2.on && <Text style={s.muted}>Synth B is off — turn it on with the ● / ○ button in the Synthesizer B header. Both sides then drop to 8-voice polyphony.</Text>}
       <VolSlider label="Volume" value={voice2.vol} onChange={v => setVoice2(x => ({ ...x, vol: v }))} onCommit={v => tp.voice2Vol(v)} disabled={!connected || !voice2.on} />
       {voiceBrowserBody(2)}
+      {midiInputBody(1)}
     </View>
   );
   // Tempo / Drums / Metronome bodies + actions — shared by the standalone cards (if shown) and
@@ -1440,6 +1547,11 @@ export default function App() {
           <Text style={s.muted}>The transport clock runs either way — this just plays the click out the speakers. Off by default.</Text>
         </View>
         <Switch value={!metro.muted} onValueChange={v => { setMetro(m => ({ ...m, muted: !v })); tp.metronomeMute(!v); }} /></Row>
+      <Row><View style={{ flex: 1 }}>
+          <Text style={s.text}>{metro.locked ? '🔒' : '🔓'}  Lock tempo</Text>
+          <Text style={s.muted}>Off: the first song, loop, or groove you start sets the tempo to its own BPM. On: the tempo stays put — loading content no longer changes it. Off by default.</Text>
+        </View>
+        <Switch value={metro.locked} onValueChange={v => { setMetro(m => ({ ...m, locked: v })); tp.metronomeLock(v); }} /></Row>
       <Text style={s.muted}>Play defines the downbeat and starts the master clock — both MIDI players, the drums, and the arps lock to it. Runs at the master tempo ({Math.round(bpm)} BPM); set it on the top bar or the Tempo tab. Stop clears everything.</Text>
       <Text style={[s.text, { marginTop: 6 }]}>Click volume</Text>
       <VolSlider label="Volume" value={metro.vol} onChange={v => setMetro(m => ({ ...m, vol: v }))} onCommit={v => tp.metronomeVol(v)} disabled={!connected} />
@@ -1496,7 +1608,79 @@ export default function App() {
   // length — and the audio loop recorder owns the top-level Audio Loop card. So there's no
   // shared voice-selector/bars UI here any more; every rec control is per-player.
 
+  // Extra synth voices (Phase 3, data-driven): voices 2+ of a 4-voice pool get a GENERATED card
+  // each — a FULL peer of Synth A/B with the same submenu (Synth/Voices + MIDI Player + Arpeggiator),
+  // reusing the SAME components (voice browser, makeSongDeck, arpBody) driven by the uniform @TRK<i>.*
+  // wire. No hand-instantiation, so more firmware voices grow the UI with zero edits. Rendered only
+  // when @STATE tracks[] reports that many synth voices (synthCount). Voices 0/1 keep their bespoke
+  // cards (the Synth-B split toggle / shared voice-2 bus that don't apply to the fixed N-way pool).
+  const DEF_ARP = { on: false, pat: 0, rate: 0, oct: 1, latch: false };
+  const extraSynthCards: Section[] = [];
+  const extraChildCards: Section[] = [];
+  for (let v = 2; v < synthCount; v++) {
+    const theme = v === 2 ? THEME.synthC : THEME.synthD;
+    const letter = String.fromCharCode(65 + v);   // C, D, …
+    const parentId = 'synthX' + v;
+    const arpState = arpX[v] ?? DEF_ARP;
+    const mstop = (manualStopRefX.current[v] ??= { current: false });
+    // MIDI-player deck for this voice — the drumDeck pattern (a view over playerX[v]) wired to @TRK<i>.
+    const deck = makeSongDeck({
+      v: 1, persistKey: 'end', manualStopRef: mstop,
+      player: playerX[v] ?? { song: '', playing: false, name: '', prog: 0 },
+      setPlayer: upd => setPlayerX(m => { const cur = m[v] ?? { song: '', playing: false, name: '', prog: 0 }; return { ...m, [v]: typeof upd === 'function' ? (upd as any)(cur) : upd }; }),
+      endMode: endModeX[v] ?? 'stop', setEndMode: em => setEndModeX(m => ({ ...m, [v]: em })),
+      vol: trkVolX[v] ?? 100, onVol: n => setTrkVolX(m => ({ ...m, [v]: n })), commitVol: n => tp.trk(v, 'VOL=' + n),
+      wire: { play: a => tp.trk(v, 'PLAY=' + a), restart: a => tp.trk(v, 'RESTART=' + a), stop: () => tp.trk(v, 'STOP'), loop: on => tp.trk(v, 'LOOP=' + (on ? 1 : 0)) },
+    });
+    // Arp slot for this voice — same ArpSlotT the A/B arps use, targeting @TRK<i>.ARP*.
+    const setA = (patch: Partial<typeof DEF_ARP>) => setArpX(m => ({ ...m, [v]: { ...(m[v] ?? DEF_ARP), ...patch } }));
+    const setPid = (id: string) => setArpPresetIdX(m => ({ ...m, [v]: id }));
+    const vSeq = seqX[v] ?? DEFAULT_SHAPE.steps;
+    const selectPat = (i: number) => { setA({ pat: i }); tp.trk(v, 'ARPPAT=' + i); if (i === PAT_USER_SEQUENCE) tp.trk(v, 'ARPSEQ=' + encodeSequence(vSeq)); setPid(''); };
+    const arpSlot: ArpSlotT = {
+      arp: arpState, mode: arpModeX[v] ?? 'preset', setMode: m => setArpModeX(x => ({ ...x, [v]: m })),
+      presetId: arpPresetIdX[v] ?? '', activeName: ARP_LIBRARY.find(p => p.id === (arpPresetIdX[v] ?? ''))?.name || '', seq: vSeq,
+      play: () => { if (arpState.on) tp.trk(v, 'ARPRESTART'); else { setA({ on: true }); tp.trk(v, 'ARPON=1'); } },
+      stop: () => { setA({ on: false }); tp.trk(v, 'ARPON=0'); },
+      stepNav: dir => { const idx = ARP_LIBRARY.findIndex(p => p.id === (arpPresetIdX[v] ?? '')); if (!ARP_LIBRARY.length) return; const ni = (idx < 0 ? (dir > 0 ? -1 : 0) : idx) + dir; const p = ARP_LIBRARY[(ni + ARP_LIBRARY.length) % ARP_LIBRARY.length]; const st = applyArpPreset(tp, p, v + 1, arpState.latch); setA({ pat: st.pat, rate: st.rate, oct: st.oct, latch: st.latch }); if (st.seq) setSeqX(m => ({ ...m, [v]: st.seq! })); setPid(p.id); },
+      selectPattern: selectPat, applySeq: st => { setSeqX(m => ({ ...m, [v]: st })); tp.trk(v, 'ARPSEQ=' + encodeSequence(st)); if (arpState.pat !== PAT_USER_SEQUENCE) { setA({ pat: PAT_USER_SEQUENCE }); tp.trk(v, 'ARPPAT=' + PAT_USER_SEQUENCE); } setPid(''); },
+      applyPreset: p => { const st = applyArpPreset(tp, p, v + 1, arpState.latch); setA({ pat: st.pat, rate: st.rate, oct: st.oct, latch: st.latch }); if (st.seq) setSeqX(m => ({ ...m, [v]: st.seq! })); setPid(p.id); },
+      enterManual: () => { setArpModeX(x => ({ ...x, [v]: 'manual' })); tp.trk(v, 'ARPPRESET=' + encodeArpParams({ pat: arpState.pat, rate: ARP_RATES[arpState.rate].fw, gatePct: 50, swingPct: 50, oct: arpState.oct, octMode: 0, latch: arpState.latch, velMode: 0, velFixed: 100, velAccent: 127, stepMask: -1, stepLength: 16, mpeMode: 0, outCh: 1, scatterBase: 2, scatterCount: 4, scale: 0, scaleRoot: 0, transpose: 0, repeat: 1 })); setPid(''); },
+      resetManual: () => { tp.trk(v, 'ARPPRESET=' + encodeArpParams({ pat: arpState.pat, rate: ARP_RATES[arpState.rate].fw, gatePct: 50, swingPct: 50, oct: arpState.oct, octMode: 0, latch: arpState.latch, velMode: 0, velFixed: 100, velAccent: 127, stepMask: -1, stepLength: 16, mpeMode: 0, outCh: 1, scatterBase: 2, scatterCount: 4, scale: 0, scaleRoot: 0, transpose: 0, repeat: 1 })); setPid(''); },
+      setRate: i => { setA({ rate: i }); tp.trk(v, 'ARPRATE=' + ARP_RATES[i].fw); setPid(''); },
+      setOct: n => { setA({ oct: n }); tp.trk(v, 'ARPOCT=' + n); setPid(''); },
+      setLatch: b => { setA({ latch: b }); tp.trk(v, 'ARPLATCH=' + (b ? 1 : 0)); setPid(''); },
+    };
+    // Top card = a submenu (like Synthesizer A/B); its three children are the sub-pages.
+    extraSynthCards.push({
+      id: parentId, title: 'Synthesizer ' + letter, show: synthCount > v, accent: theme.accent, tint: theme.tint,
+      value: trkNames[v] || 'None',
+      subtitle: trkNames[v] ? <Text style={s.drawerValue} numberOfLines={1}>{trkNames[v]}</Text> : undefined,
+      body: <SubMenu getItems={() => sections.filter(x => x.parent === parentId).sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={theme.accent} tint={theme.tint} />,
+    });
+    extraChildCards.push(
+      {
+        id: parentId + 'v', title: 'Synth / Voices', show: false, parent: parentId, fullHeight: true, accent: theme.accent, tint: theme.tint,
+        value: trkNames[v] || 'None',
+        actions: <><HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1, v + 1)} /><HdrBtn label="Next ›" stop onPress={() => stepVoice(1, v + 1)} /></>,
+        body: (
+          <View style={s.synthWrap}>
+            <VolSlider label="Volume" value={trkVolX[v] ?? 100} disabled={!connected} onChange={n => setTrkVolX(m => ({ ...m, [v]: n }))} onCommit={n => tp.trk(v, 'VOL=' + n)} />
+            {voiceBrowserBody(v + 1)}
+            {midiInputBody(v)}
+          </View>
+        ),
+      },
+      { id: parentId + 'p', title: 'MIDI Player', show: false, parent: parentId, accent: theme.accent, tint: theme.tint,
+        value: playerValue(deck), progress: playerProgress(deck), actions: playerActions(deck), body: playerBody(deck) },
+      { id: parentId + 'a', title: 'Arpeggiator', show: false, parent: parentId, accent: theme.accent, tint: theme.tint,
+        value: arpValue(arpSlot), actions: arpActions(arpSlot), body: arpBody(arpSlot) },
+    );
+  }
+
   const sections: Section[] = [
+    ...extraSynthCards,
+    ...extraChildCards,
     // CONNECTION — catalog stats. A Settings sub-page (reached from the Settings submenu).
     {
       id: 'conn', title: 'Connection', show: false, parent: 'settings', status: cat.engine || 'connected',
@@ -1700,10 +1884,12 @@ export default function App() {
       value: playerValue(drumDeck), progress: playerProgress(drumDeck), actions: playerActions(drumDeck),
       body: <SubMenu getItems={() => sections.filter(x => x.parent === 'drumtrack').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.drums.accent} tint={THEME.drums.tint} />,
     },
-    // DRUM LOOPS — mirrors the synth's MIDI Player (playerSongBody(drumDeck)): browse /midi/drums +
-    // Play/Stop. Same reusable deck component as the synths — a Drums sub-page.
+    // DRUM LOOPS — mirrors the synth's MIDI Player (playerSongBody(drumDeck)): browse /midi (all
+    // folders) + Play/Stop. Same reusable deck component as the synths — a Drums sub-page.
     {
-      id: 'drumloops', title: 'Drum Loops', show: false, parent: 'drumtrack', accent: THEME.drums.accent, tint: THEME.drums.tint,
+      id: 'drumloops', title: 'Drum Loops', show: false, parent: 'drumtrack', fullHeight: true, accent: THEME.drums.accent, tint: THEME.drums.tint,
+      // fullHeight keeps this page MOUNTED (hidden when inactive), like Synth / Voices — so the
+      // groove browser reopens on the folder you left instead of snapping back to the /midi root.
       value: playerValue(drumDeck), actions: playerActions(drumDeck), body: playerSongBody(drumDeck),
     },
     // KIT — mirrors the synth's Synth / Voices: the drum instrument (GM kit) + level. A Drums sub-page.
@@ -1753,7 +1939,7 @@ export default function App() {
   // (play → pick a voice → tempo → arp → drums), then system (connection, BT, codec).
   // Unlisted ids fall to the end in their definition order (stable sort).
   // Order for the home grid AND for each submenu's children (SubMenu sorts by this too).
-  const SECTION_ORDER = ['synthesizer', 'synthesizerB', 'drumtrack', 'audioloop', 'tempo', 'bt', 'settings',
+  const SECTION_ORDER = ['synthesizer', 'synthesizerB', 'synthX2', 'synthX3', 'drumtrack', 'audioloop', 'tempo', 'bt', 'settings',
     'player', 'synth', 'arp', 'synth2', 'player2', 'arp2', 'drumloops', 'drumkit', 'bpm', 'metro', 'conn', 'codec'];
   const ord = (id: string) => { const i = SECTION_ORDER.indexOf(id); return i < 0 ? 999 : i; };
   const visible = sections.filter(x => x.show).sort((a, b) => ord(a.id) - ord(b.id));
@@ -1798,6 +1984,11 @@ export default function App() {
           <Pressable style={s.tBtn} onPress={() => stepBpm(-1)} disabled={!connected}><Text style={s.tBtnText}>−</Text></Pressable>
           <Text style={s.tBpm}>{Math.round(bpm)}<Text style={s.tBpmUnit}> BPM</Text></Text>
           <Pressable style={s.tBtn} onPress={() => stepBpm(1)} disabled={!connected}><Text style={s.tBtnText}>＋</Text></Pressable>
+          {/* Tempo lock: off ⇒ the sole piece of content you start sets the BPM; on ⇒ the tempo is held. */}
+          <Pressable style={[s.tBtn, s.tBtnGhost, metro.locked && s.tBtnOn]} disabled={!connected}
+            onPress={() => { const locked = !metro.locked; setMetro(m => ({ ...m, locked })); tp.metronomeLock(locked); }}
+            accessibilityLabel={metro.locked ? 'Tempo locked — tap to let content set the BPM' : 'Tempo follows content — tap to lock'}>
+            <Text style={[s.tBtnText, metro.locked && s.tBtnOnText]}>{metro.locked ? '🔒' : '🔓'}</Text></Pressable>
         </View>
         <View style={s.volRow}>
           <Text style={s.volLbl}>VOL</Text>

@@ -253,6 +253,7 @@ export class WiFiTransport implements Transport {
   metronomeMute(muted: boolean) { this.send('@METROMUTE=' + (muted ? 1 : 0)); }
   metronomeSig(bpb: number) { this.send('@METROSIG=' + Math.max(1, Math.min(16, Math.round(bpb)))); }
   metronomeVol(pct: number) { this.send('@METROVOL=' + Math.max(0, Math.min(150, Math.round(pct)))); }
+  metronomeLock(on: boolean) { this.send('@METROLOCK=' + (on ? 1 : 0)); }
   arpOn(on: boolean) { this.send('@ARPON=' + (on ? 1 : 0)); }
   arpRestart() { this.send('@ARPRESTART'); }
   arpPattern(i: number) { this.send('@ARPPAT=' + i); }
@@ -283,6 +284,7 @@ export class WiFiTransport implements Transport {
   song2Restart(arg: string) { this.send('@SONG2RESTART=' + arg); }
   stopSong2() { this.send('@SONG2=stop'); }
   song2Loop(on: boolean) { this.send('@LOOP2=' + (on ? 1 : 0)); }
+  trk(index: number, cmd: string) { this.send('@TRK' + index + '.' + cmd); }
   // ---- Loop recorder ----
   recVoice(v: number) { this.send('@RECV=' + (v === 2 ? 2 : 1)); }
   recBars(n: number) { this.send('@RECBARS=' + n); }
