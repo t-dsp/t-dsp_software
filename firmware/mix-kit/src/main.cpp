@@ -2820,9 +2820,13 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     else if (handleArpLine(line, reply, g_arpFilter, "@ARP")) { /* handled */ }
 #if TDSP_VOICE2
     // --- Voices 2: a second Dexed voice on the keyboard half of the pool (engines 4..7) ---
-#if TDSP_SYNTH_VOICES < 4
+#if TDSP_SYNTH_VOICES < 4 && !TDSP_HETERO
     // The runtime Synth-B enable is a DYNAMIC 4/4 split (repatches engines). A fixed 4-way pool
     // (N=4) has no toggle — all four voices are always live — so this command is retired there.
+    // A HETERO build ALSO retires it: its 2 Dexed voices are a PERMANENT split (forced on at boot),
+    // because disabling it unifies the pool while Synth B's sink still targets engines 4..7 -> the
+    // two voices then FIGHT over the same engines (audible as per-measure voice-stealing alternation).
+    // So @VOICE2= is ignored on a hetero build; the split can never be turned off.
     else if (strncmp(line, "@VOICE2=", 8) == 0) {          // Synth B master enable (dynamic 4/4 pool split)
         bool on = (atoi(line + 8) != 0);
         if (on != g_voice2On) {
@@ -2850,7 +2854,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         }
         reply.printf("@VOICE2=%d\n", g_voice2On ? 1 : 0);
     }
-#endif  // TDSP_SYNTH_VOICES < 4 (runtime @VOICE2 split toggle)
+#endif  // TDSP_SYNTH_VOICES < 4 && !TDSP_HETERO (runtime @VOICE2 split toggle; hetero = permanent split)
     else if (strncmp(line, "@VOICE2VOL=", 11) == 0) {      // Voices-2 level 0..150 %
         synthSetVoice2Vol(atoi(line + 11));
         reply.printf("@VOICE2VOL=%d\n", g_voice2VolPct);
