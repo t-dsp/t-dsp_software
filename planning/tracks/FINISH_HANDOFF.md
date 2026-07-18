@@ -67,14 +67,17 @@ runtime** — the USER does. Build green, serial-verify, hand each milestone to 
    box's `platformio.ini` (keep its `platform=teensy@5.1.0` pin); `printf U > /dev/ttyACM0` → HalfKay →
    `teensy_loader_cli` (2nd try). (This box is also the drum-stutter test rig — coordinate with `drum-smooth`.)
 
-### B. Pool-partition polish
-- **Grey the absorbed voice cards** when `@STATE.pool.active[v]==0` (a reduced preset). Today the firmware just
-  rejects their launches (`@TRK.PLAY=IDLE`) and the Voice-Pool card's text spells out which voices are off — make
-  Synth B/C/D visibly read "off / (idle — pool)" and disable their controls. App-only, tsc-verify. The state is
-  already parsed (`pool.active` in App.tsx).
+### B. Pool-partition polish — **DONE** (branch `tracks-finish`, commit `24cc28a`)
+- ✅ **Grey the absorbed voice cards** when `@STATE.pool.active[v]==0`. `Section` gained a `dim` flag, set on
+  Synth B + the generated Synth C/D cards; the home-grid `Card` render greys them (opacity 0.45) and overrides the
+  value to "off — idle (pool)". App-only, tsc-clean. USER to UI-verify (drive `@POOL=3` → Synth B card greys).
 
-### C. Thread D — the app slot/engine picker (hetero builds)
-- On `teensy41_dexed2_opll1` the app already renders a card per voice; add a **slot/engine picker** that reads the
+### C. Thread D — the app slot/engine picker (hetero builds) — **DONE** (branch `tracks-finish`, commit `24cc28a`)
+- ✅ App parses per-track engine kind from `@STATE tracks[].eng`; on an OPLL voice `voiceBrowserBody` swaps the
+  Dexed cart browser for the 15 OPLL ROM voices (names mirror `lib/TDspYmfm` `kInstNames[1..15]`), selecting one
+  sends `@TRK<i>.INSTR=<idx>`. Homogeneous builds unaffected (eng undefined → Dexed browser). tsc-clean; USER to
+  UI-verify on a `teensy41_dexed2_opll1` flash (Synth C card shows the ROM list, not carts).
+- Original note: On `teensy41_dexed2_opll1` the app already renders a card per voice; add a **slot/engine picker** that reads the
   top-level `engines:{dexed,opll}` inventory + each voice's engine kind, and for an OPLL voice swaps the Dexed cart
   browser for the **OPLL ROM instrument list** (`@TRK<i>.INSTR=<0..14>`, keyed on the voice being in the OPLL
   range). tsc-verify; user UI-tests.
@@ -82,9 +85,22 @@ runtime** — the USER does. Build green, serial-verify, hand each milestone to 
 ### D. Thread D — the firmware engine-inventory generalization (the real payoff)
 Today `HeteroOpll.h` `static_assert`s `TDSP_OPLL_ENGINES==1` and the extra-voice song STATE is single-index
 (`g_curSong3*`, `g_buf3`, `g_songFollow3`). To reach arbitrary mixes (`4dexed_2opll`, a TSF slot, …):
-- **Array-ify the extra-voice song state** (name/arg/loop/bpm/bpb/loopBeats/launchPending/buffer/follower) so N>3
-  total voices work — the same array-ify Phase 3 used for players/arps/routers. Then lift the `static_assert` and
-  window N OPLL engines like the Dexed pool.
+> **STATUS (branch `tracks-finish`):** NOT started — deliberately deferred. §D is the deep architectural item and,
+> unlike §B/§C/§E, it **cannot be hardware-verified in the COM4-only setup**: there is no dexed+2×OPLL env, no audio
+> graph wired for a 2nd OPLL instance (`HeteroOpll.h` hardwires a single `g_hoOpll`), and the array-ify alone produces
+> **zero testable behavior** while still touching the shipped 4-voice board's code. Shipping it blind would break the
+> verification contract and risk the board. Do §D on a session that can flash+audition a real multi-engine build (or
+> alongside §G's PSRAM core). Concrete map of the work, in dependency order:
+>   1. **Array-ify extra-voice song state.** Refs are contained (`grep` in main.cpp): `g_songFollow3/4` (decl 271/274),
+>      `g_buf3/4` (870/872), `g_curSong3/4Name/Arg`, `g_song3/4{Loop,WasPlaying,Bpm,Bpb,LoopBeats,LaunchPending}`
+>      (≈2–6 refs each), all consumed through `Track` pointers in `tracksInit` (~3178–3210). Turn them into
+>      `[kSynthVoices]` arrays + a `g_songFollowV[]` (parallel to `g_playerV/g_arpFilterV/g_routerV`), keep
+>      `g_song3*`≡`[2]`/`g_song4*`≡`[3]` aliases so existing builds stay **byte-identical** (verify by hex diff).
+>   2. **HeteroOpll.h → N instances.** Today: one `g_hoOpll` + `g_hoOpllVoiceSink[1]` + `static_assert(==1)`. Make the
+>      OPLL engine/sink/F32-node/trim an array `[TDSP_OPLL_ENGINES]`, wire each `AudioConnection` (respecting
+>      F32-update-order — declare hardware output first), then lift the assert to `>=1`. Add a `dexed2_opll2` /
+>      `dexed4_opll2` env to exercise it.
+>   3. Then the codegen/registry/sub-bus items below.
 - **X-macro / small codegen for static wiring** (DESIGN §"Build-time engine inventory"): an engine array + each
   engine's `AudioConnection` to its sub-bus, kept in sync with the `TDSP_*_ENGINES` counts. Hand-wiring 8 Dexed +
   2 OPLL + 1 TSF is unmaintainable.
@@ -98,11 +114,19 @@ Today `HeteroOpll.h` `static_assert`s `TDSP_OPLL_ENGINES==1` and the extra-voice
 - **Runtime repartition already generalizes the Dexed side** (`@POOL`); extend the same idea to bind a Track to any
   compiled engine slot at runtime (the DESIGN's slot→Track binding).
 
-### E. Thread E — per-track mixer strip (P3.5)
-Each Track has `setLevel` + (pool) a per-voice trim node. Generalize to a real strip: per-track level/mute (and
-optionally pan) → the track's sub-bus → master limiter → out (the Dexed `dxpTrim`/`dxpMix` pattern generalized to
-every engine kind). App gets a mixer view (N faders + mutes) reading `tracks[]`. Keyboard-owner is already the
-subscription hub — no separate work.
+### E. Thread E — per-track mixer strip (P3.5) — **DONE (level+mute)** (branch `tracks-finish`, `595bf57`+`24cc28a`)
+- ✅ **Level + mute per track.** New `@TRK<i>.MUTE=0|1` latch + a `LEVEL=` alias for `VOL=`; both stay
+  mute-aware (dragging a muted fader updates the stored level but keeps it silent). Layered over the existing
+  `Track.setLevel` hook via file-scope arrays `g_mixLevel[]`/`g_mixMute[]` (NOT Track struct fields) gated behind
+  `TDSP_MIXER_STRIP` (= `TDSP_SYNTH_VOICES>=4 || TDSP_HETERO`). State ships as top-level `@STATE "mix":[{level,mute},…]`
+  indexed like `@TRK<i>` (synth voices, then drum). **voice2/drumvoice builds byte-identical** (verified: firmware.hex
+  md5 unchanged pre/post). **Serial-verified on COM4** (`4voice`): `@TRK0.MUTE=1` drops `outPeak` 0.06→0.00, `MUTE=0`
+  restores; `mix[]` tracks the latch. App: a **Mixer card** (N faders + mute pills) reading `mix[]`; shows on
+  `mix.has`. USER to audio/UI-verify.
+- **Remaining (not done):** optional **pan**, and the deeper "each engine kind gets a real sub-bus → master limiter"
+  generalization. Today mute/level ride each backend's existing `setLevel` node (`dxpVoiceMix`/`g_hoOpllTrim`/slot
+  gain), which is sufficient for level+mute; a true per-track sub-bus tree is only needed once §D adds more engines
+  than the master mixer has free slots (see §D "Mix-slot pressure").
 
 ### F. Deferred Thread-C extension — BT/serial MIDI input sources
 The hub has `SrcBtMidi`/`SrcSerial` enum slots, unwired. The ESP32 forwards BLE-MIDI / serial-MIDI bytes to the
@@ -162,6 +186,9 @@ refuse/grey configs that exceed RAM.
 ## 7. One-line status of every thread
 - Phase 0–3: **DONE**, on master. Thread D minimal (2 Dexed + 1 OPLL): **DONE**, serial-verified. 3 fixes:
   **DONE**. Synth-B switch removal: **DONE**. Runtime `@POOL` repartition (fw+app): **DONE**, serial-verified.
-- **NEXT:** §A EAS rebuild + jay-mint → §B grey pool cards → §C app slot/engine picker → §D firmware inventory
-  generalization (multi-engine) → §E per-track mixer strip → §F BT/serial inputs → §G PSRAM soundfont slots.
+- **§B grey pool cards: DONE** (`24cc28a`, tsc). **§C app slot/engine picker: DONE** (`24cc28a`, tsc). **§E per-track
+  mixer strip (level+mute): DONE** (`595bf57` fw + `24cc28a` app; serial-verified COM4, voice2/drumvoice byte-identical).
+  All three on branch **`tracks-finish`** (pushed), NOT yet merged — awaiting USER audio/UI-verify then merge.
+- **NEXT:** §A EAS rebuild + jay-mint → §D firmware inventory generalization (multi-engine; see §D STATUS block —
+  deferred, needs a board that can audition a real multi-OPLL build) → §F BT/serial inputs → §G PSRAM soundfont slots.
 - TSF-drum-stutter fix: **DONE**, user-verified + merged to master (`ce97e53`).
