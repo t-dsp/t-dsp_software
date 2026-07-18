@@ -617,18 +617,48 @@ FLASHMEM static void synthSetVoice2Enabled(bool on) {
 #endif  // TDSP_VOICE2 && TDSP_SYNTH_VOICES < 4
 
 #if TDSP_SYNTH_VOICES >= 4
-// --- Four independent voices: per-voice level + instrument + cart over fixed 2-engine windows.
-// User level rides each voice's 2-in mixer; ReplayGain rides its trim (pre-sum); slot 3 = the fixed
-// make-up. No runtime split — the windows never move, so a MIDI-source switch (Thread C) never
-// touches audio. synthSetInstrument/2 + synthPickCartVoice/2 stay voice-0/1 aliases so main.cpp
-// (and @DXVOICE/@DXVOICE2/@DXPICK/@DXPICK2) drive voices 0/1 unchanged; @TRK<i>.DX* -> the V-family.
+// --- Four voices over a RUNTIME-REPARTITIONABLE pool (no reflash) ---------------------------------
+// Default = 4 voices, each 2 engines (2+2+2+2). @POOL presets redistribute the 8 engines among the 4
+// fixed track slots at runtime: a partition groups CONTIGUOUS voices; each group's LEAD voice's sink
+// spans all the group's engines (more engines/voice = more polyphony), and the absorbed voices go idle
+// with their buses MIRRORING the lead's level+trim (so the lead's extra engines come out at the lead's
+// fader). The lead's base is fixed at its own bus, and groups are contiguous, so a lead just grows its
+// engine count from its base — no base-pointer move. Generalizes the old 2-way VOICE2 split to N-way.
+//
+// g_voiceEngines[v] = engines voice v owns (0 = absorbed/idle; main.cpp gates MIDI on poolVoiceActive).
+// g_busLead[b]      = which voice leads bus b (bus b's mixer gain + trim follow that lead).
+static uint8_t g_voiceEngines[4] = { kEnginesPerVoice, kEnginesPerVoice, kEnginesPerVoice, kEnginesPerVoice };
+static int8_t  g_busLead[4]      = { 0, 1, 2, 3 };
+static uint8_t g_poolPreset      = 0;   // 0=4voices 1=2voices 2=1voice 3=4+2+2 (see poolSetPreset)
+
+static bool poolVoiceActive(int v)  { return v >= 0 && v < 4 && g_voiceEngines[v] > 0; }
+static int  poolVoiceEngines(int v) { return (v >= 0 && v < 4) ? g_voiceEngines[v] : 0; }
+static int  poolPreset(void)        { return g_poolPreset; }
+
+// Voice v's Tier-1 trim VALUE from its current selection (a /dexed cart ships at unity; a bundled
+// voice uses the baked table). Used to mirror a lead's trim onto the buses it spans.
+static float poolVoiceTrimValue(int v) {
+    const float t = g_curCartRelV[v][0]                   ? 1.0f
+                  : (g_synthInstrumentV[v] < kNumBundled) ? dexedVoiceTrim(g_synthInstrumentV[v]) : 1.0f;
+    return tdsp::auditionTrim(t);
+}
+
+// Bus gains: every bus plays at ITS LEAD's user level (so an absorbed bus rides the lead's fader).
 static void applyPoolVols() {
     const float M = TDSP_DEFAULT_SYNTH_MAKEUP;
-    for (int v = 0; v < 4; ++v) {
-        const float uv = g_voiceVolPctV[v] / 100.0f;                 // per-voice user level 0..1.5
-        for (int e = 0; e < kEnginesPerVoice; ++e) dxpVoiceMix[v]->gain(e, uv);
+    for (int b = 0; b < 4; ++b) {
+        const int lead = (g_busLead[b] >= 0) ? g_busLead[b] : b;
+        const float uv = g_voiceVolPctV[lead] / 100.0f;              // bus b's level = its lead's level
+        for (int e = 0; e < kEnginesPerVoice; ++e) dxpVoiceMix[b]->gain(e, uv);
     }
     outL.gain(3, M); outR.gain(3, M);                                // fixed synth-bus make-up (slot 3)
+}
+// Bus trims: every bus uses its LEAD's ReplayGain trim.
+static void applyPoolTrims() {
+    for (int b = 0; b < 4; ++b) {
+        const int lead = (g_busLead[b] >= 0) ? g_busLead[b] : b;
+        dxpVoiceTrim[b]->setGain(poolVoiceTrimValue(lead));
+    }
 }
 static void synthSetVoiceVolV(int v, int pct) {
     if (v < 0 || v >= 4) return;
@@ -641,46 +671,101 @@ static void synthSetVoice2Vol(int pct) { synthSetVoiceVolV(1, pct); }
 static void synthSetVoice3Vol(int pct) { synthSetVoiceVolV(2, pct); }
 static void synthSetVoice4Vol(int pct) { synthSetVoiceVolV(3, pct); }
 
+// Apply voice v's trim to EVERY bus it currently leads (a lead spanning k buses gains them all).
+static void applyLeadTrim(int v, float trim) {
+    for (int b = 0; b < 4; ++b) if (g_busLead[b] == v) dxpVoiceTrim[b]->setGain(tdsp::auditionTrim(trim));
+}
+
 FLASHMEM static void synthSetInstrumentV(int v, int idx) {
     if (v < 0 || v >= 4) return;
     const int total = kNumBundled + tdsp::dexed::numSdVoices();
     if (idx < 0) idx = 0;
     if (idx >= total) idx = total - 1;
-    loadInstrumentRange(idx, v * kEnginesPerVoice, kEnginesPerVoice);
+    const int count = g_voiceEngines[v] > 0 ? g_voiceEngines[v] : kEnginesPerVoice;   // the voice's CURRENT window
+    loadInstrumentRange(idx, v * kEnginesPerVoice, count);
     g_poolSinkV[v]->applyExprConfig();
     g_synthInstrumentV[v] = idx;
     g_curCartRelV[v][0] = 0; g_curCartVoiceV[v] = -1;
     float trim = (idx < kNumBundled) ? dexedVoiceTrim(idx) : 1.0f;
-    dxpVoiceTrim[v]->setGain(tdsp::auditionTrim(trim));
-    Serial.printf("[synth] voice %d instrument %d = %s (trim=%.3f)\n", v, idx, synthInstrumentName(idx), (double)trim);
+    applyLeadTrim(v, trim);
+    Serial.printf("[synth] voice %d instrument %d = %s (trim=%.3f, %d eng)\n", v, idx, synthInstrumentName(idx), (double)trim, count);
 }
 FLASHMEM static void synthSetInstrument(int idx)  { synthSetInstrumentV(0, idx); }
 FLASHMEM static void synthSetInstrument2(int idx) { synthSetInstrumentV(1, idx); }
 
 FLASHMEM static const char *synthPickCartVoiceV(int v, const char *relCart, int voice) {
     if (v < 0 || v >= 4) return nullptr;
-    const char *nm = pickCartVoiceRange(relCart, voice, v * kEnginesPerVoice, kEnginesPerVoice);
+    const int count = g_voiceEngines[v] > 0 ? g_voiceEngines[v] : kEnginesPerVoice;
+    const char *nm = pickCartVoiceRange(relCart, voice, v * kEnginesPerVoice, count);
     if (!nm) return nullptr;
     g_poolSinkV[v]->applyExprConfig();
-    dxpVoiceTrim[v]->setGain(tdsp::auditionTrim(1.0f));              // SD carts ship at unity trim
+    applyLeadTrim(v, 1.0f);                                          // SD carts ship at unity trim
     snprintf(g_curCartRelV[v], sizeof(g_curCartRelV[v]), "%s", relCart);
     g_curCartVoiceV[v] = voice;
     snprintf(g_curCartNameV[v], sizeof(g_curCartNameV[v]), "%s", nm);
-    Serial.printf("[synth] voice %d pick %s v%d = %s\n", v, relCart, voice, nm);
+    Serial.printf("[synth] voice %d pick %s v%d = %s (%d eng)\n", v, relCart, voice, nm, count);
     return nm;
 }
 FLASHMEM static const char *synthPickCartVoice(const char *relCart, int voice)  { return synthPickCartVoiceV(0, relCart, voice); }
 FLASHMEM static const char *synthPickCartVoice2(const char *relCart, int voice) { return synthPickCartVoiceV(1, relCart, voice); }
 
-// Re-apply voice v's Tier-1 trim under the CURRENT ReplayGain state (the @RG toggle) — gain-only,
-// no engine reload, so it neither cuts sounding notes nor clobbers a picked cart. A /dexed cart
-// ships at unity; a bundled voice uses the baked table (mirrors synthReapplyVoice2Trim for N<4).
+// Re-apply voice v's Tier-1 trim under the CURRENT ReplayGain state (the @RG toggle) — gain-only, no
+// engine reload. Applies to every bus the voice leads (mirrors synthReapplyVoice2Trim for N<4).
 static void synthReapplyVoiceTrimV(int v) {
     if (v < 0 || v >= 4) return;
     const float t = g_curCartRelV[v][0]                     ? 1.0f
-                  : (g_synthInstrumentV[v] < kNumBundled)   ? dexedVoiceTrim(g_synthInstrumentV[v])
-                                                            : 1.0f;
-    dxpVoiceTrim[v]->setGain(tdsp::auditionTrim(t));
+                  : (g_synthInstrumentV[v] < kNumBundled)   ? dexedVoiceTrim(g_synthInstrumentV[v]) : 1.0f;
+    applyLeadTrim(v, t);
+}
+
+// Reload voice v's CURRENT selection across its (possibly grown) window [2v, 2v+g_voiceEngines[v]).
+FLASHMEM static void reloadVoiceWindowV(int v) {
+    const int count = g_voiceEngines[v];
+    if (count <= 0) return;
+    if (g_curCartRelV[v][0]) pickCartVoiceRange(g_curCartRelV[v], g_curCartVoiceV[v], v * kEnginesPerVoice, count);
+    else                     loadInstrumentRange(g_synthInstrumentV[v], v * kEnginesPerVoice, count);
+    g_poolSinkV[v]->applyExprConfig();
+}
+
+// Repartition the pool into contiguous voice groups (busGroups[gi] = buses in group gi; sum == 4).
+// Panics all sinks, grows each group-lead to span its engines + reloads its patch, marks absorbed
+// voices idle, then mirrors bus levels/trims onto the leads. Runs from a command (never the ISR).
+FLASHMEM static void poolApplyPartition(const uint8_t *busGroups, int nGroups) {
+    for (int b = 0; b < 4; ++b) g_busLead[b] = -1;
+    for (int v = 0; v < 4; ++v) g_voiceEngines[v] = 0;
+    int bus = 0;
+    for (int gi = 0; gi < nGroups && bus < 4; ++gi) {
+        int k = busGroups[gi]; if (k < 1) k = 1;
+        int lead = bus;                                             // lead = first bus of the group
+        for (int b = bus; b < bus + k && b < 4; ++b) g_busLead[b] = (int8_t)lead;
+        g_voiceEngines[lead] = (uint8_t)((bus + k <= 4 ? k : 4 - bus) * kEnginesPerVoice);
+        bus += k;
+    }
+    for (int v = 0; v < 4; ++v) g_poolSinkV[v]->panic();            // no note survives the repatch
+    for (int v = 0; v < 4; ++v) {
+        if (g_voiceEngines[v] > 0) { g_poolSinkV[v]->setEngineCount(g_voiceEngines[v]); reloadVoiceWindowV(v); }
+        else                       { g_poolSinkV[v]->setEngineCount(kEnginesPerVoice); }  // idle; gated off MIDI in main.cpp
+    }
+    applyPoolVols();
+    applyPoolTrims();
+}
+
+// The four presets the app offers. Group sizes are in BUSES (each bus = kEnginesPerVoice engines).
+FLASHMEM static void poolSetPreset(int preset) {
+    static const uint8_t P0[] = { 1, 1, 1, 1 };   // 4 voices (2 eng each)
+    static const uint8_t P1[] = { 2, 2 };         // 2 voices (4 eng each)
+    static const uint8_t P2[] = { 4 };            // 1 voice  (8 eng)
+    static const uint8_t P3[] = { 2, 1, 1 };      // 4+2+2 (voice0=4 eng, voices2/3=2 eng, voice1 absorbed)
+    switch (preset) {
+        case 1: poolApplyPartition(P1, 2); break;
+        case 2: poolApplyPartition(P2, 1); break;
+        case 3: poolApplyPartition(P3, 3); break;
+        default: preset = 0; poolApplyPartition(P0, 4); break;
+    }
+    g_poolPreset = (uint8_t)preset;
+    Serial.printf("[pool] preset %d -> engines/voice = %d,%d,%d,%d (active: %d%d%d%d)\n", preset,
+                  g_voiceEngines[0], g_voiceEngines[1], g_voiceEngines[2], g_voiceEngines[3],
+                  poolVoiceActive(0), poolVoiceActive(1), poolVoiceActive(2), poolVoiceActive(3));
 }
 #endif  // TDSP_SYNTH_VOICES >= 4
 

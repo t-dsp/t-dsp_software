@@ -2145,6 +2145,17 @@ static void maybeSynchroStart(byte vel) {
     }
 }
 
+// A synth voice can be idled by the runtime @POOL partition (its engines were handed to a group
+// lead). An idle voice must take NO live notes — routing to it would allocate on engines the lead
+// now owns (voice-stealing). Always-live on non-repartitionable builds.
+static inline bool voiceLive(int i) {
+#if defined(TDSP_SYNTH_DEXED_POOL) && TDSP_SYNTH_VOICES >= 4
+    return (i < 0 || i >= kSynthVoices) ? true : poolVoiceActive(i);
+#else
+    (void)i; return true;
+#endif
+}
+
 namespace midihub {
     // Held live notes, per source, so a subscription change can release cleanly (no hung note) on a
     // track that stops listening — the generalization of the old per-keyboard usbHeld flush. Sized
@@ -2168,7 +2179,7 @@ namespace midihub {
     static void noteOn(MidiSourceId s, uint8_t ch, uint8_t note, uint8_t vel) {
         maybeSynchroStart(vel);
         if (vel) heldAdd(s, ch, note); else heldRemove(s, ch, note);
-        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handleNoteOn(ch, note, vel);
+        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch) && voiceLive((int)(&t - g_tracks))) t.router->handleNoteOn(ch, note, vel);
     }
     static void noteOff(MidiSourceId s, uint8_t ch, uint8_t note, uint8_t vel) {
         heldRemove(s, ch, note);
@@ -2370,6 +2381,10 @@ static void handleTrkCmd(const char* s, Stream& reply) {
     if (i >= 0 && i < nSynth) t = &g_tracks[i];
     else if (i == nSynth)     { t = &g_drumTrack; isDrum = true; }
     if (!t) return;
+    // An idle voice (absorbed by the @POOL partition) can't launch a song — its engines belong to a
+    // group lead, so playing would steal the lead's voices. Config commands (INSTR/SRC) still work.
+    const bool launchCmd = (strncmp(cmd, "PLAY=", 5) == 0 || strncmp(cmd, "SONGF=", 6) == 0 || strncmp(cmd, "RESTART=", 8) == 0);
+    if (launchCmd && !isDrum && !voiceLive(i)) { reply.printf("@TRK%d.PLAY=IDLE\n", i); return; }
     if      (strncmp(cmd, "PLAY=", 5) == 0 || strncmp(cmd, "SONGF=", 6) == 0) { const char* a = eq + 1; if (isDrum) drumStartFile(a); else trackLaunch(*t, a); }
     else if (strncmp(cmd, "RESTART=", 8) == 0) { if (isDrum) drumStartFile(arg); else trackRestart(*t, arg); }
     else if (strncmp(cmd, "STOP", 4) == 0)     { if (isDrum) drumStop(); else songStop(*t); }
@@ -2778,6 +2793,21 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         synthSetInstrument(g_synthInstrument);         // reload so RESPECT restores the patch's own LFO
         Serial.printf("[lfo] mode = %s\n", force ? "FORCE (vib/trem on any patch)" : "RESPECT patch LFO");
     }
+#if TDSP_SYNTH_VOICES >= 4
+    // Runtime pool partition (no reflash): redistribute the 8 engines among the 4 voices. 0=4 voices
+    // (2 eng each), 1=2 voices (4 eng), 2=1 voice (8 eng), 3=4+2+2. Absorbed voices go silent: stop
+    // their players + panic their arps + release live notes (voiceLive() then gates them off live MIDI).
+    else if (strncmp(line, "@POOL=", 6) == 0) {
+        poolSetPreset(atoi(line + 6));
+        for (int v = 0; v < kSynthVoices; ++v) if (!poolVoiceActive(v)) {
+            songStop(g_tracks[v]);                  // absorbed voice: stop its player
+            if (g_tracks[v].arp) g_tracks[v].arp->panic();   // and clear its arp (poolApplyPartition already panicked the sink)
+        }
+        applyMidiMode(g_mpeMode);                   // re-apply per-channel bend range to the resized windows
+        reply.printf("@POOL=%d\n", poolPreset());
+    }
+    else if (strcmp(line, "@POOL") == 0) reply.printf("@POOL=%d\n", poolPreset());   // query
+#endif
 #endif
 #if defined(TDSP_SYNTH_SF2_TSF) && TDSP_DIAGNOSTICS
     else if (strncmp(line, "@PROOF=", 7) == 0)     runAxisProof(atoi(line + 7));   // capture 1 note w/ axis at full (0=press 1=timbre 2=bend 3=neutral)
@@ -3024,6 +3054,15 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         // kind, so the app knows this board is heterogeneous and which track index maps to which engine
         // (tracks [0,dexed) = Dexed pool windows, the next opll = melodic OPLL). Slot binding is a build fact.
         reply.printf(",\"engines\":{\"dexed\":%d,\"opll\":%d}", kDexedVoices, kSynthVoices - kDexedVoices);
+#endif
+#if defined(TDSP_SYNTH_DEXED_POOL) && TDSP_SYNTH_VOICES >= 4
+        // Runtime pool partition (@POOL, no reflash): the current preset + per-voice engine count +
+        // which voices are active (a lead absorbs its group; absorbed voices are idle). The app uses
+        // "active" to grey absorbed cards, "preset" for the picker, "engines" to show polyphony
+        // (engines*2 = normal poly, engines = MPE notes). Top-level (out of caps) so it's additive.
+        reply.printf(",\"pool\":{\"preset\":%d,\"engines\":[%d,%d,%d,%d],\"active\":[%d,%d,%d,%d]}",
+                     poolPreset(), poolVoiceEngines(0), poolVoiceEngines(1), poolVoiceEngines(2), poolVoiceEngines(3),
+                     poolVoiceActive(0) ? 1 : 0, poolVoiceActive(1) ? 1 : 0, poolVoiceActive(2) ? 1 : 0, poolVoiceActive(3) ? 1 : 0);
 #endif
         reply.print("}\n");   // close root object
         reply.printf("@APP=%s\n", g_appState);   // opaque app-owned state, emitted with @STATE so one connect rehydrates both
