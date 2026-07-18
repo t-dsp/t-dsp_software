@@ -508,6 +508,11 @@ export default function App() {
   // RAM/PSRAM dependent), not a bool: 0 hides the Audio Loop card entirely.
   const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, recedit: false, audioloop: 0 });
   const [voice2, setVoice2] = useState({ on: false, vol: 100, name: '', path: '' });
+  // Per-track live-MIDI subscription (Phase 3, Thread C), keyed by firmware track index i. `src` =
+  // which input device feeds that synth ("none"/"din"/"usb"/"multi"/…), `srcch` = channel filter
+  // (0 = all). Hydrated from @STATE tracks[]; the MIDI-Input selector on each synth card writes it
+  // via @TRK<i>.SRC / SRCCH. Data-driven: a new voice's entry just appears here, no per-voice field.
+  const [trkSubs, setTrkSubs] = useState<Record<number, { src: string; srcch: number }>>({});
   // MIDI loop recorder (build-flag gated, caps.rec). Each synth's MIDI player owns its own
   // recorder, so every setting is PER-VOICE: bars1/bars2 = that synth's loop length, st1/st2 =
   // state (0 idle 1 armed 2 recording 3 overdub 4 playing), p1/p2 = record-fill / playback-phase.
@@ -608,6 +613,13 @@ export default function App() {
     // MIDI Player 2 (voice-2 song player): restore what's playing + its loop flag → end-mode guess.
     if (j.song2) setPlayer2(p => ({ ...p, playing: !!j.song2.playing, song: j.song2.name ? songArgByName(j.song2.name) : p.song, name: j.song2.name || p.name, prog: j.song2.p != null ? j.song2.p / 1000 : (j.song2.playing ? -1 : 0) }));
     if (j.song2?.loop != null) setEndMode2(m => j.song2.loop ? 'repeat' : (m === 'repeat' ? 'stop' : m));
+    // Per-track live-MIDI subscription (Thread C): each synth entry in tracks[] carries its input
+    // device + channel filter. Rebuild the whole map so a removed/added track is reflected exactly.
+    if (Array.isArray(j.tracks)) {
+      const next: Record<number, { src: string; srcch: number }> = {};
+      for (const t of j.tracks) if (t && t.kind === 'synth' && t.i != null) next[t.i | 0] = { src: t.src || 'none', srcch: t.srcch | 0 };
+      setTrkSubs(next);
+    }
   }
 
   // Restore the opaque app-owned state (@APP=). This is the authoritative source for settings
@@ -1369,6 +1381,43 @@ export default function App() {
   const playerValue = (D: SongDeckT) => (D.player.playing ? '♪ ' : '') + (D.player.name || '—');
   const playerProgress = (D: SongDeckT) => (D.player.playing && D.player.prog >= 0 ? D.player.prog : undefined);
 
+  // MIDI Input selector (Phase 3, Thread C) — which physical device plays THIS synth, plus an
+  // optional channel filter. `i` is the firmware track index (synth card N -> track N-1). Switching
+  // is a pure @TRK<i>.SRC subscription write on the device: no repatch, no audio/loop/clock impact —
+  // you can move a keyboard between synths mid-performance with no dropout. Reuses the shared pill
+  // styles so it's ONE control every synth card renders (data-driven; a new voice reuses it verbatim).
+  // BT/Serial inputs aren't wired as sources yet (deferred), so the picker offers the real local
+  // devices: Off / DIN / USB / Both. "Both" (all local) reads back from the device as "multi".
+  const midiInputBody = (i: number) => {
+    const sub = trkSubs[i] || { src: 'none', srcch: 0 };
+    const active = sub.src === 'multi' ? 'all' : sub.src;   // both-local reports as "multi"
+    const devs = [{ k: 'none', l: 'Off' }, { k: 'din', l: 'DIN' }, { k: 'usb', l: 'USB' }, { k: 'all', l: 'Both' }];
+    const setSrc = (k: string) => { setTrkSubs(m => ({ ...m, [i]: { src: k, srcch: (m[i]?.srcch ?? 0) } })); tp.trk(i, 'SRC=' + k); };
+    const setCh  = (c: number) => { setTrkSubs(m => ({ ...m, [i]: { src: (m[i]?.src ?? 'none'), srcch: c } })); tp.trk(i, 'SRCCH=' + c); };
+    return (
+      <View style={{ marginTop: 10 }}>
+        <Text style={s.muted}>MIDI Input — which device plays this synth (switches live, no dropout)</Text>
+        <Row>
+          {devs.map(d => (
+            <Pressable key={d.k} style={[s.pill, s.grow1, active === d.k && s.pillOn]} disabled={!connected} onPress={() => setSrc(d.k)}>
+              <Text style={s.text}>{d.l}</Text>
+            </Pressable>
+          ))}
+        </Row>
+        {active !== 'none' && (<>
+          <Text style={[s.muted, { marginTop: 6 }]}>Channel filter</Text>
+          <View style={s.patGrid}>
+            {Array.from({ length: 17 }, (_, c) => (
+              <Pressable key={c} style={[s.pill, sub.srcch === c && s.pillOn]} disabled={!connected} onPress={() => setCh(c)}>
+                <Text style={s.text}>{c === 0 ? 'All' : String(c)}</Text>
+              </Pressable>
+            ))}
+          </View>
+        </>)}
+      </View>
+    );
+  };
+
   const synthActions = (<>
     <HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1)} />
     <HdrBtn label="Next ›" stop onPress={() => stepVoice(1)} />
@@ -1379,6 +1428,7 @@ export default function App() {
           @SONGVOL, the synth mix-bus fader), surfaced here since this is the synth page. */}
       <VolSlider label="Volume" value={songVol} onChange={setSongVol} onCommit={v => tp.songVol(v)} disabled={!connected} />
       {voiceBrowserBody(1)}
+      {midiInputBody(0)}
     </View>
   );
   // Voices-2 (keyboard-split) body/actions — shared by the standalone Synth/Voices 2 card and
@@ -1395,6 +1445,7 @@ export default function App() {
       {!voice2.on && <Text style={s.muted}>Synth B is off — turn it on with the ● / ○ button in the Synthesizer B header. Both sides then drop to 8-voice polyphony.</Text>}
       <VolSlider label="Volume" value={voice2.vol} onChange={v => setVoice2(x => ({ ...x, vol: v }))} onCommit={v => tp.voice2Vol(v)} disabled={!connected || !voice2.on} />
       {voiceBrowserBody(2)}
+      {midiInputBody(1)}
     </View>
   );
   // Tempo / Drums / Metronome bodies + actions — shared by the standalone cards (if shown) and
