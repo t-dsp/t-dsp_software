@@ -194,6 +194,13 @@ static const int kDexedVoices = kSynthVoices;          // homogeneous: every voi
 static inline const char *voiceEngineName(int v) { return (v >= kDexedVoices) ? "opll" : "dexed"; }
 static inline bool        voiceIsOpll(int v)      { return TDSP_HETERO && v >= kDexedVoices; }
 
+// --- Per-track mixer strip (handoff §E) ----------------------------------------------------------
+// A real fader + mute per Track, layered ON TOP of the existing per-voice level hook (Track.setLevel).
+// Only multi-track builds get it: the fixed 4-voice pool and any HETERO board. The 2-track
+// voice2/drumvoice builds stay BYTE-IDENTICAL — every mixer block below is gated on this macro, and
+// the state lives in gated arrays (NOT Track struct fields), so those builds compile to the same hex.
+#define TDSP_MIXER_STRIP (TDSP_SYNTH_VOICES >= 4 || TDSP_HETERO)
+
 tdsp::MidiFilePlayer   g_playerV[kSynthVoices];   // one song player per synth voice
 tdsp::MidiFilePlayer  &g_player = g_playerV[0];   // alias: voice 0 (all existing g_player refs)
 tdsp::ArpFilter        g_arpFilterV[kSynthVoices];   // one arp per synth voice (bypassed by default)
@@ -2378,6 +2385,22 @@ FLASHMEM static bool handleArpLine(const char* line, Print& reply, tdsp::ArpFilt
 // @SONG*/@SONG2*/@DRUM*/@ARP*/@DXPICK* stay. Covers transport (PLAY/RESTART/STOP/VOL/LOOP), the whole
 // arp surface (ARP<any> -> handleArpLine), voice select (DXPICK/DXVOICE), and the live-MIDI
 // subscription (SRC/SRCCH, Thread C). `reply` echoes confirmations back over the arriving link.
+#if TDSP_MIXER_STRIP
+// Per-track fader + mute state (handoff §E), indexed exactly like the @TRK<i> command space:
+// 0..kSynthVoices-1 = synth voices, kSynthVoices = the drum track. g_mixLevel is the user fader %,
+// g_mixMute the mute latch; the effective gain handed to the engine (via Track.setLevel) is 0 while
+// muted, else the fader %. Level is NOT applied at boot — the engines keep their power-on default
+// until the fader moves — so a non-mixer field of the graph is never touched here.
+static const int kMixTracks = kSynthVoices + 1;   // synth voices + the drum track
+static int  g_mixLevel[kMixTracks];               // per-track fader %, 0..100 (default 100)
+static bool g_mixMute [kMixTracks];               // per-track mute latch
+static Track* mixTrack(int idx) { return (idx < kSynthVoices) ? &g_tracks[idx] : &g_drumTrack; }
+static void mixApply(int idx)   { Track* t = mixTrack(idx); if (t->setLevel) t->setLevel(g_mixMute[idx] ? 0 : g_mixLevel[idx]); }
+static void mixSetLevel(int idx, int pct) { if (idx < 0 || idx >= kMixTracks) return; if (pct < 0) pct = 0; if (pct > 100) pct = 100; g_mixLevel[idx] = pct; mixApply(idx); }
+static void mixSetMute (int idx, bool m)  { if (idx < 0 || idx >= kMixTracks) return; g_mixMute[idx] = m; mixApply(idx); }
+static void mixInit() { for (int i = 0; i < kMixTracks; ++i) { g_mixLevel[i] = 100; g_mixMute[i] = false; } }
+#endif
+
 static void handleTrkCmd(const char* s, Stream& reply) {
     const char* dot = strchr(s, '.');
     if (!dot) return;
@@ -2397,7 +2420,15 @@ static void handleTrkCmd(const char* s, Stream& reply) {
     if      (strncmp(cmd, "PLAY=", 5) == 0 || strncmp(cmd, "SONGF=", 6) == 0) { const char* a = eq + 1; if (isDrum) drumStartFile(a); else trackLaunch(*t, a); }
     else if (strncmp(cmd, "RESTART=", 8) == 0) { if (isDrum) drumStartFile(arg); else trackRestart(*t, arg); }
     else if (strncmp(cmd, "STOP", 4) == 0)     { if (isDrum) drumStop(); else songStop(*t); }
+#if TDSP_MIXER_STRIP
+    // Fader + mute (handoff §E). VOL/LEVEL set the fader and stay mute-aware — dragging a muted track's
+    // fader updates its stored level but keeps it silent; MUTE toggles the latch. Non-mixer builds fall
+    // through to the original direct setLevel below, so voice2/drumvoice stay byte-identical.
+    else if (strncmp(cmd, "VOL=", 4) == 0 || strncmp(cmd, "LEVEL=", 6) == 0) { mixSetLevel(i, atoi(arg)); reply.printf("@TRK%d.LEVEL=%d\n", i, g_mixLevel[i]); }
+    else if (strncmp(cmd, "MUTE=", 5) == 0)    { mixSetMute(i, atoi(arg) != 0); reply.printf("@TRK%d.MUTE=%d\n", i, g_mixMute[i] ? 1 : 0); }
+#else
     else if (strncmp(cmd, "VOL=", 4) == 0)     { if (t->setLevel) t->setLevel(atoi(arg)); }
+#endif
     else if (strncmp(cmd, "LOOP=", 5) == 0)    { if (!isDrum) { *t->loop = (atoi(arg) != 0); t->player->setLooping(*t->loop); } }   // a groove always loops
     // Whole arp surface for the track (ON/PAT/RATE/OCT/LATCH/GATE/SWING/PRESET/SEQ) — reuse the
     // shared arp parser with a synthetic "ARP" prefix so "@TRK<i>.ARPPAT=" -> handleArpLine "PAT=".
@@ -3081,6 +3112,14 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
                      poolPreset(), poolVoiceEngines(0), poolVoiceEngines(1), poolVoiceEngines(2), poolVoiceEngines(3),
                      poolVoiceActive(0) ? 1 : 0, poolVoiceActive(1) ? 1 : 0, poolVoiceActive(2) ? 1 : 0, poolVoiceActive(3) ? 1 : 0);
 #endif
+#if TDSP_MIXER_STRIP
+        // Per-track mixer strip (handoff §E): fader % + mute latch for every track (synth voices, then
+        // the drum), indexed the same as @TRK<i>. Its mere PRESENCE tells the app this build has the
+        // mixer view. Top-level + gated so the 2-track voice2/drumvoice builds stay byte-identical.
+        reply.print(",\"mix\":[");
+        for (int i = 0; i < kMixTracks; ++i) reply.printf("%s{\"level\":%d,\"mute\":%d}", i ? "," : "", g_mixLevel[i], g_mixMute[i] ? 1 : 0);
+        reply.print("]");
+#endif
         reply.print("}\n");   // close root object
         reply.printf("@APP=%s\n", g_appState);   // opaque app-owned state, emitted with @STATE so one connect rehydrates both
     }
@@ -3223,6 +3262,9 @@ FLASHMEM static void trackWireSetup(Track &t) {
 FLASHMEM void setup() {
     hardResetCodecPower();
     tracksInit();
+#if TDSP_MIXER_STRIP
+    mixInit();   // per-track fader/mute defaults (handoff §E); does not touch boot audio (no setLevel here)
+#endif
 
     Serial.begin(115200);
     uint32_t t0 = millis();
