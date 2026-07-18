@@ -11,6 +11,16 @@
 
 #include <stdint.h>
 
+// Which physical MIDI INPUT DEVICE a live event came from (Phase 3, Thread C). The box can
+// have several inputs at once — DIN MIDI-in (Serial1), a USB-host controller (LinnStrument),
+// Bluetooth-MIDI (via the ESP32), a MIDI-over-serial source — and each Track subscribes to the
+// ones that should feed it. The MidiHub (main.cpp) tags every event with its source and fans it
+// only to the Tracks whose subscription matches, so "which device feeds this synth" is a field
+// read, never an audio-graph repatch. Values 1.. are used as bit positions in Track.liveSrcMask.
+enum MidiSourceId : uint8_t { SrcNone = 0, SrcDin = 1, SrcUsbHost = 2, SrcBtMidi = 3, SrcSerial = 4, SrcCount = 5 };
+static inline uint8_t srcBit(MidiSourceId s) { return (s == SrcNone) ? 0 : (uint8_t)(1u << s); }
+static inline uint8_t srcMaskAllLocal() { return (uint8_t)(srcBit(SrcDin) | srcBit(SrcUsbHost)); }
+
 namespace tdsp {
 class  MidiFilePlayer;   // the song player (its own @SONG feed)
 class  ArpFilter;        // the arp (bypassed = pass-through); may be null on a no-ARP2 build
@@ -75,4 +85,14 @@ struct Track {
     uint8_t *bpb;           // g_song{,2}Bpb
     double  *loopBeats;     // g_song{,2}LoopBeats
     bool    *launchPending; // g_song{,2}LaunchPending
+
+    // Live-MIDI SUBSCRIPTION (Phase 3, Thread C). Which input device(s) feed this track's live
+    // router, and an optional channel filter. Switching = one field write (the MidiHub reads it
+    // per event) — NO AudioConnection change, no loadVoice, no clock/player touch, so a synth can
+    // change which keyboard it listens to mid-performance with zero dropout. liveSrcMask is a
+    // bitmask over MidiSourceId (0 = no live input; srcMaskAllLocal() = DIN + USB-host). srcChMask
+    // filters channels: 0 = all 16, else a one-hot 1<<(ch-1). The player's own feed is unaffected —
+    // the synth always hears {its song} + {subscribed live input}. See main.cpp `midihub`.
+    uint8_t  liveSrcMask;   // bits: (1<<SrcDin)|(1<<SrcUsbHost)|… ; 0 = none
+    uint16_t srcChMask;     // 0 = all channels; else 1<<(ch-1)
 };

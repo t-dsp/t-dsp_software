@@ -1976,17 +1976,19 @@ struct RecLoadReceiver {
 static RecLoadReceiver g_recLoad;
 #endif  // TDSP_RECORDER_EDIT
 
-// --- Live MIDI IN (DIN on Serial1 + USB host) -> MPE-aware router -> synth ----
-// Both physical sources feed one MidiRouter, which normalizes pitch bend to
-// semitones (per-channel range: 2 in MIDI mode, 48 in MPE / RPN), CC74 -> timbre,
-// and channel pressure -> pressure. The router then drives the same g_synthSink the
-// song player uses. Callbacks are shared by the DIN (MIDI.h) and USB host (MIDIDevice)
-// sources — their setHandle* signatures match. Compiled only if at least one
-// hardware MIDI input exists (else nothing registers them).
-#if TDSP_HAS_DIN_MIDI || TDSP_HAS_USB_MIDI_HOST
-// SYNCHRO START (PSS-140 style): the first live note kicks off an armed groove on beat 1
-// — you pick the downbeat by when you play. (vel 0 = note-off, ignore.) Shared by the DIN
-// and USB-host note-on callbacks so a keyboard press starts the groove either way.
+// --- Live MIDI IN -> MIDI HUB -> per-track routers (Phase 3, Thread C) ----------
+// The box can have several MIDI INPUT DEVICES at once (DIN on Serial1, a USB-host controller,
+// Bluetooth-MIDI via the ESP32, a serial source) and N synth voices. Every input tags its events
+// with a MidiSourceId and calls midihub::*; the hub fans each event ONLY to the Tracks whose
+// liveSrcMask subscribes to that source (and whose optional channel filter matches), into that
+// Track's router -> [arp] -> sink. So "which device feeds which synth" is a per-Track FIELD, and
+// switching it is a field write the hub reads on the next event — the static audio graph never
+// changes (no AudioConnection edit, no loadVoice, no clock/player touch). Each router still
+// normalizes pitch bend to semitones (2 normal / 48 MPE), CC74 -> timbre, pressure -> Z. This
+// replaces the old usbRouter() keyboard-owner switch (gone) with a subscription model. See Track.h.
+
+// SYNCHRO START (PSS-140 style): the first live note kicks off an armed groove on beat 1 — you
+// pick the downbeat by when you play. Source-agnostic: any input's first note arms the groove.
 static void maybeSynchroStart(byte vel) {
     if (g_drumArmed && vel > 0) {
         g_drumArmed = false;
@@ -1996,42 +1998,100 @@ static void maybeSynchroStart(byte vel) {
         Serial.println("[drum] SYNCHRO start (first note)");
     }
 }
-static void midiNoteOn  (byte ch, byte note, byte vel) { maybeSynchroStart(vel); g_router.handleNoteOn(ch, note, vel); }
-static void midiNoteOff (byte ch, byte note, byte vel) { g_router.handleNoteOff(ch, note, vel); }
-static void midiCC      (byte ch, byte cc,   byte val) { g_router.handleControlChange(ch, cc, val); }
-static void midiPitch   (byte ch, int bend)            { g_router.handlePitchBend(ch, (int16_t)bend); }
-static void midiPressure(byte ch, byte pressure)       { g_router.handleChannelPressure(ch, pressure); }
 
-#if TDSP_VOICE2 && TDSP_HAS_USB_MIDI_HOST
-// USB-host controller callbacks: identical to the DIN ones EXCEPT that when the Voices-2
-// split is on they steer to the keyboard router (g_kbdRouter -> g_synthSinkB) instead of
-// the main path. With the split off they behave exactly like the shared callbacks above.
-static inline tdsp::MidiRouter& usbRouter() { return g_voice2On ? g_kbdRouter : g_router; }
-// Track the USB keyboard's currently-held notes so an owner switch can release them on the
-// sink the keyboard is LEAVING (individual note-offs — never a panic, which would cut voice 1's
-// song). Without this, a note held across a switch would hang (its key-up goes to the new sink).
-static uint8_t g_usbHeldN = 0;
-static struct { uint8_t ch, note; } g_usbHeld[24];
-static void usbHeldAdd(uint8_t ch, uint8_t note) {
-    for (uint8_t i = 0; i < g_usbHeldN; ++i) if (g_usbHeld[i].ch == ch && g_usbHeld[i].note == note) return;
-    if (g_usbHeldN < 24) { g_usbHeld[g_usbHeldN].ch = ch; g_usbHeld[g_usbHeldN].note = note; g_usbHeldN++; }
+namespace midihub {
+    // Held live notes, per source, so a subscription change can release cleanly (no hung note) on a
+    // track that stops listening — the generalization of the old per-keyboard usbHeld flush. Sized
+    // for the deepest realistic chord; extra notes past the cap just aren't auto-released on switch.
+    struct Held { uint8_t ch, note; };
+    static Held    s_held[SrcCount][24];
+    static uint8_t s_heldN[SrcCount];
+    static void heldAdd(MidiSourceId s, uint8_t ch, uint8_t note) {
+        uint8_t &n = s_heldN[s];
+        for (uint8_t i = 0; i < n; ++i) if (s_held[s][i].ch == ch && s_held[s][i].note == note) return;
+        if (n < 24) { s_held[s][n].ch = ch; s_held[s][n].note = note; ++n; }
+    }
+    static void heldRemove(MidiSourceId s, uint8_t ch, uint8_t note) {
+        uint8_t &n = s_heldN[s];
+        for (uint8_t i = 0; i < n; ++i) if (s_held[s][i].ch == ch && s_held[s][i].note == note) { s_held[s][i] = s_held[s][--n]; return; }
+    }
+    static inline bool subscribed(const Track &t, MidiSourceId s) { return (t.liveSrcMask & srcBit(s)) != 0; }
+    static inline bool chOk(const Track &t, uint8_t ch) { return t.srcChMask == 0 || (ch >= 1 && ch <= 16 && (t.srcChMask & (uint16_t)(1u << (ch - 1)))); }
+
+    // The five fan-out entries. O(tracks) enum/pointer compares + forward — no audio-graph work.
+    static void noteOn(MidiSourceId s, uint8_t ch, uint8_t note, uint8_t vel) {
+        maybeSynchroStart(vel);
+        if (vel) heldAdd(s, ch, note); else heldRemove(s, ch, note);
+        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handleNoteOn(ch, note, vel);
+    }
+    static void noteOff(MidiSourceId s, uint8_t ch, uint8_t note, uint8_t vel) {
+        heldRemove(s, ch, note);
+        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handleNoteOff(ch, note, vel);
+    }
+    static void controlChange(MidiSourceId s, uint8_t ch, uint8_t cc, uint8_t val) {
+        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handleControlChange(ch, cc, val);
+    }
+    static void pitchBend(MidiSourceId s, uint8_t ch, int bend) {
+        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handlePitchBend(ch, (int16_t)bend);
+    }
+    static void channelPressure(MidiSourceId s, uint8_t ch, uint8_t pressure) {
+        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handleChannelPressure(ch, pressure);
+    }
+
+    // Change a track's live subscription. Releases notes still held on the sources it's DROPPING
+    // (this track's router only — clean note-offs, never a panic that could cut a song), then swaps
+    // the mask. Pure field write + a few note-offs; the audio graph is untouched. This is the switch
+    // the app drives via @TRK<i>.SRC and the zero-dropout acceptance test.
+    static void setSources(Track &t, uint8_t newMask) {
+        if (t.router) {
+            uint8_t removed = (uint8_t)(t.liveSrcMask & ~newMask);
+            for (uint8_t s = SrcDin; s < SrcCount; ++s) if (removed & (uint8_t)(1u << s))
+                for (uint8_t i = 0; i < s_heldN[s]; ++i) t.router->handleNoteOff(s_held[s][i].ch, s_held[s][i].note, 0);
+        }
+        t.liveSrcMask = newMask;
+    }
+    // Wire<->mask helpers for @TRK<i>.SRC= and @STATE. The app picks a single device (or none/all).
+    static uint8_t parseSrcMask(const char *a) {
+        if (!strcmp(a, "none"))   return 0;
+        if (!strcmp(a, "all"))    return srcMaskAllLocal();
+        if (!strcmp(a, "din"))    return srcBit(SrcDin);
+        if (!strcmp(a, "usb"))    return srcBit(SrcUsbHost);
+        if (!strcmp(a, "bt"))     return srcBit(SrcBtMidi);
+        if (!strcmp(a, "serial")) return srcBit(SrcSerial);
+        return 0;
+    }
+    static const char *srcName(uint8_t mask) {
+        switch (mask) {
+            case 0:                       return "none";
+            case (1u << SrcDin):          return "din";
+            case (1u << SrcUsbHost):      return "usb";
+            case (1u << SrcBtMidi):       return "bt";
+            case (1u << SrcSerial):       return "serial";
+            default:                      return "multi";   // >1 source subscribed
+        }
+    }
+    static int chNum(uint16_t mask) {   // report the channel filter as a single number (0 = all)
+        if (mask == 0) return 0;
+        for (int c = 1; c <= 16; ++c) if (mask == (uint16_t)(1u << (c - 1))) return c;
+        return 0;
+    }
 }
-static void usbHeldRemove(uint8_t ch, uint8_t note) {
-    for (uint8_t i = 0; i < g_usbHeldN; ++i) if (g_usbHeld[i].ch == ch && g_usbHeld[i].note == note) { g_usbHeld[i] = g_usbHeld[--g_usbHeldN]; return; }
-}
-// Release every held keyboard note on the CURRENT owner's router, then clear. Call BEFORE
-// flipping g_voice2On so the note-offs land on the sink being left (no hung notes, no song cut).
-static void usbFlushHeld() {
-    for (uint8_t i = 0; i < g_usbHeldN; ++i) usbRouter().handleNoteOff(g_usbHeld[i].ch, g_usbHeld[i].note, 0);
-    g_usbHeldN = 0;
-}
-static void usbNoteOn  (byte ch, byte note, byte vel) { maybeSynchroStart(vel); if (vel) usbHeldAdd(ch, note); else usbHeldRemove(ch, note); usbRouter().handleNoteOn(ch, note, vel); }
-static void usbNoteOff (byte ch, byte note, byte vel) { usbHeldRemove(ch, note); usbRouter().handleNoteOff(ch, note, vel); }
-static void usbCC      (byte ch, byte cc,   byte val) { usbRouter().handleControlChange(ch, cc, val); }
-static void usbPitch   (byte ch, int bend)            { usbRouter().handlePitchBend(ch, (int16_t)bend); }
-static void usbPressure(byte ch, byte pressure)       { usbRouter().handleChannelPressure(ch, pressure); }
+
+// Physical-input callbacks: each tags its source and hands off to the hub. Signatures match the
+// MIDI.h (DIN) and MIDIDevice (USB host) setHandle* families so both register the same shapes.
+#if TDSP_HAS_DIN_MIDI
+static void dinNoteOn  (byte ch, byte note, byte vel) { midihub::noteOn (SrcDin, ch, note, vel); }
+static void dinNoteOff (byte ch, byte note, byte vel) { midihub::noteOff(SrcDin, ch, note, vel); }
+static void dinCC      (byte ch, byte cc,   byte val) { midihub::controlChange(SrcDin, ch, cc, val); }
+static void dinPitch   (byte ch, int  bend)           { midihub::pitchBend(SrcDin, ch, bend); }
 #endif
-#endif  // TDSP_HAS_DIN_MIDI || TDSP_HAS_USB_MIDI_HOST
+#if TDSP_HAS_USB_MIDI_HOST
+static void usbHostNoteOn  (byte ch, byte note, byte vel) { midihub::noteOn (SrcUsbHost, ch, note, vel); }
+static void usbHostNoteOff (byte ch, byte note, byte vel) { midihub::noteOff(SrcUsbHost, ch, note, vel); }
+static void usbHostCC      (byte ch, byte cc,   byte val) { midihub::controlChange(SrcUsbHost, ch, cc, val); }
+static void usbHostPitch   (byte ch, int  bend)           { midihub::pitchBend(SrcUsbHost, ch, bend); }
+static void usbHostPressure(byte ch, byte pressure)       { midihub::channelPressure(SrcUsbHost, ch, pressure); }
+#endif
 
 // Switch the device between normal MIDI and MPE (per-note expression). Sets the
 // router's per-channel bend range (2 vs the LinnStrument's 48-semi default) and lets
@@ -2039,12 +2099,9 @@ static void usbPressure(byte ch, byte pressure)       { usbRouter().handleChanne
 static void applyMidiMode(bool mpe) {
     g_mpeMode = mpe;
     float range = mpe ? tdsp::MidiRouter::kDefaultPitchBendRange : 2.0f;   // 48 (MPE) vs 2
-    for (uint8_t ch = 1; ch <= 16; ch++) g_router.setPitchBendRange(ch, range);
-#if TDSP_VOICE2
-    // The USB-host keyboard (e.g. LinnStrument) rides its own router. Track the same
-    // range so per-note slides aren't clamped to +-2 semis in MPE — see g_kbdRouter setup.
-    for (uint8_t ch = 1; ch <= 16; ch++) g_kbdRouter.setPitchBendRange(ch, range);
-#endif
+    // Every voice's live-MIDI router gets the same bend range so an MPE controller's per-note
+    // slides aren't clamped to +-2 semis on whichever synth it's subscribed to (voices 2/3 too).
+    for (tdsp::MidiRouter &r : g_routerV) for (uint8_t ch = 1; ch <= 16; ch++) r.setPitchBendRange(ch, range);
     // MPE is single-timbre: a song's per-channel program changes shouldn't apply, so the
     // whole performance (and the MPE test song) uses the SELECTED instrument, not the file's.
     g_player.setProgramChangeEnabled(!mpe);
@@ -2148,12 +2205,14 @@ FLASHMEM static bool handleArpLine(const char* line, Print& reply, tdsp::ArpFilt
     return true;
 }
 
-// Track-indexed command dispatch (Phase 3): "@TRK<i>.<CMD>[=<arg>]" routes a UNIFORM transport
-// interface to any track by index — g_tracks[0..n-1] (synth voices) or g_drumTrack (the drum). This
-// is what lets the app drive N cards from the @STATE tracks[] array with one command family, and a
-// future 4th/5th track needs no new command. Thin aliases over the existing per-voice handlers; the
-// legacy @SONG*/@SONG2*/@DRUM* stay. Arp params keep their @ARP*/@ARP2* commands for now (deferred).
-static void handleTrkCmd(const char* s) {
+// Track-indexed command dispatch (Phase 3): "@TRK<i>.<CMD>[=<arg>]" routes a UNIFORM interface
+// to any track by index — g_tracks[0..n-1] (synth voices) or g_drumTrack (the drum). This is what
+// lets the app drive N cards from the @STATE tracks[] array with one command family, so a future
+// 4th/5th track needs no new command. Thin dispatch over the existing per-voice handlers; the legacy
+// @SONG*/@SONG2*/@DRUM*/@ARP*/@DXPICK* stay. Covers transport (PLAY/RESTART/STOP/VOL/LOOP), the whole
+// arp surface (ARP<any> -> handleArpLine), voice select (DXPICK/DXVOICE), and the live-MIDI
+// subscription (SRC/SRCCH, Thread C). `reply` echoes confirmations back over the arriving link.
+static void handleTrkCmd(const char* s, Stream& reply) {
     const char* dot = strchr(s, '.');
     if (!dot) return;
     const int i = atoi(s);                       // "<i>" before the dot
@@ -2170,7 +2229,38 @@ static void handleTrkCmd(const char* s) {
     else if (strncmp(cmd, "STOP", 4) == 0)     { if (isDrum) drumStop(); else songStop(*t); }
     else if (strncmp(cmd, "VOL=", 4) == 0)     { if (t->setLevel) t->setLevel(atoi(arg)); }
     else if (strncmp(cmd, "LOOP=", 5) == 0)    { if (!isDrum) { *t->loop = (atoi(arg) != 0); t->player->setLooping(*t->loop); } }   // a groove always loops
-    else if (strncmp(cmd, "ARPON=", 6) == 0)   { if (t->arp) t->arp->setEnabled(atoi(arg) != 0); }
+    // Whole arp surface for the track (ON/PAT/RATE/OCT/LATCH/GATE/SWING/PRESET/SEQ) — reuse the
+    // shared arp parser with a synthetic "ARP" prefix so "@TRK<i>.ARPPAT=" -> handleArpLine "PAT=".
+    else if (strncmp(cmd, "ARP", 3) == 0)      { if (t->arp) handleArpLine(cmd, reply, *t->arp, "ARP"); }
+    // Live-MIDI input subscription (Thread C): which physical device feeds this synth + channel
+    // filter. Pure field writes the hub reads per event — no audio-graph repatch, zero switch latency.
+    else if (strncmp(cmd, "SRC=", 4) == 0)     { midihub::setSources(*t, midihub::parseSrcMask(arg)); reply.printf("@TRK%d.SRC=%s\n", i, midihub::srcName(t->liveSrcMask)); }
+    else if (strncmp(cmd, "SRCCH=", 6) == 0)   { int n = atoi(arg); t->srcChMask = (n <= 0 || n > 16) ? 0 : (uint16_t)(1u << (n - 1)); reply.printf("@TRK%d.SRCCH=%d\n", i, midihub::chNum(t->srcChMask)); }
+#if defined(TDSP_SYNTH_DEXED) || defined(TDSP_SYNTH_DEXED_POOL)
+    // Voice select for this track. DXPICK=<relCart>\t<voice> (library pick) / DXVOICE=<idx> (bundled).
+    else if (strncmp(cmd, "DXPICK=", 7) == 0 && !isDrum) {
+        char buf[160]; strncpy(buf, arg, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
+        int voice = 0; char* tab = strrchr(buf, '\t'); if (tab) { *tab = 0; voice = atoi(tab + 1); }
+        const char* nm =
+#if TDSP_SYNTH_VOICES >= 4
+            synthPickCartVoiceV(i, buf, voice);
+#elif TDSP_VOICE2
+            (i == 1) ? synthPickCartVoice2(buf, voice) : synthPickCartVoice(buf, voice);
+#else
+            synthPickCartVoice(buf, voice);
+#endif
+        reply.printf("@TRK%d.DXPICKED=%s\t%d\t%s\n", i, buf, voice, nm ? nm : "?");
+    }
+    else if (strncmp(cmd, "DXVOICE=", 8) == 0 && !isDrum) {
+#if TDSP_SYNTH_VOICES >= 4
+        synthSetInstrumentV(i, atoi(arg));
+#elif TDSP_VOICE2
+        if (i == 1) synthSetInstrument2(atoi(arg)); else synthSetInstrument(atoi(arg));
+#else
+        synthSetInstrument(atoi(arg));
+#endif
+    }
+#endif
 }
 
 // `reply` is the stream the command arrived on (USB Serial or the ESP32 UART,
@@ -2221,7 +2311,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         reply.printf("@DXPICKED=%s\t%d\t%s\n", buf, voice, nm ? nm : "?");
     }
 #endif
-    else if (strncmp(line, "@TRK", 4) == 0)       handleTrkCmd(line + 4);   // @TRK<i>.<CMD>[=<arg>] — uniform per-track transport (Phase 3)
+    else if (strncmp(line, "@TRK", 4) == 0)       handleTrkCmd(line + 4, reply);   // @TRK<i>.<CMD>[=<arg>] — uniform per-track interface (Phase 3)
     else if (strncmp(line, "@SONGF=", 7) == 0)    trackLaunch(g_tracks[0], line + 7);     // @SONGF=<filename|name> (play by name — the app's path; bar-quantized if @QUANTIZE=1)
     else if (strncmp(line, "@SONGRESTART=", 13) == 0) trackRestart(g_tracks[0], line + 13);   // hard restart on a fresh downbeat — the app's Play / ‹ ›
     else if (strncmp(line, "@SONG=", 6) == 0) {
@@ -2552,9 +2642,6 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     else if (strncmp(line, "@VOICE2=", 8) == 0) {          // Synth B master enable (dynamic 4/4 pool split)
         bool on = (atoi(line + 8) != 0);
         if (on != g_voice2On) {
-#if TDSP_HAS_USB_MIDI_HOST
-            usbFlushHeld();          // release held keyboard notes on the router being LEFT (no hang, no song cut)
-#endif
             if (!on) {
                 // Disabling Synth B: engines 4..7 rejoin Synth A, so nothing may keep driving the
                 // B sink or its notes collide with voice 1. Stop the B song player and silence
@@ -2564,8 +2651,18 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
                 g_arpFilter2.panic();
 #endif
             }
-            g_voice2On = on;         // usbRouter() now steers the keyboard to the new owner
+            g_voice2On = on;
             synthSetVoice2Enabled(on);   // reshape the pool: 4/4 split (on) or unified 8 engines (off)
+#if TDSP_HAS_USB_MIDI_HOST
+            // Keyboard follows the split via the SUBSCRIPTION model (a field write, not a router
+            // repatch): move the USB-host source onto whichever voice is now active. setSources()
+            // releases any held keyboard notes on the voice being left — no hang, no song cut. The
+            // app's explicit @TRK<i>.SRC commands take over from here if it drives them.
+            midihub::setSources(g_tracks[1], on ? (uint8_t)(g_tracks[1].liveSrcMask |  srcBit(SrcUsbHost))
+                                                : (uint8_t)(g_tracks[1].liveSrcMask & ~srcBit(SrcUsbHost)));
+            midihub::setSources(g_tracks[0], on ? (uint8_t)(g_tracks[0].liveSrcMask & ~srcBit(SrcUsbHost))
+                                                : (uint8_t)(g_tracks[0].liveSrcMask |  srcBit(SrcUsbHost)));
+#endif
         }
         reply.printf("@VOICE2=%d\n", g_voice2On ? 1 : 0);
     }
@@ -2668,12 +2765,16 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         // render a card per track (kind/name/playing/on/arp) instead of hardcoding Synth A/B/Drums.
         // Additive alongside the per-voice keys above; the app migrates to this, the old keys retire
         // later. "on" = the track is currently usable (voice 2 enabled / engine renders ch10 drums).
+        // Each synth entry also carries its live-MIDI subscription (Thread C): "src" = which input
+        // device feeds it ("din"/"usb"/"bt"/"serial"/"none"/"multi"), "srcch" = channel filter (0=all).
         reply.print(",\"tracks\":[");
-        reply.printf("{\"i\":0,\"kind\":\"synth\",\"playing\":%d,\"on\":1,\"arp\":1,\"name\":", g_tracks[0].player->isPlaying() ? 1 : 0);
+        reply.printf("{\"i\":0,\"kind\":\"synth\",\"playing\":%d,\"on\":1,\"arp\":1,\"src\":\"%s\",\"srcch\":%d,\"name\":",
+                     g_tracks[0].player->isPlaying() ? 1 : 0, midihub::srcName(g_tracks[0].liveSrcMask), midihub::chNum(g_tracks[0].srcChMask));
         tdsp::catdb::jsonStr(reply, synthInstrumentName(synthInstrument())); reply.print("}");
 #if TDSP_VOICE2
-        reply.printf(",{\"i\":1,\"kind\":\"synth\",\"playing\":%d,\"on\":%d,\"arp\":%d,\"name\":",
-                     g_tracks[1].player->isPlaying() ? 1 : 0, g_voice2On ? 1 : 0, TDSP_ARP2 ? 1 : 0);
+        reply.printf(",{\"i\":1,\"kind\":\"synth\",\"playing\":%d,\"on\":%d,\"arp\":%d,\"src\":\"%s\",\"srcch\":%d,\"name\":",
+                     g_tracks[1].player->isPlaying() ? 1 : 0, g_voice2On ? 1 : 0, TDSP_ARP2 ? 1 : 0,
+                     midihub::srcName(g_tracks[1].liveSrcMask), midihub::chNum(g_tracks[1].srcChMask));
         tdsp::catdb::jsonStr(reply, synthInstrumentName(g_synthInstrument2)); reply.print("}");
 #endif
         reply.printf(",{\"i\":%d,\"kind\":\"drum\",\"playing\":%d,\"on\":%d,\"arp\":0,\"name\":",
@@ -2716,6 +2817,7 @@ FLASHMEM static void tracksInit() {
     t0.caps = { /*ownsGlobalMode*/true, /*ownsMeter*/true, /*prepSpecial*/true, /*splitGuarded*/false };
     t0.name = g_curSongName; t0.arg = g_curSongArg; t0.loop = &g_loop; t0.wasPlaying = &g_songWasPlaying;
     t0.bpm = &g_songBpm; t0.bpb = &g_songBpb; t0.loopBeats = &g_songLoopBeats; t0.launchPending = &g_songLaunchPending;
+    t0.liveSrcMask = srcMaskAllLocal(); t0.srcChMask = 0;   // voice 0 hears BOTH local inputs (DIN + USB) by default
 #if TDSP_VOICE2
     Track &t1 = g_tracks[1];
     t1.player = &g_player2;
@@ -2735,6 +2837,7 @@ FLASHMEM static void tracksInit() {
     t1.caps = { false, false, false, /*splitGuarded*/true };
     t1.name = g_curSong2Name; t1.arg = g_curSong2Arg; t1.loop = &g_song2Loop; t1.wasPlaying = &g_song2WasPlaying;
     t1.bpm = &g_song2Bpm; t1.bpb = &g_song2Bpb; t1.loopBeats = &g_song2LoopBeats; t1.launchPending = &g_song2LaunchPending;
+    t1.liveSrcMask = 0; t1.srcChMask = 0;   // idle until @VOICE2 moves the keyboard here, or @TRK1.SRC assigns a device
 #endif
 
     // Drum track (Phase 2): a Track peer of the voices, bound to the looping ch10 groove player.
@@ -2749,6 +2852,7 @@ FLASHMEM static void tracksInit() {
                 /*mutesSongDrums*/true, /*tempoSourceWhenIdle*/true };
     td.name = g_curDrumName; td.arg = g_curDrumArg; td.loop = &g_drumLoop; td.wasPlaying = &g_drumWasPlaying;
     td.bpm = &g_drumFileBpm; td.bpb = &g_drumBpb; td.loopBeats = &g_drumLoopBeats; td.launchPending = &g_drumLaunchPending;
+    td.liveSrcMask = 0; td.srcChMask = 0;   // a groove has no live input (router is null)
 }
 
 // Wire one track's MIDI graph (unified — replaces the parallel voice-1/voice-2 hookup blocks in
@@ -2881,32 +2985,23 @@ FLASHMEM void setup() {
     applyAppMaster();            // digital app master start (TDSP_DEFAULT_APP_VOL_PCT)
 
 #if TDSP_HAS_DIN_MIDI
-    // Physical MIDI IN on Serial1 (pin 0), omni, soft-thru off -> the router.
+    // Physical MIDI IN on Serial1 (pin 0), omni, soft-thru off -> the hub (SrcDin).
     MIDI.begin(MIDI_CHANNEL_OMNI);
     MIDI.turnThruOff();
-    MIDI.setHandleNoteOn(midiNoteOn);
-    MIDI.setHandleNoteOff(midiNoteOff);
-    MIDI.setHandlePitchBend(midiPitch);
-    MIDI.setHandleControlChange(midiCC);
+    MIDI.setHandleNoteOn(dinNoteOn);
+    MIDI.setHandleNoteOff(dinNoteOff);
+    MIDI.setHandlePitchBend(dinPitch);
+    MIDI.setHandleControlChange(dinCC);
 #endif
 #if TDSP_HAS_USB_MIDI_HOST
-    // USB host: a controller (LinnStrument) plugged into the Teensy 4.1 host port. On
-    // Voices-2 builds it uses the split-aware usb* callbacks (steer to the keyboard router
-    // when @VOICE2=1); otherwise the shared DIN callbacks (main path).
+    // USB host: a controller (LinnStrument) plugged into the Teensy 4.1 host port -> the hub
+    // (SrcUsbHost). Which synth voice(s) it feeds is the Track subscription, not a callback choice.
     g_usbHost.begin();
-#if TDSP_VOICE2
-    g_usbMidi.setHandleNoteOn(usbNoteOn);
-    g_usbMidi.setHandleNoteOff(usbNoteOff);
-    g_usbMidi.setHandleControlChange(usbCC);
-    g_usbMidi.setHandlePitchChange(usbPitch);
-    g_usbMidi.setHandleAfterTouchChannel(usbPressure);
-#else
-    g_usbMidi.setHandleNoteOn(midiNoteOn);
-    g_usbMidi.setHandleNoteOff(midiNoteOff);
-    g_usbMidi.setHandleControlChange(midiCC);
-    g_usbMidi.setHandlePitchChange(midiPitch);
-    g_usbMidi.setHandleAfterTouchChannel(midiPressure);   // channel pressure = MPE Z-axis
-#endif
+    g_usbMidi.setHandleNoteOn(usbHostNoteOn);
+    g_usbMidi.setHandleNoteOff(usbHostNoteOff);
+    g_usbMidi.setHandleControlChange(usbHostCC);
+    g_usbMidi.setHandlePitchChange(usbHostPitch);
+    g_usbMidi.setHandleAfterTouchChannel(usbHostPressure);   // channel pressure = MPE Z-axis
 #endif
 
     // Uniform per-track MIDI graph (trackWireSetup): each track's router + song player feed [arp] ->
@@ -2945,10 +3040,7 @@ FLASHMEM void setup() {
     g_conductor.addFollower(&g_launchSched);   // flags bar edges so loop() can fire quantized launches
     g_router.addSink(&g_clockSink);
     g_conductor.setTickHook(+[](void*){
-        g_router.handleClock();
-#if TDSP_VOICE2
-        g_kbdRouter.handleClock();   // step the keyboard-path arp (arp2) on the master grid
-#endif
+        for (tdsp::MidiRouter &r : g_routerV) r.handleClock();   // step every voice's arp on the master grid
     }, nullptr);
     synthBegin();
     // Capture the engine's drum capability NOW (synthBegin set the song mask to
@@ -3037,10 +3129,7 @@ static void pumpTransport() {
 #endif
     for (Track &t : g_tracks) t.player->tick();
     g_drumPlayer.tick();
-    g_arpFilter.tick(micros());
-#if TDSP_VOICE2 && TDSP_ARP2
-    g_arpFilter2.tick(micros());
-#endif
+    for (tdsp::ArpFilter &a : g_arpFilterV) a.tick(micros());
 #if TDSP_RECORDER
     g_loop1.poll(); g_loop1.tick();
 #if TDSP_VOICE2
@@ -3103,10 +3192,7 @@ void loop() {
         for (Track &t : g_tracks) t.player->tick();   // a just-launched player hits its downbeat now (already-running ones no-op)
         g_drumPlayer.tick();
     }
-    g_arpFilter.tick(micros());   // drain the arp's gate-off queue (note steps fire on onClock)
-#if TDSP_VOICE2 && TDSP_ARP2
-    g_arpFilter2.tick(micros());  // same for the keyboard-path arp
-#endif
+    for (tdsp::ArpFilter &a : g_arpFilterV) a.tick(micros());   // drain each arp's gate-off queue (steps fire on onClock)
 #if TDSP_RECORDER
     g_loop1.poll(); g_loop1.tick();   // close the record window on the beat + advance loop playback
 #if TDSP_VOICE2
