@@ -34,6 +34,15 @@ public:
     }
     void onNoteOff(uint8_t ch, uint8_t note, uint8_t) override {
         tsf *t = *_t; if (!t) return;
+        // GM percussion (ch10) is ONE-SHOT: a struck drum should ring its natural sample
+        // decay. Exported drum MIDI authors a note-off right after every hit — meaningless
+        // for a one-shot, but it triggers TSF's volume-envelope RELEASE and chops the tail,
+        // so the kit sounds clipped/dry. DROP note-offs on the drum channel so kick, snare,
+        // toms, claps, crashes, ride, closed hat, etc. all ring out. EXCEPT the hi-hats that
+        // genuinely articulate on note-off: OPEN hat (46) and PEDAL hat (44) must be able to
+        // CLOSE — and TSF has no SF2 exclusive-class/choke-group support, so the authored
+        // note-off is the only thing that stops a ringing open hat. Keep those two.
+        if (ch == 10 && note != 46 && note != 44) return;
         AudioNoInterrupts(); tsf_channel_note_off(t, ch - 1, note); AudioInterrupts();
     }
     void onProgramChange(uint8_t ch, uint8_t prog) override {

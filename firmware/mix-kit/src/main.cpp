@@ -1004,6 +1004,15 @@ static bool   g_song4LaunchPending = false;
 static bool          g_syncProbe = false;   // @SYNCPROBE: 1 Hz drift probe (PLAN §9)
 static elapsedMillis g_syncProbeClock;      // throttle for the probe print
 
+// @DRUMJIT: drum-timing jitter probe. Measures how late each drum note-ON fires vs its
+// scheduled beat (dispatch lateness = loop()-polling latency + loop() stalls) plus the
+// worst loop()-to-loop() gap. Emits a @JIT line once/second while enabled. See
+// tools/drum_jitter_test.py + planning docs on the audio-locked sequencer.
+static bool          g_jitProbe = false;
+static elapsedMillis g_jitClock;            // 1 Hz emit throttle
+static uint32_t      g_lastLoopUs = 0;      // for loop()-to-loop() gap
+static uint32_t      g_maxLoopGapUs = 0;    // worst gap in the current 1 s window
+
 // Generic app-owned state blob. The app has settings the firmware never interprets or acts
 // on (e.g. the MIDI player's end-of-song mode: shuffle/continue/stop) but which must survive
 // an app reload/reconnect. Rather than a per-setting command + @STATE field for each, the app
@@ -2583,6 +2592,14 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         reply.printf("@SYNCPROBE=%d\n", g_syncProbe ? 1 : 0);
         Serial.printf("[sync] probe %s\n", g_syncProbe ? "ON (1 Hz)" : "off");
     }
+    else if (strncmp(line, "@DRUMJIT=", 9) == 0) {   // drum-timing jitter probe: dispatch lateness + loop() gap
+        g_jitProbe = (atoi(line + 9) != 0);
+        g_drumPlayer.setJitterProbe(g_jitProbe);
+        g_drumPlayer.resetJitter();
+        g_maxLoopGapUs = 0; g_lastLoopUs = 0; g_jitClock = 0;
+        reply.printf("@DRUMJIT=%d\n", g_jitProbe ? 1 : 0);
+        Serial.printf("[jit] drum jitter probe %s\n", g_jitProbe ? "ON (1 Hz @JIT)" : "off");
+    }
 #ifdef TDSP_METRONOME
     else if (strncmp(line, "@METRO=", 7) == 0) {   // MASTER TRANSPORT play/stop (the metronome IS the clock)
         if (atoi(line + 7) != 0) transportPlay(); else transportStop();
@@ -3338,6 +3355,10 @@ FLASHMEM void setup() {
     g_drumPlayer.setChannelMask((uint16_t)(1u << 9));   // MIDI channel 10 (index 9)
     g_drumPlayer.setProgramChangeEnabled(false);
     g_drumPlayer.setLooping(true);
+    g_drumPlayer.setOneShotTail(true);   // drums are one-shot: don't fire the loop's seam note-offs
+                                         // (end-of-track cleanup) — let the last fill/crash ring through
+                                         // instead of getting chopped every bar. Mid-loop offs (hat chokes)
+                                         // still fire, so articulation is preserved.
 #if TDSP_VOICE2
     // Voice 2's per-channel bend range is owned by applyMidiMode() (2 normal / 48 MPE); the startup
     // applyMidiMode() call below sets it, so an MPE controller's per-note slides aren't clamped.
@@ -3489,6 +3510,14 @@ void loop() {
     // ticks the slow LED heartbeat and returns false.
     if (kit.service(Serial)) return;
 
+    // Jitter probe: worst loop()-to-loop() gap this window. A drum hit can be delayed by
+    // at most one loop() period, so this bounds the dispatch jitter (see @DRUMJIT / @JIT).
+    if (g_jitProbe) {
+        uint32_t nowUs = micros();
+        if (g_lastLoopUs) { uint32_t gap = nowUs - g_lastLoopUs; if (gap > g_maxLoopGapUs) g_maxLoopGapUs = gap; }
+        g_lastLoopUs = nowUs;
+    }
+
 #if TDSP_HAS_SDCARD && defined(USB_MTPDISK_SERIAL)
     MTP.loop();   // service USB file transfers to/from the SD (host drag-and-drop)
 #endif
@@ -3568,6 +3597,23 @@ void loop() {
                       g_conductor.clock().positionBeats(),
                       g_drumPlayer.isSynced() ? 1 : 0, g_drumPlayer.syncCursorBeat(), g_drumPlayer.syncLoopBeats(),
                       g_player.isSynced() ? 1 : 0, g_player.syncCursorBeat(), g_player.syncLoopBeats());
+    }
+
+    // @DRUMJIT: once/second, emit drum dispatch-lateness stats + worst loop() gap. Lateness
+    // is reported in ms (converted from beats via the live master BPM) so the host tool can
+    // read on-beat accuracy directly. Cumulative since @DRUMJIT=1 for count/mean/max; the
+    // loop gap is a per-second worst-case (reset each window to surface sporadic stalls).
+    if (g_jitProbe && g_jitClock >= 1000) {
+        g_jitClock = 0;
+        const float bpm = g_masterBpm > 1.0f ? g_masterBpm : 120.0f;
+        const double msPerBeat = 60000.0 / (double)bpm;
+        Serial.printf("@JIT n=%lu maxLate=%.2f meanLate=%.2f std=%.2f maxLoopGap=%.0f bpm=%.1f\n",
+                      (unsigned long)g_drumPlayer.jitterCount(),
+                      g_drumPlayer.jitterMaxBeats()  * msPerBeat,
+                      g_drumPlayer.jitterMeanBeats() * msPerBeat,
+                      g_drumPlayer.jitterStdBeats()  * msPerBeat,
+                      (double)g_maxLoopGapUs / 1000.0, (double)bpm);
+        g_maxLoopGapUs = 0;   // per-second worst-case window
     }
 
     // Push each track's playback position to the app (drives the MIDI Player progress bars): @SONGP
