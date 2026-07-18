@@ -1709,6 +1709,9 @@ static void transportPlay() {
 #if TDSP_ARP2
     g_arpFilter2.resyncToGrid();
 #endif
+#if TDSP_SYNTH_VOICES >= 3
+    for (int v = 2; v < kSynthVoices; ++v) if (g_tracks[v].arp) g_tracks[v].arp->resyncToGrid();  // extra voices' arps lock to the same downbeat
+#endif
     Serial.println("[transport] PLAY (downbeat defined)");
 }
 static void transportStop() {
@@ -1725,6 +1728,16 @@ static void transportStop() {
     g_arpFilter.panic();                    // clear any arp-held / pending gate-offs
 #if TDSP_ARP2
     g_arpFilter2.panic();
+#endif
+#if TDSP_SYNTH_VOICES >= 3
+    // Extra voices beyond A/B — the 4-way Dexed pool's voices 2/3, OR the hetero OPLL voice (Synth C).
+    // Master stop must clear EVERY voice, not just A/B, or a started voice (e.g. the OPLL) keeps ringing
+    // with no way to stop it. Stop each player, silence its sink, and panic its arp (mirrors voices 0/1).
+    for (int v = 2; v < kSynthVoices; ++v) {
+        songStop(g_tracks[v]);
+        if (g_tracks[v].sink) g_tracks[v].sink->onAllNotesOff(0);
+        if (g_tracks[v].arp)  g_tracks[v].arp->panic();
+    }
 #endif
     Serial.println("[transport] STOP (all silenced)");
 }
