@@ -1786,6 +1786,17 @@ static uint8_t g_xferId = 0;
 // lib/TDspSdXfer.
 static tdsp::SdWriteReceiver g_sdWrite(SD);
 
+// Keep the master transport alive during a long, blocking SD stream. streamFile()/
+// streamDir()/streamClip() run a synchronous read/encode/write loop that monopolizes
+// loop() for the WHOLE transfer — so while the app fetches e.g. /tdsp/grooves.ndjson to
+// build the drum-loops page, the Conductor clock, metronome click, and groove/song
+// players would all freeze (then jerk to catch up). Pumping the SD-free, non-blocking
+// realtime work between frames keeps time running smoothly across the transfer. Defined
+// after all the objects it touches (just above loop()); prototype here so the streamers
+// can call it. Deliberately SD-free: it does NOT fire launch-quantized starts or song-loop
+// restarts (those re-parse the SD and would re-enter the very transfer that called us).
+static void pumpTransport();
+
 static void streamFile(Print& out, const char* path) {
     const uint8_t id = ++g_xferId;
     File f = SD.open(path);
@@ -1794,6 +1805,7 @@ static void streamFile(Print& out, const char* path) {
     uint8_t raw[360];   // 360 = mult of 3 (no mid-stream b64 pad) AND @FD line fits one ~512 BLE MTU
     char b64[4 * (sizeof(raw) / 3) + 1];
     uint32_t seq = 0;
+    elapsedMicros svcClock = 0;   // pace pumpTransport() so a big/slow read never starves the clock
     for (;;) {
         int n = f.read(raw, sizeof(raw));
         if (n <= 0) break;
@@ -1818,6 +1830,7 @@ static void streamFile(Print& out, const char* path) {
         // CDC path (web page) is flow-controlled, so stream it at full speed — pace
         // anything that ISN'T the USB Serial (i.e. the Serial7 link to the ESP32).
         if (&out != &Serial) delay(6);
+        if (svcClock >= 2000) { svcClock = 0; pumpTransport(); }   // ~2ms: keep clock/click/grooves running
         if (n < (int)sizeof(raw)) break;   // final (short) read
     }
     f.close();
@@ -1843,6 +1856,7 @@ static void streamDir(Print& out, const char* path, const char* ext) {
     if (!d || !d.isDirectory()) { if (d) d.close(); out.printf("@LERR=%u\x1f%s\n", id, "not a dir"); return; }
     out.printf("@LB=%u\x1f%s\n", id, path);
     uint32_t count = 0;
+    elapsedMicros svcClock = 0;   // keep the transport ticking while a big folder lists
     for (File f = d.openNextFile(); f; f = d.openNextFile()) {
         const char* nm = f.name();
         const bool dir = f.isDirectory();
@@ -1855,6 +1869,7 @@ static void streamDir(Print& out, const char* path, const char* ext) {
             if (&out != &Serial) delay(4);
         }
         f.close();
+        if (svcClock >= 2000) { svcClock = 0; pumpTransport(); }
     }
     d.close();
     out.printf("@LE=%u\x1f%lu\n", id, (unsigned long)count);
@@ -1872,6 +1887,7 @@ static void streamClip(Print& out, const char* name, const tdsp::LoopClip& c) {
     uint8_t raw[360];   // same window as streamFile: mult of 3, @FD line fits one BLE MTU
     char b64[4 * (sizeof(raw) / 3) + 1];
     uint32_t seq = 0, pos = 0;
+    elapsedMicros svcClock = 0;   // keep the transport ticking during the clip dump
     while (pos < total) {
         int n = 0;
         while (n < (int)sizeof(raw) && pos < total) raw[n++] = tdsp::loopClipByteAt(c, pos++);
@@ -1892,6 +1908,7 @@ static void streamClip(Print& out, const char* name, const tdsp::LoopClip& c) {
         b64[o] = 0;
         out.printf("@FD=%u\x1f%lu\x1f%s\n", id, (unsigned long)seq++, b64);
         if (&out != &Serial) delay(6);   // pace the ESP32/BLE relay (USB is flow-controlled)
+        if (svcClock >= 2000) { svcClock = 0; pumpTransport(); }
     }
     out.printf("@FE=%u\x1f%lu\n", id, (unsigned long)seq);
 }
@@ -2995,6 +3012,46 @@ FLASHMEM void setup() {
 #if TDSP_DIAGNOSTICS
 #include "Diagnostics.inc.h"
 #endif
+
+// The SD-free, non-blocking realtime subset of loop(), factored out so a long blocking
+// SD stream (streamFile/streamDir/streamClip) can keep the master transport running mid-
+// transfer. This is EXACTLY the time-critical work loop() does every iteration — advance
+// the clock, strike the click, dispatch the groove/song players and arps — MINUS anything
+// that could touch the SD and re-enter the transfer in flight: the launch-quantize fire
+// (trackFire parses a groove/song from the card) and trackLoopTick (re-arms a finished
+// song, another SD parse). Those stay loop()-only; a launch armed during a stream simply
+// fires on the next real loop() the moment the transfer completes. Prototyped up by the
+// streamers (they call it); defined here where every symbol it needs is already in scope.
+static void pumpTransport() {
+    g_conductor.update(micros());
+#ifdef TDSP_METRONOME
+    metroPoll();
+#endif
+    beatEmitPoll();
+#if TDSP_HAS_DIN_MIDI
+    while (MIDI.read()) { /* live DIN MIDI still played through the load */ }
+#endif
+#if TDSP_HAS_USB_MIDI_HOST
+    g_usbHost.Task();
+    while (g_usbMidi.read()) { /* live USB-host controller stays responsive */ }
+#endif
+    for (Track &t : g_tracks) t.player->tick();
+    g_drumPlayer.tick();
+    g_arpFilter.tick(micros());
+#if TDSP_VOICE2 && TDSP_ARP2
+    g_arpFilter2.tick(micros());
+#endif
+#if TDSP_RECORDER
+    g_loop1.poll(); g_loop1.tick();
+#if TDSP_VOICE2
+    g_loop2.poll(); g_loop2.tick();
+#endif
+    recPollClick();
+#endif
+#if TDSP_AUDIOLOOP
+    for (uint8_t i = 0; i < g_aloopN; i++) g_aloop[i].poll();
+#endif
+}
 
 void loop() {
     // Flash-mode passthrough owns the loop (also handles @BOOTAPP@); in run mode this
