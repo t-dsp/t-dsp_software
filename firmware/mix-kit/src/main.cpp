@@ -3002,9 +3002,10 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
 #endif
                      );
 #if TDSP_HETERO
-        // The compiled engine INVENTORY (Thread D): how many voices of each engine kind, so the app
-        // knows this board is heterogeneous and which track index maps to which engine (tracks
-        // [0,dexed) = Dexed pool windows, the next opll = melodic OPLL). Slot binding is a build fact.
+        // The compiled engine INVENTORY (Thread D), a top-level @STATE field (kept OUT of "caps" so the
+        // shared caps printf stays byte-identical on non-hetero builds): how many voices of each engine
+        // kind, so the app knows this board is heterogeneous and which track index maps to which engine
+        // (tracks [0,dexed) = Dexed pool windows, the next opll = melodic OPLL). Slot binding is a build fact.
         reply.printf(",\"engines\":{\"dexed\":%d,\"opll\":%d}", kDexedVoices, kSynthVoices - kDexedVoices);
 #endif
         reply.print("}\n");   // close root object
