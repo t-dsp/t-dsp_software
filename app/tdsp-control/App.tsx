@@ -19,7 +19,7 @@ import type { BrowseEntry } from './src/browse';
 import ArpStepGrid from './src/ui/ArpStepGrid';
 import PianoRoll from './src/ui/PianoRoll';
 import ArpPresetBrowser from './src/ui/ArpPresetBrowser';
-import { ARP_PATTERNS as ARP_PAT, ARP_RATES, rateIndexFromFw, PAT_USER_SEQUENCE, DEFAULT_SHAPE, SeqStep } from './src/arpSeq';
+import { ARP_PATTERNS as ARP_PAT, ARP_RATES, rateIndexFromFw, PAT_USER_SEQUENCE, DEFAULT_SHAPE, SeqStep, encodeSequence, encodeArpParams } from './src/arpSeq';
 import { applyArpPreset, ArpPreset, ARP_LIBRARY } from './src/arpLibrary';
 
 const EMPTY_DIR: DirPage = { path: '', page: 0, npages: 1, folders: [], carts: [] };
@@ -524,6 +524,16 @@ export default function App() {
   const [trkNames, setTrkNames] = useState<Record<number, string>>({});
   const [selVoiceX, setSelVoiceX] = useState<Record<number, string>>({});   // browser sel key, keyed by 0-based voice index (>=2)
   const [trkVolX, setTrkVolX] = useState<Record<number, number>>({});       // per-extra-voice level (@TRK<i>.VOL), local echo
+  // Per-extra-voice (index >=2) MIDI-player + arp state, so Synth C/D get the SAME submenu as A/B
+  // (Synth/Voices + MIDI Player + Arpeggiator). Map-keyed by 0-based voice index; the deck/arp
+  // slots are built from these in a loop and wired to @TRK<i>.{PLAY,RESTART,STOP,LOOP,ARP*}.
+  const [playerX, setPlayerX] = useState<Record<number, { song: string; playing: boolean; name: string; prog: number }>>({});
+  const [endModeX, setEndModeX] = useState<Record<number, EndMode>>({});
+  const [arpX, setArpX] = useState<Record<number, { on: boolean; pat: number; rate: number; oct: number; latch: boolean }>>({});
+  const [arpModeX, setArpModeX] = useState<Record<number, 'preset' | 'manual'>>({});
+  const [arpPresetIdX, setArpPresetIdX] = useState<Record<number, string>>({});
+  const [seqX, setSeqX] = useState<Record<number, SeqStep[]>>({});
+  const manualStopRefX = useRef<Record<number, React.MutableRefObject<boolean>>>({});
   // MIDI loop recorder (build-flag gated, caps.rec). Each synth's MIDI player owns its own
   // recorder, so every setting is PER-VOICE: bars1/bars2 = that synth's loop length, st1/st2 =
   // state (0 idle 1 armed 2 recording 3 overdub 4 playing), p1/p2 = record-fill / playback-phase.
@@ -680,6 +690,15 @@ export default function App() {
         if (manualStop2Ref.current) manualStop2Ref.current = false;
         else onSong2EndRef.current();
       } else setPlayer2(p => ({ ...p, playing: true, prog: Math.max(0, Math.min(1, v / 1000)) }));
+    } else if (/^@TRK\d+\.P=/.test(line)) {
+      // Extra synth voices (>=2) MIDI-player position feed: @TRK<i>.P=<permille> (-1 = ended).
+      const m = line.match(/^@TRK(\d+)\.P=(-?\d+)/);
+      if (m) {
+        const i = parseInt(m[1], 10), pv = parseInt(m[2], 10);
+        setPlayerX(mp => { const cur = mp[i] ?? { song: '', playing: false, name: '', prog: 0 };
+          return { ...mp, [i]: pv < 0 ? { ...cur, playing: false, prog: 0 } : { ...cur, playing: true, prog: Math.max(0, Math.min(1, pv / 1000)) } }; });
+        if (pv < 0) { const r = manualStopRefX.current[i]; if (r) r.current = false; }   // clear manual-stop flag; no auto-advance for extra voices yet
+      }
     } else if (line.startsWith('@ALP=')) {
       // Live audio-loop telemetry: "@ALP=<st0>,<p0>[,<st1>,<p1>...]" — one state+permille pair per loop.
       const n = line.slice(5).split(',').map(x => parseInt(x, 10));
@@ -1593,34 +1612,78 @@ export default function App() {
   // shared voice-selector/bars UI here any more; every rec control is per-player.
 
   // Extra synth voices (Phase 3, data-driven): voices 2+ of a 4-voice pool get a GENERATED card
-  // each — no hand-instantiation, so a firmware with more voices grows the UI with zero edits. Each
-  // reuses the SAME components as Synth A/B (the folder voice browser + level + MIDI-input selector),
-  // driven by the uniform @TRK<i>.* wire. Rendered only when @STATE tracks[] reports that many synth
-  // voices (synthCount). Voices 0/1 keep their richer bespoke cards (song player, full arp, split).
-  const extraSynthBody = (v: number) => (   // v = 0-based voice index (>=2)
-    <View style={s.synthWrap}>
-      <VolSlider label="Volume" value={trkVolX[v] ?? 100} disabled={!connected}
-        onChange={n => setTrkVolX(m => ({ ...m, [v]: n }))} onCommit={n => tp.trk(v, 'VOL=' + n)} />
-      {voiceBrowserBody(v + 1)}
-      {midiInputBody(v)}
-    </View>
-  );
+  // each — a FULL peer of Synth A/B with the same submenu (Synth/Voices + MIDI Player + Arpeggiator),
+  // reusing the SAME components (voice browser, makeSongDeck, arpBody) driven by the uniform @TRK<i>.*
+  // wire. No hand-instantiation, so more firmware voices grow the UI with zero edits. Rendered only
+  // when @STATE tracks[] reports that many synth voices (synthCount). Voices 0/1 keep their bespoke
+  // cards (the Synth-B split toggle / shared voice-2 bus that don't apply to the fixed N-way pool).
+  const DEF_ARP = { on: false, pat: 0, rate: 0, oct: 1, latch: false };
   const extraSynthCards: Section[] = [];
+  const extraChildCards: Section[] = [];
   for (let v = 2; v < synthCount; v++) {
     const theme = v === 2 ? THEME.synthC : THEME.synthD;
     const letter = String.fromCharCode(65 + v);   // C, D, …
+    const parentId = 'synthX' + v;
+    const arpState = arpX[v] ?? DEF_ARP;
+    const mstop = (manualStopRefX.current[v] ??= { current: false });
+    // MIDI-player deck for this voice — the drumDeck pattern (a view over playerX[v]) wired to @TRK<i>.
+    const deck = makeSongDeck({
+      v: 1, persistKey: 'end', manualStopRef: mstop,
+      player: playerX[v] ?? { song: '', playing: false, name: '', prog: 0 },
+      setPlayer: upd => setPlayerX(m => { const cur = m[v] ?? { song: '', playing: false, name: '', prog: 0 }; return { ...m, [v]: typeof upd === 'function' ? (upd as any)(cur) : upd }; }),
+      endMode: endModeX[v] ?? 'stop', setEndMode: em => setEndModeX(m => ({ ...m, [v]: em })),
+      vol: trkVolX[v] ?? 100, onVol: n => setTrkVolX(m => ({ ...m, [v]: n })), commitVol: n => tp.trk(v, 'VOL=' + n),
+      wire: { play: a => tp.trk(v, 'PLAY=' + a), restart: a => tp.trk(v, 'RESTART=' + a), stop: () => tp.trk(v, 'STOP'), loop: on => tp.trk(v, 'LOOP=' + (on ? 1 : 0)) },
+    });
+    // Arp slot for this voice — same ArpSlotT the A/B arps use, targeting @TRK<i>.ARP*.
+    const setA = (patch: Partial<typeof DEF_ARP>) => setArpX(m => ({ ...m, [v]: { ...(m[v] ?? DEF_ARP), ...patch } }));
+    const setPid = (id: string) => setArpPresetIdX(m => ({ ...m, [v]: id }));
+    const vSeq = seqX[v] ?? DEFAULT_SHAPE.steps;
+    const selectPat = (i: number) => { setA({ pat: i }); tp.trk(v, 'ARPPAT=' + i); if (i === PAT_USER_SEQUENCE) tp.trk(v, 'ARPSEQ=' + encodeSequence(vSeq)); setPid(''); };
+    const arpSlot: ArpSlotT = {
+      arp: arpState, mode: arpModeX[v] ?? 'preset', setMode: m => setArpModeX(x => ({ ...x, [v]: m })),
+      presetId: arpPresetIdX[v] ?? '', activeName: ARP_LIBRARY.find(p => p.id === (arpPresetIdX[v] ?? ''))?.name || '', seq: vSeq,
+      play: () => { if (arpState.on) tp.trk(v, 'ARPRESTART'); else { setA({ on: true }); tp.trk(v, 'ARPON=1'); } },
+      stop: () => { setA({ on: false }); tp.trk(v, 'ARPON=0'); },
+      stepNav: dir => { const idx = ARP_LIBRARY.findIndex(p => p.id === (arpPresetIdX[v] ?? '')); if (!ARP_LIBRARY.length) return; const ni = (idx < 0 ? (dir > 0 ? -1 : 0) : idx) + dir; const p = ARP_LIBRARY[(ni + ARP_LIBRARY.length) % ARP_LIBRARY.length]; const st = applyArpPreset(tp, p, v + 1, arpState.latch); setA({ pat: st.pat, rate: st.rate, oct: st.oct, latch: st.latch }); if (st.seq) setSeqX(m => ({ ...m, [v]: st.seq! })); setPid(p.id); },
+      selectPattern: selectPat, applySeq: st => { setSeqX(m => ({ ...m, [v]: st })); tp.trk(v, 'ARPSEQ=' + encodeSequence(st)); if (arpState.pat !== PAT_USER_SEQUENCE) { setA({ pat: PAT_USER_SEQUENCE }); tp.trk(v, 'ARPPAT=' + PAT_USER_SEQUENCE); } setPid(''); },
+      applyPreset: p => { const st = applyArpPreset(tp, p, v + 1, arpState.latch); setA({ pat: st.pat, rate: st.rate, oct: st.oct, latch: st.latch }); if (st.seq) setSeqX(m => ({ ...m, [v]: st.seq! })); setPid(p.id); },
+      enterManual: () => { setArpModeX(x => ({ ...x, [v]: 'manual' })); tp.trk(v, 'ARPPRESET=' + encodeArpParams({ pat: arpState.pat, rate: ARP_RATES[arpState.rate].fw, gatePct: 50, swingPct: 50, oct: arpState.oct, octMode: 0, latch: arpState.latch, velMode: 0, velFixed: 100, velAccent: 127, stepMask: -1, stepLength: 16, mpeMode: 0, outCh: 1, scatterBase: 2, scatterCount: 4, scale: 0, scaleRoot: 0, transpose: 0, repeat: 1 })); setPid(''); },
+      resetManual: () => { tp.trk(v, 'ARPPRESET=' + encodeArpParams({ pat: arpState.pat, rate: ARP_RATES[arpState.rate].fw, gatePct: 50, swingPct: 50, oct: arpState.oct, octMode: 0, latch: arpState.latch, velMode: 0, velFixed: 100, velAccent: 127, stepMask: -1, stepLength: 16, mpeMode: 0, outCh: 1, scatterBase: 2, scatterCount: 4, scale: 0, scaleRoot: 0, transpose: 0, repeat: 1 })); setPid(''); },
+      setRate: i => { setA({ rate: i }); tp.trk(v, 'ARPRATE=' + ARP_RATES[i].fw); setPid(''); },
+      setOct: n => { setA({ oct: n }); tp.trk(v, 'ARPOCT=' + n); setPid(''); },
+      setLatch: b => { setA({ latch: b }); tp.trk(v, 'ARPLATCH=' + (b ? 1 : 0)); setPid(''); },
+    };
+    // Top card = a submenu (like Synthesizer A/B); its three children are the sub-pages.
     extraSynthCards.push({
-      id: 'synthX' + v, title: 'Synthesizer ' + letter, show: synthCount > v, fullHeight: true,
-      accent: theme.accent, tint: theme.tint,
+      id: parentId, title: 'Synthesizer ' + letter, show: synthCount > v, accent: theme.accent, tint: theme.tint,
       value: trkNames[v] || 'None',
       subtitle: trkNames[v] ? <Text style={s.drawerValue} numberOfLines={1}>{trkNames[v]}</Text> : undefined,
-      actions: <><HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1, v + 1)} /><HdrBtn label="Next ›" stop onPress={() => stepVoice(1, v + 1)} /></>,
-      body: extraSynthBody(v),
+      body: <SubMenu getItems={() => sections.filter(x => x.parent === parentId).sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={theme.accent} tint={theme.tint} />,
     });
+    extraChildCards.push(
+      {
+        id: parentId + 'v', title: 'Synth / Voices', show: false, parent: parentId, fullHeight: true, accent: theme.accent, tint: theme.tint,
+        value: trkNames[v] || 'None',
+        actions: <><HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1, v + 1)} /><HdrBtn label="Next ›" stop onPress={() => stepVoice(1, v + 1)} /></>,
+        body: (
+          <View style={s.synthWrap}>
+            <VolSlider label="Volume" value={trkVolX[v] ?? 100} disabled={!connected} onChange={n => setTrkVolX(m => ({ ...m, [v]: n }))} onCommit={n => tp.trk(v, 'VOL=' + n)} />
+            {voiceBrowserBody(v + 1)}
+            {midiInputBody(v)}
+          </View>
+        ),
+      },
+      { id: parentId + 'p', title: 'MIDI Player', show: false, parent: parentId, accent: theme.accent, tint: theme.tint,
+        value: playerValue(deck), progress: playerProgress(deck), actions: playerActions(deck), body: playerBody(deck) },
+      { id: parentId + 'a', title: 'Arpeggiator', show: false, parent: parentId, accent: theme.accent, tint: theme.tint,
+        value: arpValue(arpSlot), actions: arpActions(arpSlot), body: arpBody(arpSlot) },
+    );
   }
 
   const sections: Section[] = [
     ...extraSynthCards,
+    ...extraChildCards,
     // CONNECTION — catalog stats. A Settings sub-page (reached from the Settings submenu).
     {
       id: 'conn', title: 'Connection', show: false, parent: 'settings', status: cat.engine || 'connected',

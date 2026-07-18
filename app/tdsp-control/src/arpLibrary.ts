@@ -13,7 +13,7 @@
 import raw from './arpLibrary.data.json';
 import type { Transport } from './transport';
 import type { SeqStep, ArpWireParams } from './arpSeq';
-import { rateIndexFromFw } from './arpSeq';
+import { rateIndexFromFw, encodeArpParams, encodeSequence } from './arpSeq';
 
 // One step as stored in the JSON library ({d,o,v}); mapped to SeqStep on apply.
 type RawStep = { d: number; o: number; v: number };
@@ -78,12 +78,14 @@ export type AppliedArp = { pat: number; rate: number; oct: number; latch: boolea
 // param rides ONE @ARPPRESET line (atomic + throttle-friendly vs. ~20 separate commands).
 // `latchKeep` (when provided) overrides the preset's own latch so the user's latch setting
 // is STICKY across preset/pattern changes — a latching preset never silently flips it on.
-export function applyArpPreset(tp: Transport, p: ArpPreset, slot: 1 | 2 = 1, latchKeep?: boolean): AppliedArp {
+// slot: 1 = main arp (@ARP*), 2 = voice-2 arp (@ARP2*), >=3 = voice-index (slot-1) via the uniform
+// @TRK<i>.ARP* interface (data-driven 4-voice pool). The encoders match the transport's own.
+export function applyArpPreset(tp: Transport, p: ArpPreset, slot: number = 1, latchKeep?: boolean): AppliedArp {
   const pr = p.params;
   const latch = latchKeep !== undefined ? latchKeep : !!pr.latch;
   const seq = pr.steps && pr.steps.length ? toSeqSteps(pr.steps) : undefined;
   // Call as a METHOD (not a detached ref) so `this` stays bound inside the transport.
-  if (seq) { if (slot === 2) tp.arp2Sequence(seq); else tp.arpSequence(seq); }
+  if (seq) { if (slot >= 3) tp.trk(slot - 1, 'ARPSEQ=' + encodeSequence(seq)); else if (slot === 2) tp.arp2Sequence(seq); else tp.arpSequence(seq); }
 
   const wire: ArpWireParams = {
     pat: pr.pattern, rate: pr.rate,
@@ -95,7 +97,7 @@ export function applyArpPreset(tp: Transport, p: ArpPreset, slot: 1 | 2 = 1, lat
     outCh: pr.outputChannel, scatterBase: pr.scatterBase, scatterCount: pr.scatterCount,
     scale: pr.scale, scaleRoot: pr.scaleRoot, transpose: pr.transpose, repeat: pr.repeat,
   };
-  if (slot === 2) tp.arp2Preset(wire); else tp.arpPreset(wire);
+  if (slot >= 3) tp.trk(slot - 1, 'ARPPRESET=' + encodeArpParams(wire)); else if (slot === 2) tp.arp2Preset(wire); else tp.arpPreset(wire);
 
   const oct = Math.max(1, Math.min(4, (pr.octaveRange ?? 1) | 0));
   return { pat: pr.pattern, rate: rateIndexFromFw(pr.rate), oct, latch, seq };
