@@ -1259,17 +1259,9 @@ export default function App() {
   const kbdBtn = (owner: 1 | 2) => caps.voice2
     ? <KbdBtn owned={owner === 2 ? voice2.on : !voice2.on} onPress={() => takeKeyboard(owner)} />
     : undefined;
-  // Synth B master enable — the single on/off for the whole voice-2 side (the 4/4 pool split +
-  // Player 2 + Arp 2 + the keyboard). Lives in the Synthesizer B header, where you'd look for it.
-  // ON  = split 4/4 (Synth A drops to 8-voice, Synth B gets its own 8). OFF = all 8 engines back
-  // to Synth A (16-voice); the B side is idle. Same @VOICE2 the keyboard-owner icon toggles.
-  const synthBEnableBtn = (
-    <Pressable onPress={() => { const on = !voice2.on; setVoice2(v => ({ ...v, on })); tp.voice2Enable(on); }}
-      style={[s.hdrBtn, !voice2.on && s.hdrBtnStop]} disabled={!connected}
-      accessibilityLabel={voice2.on ? 'Synth B enabled — tap to disable' : 'Synth B disabled — tap to enable'}>
-      <Text style={s.hdrBtnText}>{voice2.on ? '● On' : '○ Off'}</Text>
-    </Pressable>
-  );
+  // (The old "Synth B enable" ● On / ○ Off toggle was removed: the pool split is now PERMANENT on
+  // every build that has a Synth B — the fixed 4-way split (4-voice) and the hetero build force it on
+  // at boot and ignore @VOICE2, so there's nothing to enable. Synth B is always live.)
 
   // The folder browser (nav bar + picker), shared by the Synth and Synth/Voices 2 pages.
   // Both share the browse position (cart/folder) but keep their own selection + list ref, and
@@ -1403,7 +1395,6 @@ export default function App() {
   // what happens when it ends. A tap plays the file immediately (restart on a fresh downbeat).
   const playerSongBody = (D: SongDeckT) => (
     <>
-      {D.v === 2 && !voice2.on && <Text style={s.muted}>Synth B is off — this player is silent until you enable it (● / ○ in the Synthesizer B header).</Text>}
       <VolSlider label="Volume" value={D.vol} onChange={D.onVol} onCommit={D.commitVol} disabled={!connected} />
       {!!D.volNote && <Text style={s.muted}>{D.volNote}</Text>}
       <View style={s.browseBox}>
@@ -1491,11 +1482,8 @@ export default function App() {
   </>);
   const synth2Body = (
     <View style={s.synthWrap}>
-      {/* The master on/off for Synth B now lives in the Synthesizer B header (● On / ○ Off).
-          Enabling it splits the pool 4/4 (engines 4-7 become this voice); off hands all 8 back
-          to Synth A. This page just picks the voice + its level. */}
-      {!voice2.on && <Text style={s.muted}>Synth B is off — turn it on with the ● / ○ button in the Synthesizer B header. Both sides then drop to 8-voice polyphony.</Text>}
-      <VolSlider label="Volume" value={voice2.vol} onChange={v => setVoice2(x => ({ ...x, vol: v }))} onCommit={v => tp.voice2Vol(v)} disabled={!connected || !voice2.on} />
+      {/* Synth B is always live now (the pool split is permanent). This page just picks the voice + level. */}
+      <VolSlider label="Volume" value={voice2.vol} onChange={v => setVoice2(x => ({ ...x, vol: v }))} onCommit={v => tp.voice2Vol(v)} disabled={!connected} />
       {voiceBrowserBody(2)}
       {midiInputBody(1)}
     </View>
@@ -1755,7 +1743,7 @@ export default function App() {
     {
       id: 'synth2', title: 'Synth / Voices 2', show: false, parent: 'synthesizerB', fullHeight: true, accent: THEME.synthB.accent, tint: THEME.synthB.tint,   // Synthesizer B sub-page
       topRight: kbdBtn(2),
-      value: (voice2.on ? '' : '(off)  ') + (voice2.name || 'None'),
+      value: (voice2.name || 'None'),
       subtitle: voice2.name ? (
         <>
           <Text style={s.drawerValue} numberOfLines={1}>{voice2.name}</Text>
@@ -1780,14 +1768,13 @@ export default function App() {
     {
       id: 'synthesizerB', title: 'Synthesizer B', show: caps.voice2, accent: THEME.synthB.accent, tint: THEME.synthB.tint,
       topRight: kbdBtn(2),
-      value: (voice2.on ? '' : '(off)  ') + (voice2.name || 'None'),
+      value: (voice2.name || 'None'),
       subtitle: voice2.name ? (
         <>
           <Text style={s.drawerValue} numberOfLines={1}>{voice2.name}</Text>
           {!!voice2.path && <Text style={s.pathLine} numberOfLines={1} ellipsizeMode="head">{voice2.path}</Text>}
         </>
       ) : undefined,
-      actions: synthBEnableBtn,   // master on/off for the whole voice-2 side, in the header
       body: <SubMenu getItems={() => sections.filter(x => x.parent === 'synthesizerB').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.synthB.accent} tint={THEME.synthB.tint} />,
     },
     // AUDIO LOOP — gated on caps.audioloop (the COUNT of loops the device could allocate;
