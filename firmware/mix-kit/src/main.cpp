@@ -173,6 +173,29 @@ AudioSynthWaveformSine spdifTone;                                // int16 tone -
 // declared by the build-selected backend header, included after the mixers.
 AudioSynthWaveformSine_F32 testTone;         // local DAC self-test source (F32)
 
+// (E) USB Audio interface (host <-> Teensy), F32-native 24-bit / 48 kHz. Build-flag
+// gated: needs the USB_MIDI_AUDIO_SERIAL descriptor + -D AUDIO_SUBSLOT_SIZE=3 (which
+// arm the patched core's Q31 rings) — the env sets both. See lib/USB_Audio_F32_24 and
+// planning/usb-audio-mixkit/DESIGN.md.
+#ifndef TDSP_USB_AUDIO
+#define TDSP_USB_AUDIO 0
+#endif
+// External-input sub-mixer: USB, optical S/PDIF-in, and Bluetooth are collected into ONE
+// DRY bus (extL/extR) that rejoins the signal path AFTER the reverb insert — so external
+// audio BYPASSES the reverb by default (project decision). Auto-on with USB audio; a build
+// can also force it with -D TDSP_EXT_MIX=1 to move BT/optical out of the reverb path.
+#ifndef TDSP_EXT_MIX
+#define TDSP_EXT_MIX TDSP_USB_AUDIO
+#endif
+#if TDSP_USB_AUDIO
+#include <AudioInputUSB_F32.h>
+#include <AudioOutputUSB_F32.h>
+AudioInputUSB_F32  usbIn;                    // host -> Teensy  (into the external sub-mix)
+AudioOutputUSB_F32 usbOut;                   // Teensy -> host  (records the instrument mix)
+static int      g_usbGainPct  = 100;         // USB-in return level 0..150 % (@USBGAIN); slot-2 gain of extL/extR
+static uint32_t g_usbLastPop  = 0;           // last-seen AudioInputUSB_F32::pop_ok, for the @STATE "active" delta
+#endif
+
 // --- Synth-voice count (Phase 3): how many independent Dexed synth voices this build has. Default
 // preserves today (1 unified, or 2 on a split/voice2 build); a 4-voice env sets -D TDSP_SYNTH_VOICES=4.
 // The per-voice objects below are declared as arrays of this size; g_player/g_player2 alias [0]/[1]
@@ -307,6 +330,12 @@ static const int kNumTracks = kSynthVoices;   // one Track per synth voice (1 / 
 static Track g_tracks[kNumTracks];
 
 AudioMixer4_F32        outL, outR;           // F32 mix: 0=BT, 1=local tone, 2=S/PDIF-in, 3=synth
+#if TDSP_EXT_MIX
+// External inputs collected here (DRY): 0=BT, 1=S/PDIF-in, 2=USB-in. On TDSP_EXT_MIX builds
+// BT and S/PDIF move OFF outL slots 0/2 into this bus; the bus rejoins post-reverb (see the
+// master-out mixer below), so external audio is never reverbed. Its slot-2 (USB) level is @USBGAIN.
+AudioMixer4_F32        extL, extR;
+#endif
 #if TDSP_FX
 // FX master insert (INSERT topology): the stereo reverb sits between the master sum
 // (finalL/finalR when audioloop is on, else outL/outR) and tdmOut. Constructed AFTER tdmOut
@@ -332,25 +361,46 @@ AudioConnection     c_btcR   (btIn,       1, btToF32R, 0);
 #endif
 // F32 mix bus and 24-bit TDM output (synth engine feeds slot 3 from its backend)
 #if TDSP_ROLE_BT_RECEIVER
+#if TDSP_EXT_MIX
+AudioConnection_F32 c_btL    (btToF32L,   0, extL, 0);   // BT -> external sub-mix slot 0 (dry, post-reverb)
+AudioConnection_F32 c_btR    (btToF32R,   0, extR, 0);
+#else
 AudioConnection_F32 c_btL    (btToF32L,   0, outL, 0);   // BT -> mix slot 0
 AudioConnection_F32 c_btR    (btToF32R,   0, outR, 0);
+#endif
 #endif
 #if !TDSP_METRONOME
 AudioConnection_F32 c_toneL  (testTone,   0, outL, 1);   // local self-test tone on mix slot 1
 AudioConnection_F32 c_toneR  (testTone,   0, outR, 1);
 #endif
 #if TDSP_SPDIF_IN
+#if TDSP_EXT_MIX
+AudioConnection_F32 c_spL    (spdifIn,    0, extL, 1);   // optical -> external sub-mix slot 1 (dry, post-reverb)
+AudioConnection_F32 c_spR    (spdifIn,    1, extR, 1);
+#else
 AudioConnection_F32 c_spL    (spdifIn,    0, outL, 2);
 AudioConnection_F32 c_spR    (spdifIn,    1, outR, 2);
 #endif
-#if TDSP_METRONOME
-// The metronome click (testTone) is injected AFTER the reverb insert AND after the audio-loop
-// record-bus tap, via this POST mixer — so the click is NOT reverbed and NOT captured in audio
-// loops. Its volume is postL/postR slot-1 gain (metroApplyMute); the whole mix reaches the DAC
-// through postL/postR slot 0. Non-metronome builds keep testTone on outL/outR slot 1 (unchanged).
+#endif
+#if TDSP_USB_AUDIO
+AudioConnection_F32 c_usbL   (usbIn,      0, extL, 2);   // USB host audio -> external sub-mix slot 2
+AudioConnection_F32 c_usbR   (usbIn,      1, extR, 2);
+#endif
+#if TDSP_METRONOME || TDSP_EXT_MIX
+// Master-out mixer. The instrument chain reaches the DAC through slot 0; the metronome click
+// (slot 1) and the external inputs (slot 2) are injected HERE — AFTER the reverb insert AND
+// after the audio-loop record-bus tap — so NEITHER is reverbed nor captured in audio loops.
+// The click volume is postL/postR slot-1 gain (metroApplyMute). This one mixer serves both
+// the metronome and the external sub-mix; a build with just one of them uses only its slot.
 AudioMixer4_F32     postL, postR;
-AudioConnection_F32 c_metL  (testTone, 0, postL, 1);
+#if TDSP_METRONOME
+AudioConnection_F32 c_metL  (testTone, 0, postL, 1);   // metronome click (dry, post-reverb)
 AudioConnection_F32 c_metR  (testTone, 0, postR, 1);
+#endif
+#if TDSP_EXT_MIX
+AudioConnection_F32 c_extPL (extL,     0, postL, 2);   // external inputs (USB/optical/BT), DRY
+AudioConnection_F32 c_extPR (extR,     0, postR, 2);
+#endif
 AudioConnection_F32 c_postL (postL, 0, tdmOut, 0);
 AudioConnection_F32 c_postR (postR, 0, tdmOut, 1);
 #define TDSP_DAC_L_NODE postL
@@ -378,9 +428,17 @@ AudioConnection_F32 c_fxInL  (finalL, 0, g_fxReverb, 0);  // final mix -> reverb
 AudioConnection_F32 c_fxInR  (finalR, 0, g_fxReverb, 1);
 AudioConnection_F32 c_finOutL(g_fxReverb, 0, TDSP_DAC_L_NODE, TDSP_DAC_L_SLOT);  // reverb -> post/DAC
 AudioConnection_F32 c_finOutR(g_fxReverb, 1, TDSP_DAC_R_NODE, TDSP_DAC_R_SLOT);
+#define TDSP_INSTR_L_NODE g_fxReverb
+#define TDSP_INSTR_L_SLOT 0
+#define TDSP_INSTR_R_NODE g_fxReverb
+#define TDSP_INSTR_R_SLOT 1
 #else
 AudioConnection_F32 c_finOutL(finalL, 0, TDSP_DAC_L_NODE, TDSP_DAC_L_SLOT);      // final mix -> post/DAC
 AudioConnection_F32 c_finOutR(finalR, 0, TDSP_DAC_R_NODE, TDSP_DAC_R_SLOT);
+#define TDSP_INSTR_L_NODE finalL
+#define TDSP_INSTR_L_SLOT 0
+#define TDSP_INSTR_R_NODE finalR
+#define TDSP_INSTR_R_SLOT 0
 #endif
 AudioConnection_F32 c_al0inL (outL, 0, g_aloop[0], 0);    // loop 0 taps the record bus
 AudioConnection_F32 c_al0inR (outR, 0, g_aloop[0], 1);
@@ -408,11 +466,26 @@ AudioConnection_F32 c_fxInL  (outL,       0, g_fxReverb, 0);   // master sum -> 
 AudioConnection_F32 c_fxInR  (outR,       0, g_fxReverb, 1);
 AudioConnection_F32 c_outL   (g_fxReverb, 0, TDSP_DAC_L_NODE, TDSP_DAC_L_SLOT);   // reverb -> post/DAC
 AudioConnection_F32 c_outR   (g_fxReverb, 1, TDSP_DAC_R_NODE, TDSP_DAC_R_SLOT);
+#define TDSP_INSTR_L_NODE g_fxReverb
+#define TDSP_INSTR_L_SLOT 0
+#define TDSP_INSTR_R_NODE g_fxReverb
+#define TDSP_INSTR_R_SLOT 1
 #else
 AudioConnection_F32 c_outL   (outL,       0, TDSP_DAC_L_NODE, TDSP_DAC_L_SLOT);
 AudioConnection_F32 c_outR   (outR,       0, TDSP_DAC_R_NODE, TDSP_DAC_R_SLOT);
+#define TDSP_INSTR_L_NODE outL
+#define TDSP_INSTR_L_SLOT 0
+#define TDSP_INSTR_R_NODE outR
+#define TDSP_INSTR_R_SLOT 0
 #endif
 #endif   // TDSP_AUDIOLOOP
+#if TDSP_USB_AUDIO
+// USB record send: the host records the INSTRUMENT mix (synths/drums, incl. reverb) — tapped
+// BEFORE the external-input sum (TDSP_INSTR_* = whatever feeds the DAC), so the computer's own
+// audio is NOT echoed back to it. Fan-out from the same source that drives the master out.
+AudioConnection_F32 c_usbOutL(TDSP_INSTR_L_NODE, TDSP_INSTR_L_SLOT, usbOut, 0);
+AudioConnection_F32 c_usbOutR(TDSP_INSTR_R_NODE, TDSP_INSTR_R_SLOT, usbOut, 1);
+#endif
 #if TDSP_ROLE_BT_RECEIVER
 AudioConnection_F32 c_pkBt   (btToF32L,   0, peakBt,    0);
 #endif
@@ -2753,6 +2826,14 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         Serial.printf("@DRUMMAP=%d\n", (int)g_drumNoteMapper.mode());
     }
     else if (strncmp(line, "@DRUMVOL=", 9) == 0)    setDrumVol(atoi(line + 9));    // 0..150 %
+#if TDSP_USB_AUDIO
+    else if (strncmp(line, "@USBGAIN=", 9) == 0) {   // USB-in return level into the external sub-mix (0..150 %); host owns its own stream volume
+        int v = atoi(line + 9); if (v < 0) v = 0; if (v > 150) v = 150;
+        g_usbGainPct = v;
+        extL.gain(2, v / 100.0f); extR.gain(2, v / 100.0f);   // slot 2 = USB-in on the external sub-mixer
+        reply.printf("@USBGAIN=%d\n", v);
+    }
+#endif
     else if (strncmp(line, "@SONGVOL=", 9) == 0)    setSongVol(atoi(line + 9));    // 0..150 %, MIDI player level (independent of @VOL master)
     else if (strncmp(line, "@BPM=", 5) == 0)        setMasterBpm(atoi(line + 5));  // master tempo (song+drum)
     else if (strncmp(line, "@METROLOCK=", 11) == 0) {   // tempo lock: when ON, content stops auto-loading its BPM (the metronome lock-icon)
@@ -3198,6 +3279,16 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         // FX (reverb) bus state — the app hydrates the Reverb card from this.
         reply.print("\"fx\":"); fxEmitJson(reply); reply.print(",");
 #endif
+#if TDSP_USB_AUDIO
+        // USB Audio interface status — the app's USB Audio card reads this. "active" = the host
+        // is streaming (pop_ok advanced since the last @STATE); gain = the USB-in return level;
+        // rxover/txunder = ring over/underrun counters (host<->codec clock-drift diagnostics).
+        { AudioInputUSB_F32::Status st = AudioInputUSB_F32::getStatus();
+          uint32_t nowPop = AudioInputUSB_F32::pop_ok;
+          bool act = (nowPop != g_usbLastPop); g_usbLastPop = nowPop;
+          reply.printf("\"usb\":{\"active\":%d,\"gain\":%d,\"rxover\":%u,\"txunder\":%u},",
+                       act ? 1 : 0, g_usbGainPct, (unsigned)st.rx_overruns, (unsigned)st.tx_underruns); }
+#endif
         reply.print("\"voice\":{");
 #if defined(TDSP_SYNTH_DEXED) || defined(TDSP_SYNTH_DEXED_POOL)
         if (g_curCartRel[0]) {   // last pick was a /dexed cart voice (@DXPICK)
@@ -3281,7 +3372,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         // compiled track count (2 synth voices + 1 drum, or 1+1 on a non-voice2 build).
         // caps.audioloop = the number of audio loops that ACTUALLY allocated (0 = the board
         // couldn't spare the RAM -> the app hides the card), not just the build flag.
-        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"tracks\":%d,\"audioloop\":%d,\"fx\":%d}",
+        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"tracks\":%d,\"audioloop\":%d,\"fx\":%d,\"usbaudio\":%d}",
                      TDSP_VOICE2 ? 1 : 0, (TDSP_VOICE2 && TDSP_ARP2) ? 1 : 0, TDSP_RECORDER ? 1 : 0,
                      TDSP_RECORDER_EDIT ? 1 : 0, kSynthVoices + 1,   // N synth voices + the drum track
 #if TDSP_AUDIOLOOP
@@ -3290,6 +3381,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
                      0
 #endif
                      , TDSP_FX ? 1 : 0   // caps.fx: the app shows the Reverb card only on FX builds
+                     , TDSP_USB_AUDIO ? 1 : 0   // caps.usbaudio: the app shows the USB Audio card only on USB-audio builds
                      );
         // PSRAM presence (top-level, MB): the app greys PSRAM-dependent cards with a reason when 0.
         reply.printf(",\"psram\":%u", (unsigned)external_psram_size);
@@ -3566,9 +3658,9 @@ FLASHMEM void setup() {
 #if TDSP_AUDIOLOOP
     // The audio loops add nodes to the F32 graph (N loopers + the final L/R mix), each
     // allocating blocks per update — give the pool headroom or they starve and drop out.
-    AudioMemory_F32(60 + 6 + 4 * TDSP_AUDIOLOOP_N + TDSP_FX * 8);
+    AudioMemory_F32(60 + 6 + 4 * TDSP_AUDIOLOOP_N + TDSP_FX * 8 + TDSP_USB_AUDIO * 8);
 #else
-    AudioMemory_F32(60 + TDSP_FX * 8);   // + headroom for the reverb insert's blocks
+    AudioMemory_F32(60 + TDSP_FX * 8 + TDSP_USB_AUDIO * 8);   // + reverb insert + USB/ext sub-mix blocks
 #endif
     setMix(1.0f, 0.0f, 1.0f);
 #if TDSP_METRONOME
