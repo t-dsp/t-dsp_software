@@ -46,7 +46,17 @@ AudioConnection cpk0(dxp0, 0, dxpc0, 0), cpk1(dxp1, 0, dxpc1, 0),
 #define TDSP_SYNTH_VOICES (TDSP_VOICE2 ? 2 : 1)   // defensive: main.cpp sets this before the include
 #endif
 
-#if TDSP_SYNTH_VOICES >= 4
+// The Dexed POOL's own voice count — how many independent Dexed voices the 8-engine pool is
+// windowed into. On a homogeneous build this equals TDSP_SYNTH_VOICES (the total voice count).
+// On a HETEROGENEOUS build (TDSP_HETERO) the total voice count includes non-Dexed engines
+// (melodic OPLLs), so the env sets TDSP_POOL_VOICES to just the Dexed share (e.g. 2) — that
+// keeps this pool on its proven 2-way split while main.cpp counts all 4 tracks. Every non-hetero
+// env leaves it defaulted, so their pool graph/state/@POOL logic is byte-identical.
+#ifndef TDSP_POOL_VOICES
+#define TDSP_POOL_VOICES TDSP_SYNTH_VOICES
+#endif
+
+#if TDSP_POOL_VOICES >= 4
 // FOUR independent synth voices (the "N synths" payoff). The 8-engine pool is a FIXED 4-way split
 // (2 engines each = 2-note MPE / 4-note normal poly per voice) — no runtime @VOICE2 toggle, no
 // repatch on switch. Each voice: its 2 engines -> a 2-in mixer (carries the voice's user level) ->
@@ -94,7 +104,7 @@ AudioConnection_F32 cps0(dxpMixA, 0, dxpSum, 0), cps1(dxpMixB, 0, dxpSum, 1);
 AudioEffectGain_F32 dxpTrim;
 AudioConnection_F32 cpTrim(dxpSum, 0, dxpTrim, 0);
 #endif
-#endif  // TDSP_SYNTH_VOICES >= 4 (graph)
+#endif  // TDSP_POOL_VOICES >= 4 (graph)
 
 // Soft-limiter safety net on the synth bus, AFTER the ReplayGain trim and BEFORE the
 // mix — the last stage that can catch coincident loud voices summing past full scale
@@ -273,7 +283,7 @@ AudioSynthDexed *g_pool[kPoolN] = { &dxp0, &dxp1, &dxp2, &dxp3, &dxp4, &dxp5, &d
 #ifndef TDSP_VOICE2
 #define TDSP_VOICE2 0
 #endif
-#if TDSP_SYNTH_VOICES >= 4
+#if TDSP_POOL_VOICES >= 4
 // FOUR independent DexedPoolSinks, one per voice, each over its own 2-engine window. The windows
 // are FIXED (no runtime split), so a MIDI-source switch (Thread C) never touches the audio graph.
 // g_synthSink/g_synthSinkB alias voices 0/1 so the existing @STATE + @DXVOICE2/@VOICE2VOL/@ARP2
@@ -300,7 +310,7 @@ DexedPoolSink    g_poolSink(g_pool, kPoolN, kPoolVpe);
 tdsp::MidiSink  *g_synthSink = &g_poolSink;
 #endif
 
-#if TDSP_VOICE2 && TDSP_SYNTH_VOICES < 4
+#if TDSP_VOICE2 && TDSP_POOL_VOICES < 4
 // --- Voices 2: split the 8-engine pool 4/4 so a second DEX voice can be driven by a
 // separate MIDI source (a USB-host keyboard). Engines 0..3 stay on the main path
 // (song player + arp + drums + app); engines 4..7 become an independent sink. A second
@@ -322,7 +332,7 @@ static int       g_voice2VolPct  = 100;      // Voices-2 level, 0..150 % (scales
 // once the Voices-2 split is on (the high half is then the keyboard's). (N>=4 uses fixed
 // per-voice windows instead, so this is unused there — kept returning kPoolN for shared code.)
 static inline int poolMainCount() {
-#if TDSP_VOICE2 && TDSP_SYNTH_VOICES < 4
+#if TDSP_VOICE2 && TDSP_POOL_VOICES < 4
     return g_voice2Split ? kPoolSplitN : kPoolN;
 #else
     return kPoolN;
@@ -333,7 +343,7 @@ static inline int poolMainCount() {
 // = /dexed/*.syx carts off the SD card — identical scheme to SynthBackendDexed.h,
 // so the huge open DX7 patch libraries work with the polyphonic/MPE pool too.
 static const int kNumBundled = tdsp::dexed::kNumBanks * tdsp::dexed::kVoicesPerBank;  // 320
-#if TDSP_SYNTH_VOICES >= 4
+#if TDSP_POOL_VOICES >= 4
 // Per-voice selection state as arrays; voices 0/1 are aliased to the classic names so main.cpp's
 // existing @STATE voice/voice2 sections (and every synthSetInstrument*/PickCartVoice* call) read
 // and write the same storage unchanged. g_voice2VolPct aliases voice 1's user level (the split
@@ -372,9 +382,9 @@ static char g_curCart2Rel[160] = {0};
 static int  g_curCart2Voice    = -1;
 static char g_curCart2Name[tdsp::dexed::kVoiceNameBufBytes] = {0};
 #endif
-#endif  // TDSP_SYNTH_VOICES >= 4 (state)
+#endif  // TDSP_POOL_VOICES >= 4 (state)
 
-#if TDSP_SYNTH_VOICES >= 4
+#if TDSP_POOL_VOICES >= 4
 static const char *synthName()        { return "Dexed x4"; }
 static const char *synthDescription() { return "6-op FM (DX7): four independent 2-engine voices (2-note MPE / 4-note poly each), each with its own bus, level, and ReplayGain. Bundled + /dexed/*.syx carts."; }
 static bool        synthIsGM()         { return false; }
@@ -429,7 +439,7 @@ FLASHMEM static void loadInstrumentRange(int idx, int start, int count) {
     }
 }
 
-#if TDSP_SYNTH_VOICES < 4
+#if TDSP_POOL_VOICES < 4
 // Load a voice into the MAIN pool window (all 8 engines normally; engines 0..3 once the
 // Voices-2 split is on, leaving the keyboard's top half untouched).
 FLASHMEM static void synthSetInstrument(int idx) {
@@ -450,7 +460,7 @@ FLASHMEM static void synthSetInstrument(int idx) {
     Serial.printf("[synth] pool instrument %d = %s (trim=%.3f)\n",
                   idx, synthInstrumentName(idx), (double)trim);
 }
-#endif  // TDSP_SYNTH_VOICES < 4
+#endif  // TDSP_POOL_VOICES < 4
 
 // Load an arbitrary /dexed subfolder cart voice into engines [start, start+count).
 // Returns the voice's display name (or nullptr on failure).
@@ -467,7 +477,7 @@ FLASHMEM static const char *pickCartVoiceRange(const char *relCart, int voice, i
             voice < tdsp::dexed::kVoicesPerBank) ? names[voice] : "";
 }
 
-#if TDSP_SYNTH_VOICES < 4
+#if TDSP_POOL_VOICES < 4
 // Pick a cart voice for the MAIN pool window (the paged-browser @DXPICK path). Loads into
 // every main-window engine so any can play it; returns the display name (nullptr on fail).
 FLASHMEM static const char *synthPickCartVoice(const char *relCart, int voice) {
@@ -482,9 +492,9 @@ FLASHMEM static const char *synthPickCartVoice(const char *relCart, int voice) {
     Serial.printf("[synth] pick %s v%d = %s\n", relCart, voice, nm);
     return nm;
 }
-#endif  // TDSP_SYNTH_VOICES < 4
+#endif  // TDSP_POOL_VOICES < 4
 
-#if TDSP_VOICE2 && TDSP_SYNTH_VOICES < 4
+#if TDSP_VOICE2 && TDSP_POOL_VOICES < 4
 static int g_poolSongPct = 100;   // voice-1 bus level, mirrored from @SONGVOL (see synthSetSongVol)
 
 // Distribute the two independent volumes across the pool so the keyboard voice is NOT
@@ -614,9 +624,9 @@ FLASHMEM static void synthSetVoice2Enabled(bool on) {
     applyPoolVols();
     Serial.printf("[synth] Synth B %s\n", on ? "ENABLED (4/4 split)" : "disabled (unified 8-engine pool)");
 }
-#endif  // TDSP_VOICE2 && TDSP_SYNTH_VOICES < 4
+#endif  // TDSP_VOICE2 && TDSP_POOL_VOICES < 4
 
-#if TDSP_SYNTH_VOICES >= 4
+#if TDSP_POOL_VOICES >= 4
 // --- Four voices over a RUNTIME-REPARTITIONABLE pool (no reflash) ---------------------------------
 // Default = 4 voices, each 2 engines (2+2+2+2). @POOL presets redistribute the 8 engines among the 4
 // fixed track slots at runtime: a partition groups CONTIGUOUS voices; each group's LEAD voice's sink
@@ -767,7 +777,7 @@ FLASHMEM static void poolSetPreset(int preset) {
                   g_voiceEngines[0], g_voiceEngines[1], g_voiceEngines[2], g_voiceEngines[3],
                   poolVoiceActive(0), poolVoiceActive(1), poolVoiceActive(2), poolVoiceActive(3));
 }
-#endif  // TDSP_SYNTH_VOICES >= 4
+#endif  // TDSP_POOL_VOICES >= 4
 
 FLASHMEM static void synthBegin() {
     // Scan /dexed/*.syx off the SD card (bundled voices always present; SD adds
@@ -785,7 +795,7 @@ FLASHMEM static void synthBegin() {
         g_pool[i]->setModWheel(0);
         g_pool[i]->setSustain(false);
     }
-#if TDSP_SYNTH_VOICES >= 4
+#if TDSP_POOL_VOICES >= 4
     // Four fixed 2-engine voices: each mixer sums its 2 engines (unity here; applyPoolVols sets the
     // per-voice user level), the 4-in dxpSum sums the four per-voice trims. Every voice window is
     // fixed, so each sink spans its own 2 engines for the life of the build.
@@ -814,7 +824,7 @@ FLASHMEM static void synthBegin() {
     dxpTrimB.setGain(voice1AuditionTrim());
     applyVoice2Vol();   // unified-pool gains (mixers unity, song level on slot 3)
 #endif
-#endif  // TDSP_SYNTH_VOICES >= 4 (synthBegin init)
+#endif  // TDSP_POOL_VOICES >= 4 (synthBegin init)
 }
 
 // --- ReplayGain hooks (see REPLAYGAIN.md) ------------------------------------
@@ -823,7 +833,7 @@ FLASHMEM static void synthBegin() {
 // per-voice table lives in DexedVoiceGains.h.
 #define TDSP_HAS_REPLAYGAIN 1
 static tdsp::ILoudnessMeter *synthLoudness()     { return &dxpClip; }
-#if TDSP_SYNTH_VOICES >= 4
+#if TDSP_POOL_VOICES >= 4
 static AudioEffectGain_F32  *synthAuditionTrim() { return &dxpTrim0; }   // sweep voice 0; others silent
 #else
 static AudioEffectGain_F32  *synthAuditionTrim() { return &dxpTrim; }

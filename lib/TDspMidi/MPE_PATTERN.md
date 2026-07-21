@@ -131,7 +131,8 @@ Key ideas worth stealing for any pooled backend:
 | **TSF**             | native GM        | ✓    | ✓        | ✓ *(patched)* | ✓        | the chosen GM engine |
 | SF2 (Sf2GmEngine)   | native GM        | ✓*   | —        | —             | no-op    | bend plumbed; needs hook + pressure/timbre. Older engine |
 | OPL3                | 18-voice FM      | ✓*   | —        | —             | no-op    | bend plumbed; timbre could map to operator level. Weak GM bank |
-| **OPLL (YM2413)**   | 9-voice FM       | ✓    | ✓        | ✗ *(chip)*    | n/a      | PSS-140 chip. Bend + pressure→volume verified on HW; per-note timbre is impossible |
+| OPLL (single chip)  | 9-voice FM       | ✓    | ✓        | ✗ *(chip)*    | n/a      | `teensy41_opll`. 2-axis: bend + pressure→volume. One shared user-voice bank → no per-note timbre |
+| **OPLL pool**       | N×YM2413, 1 note each | ✓ | ✓     | ✓             | ✓        | `teensy41_opll_pool`. **Full 3-axis** — one whole chip per note, CC#74 → that chip's modulator TL |
 | Multisample sampler | 8-voice pool     | —    | —        | —             | n/a      | has voice pool + `setPlaybackRate` for bend |
 | ymfm OPM (single)   | mono-timbre      | —    | —        | —             | no-op    | furthest behind — no per-note state anywhere |
 | ymfm OPM (multi)    | per-ch banks     | —    | —        | —             | no-op    | needs per-ch bend state + expression |
@@ -140,12 +141,25 @@ Key ideas worth stealing for any pooled backend:
 `✓*` = per-channel bend is plumbed through the engine but the backend has no `synthSetMpeMode`,
 so member channels aren't actually unified into an MPE setup yet.
 
-`✗ *(chip)*` = a hard hardware limit, not missing code. OPLL's melodic voices are fixed
-ROM patches and its one user voice is a single register bank shared by all 9 channels, so
-per-note timbre (CC#74) cannot exist — `OpllSink::onTimbre` is a deliberate no-op. OPLL is
-per-channel-native (like TSF) for pitch/pressure, so it needs no `synthSetMpeMode` hook:
-`onPitchBend` and `onPressure` (→ live volume-nibble rewrite) act on the channel's voice
-directly. Its 2-axis MPE (bend + pressure→volume) is the ceiling for the YM2413.
+`✗ *(chip)*` = a hard limit **of one chip**, not missing code. A single YM2413's melodic
+voices are fixed ROM patches and its one user voice is a single register bank shared by all
+9 channels, so per-note timbre (CC#74) can't exist on it — `OpllSink::onTimbre` is a
+deliberate no-op. That single-chip backend is per-channel-native (like TSF) for pitch/pressure,
+so it needs no `synthSetMpeMode` hook: `onPitchBend` and `onPressure` (→ live volume-nibble
+rewrite) act on the channel's voice directly. 2-axis (bend + pressure→volume) is its ceiling.
+
+**The OPLL *pool* breaks that ceiling** by spending hardware instead of cleverness: run N
+independent `ym2413` instances (`AudioSynthYmfmOPLLPool` + `OpllPoolSink`), one note per chip,
+and each note gets its OWN user-voice bank — so CC#74 modulates that chip's modulator Total
+Level ($02) for genuine per-note brightness. This is the same "monotimbral + pool" strategy as
+the Dexed pool (one engine per member channel in MPE, round-robin poly otherwise), and it makes
+OPLL a full 3-axis MPE backend. Cost: N whole chips of RAM/CPU (pool is DMAMEM/RAM2, and the
+build drops S/PDIF-in to fit); pick the single-chip backend when you want 9-voice GM + rhythm
+on the cheap, the pool when you want expressive per-note MPE performance.
+
+MPE member-channel bend range is ±24 semitones (`kMpeMemberBendRange` in the mix-kit's
+`applyMidiMode`) — the LinnStrument default, two octaves each way. `computeFB` spans the OPLL's
+8 frequency blocks continuously, so a full-surface slide glides across octaves without clamping.
 
 > Note: the Teensy-side project (`t-dsp_f32_audio_shield`) has several already-MPE-native
 > engines — `MpeVaSink` (per-voice cutoff reference), Plaits, Supersaw, Neuro, Chip, Acid.

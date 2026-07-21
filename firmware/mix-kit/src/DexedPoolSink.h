@@ -63,8 +63,14 @@ public:
     // hands us the final semitone value, so we set Dexed's own sensitivity to a FIXED
     // kBendRange and map the semitones into +/-8192 counts. kBendRange must be >= the
     // widest bend we want to reproduce. The LinnStrument's default per-note bend range is
-    // 48 semis (+-24), so use 24 to reproduce a full-surface slide without clamping. (Was
-    // 1, which clamped to +-1 semi; then 12, which clamped slides wider than an octave.)
+    // +-24 semis, so use 24 to reproduce a full two-octave slide. (Was 1, which clamped to
+    // +-1 semi; then 12, which clamped slides wider than an octave.)
+    //
+    // IMPORTANT: stock synth_dexed HARD-CAPS the range at 12 (constrain(range,0,12) in
+    // dexed.cpp::setPitchbendRange), so this 24 only takes effect because the build-time
+    // patch tools/dexed_bend_range.py rewrites that cap to 24 in the fetched lib_dep. Drop
+    // that script and Dexed silently clamps back to +-12 (one octave). Verified on HW by the
+    // @BOARDTEST self-test (BoardTest.inc.h / tools/board_bend_test.py).
     static constexpr int kBendRange = 24;
     void onPitchBend(uint8_t ch, float semitones) override {
         const int16_t counts = clampCounts((int)(semitones / (float)kBendRange * 8192.0f));

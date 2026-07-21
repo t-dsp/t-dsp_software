@@ -249,6 +249,7 @@ export class WebSerialTransport implements Transport {
   stopSong2() { this.send('@SONG2=stop'); }
   song2Loop(on: boolean) { this.send('@LOOP2=' + (on ? 1 : 0)); }
   trk(index: number, cmd: string) { this.send('@TRK' + index + '.' + cmd); }
+  fx(cmd: string) { this.send('@FX.' + cmd); }
   launchQuantize(on: boolean) { this.send('@QUANTIZE=' + (on ? 1 : 0)); }
   metronome(on: boolean) { this.send('@METRO=' + (on ? 1 : 0)); }
   metronomeMute(muted: boolean) { this.send('@METROMUTE=' + (muted ? 1 : 0)); }
@@ -326,6 +327,7 @@ export class WebSerialTransport implements Transport {
   audioLoopPlay(on: boolean) { this.send('@ALPLAY=' + (on ? 1 : 0)); }
   audioLoopClear() { this.send('@ALCLR'); }
   audioLoopSave(name: string) { this.send('@ALSAVE=' + name); }
+  usbAudioGain(pct: number) { this.send('@USBGAIN=' + Math.max(0, Math.min(150, Math.round(pct)))); }
   espPair() { this.send('P'); }
   espReconnect() { this.send('r'); }
   espDisconnect() { this.send('X'); }   // Teensy relays 'X' -> ESP32 'x' (A2DP disconnect)

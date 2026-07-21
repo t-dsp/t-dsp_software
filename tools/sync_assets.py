@@ -221,6 +221,9 @@ def main():
     ap.add_argument("--sf2-dest", default="/sf2/gm_tsf.sf2", help="card path the TSF engine loads")
     ap.add_argument("--list", action="store_true", help="list detected Teensy ports and exit")
     ap.add_argument("--dry-run", action="store_true", help="show what would be pushed, don't open the port")
+    ap.add_argument("--loops-src", help="also push a STAGED loops dir (from tools/fetch_loops.py, "
+                    "e.g. c:/tmp/t-dsp-loops/loops) to /midi/loops. Loops are NOT tracked in the "
+                    "repo, so they are pushed from wherever they were staged, not from assets/.")
     args = ap.parse_args()
 
     if args.list:
@@ -240,6 +243,19 @@ def main():
             continue
         files = collect(src_abs, s["sd_root"], s["glob"])
         plan.append((f"{s['name']} -> {s['sd_root']}", files))
+
+    # Loops are staged (not committed), so their source is an explicit dir, not assets/.
+    # Push the .mid tree AND its catalog.tsv (the loops manifest points the app at it).
+    if args.loops_src:
+        loops_abs = os.path.abspath(args.loops_src)
+        if not os.path.isdir(loops_abs):
+            print(f"skip  loops: --loops-src not found ({loops_abs})", file=sys.stderr)
+        else:
+            files = collect(loops_abs, "/midi/loops", ".mid")
+            cat = os.path.join(loops_abs, "catalog.tsv")
+            if os.path.isfile(cat):
+                files.append((cat, "/midi/loops/catalog.tsv"))
+            plan.append(("loops -> /midi/loops", files))
 
     if args.soundfont:
         sf2_src = args.sf2_src or os.path.join(REPO_ROOT, "tools/sf2/fonts/gm_tim.sf2")

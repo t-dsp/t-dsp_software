@@ -1,0 +1,75 @@
+[
+  {
+    "env": "fx_none",
+    "ok": true,
+    "flash": 66556,
+    "ram1": 77728,
+    "ram2": 23232,
+    "cpu": {
+      "cpu": 0.4,
+      "memI16": 0,
+      "memF32": 2,
+      "heapRAM2": 53208
+    }
+  },
+  {
+    "env": "fx_delay",
+    "ok": true,
+    "flash": 71676,
+    "ram1": 78144,
+    "ram2": 23232,
+    "cpu": {
+      "cpu": 8.2,
+      "memI16": 0,
+      "memF32": 3,
+      "heapRAM2": 360440
+    }
+  },
+  {
+    "env": "fx_phaser",
+    "ok": true,
+    "flash": 67580,
+    "ram1": 78048,
+    "ram2": 23232,
+    "cpu": {
+      "cpu": 1.8,
+      "memI16": 0,
+      "memF32": 3,
+      "heapRAM2": 53208
+    }
+  },
+  {
+    "env": "fx_plate",
+    "ok": true,
+    "flash": 74748,
+    "ram1": 79680,
+    "ram2": 23232,
+    "cpu": {
+      "cpu": 10.5,
+      "memI16": 0,
+      "memF32": 3,
+      "heapRAM2": 248536
+    }
+  },
+  {
+    "env": "fx_reverbsc",
+    "ok": true,
+    "flash": 68604,
+    "ram1": 78208,
+    "ram2": 23232,
+    "cpu": null
+  },
+  {
+    "env": "fx_spring",
+    "ok": true,
+    "flash": 71676,
+    "ram1": 78272,
+    "ram2": 23232,
+    "cpu": {
+      "cpu": 14.3,
+      "memI16": 0,
+      "memF32": 3,
+      "heapRAM2": 91080
+    }
+  }
+]

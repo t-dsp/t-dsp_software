@@ -59,6 +59,19 @@
 #define TDSP_A2DP 1
 #endif
 
+// ---- HARD RULE: WiFi control and A2DP must NEVER coexist ------------------
+// The classic ESP32 has ONE 2.4 GHz radio. Running WiFi and Bluetooth-Classic
+// (A2DP) together forces the mandatory WiFi/BT coexistence modem-sleep, which
+// stalls the WebSocket link and SILENTLY DROPS inbound commands (measured on HW:
+// ping avg 59 ms / max 121 ms, bulk catalog transfers fail). This is a hardware
+// limit of the shared radio, not a fixable bug. A WiFi build MUST therefore be
+// built with -D TDSP_A2DP=0 (env:esp32dev_wifi already does). This #error makes
+// the forbidden combination impossible to compile. DO NOT REMOVE IT, and never
+// add A2DP back to a WiFi env.
+#if defined(TDSP_CTRL_WIFI) && TDSP_A2DP
+#error "WiFi + A2DP is forbidden on the classic ESP32 (one shared radio). A WiFi build must set -D TDSP_A2DP=0. Never enable A2DP in a TDSP_CTRL_WIFI env."
+#endif
+
 #include <Arduino.h>
 
 #include "BluetoothA2DPSink.h"

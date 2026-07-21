@@ -1,0 +1,10 @@
+{
+  "name": "TDspHexeFx",
+  "version": "1.3.0",
+  "description": "hexefx_audiolib_F32 stereo F32 audio effects (vendored subset: effects + filters only; the 6 other-vendor codec-control drivers, the I2S I/O nodes, and the umbrella header were pruned). Built on OpenAudio_ArduinoLibrary (found via lib_extra_dirs). MIT, (c) Piotr Zapart / hexefx.com.",
+  "keywords": "audio, dsp, teensy, fx, reverb, delay",
+  "frameworks": "arduino",
+  "platforms": "teensy",
+  "license": "MIT",
+  "headers": ["effect_platereverb_F32.h"]
+}

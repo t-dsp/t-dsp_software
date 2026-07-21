@@ -19,7 +19,11 @@
 
 static constexpr int kOpllPoolSlots = 6;   // MPE polyphony = independent-timbre notes
 
-AudioSynthYmfmOPLLPool g_opllPool;                       // mono int16 (out 0 == out 1)
+// The pool is 8 ym2413 chips (~8 KB each) — ~64 KB that RAM1 (DTCM) can't spare on this
+// build. Park it in DMAMEM (RAM2/OCRAM) like the Plaits voices: its constructor explicitly
+// inits every member (and each Slot's ymfm ctor runs), so uninitialized .dmabss is safe, and
+// begin() resets the chips before use. Frees the ~62 KB that was overflowing RAM1.
+DMAMEM AudioSynthYmfmOPLLPool g_opllPool;                // mono int16 (out 0 == out 1)
 AudioConvert_I16toF32  g_synthToF32;                     // int16 -> F32 bridge
 AudioConnection     c_opllPool(g_opllPool, 0, g_synthToF32, 0);
 AudioConnection_F32 c_synthL(g_synthToF32, 0, outL, 3);  // mono -> both mix channels

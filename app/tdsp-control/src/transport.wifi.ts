@@ -286,6 +286,7 @@ export class WiFiTransport implements Transport {
   stopSong2() { this.send('@SONG2=stop'); }
   song2Loop(on: boolean) { this.send('@LOOP2=' + (on ? 1 : 0)); }
   trk(index: number, cmd: string) { this.send('@TRK' + index + '.' + cmd); }
+  fx(cmd: string) { this.send('@FX.' + cmd); }
   // ---- Loop recorder ----
   recVoice(v: number) { this.send('@RECV=' + (v === 2 ? 2 : 1)); }
   recBars(n: number) { this.send('@RECBARS=' + n); }
@@ -330,6 +331,7 @@ export class WiFiTransport implements Transport {
   audioLoopPlay(on: boolean) { this.send('@ALPLAY=' + (on ? 1 : 0)); }
   audioLoopClear() { this.send('@ALCLR'); }
   audioLoopSave(name: string) { this.send('@ALSAVE=' + name); }
+  usbAudioGain(pct: number) { this.send('@USBGAIN=' + Math.max(0, Math.min(150, Math.round(pct)))); }
 
   // ---- local A2DP verbs (handled ON the ESP32, not relayed to the Teensy) ----
   // The USB path sends single chars to the Teensy, which relays them on to the ESP32;

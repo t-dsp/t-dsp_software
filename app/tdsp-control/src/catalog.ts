@@ -35,6 +35,21 @@ export const EMPTY_CATALOG: Catalog = {
   engine: '', hasDrums: false, drumEngine: '', hasBt: true, hasSf: true, hasDexed: true, builtMs: 0, instruments: [], dexed: [], grooves: [], songs: [], soundfonts: [], drumkits: [],
 };
 
+// Persistent catalog cache. The device's /tdsp/index.ndjson IS the catalog manifest — it
+// carries the schema version, build time, engine name, and every per-type file's byte size.
+// So the raw index bytes are a perfect fingerprint: if they're byte-identical to a previous
+// load, nothing on the device changed and the (multi-hundred-KB) NDJSON download can be
+// skipped entirely. A @REINDEX or reflash rewrites the index (new build time / sizes), which
+// busts the cache automatically. This is the differential check — the tiny index is the diff
+// sentinel; no TTL needed (a TTL would only ever re-fetch identical data).
+//
+// The app supplies a tiny string KV (backed by AsyncStorage) so this module stays platform-
+// and storage-agnostic. Bump CACHE_VER whenever the Catalog shape changes, so an old cached
+// blob from a previous app build is ignored instead of deserialized into the new shape.
+export interface CatalogCache { get(): Promise<string | null>; set(v: string): Promise<void>; }
+const CACHE_VER = 1;
+interface CachedCatalog { cv: number; ix: string; catalog: Catalog; }
+
 function parseNdjson<T = any>(text: string): T[] {
   const out: T[] = [];
   for (const raw of (text || '').split('\n')) {
@@ -70,8 +85,10 @@ const FETCH: { type: keyof Catalog; path: string; label: string }[] = [
 ];
 
 /** Load the full catalog. Throws if index.ndjson is missing (caller can offer @REINDEX).
- *  onProgress (optional) fires before + after each file so the UI can show a load bar. */
-export async function loadCatalog(t: Transport, onProgress?: (p: LoadProgress) => void): Promise<Catalog> {
+ *  onProgress (optional) fires before + after each file so the UI can show a load bar.
+ *  cache (optional) short-circuits the whole NDJSON download when the device's index.ndjson
+ *  is unchanged since the last load — see CatalogCache above. */
+export async function loadCatalog(t: Transport, onProgress?: (p: LoadProgress) => void, cache?: CatalogCache): Promise<Catalog> {
   // Throttle progress emits. onProgress -> setState -> a full re-render of the app; firing
   // it on EVERY 360-byte @FD chunk (hundreds per load) floods the main thread and actually
   // SLOWS the transfer (it stalls). Emit at most ~every 100 ms; `force` for phase changes.
@@ -93,6 +110,22 @@ export async function loadCatalog(t: Transport, onProgress?: (p: LoadProgress) =
       break;
     }
     catch (e) { if (attempt >= 2) throw e; await new Promise(r => setTimeout(r, 700)); }
+  }
+  // Cache hit: identical index bytes → the device's catalog is unchanged since we last loaded
+  // it, so skip the multi-file download and return the stored catalog immediately. Any read /
+  // parse / version mismatch just falls through to a normal full load (the cache is a pure
+  // optimization — never a source of truth).
+  if (cache) {
+    try {
+      const raw = await cache.get();
+      if (raw) {
+        const c = JSON.parse(raw) as CachedCatalog;
+        if (c && c.cv === CACHE_VER && c.ix === ixText && c.catalog) {
+          emit({ done: 1, total: 1, label: 'Catalog (cached)', index: FETCH.length, count: FETCH.length, det: false }, true);
+          return c.catalog;
+        }
+      }
+    } catch { /* corrupt / stale cache — do a full load */ }
   }
   const ix = parseNdjson(ixText);
   const meta = ix.find((r: any) => r && r.v) || {};
@@ -152,7 +185,7 @@ export async function loadCatalog(t: Transport, onProgress?: (p: LoadProgress) =
   // ~6 MB — too big to @READ on every connect (it timed out and the library came back empty).
   // The SD library is browsed LIVE instead, folder-by-folder, via transport.browseDir()/
   // cartVoices() (@DXLS/@DXVL). `dexed` stays [] in the catalog.
-  return {
+  const catalog: Catalog = {
     engine: meta.engine || '',
     hasDrums: meta.drums !== false,   // absent (old firmware) -> assume drums; explicit false -> hide
     drumEngine: meta.drumEngine || '',
@@ -162,7 +195,10 @@ export async function loadCatalog(t: Transport, onProgress?: (p: LoadProgress) =
     builtMs: meta.built || 0,
     instruments: out.instruments || [], dexed: [],
     grooves: out.grooves || [], songs: out.songs || [], soundfonts: out.soundfonts || [], drumkits: out.drumkits || [],
-  } as Catalog;
+  };
+  // Persist keyed on the exact index bytes so the next connect can short-circuit (see above).
+  if (cache) { try { await cache.set(JSON.stringify({ cv: CACHE_VER, ix: ixText, catalog } as CachedCatalog)); } catch { /* best effort */ } }
+  return catalog;
 }
 
 /** Cart path relative to /dexed (what @DXPICK expects). */

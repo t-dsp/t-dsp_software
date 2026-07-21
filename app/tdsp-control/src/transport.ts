@@ -98,6 +98,10 @@ export interface Transport {
   metronomeSig(bpb: number): void;                    // metronome/idle time signature = N beats/bar (@METROSIG=)
   metronomeVol(pct: number): void;                    // metronome click level (@METROVOL=, 0..150 %), independent of the master @VOL
   metronomeLock(on: boolean): void;                   // tempo lock: when ON, loading content stops auto-setting the master BPM (@METROLOCK=)
+  // ---- FX reverb master insert (build-flag gated; shown only when @STATE caps.fx). One generic
+  // method like trk(): the card builds '@FX.<cmd>' — fx('ON=1'), fx('MIX=50'), fx('SIZE=70') (plate)
+  // / fx('TIME=55') (spring). Which params exist depends on @STATE.fx.type (plate|spring). ----
+  fx(cmd: string): void;                              // @FX.<cmd>
   arpOn(on: boolean): void;
   arpRestart(): void;                                 // re-trigger the running arp cycle from step 0 (@ARPRESTART)
   arpPattern(i: number): void;
@@ -163,6 +167,10 @@ export interface Transport {
   audioLoopPlay(on: boolean): void;                   // resume a stopped loop / stop (@ALPLAY=)
   audioLoopClear(): void;                             // wipe the selected loop (@ALCLR)
   audioLoopSave(name: string): void;                  // save as /loops/<name>.wav (@ALSAVE=)
+  // ---- USB Audio interface (build-flag gated; shown only when @STATE caps.usbaudio → the
+  // TDSP_USB_AUDIO 24-bit/48k sound-card build). The host owns its own output level via the UAC
+  // Feature Unit; this sets the device-side USB-in RETURN level into the mix bus. ----
+  usbAudioGain(pct: number): void;                    // USB-in return level into the mix (@USBGAIN=, 0..150 %)
   // On USB these are single chars relayed Teensy -> ESP32; on BLE they are opcodes; over
   // WiFi they are the ESP32's local '!' commands. Same semantics either way.
   espPair(): void;

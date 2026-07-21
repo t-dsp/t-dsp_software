@@ -7,12 +7,14 @@
 // (title + live value + the same header controls); tapping a card opens that section's
 // own page. No nav library — just a `route` string ('home' | section id).
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { View, Text, Pressable, ScrollView, FlatList, TextInput, Switch, StyleSheet, ActivityIndicator, Platform, Alert, useWindowDimensions } from 'react-native';
+import { View, Text, Pressable, ScrollView, FlatList, TextInput, Switch, StyleSheet, ActivityIndicator, Platform, Alert, useWindowDimensions, AppState as RNAppState } from 'react-native';
+import type { AppStateStatus } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import Slider from '@react-native-community/slider';
 import { createTransport } from './src/transportFactory';
 import { createDiscovery } from './src/discoveryFactory';
 import type { TdspDevice } from './src/discovery';
-import { Catalog, EMPTY_CATALOG, loadCatalog, LoadProgress, Song, songArg } from './src/catalog';
+import { Catalog, CatalogCache, EMPTY_CATALOG, loadCatalog, LoadProgress, Song, songArg } from './src/catalog';
 import type { Transport, DirPage, TransportKind } from './src/transport';
 import { sortEntries } from './src/browse';
 import type { BrowseEntry } from './src/browse';
@@ -23,6 +25,16 @@ import { ARP_PATTERNS as ARP_PAT, ARP_RATES, rateIndexFromFw, PAT_USER_SEQUENCE,
 import { applyArpPreset, ArpPreset, ARP_LIBRARY } from './src/arpLibrary';
 
 const EMPTY_DIR: DirPage = { path: '', page: 0, npages: 1, folders: [], carts: [] };
+
+// Persistent catalog cache (AsyncStorage → localStorage on web). loadCatalog() short-circuits
+// the whole NDJSON download when the device's index.ndjson is byte-identical to last time, so a
+// reconnect (e.g. after the phone comes out of your pocket) is near-instant instead of a full
+// re-download. Keyed per engine so switching boards doesn't cross-contaminate. See catalog.ts.
+const CATALOG_KEY = 'tdsp.catalog.v1';
+const catalogCache: CatalogCache = {
+  get: () => AsyncStorage.getItem(CATALOG_KEY),
+  set: (v: string) => AsyncStorage.setItem(CATALOG_KEY, v),
+};
 // Display name for a groove SD path (basename minus .mid) — the drum-track card's "value".
 const grooveDisp = (p: string | null | undefined) => (p ? (p.split('/').pop() || '').replace(/\.mid$/i, '') : '');
 const kb = (n: number) => (n / 1024).toFixed(1);   // bytes -> "12.3" KB, for the load progress readout
@@ -39,6 +51,7 @@ const THEME = {
   synthD:   th('#e3b341', 0.14),   // gold (voice 4)
   tempo:    th('#e3b341', 0.14),   // amber
   bt:       th('#58a6ff', 0.14),   // blue
+  usb:      th('#79c0ff', 0.14),   // light blue (USB audio interface)
   settings: th('#ff7b72', 0.13),   // coral
   recorder:  th('#f85149', 0.14),  // red (MIDI record)
   audioloop: th('#f778ba', 0.14),  // pink (audio loop)
@@ -141,20 +154,29 @@ function BeatStrip({ sig, bpm, active, live }: { sig: number; bpm: number; activ
 // the bottom (a card is far narrower than the window, so they never share the title's
 // line). Only the › chevron opens the section — the card body itself is inert, so the
 // header controls (nested Pressables) never risk a stray navigation.
-function Card({ title, value, status, subtitle, actions, progress, onPress, style, accent, tint, topRight }:
-  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onPress: () => void; style?: any; accent?: string; tint?: string; topRight?: React.ReactNode }) {
+// The SAME Card is used on the home grid AND as a section-page header (pass `onBack`): identical
+// content (title/subtitle/foot/actions), just a left back-arrow instead of the right open-chevron.
+function Card({ title, value, status, subtitle, actions, foot, progress, onPress, onBack, style, accent, tint, topRight, disabledReason }:
+  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; foot?: React.ReactNode; progress?: number; onPress?: () => void; onBack?: () => void; style?: any; accent?: string; tint?: string; topRight?: React.ReactNode; disabledReason?: string }) {
+  // A feature the firmware compiled in but that can't run right now (e.g. a PSRAM-only synth/looper/fx
+  // on a board without PSRAM, or a missing SD asset): grey the whole card, swap the subtitle for the
+  // reason, and make it inert (no chevron, no header actions) — the box is visible so the user knows
+  // it exists, with the reason shown, but it can't be opened or driven. See @STATE "unavail".
+  const off = !!disabledReason;
   return (
-    <View style={[s.card, style, tint && { backgroundColor: tint }, accent && { borderLeftColor: accent, borderLeftWidth: 3 }]}>
+    <View style={[s.card, style, tint && { backgroundColor: tint }, accent && { borderLeftColor: accent, borderLeftWidth: 3 }, off && s.cardOff]}>
       <View style={s.cardHead}>
+        {onBack && <Pressable onPress={onBack} hitSlop={10} style={s.chevBtn}><Text style={s.chev}>‹</Text></Pressable>}
         <View style={s.drawerLeft}>
           <Text style={[s.drawerTitle, accent && { color: accent }]} numberOfLines={1}>{title}</Text>
-          {subtitle ?? <Subtitle value={value} status={status} />}
-          {progress != null && <ProgressBar value={progress} />}
+          {off ? <Text style={s.cardReason} numberOfLines={1}>⚠  {disabledReason}</Text> : (subtitle ?? <Subtitle value={value} status={status} />)}
+          {!off && progress != null && <ProgressBar value={progress} />}
         </View>
-        {topRight}
-        <Pressable onPress={onPress} hitSlop={10} style={s.chevBtn}><Text style={s.chev}>❯</Text></Pressable>
+        {!off && topRight}
+        {!onBack && <Pressable onPress={off ? undefined : onPress} disabled={off} hitSlop={10} style={s.chevBtn}><Text style={[s.chev, off && { opacity: 0 }]}>❯</Text></Pressable>}
       </View>
-      {!!actions && <View style={s.cardActions}>{actions}</View>}
+      {!off && !!foot && <View style={s.cardFoot}>{foot}</View>}
+      {!off && !!actions && <View style={s.cardActions}>{actions}</View>}
     </View>
   );
 }
@@ -231,8 +253,10 @@ function LoadScreen({ bus, tpLabel }: { bus: ProgressBus; tpLabel: string }) {
 
 // A transport button for a section header (nested Pressable → doesn't navigate the card).
 // All header buttons share one uniform width (s.hdrBtn.minWidth).
-const HdrBtn = ({ label, onPress, stop }: { label: string; onPress: () => void; stop?: boolean }) => (
-  <Pressable onPress={onPress} style={[s.hdrBtn, stop && s.hdrBtnStop]}><Text style={s.hdrBtnText}>{label}</Text></Pressable>
+// `active` (play buttons only): true = playing (green), false = idle (dark). Omit on non-play
+// buttons (nav/stop/±) so they keep their normal look.
+const HdrBtn = ({ label, onPress, stop, active }: { label: string; onPress: () => void; stop?: boolean; active?: boolean }) => (
+  <Pressable onPress={onPress} style={[s.hdrBtn, stop && s.hdrBtnStop, active === false && s.hdrBtnIdle]}><Text style={s.hdrBtnText} numberOfLines={1}>{label}</Text></Pressable>
 );
 // A small keyboard glyph drawn with Views so it can be tinted (an emoji can't): a bordered
 // body with five keys. WHITE = this synth owns the USB keyboard; GREY = another synth does.
@@ -251,16 +275,45 @@ const KbdBtn = ({ owned, onPress }: { owned: boolean; onPress: () => void }) => 
   </Pressable>
 );
 const Row = ({ children }: any) => <View style={s.row}>{children}</View>;
-// A per-section level slider (0..150 %, 100 = the file's own velocity), independent of the
-// master @VOL. Live drag only moves the label; the value is sent on release (onSlidingComplete)
-// so a drag never bursts the serial link (mirrors ui.html's @change-not-@input behavior).
-const VolSlider = ({ label, value, onChange, onCommit, disabled }:
-  { label: string; value: number; onChange: (v: number) => void; onCommit: (v: number) => void; disabled?: boolean }) => (
+// Live-drag command rate. Sliders now send WHILE dragging (not just on release) so the change is
+// heard as you move — throttled to ~1 msg / SLIDER_TX_MS to stay inside the serial/BLE budget (the
+// ESP32 relay throttles at TX_GAP_MS=20ms and drops the queue tail past ~25 msg/s; see
+// project_serial_bridge_throttle). 60 ms ≈ 16 sends/s: the thumb tracks the finger at 60 fps
+// (onValueChange) while the device gets a smooth stream of small step=1 updates — continuous to the
+// ear without bursting the wire. (If a specific param still zippers, add firmware-side param
+// smoothing for it — decouples audio smoothness from the send rate.)
+const SLIDER_TX_MS = 60;
+// Slider that streams throttled onCommit()s during the drag: leading edge (immediate) + a trailing
+// timer so a HELD position still lands within SLIDER_TX_MS, and the exact final value on release.
+const ThrottledSlider = ({ value, onChange, onCommit, min = 0, max = 150, step = 1, disabled, style }:
+  { value: number; onChange: (v: number) => void; onCommit: (v: number) => void;
+    min?: number; max?: number; step?: number; disabled?: boolean; style?: any }) => {
+  const last = useRef(0); const pend = useRef<number | null>(null); const timer = useRef<any>(null);
+  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
+  const flush = () => {
+    if (timer.current) { clearTimeout(timer.current); timer.current = null; }
+    if (pend.current !== null) { last.current = Date.now(); const v = pend.current; pend.current = null; onCommit(v); }
+  };
+  const change = (v: number) => {
+    onChange(v);                                   // move the thumb/label immediately (60fps, no send)
+    pend.current = v;
+    const dt = Date.now() - last.current;
+    if (dt >= SLIDER_TX_MS) flush();               // leading edge
+    else if (!timer.current) timer.current = setTimeout(flush, SLIDER_TX_MS - dt);   // trailing edge
+  };
+  return (
+    <Slider style={style ?? { flex: 1, height: 34 }} minimumValue={min} maximumValue={max} step={step} value={value}
+      minimumTrackTintColor={C.accent} maximumTrackTintColor={C.border} thumbTintColor={C.accent}
+      disabled={disabled} onValueChange={change} onSlidingComplete={v => { pend.current = v; flush(); }} />
+  );
+};
+// A per-section level slider (0..150 %, 100 = the file's own velocity), independent of the master
+// @VOL. Streams throttled sends during the drag (ThrottledSlider) so you hear it ramp as you move.
+const VolSlider = ({ label, value, onChange, onCommit, disabled, max = 150 }:
+  { label: string; value: number; onChange: (v: number) => void; onCommit: (v: number) => void; disabled?: boolean; max?: number }) => (
   <View style={s.volRow}>
     <Text style={[s.muted, { width: 52 }]}>{label}</Text>
-    <Slider style={{ flex: 1, height: 34 }} minimumValue={0} maximumValue={150} step={1} value={value}
-      minimumTrackTintColor={C.accent} maximumTrackTintColor={C.border} thumbTintColor={C.accent}
-      disabled={disabled} onValueChange={onChange} onSlidingComplete={onCommit} />
+    <ThrottledSlider value={value} onChange={onChange} onCommit={onCommit} max={max} disabled={disabled} />
     <Text style={[s.muted, { width: 44, textAlign: 'right' }]}>{Math.round(value)}%</Text>
   </View>
 );
@@ -300,7 +353,7 @@ function SubMenu({ getItems, onOpen, accent, tint }: { getItems: () => any[]; on
     <View style={s.submenu}>
       {getItems().map(sec => (
         <Card key={sec.id} title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} actions={sec.actions}
-          onPress={() => onOpen(sec.id)} style={s.cardGrid} accent={accent ?? sec.accent} tint={tint ?? sec.tint} topRight={sec.topRight} />
+          onPress={() => onOpen(sec.id)} style={s.cardGrid} accent={accent ?? sec.accent} tint={tint ?? sec.tint} topRight={sec.topRight} disabledReason={sec.disabledReason} />
       ))}
     </View>
   );
@@ -322,11 +375,12 @@ const stripExt = (name: string, ext?: string) => {
   const suf = ext ? '.' + ext : '.mid';
   return name.toLowerCase().endsWith(suf.toLowerCase()) ? name.slice(0, -suf.length) : name;
 };
-function FolderBrowser({ tp, root, ext, enabled, selected, playing, onSelectFile, injectFolders }: {
+function FolderBrowser({ tp, root, ext, enabled, selected, playing, onSelectFile, injectFolders, onFolderList }: {
   tp: Transport; root: string; ext?: string; enabled: boolean;
   selected?: string; playing?: string;
   onSelectFile: (fullPath: string, displayName: string) => void;
   injectFolders?: InjectFolder[];
+  onFolderList?: (files: { arg: string; name: string }[]) => void;   // publish the current folder's ordered files (for header ‹/›)
 }) {
   const [path, setPath] = useState(root);                        // current REAL folder (absolute SD path)
   const [virt, setVirt] = useState<InjectFolder | null>(null);   // inside an injected virtual folder
@@ -335,6 +389,16 @@ function FolderBrowser({ tp, root, ext, enabled, selected, playing, onSelectFile
 
   // Reset to the root when the root prop changes (component reused across cards).
   useEffect(() => { setPath(root); setVirt(null); }, [root]);
+
+  // Publish the current folder's ordered playable files up to the deck, so the header ‹/› step within
+  // the folder you're viewing (not the flat catalog). Recomputed whenever the visible list changes;
+  // while loading (entries === null) we keep the previous list so a mid-fetch ‹/› still works.
+  useEffect(() => {
+    if (!onFolderList) return;
+    if (virt) { onFolderList(virt.leaves.map(lf => ({ arg: lf.arg, name: lf.name }))); return; }
+    if (entries) onFolderList(entries.filter(e => e.type === 'F').map(e => ({ arg: path + '/' + e.name, name: stripExt(e.name, ext) })));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [entries, virt, path, ext]);
 
   // Live @LS fetch whenever the real path changes (skip while inside a virtual folder). The
   // `alive` gate drops a stale reply when the user navigates away mid-fetch.
@@ -509,7 +573,24 @@ export default function App() {
   // selection + volume + arp state; the folder browser is shared (pickVoice takes a target).
   // caps.audioloop is a COUNT (how many audio loops the device actually allocated —
   // RAM/PSRAM dependent), not a bool: 0 hides the Audio Loop card entirely.
-  const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, recedit: false, audioloop: 0 });
+  const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, recedit: false, audioloop: 0, fx: false, usbaudio: false });
+  // USB Audio interface (build-flag gated, caps.usbaudio → TDSP_USB_AUDIO). The device is a
+  // 24-bit/48k USB sound card: host audio in → mix bus, the mix out → host. `active` = the host
+  // has the audio stream open (playing/recording); `gain` = the USB-in return level (0..150 %,
+  // @USBGAIN); rxover/txunder = ring-buffer over/underrun counters (drift diagnostics, from
+  // usbIn.getStatus()). See planning/usb-audio-mixkit/DESIGN.md.
+  const [usbAudio, setUsbAudio] = useState({ active: false, gain: 100, rxover: 0, txunder: 0 });
+  // FX reverb master insert (build-flag gated, caps.fx). One reverb per build — @STATE.fx.type is
+  // 'plate' (rich: size/damp/diff/shimmer/freeze) or 'spring' (time/treble/bass); both share mix.
+  // The card renders the type-appropriate sliders. Off = clean bypass (the build sounds identical).
+  const [fx, setFx] = useState({ type: 'plate' as 'plate' | 'spring', on: false, mix: 30,
+    size: 70, damp: 40, lodamp: 10, diff: 65, lowpass: 100, hipass: 0, shimmer: 0, pitch: 0, freeze: false,
+    time: 55, treble: 40, bass: 30 });
+  // Features compiled in but unavailable right now, keyed by card id -> reason (e.g. "PSRAM required").
+  // The firmware reports these in @STATE.unavail; a card whose id is present renders greyed with the
+  // reason instead of hiding. psram = MB of soldered PSRAM (0 on the no-PSRAM boards).
+  const [unavail, setUnavail] = useState<Record<string, string>>({});
+  const [psram, setPsram] = useState(0);
   const [voice2, setVoice2] = useState({ on: false, vol: 100, name: '', path: '' });
   // Runtime pool partition (4-voice pool builds, @STATE.pool): the 8 Dexed engines redistributed among
   // the 4 fixed voices. `preset` 0=4voices 1=2voices 2=1voice 3=4+2+2; `engines[v]` = engines that voice
@@ -520,11 +601,18 @@ export default function App() {
   // (0 = all). Hydrated from @STATE tracks[]; the MIDI-Input selector on each synth card writes it
   // via @TRK<i>.SRC / SRCCH. Data-driven: a new voice's entry just appears here, no per-voice field.
   const [trkSubs, setTrkSubs] = useState<Record<number, { src: string; srcch: number }>>({});
+  // The drum track's live-MIDI index (= synthCount) when the firmware supports live finger-drumming
+  // (drum @STATE entry carries "src"); null on older firmware / no drum engine, so the drums card
+  // hides its keyboard button. Kept separate from synthCount so claimUsb can include it exclusively.
+  const [drumSrcIdx, setDrumSrcIdx] = useState<number | null>(null);
   // Data-driven synth voices (Phase 3): how many synth cards to render + each voice's name/level,
   // all from @STATE tracks[]. Voices 0/1 keep their bespoke cards (Synth A/B); voices 2+ get a
   // generated card driven by @TRK<i>.* (selVoiceX = the browser selection per extra voice index).
   const [synthCount, setSynthCount] = useState(1);
   const [trkNames, setTrkNames] = useState<Record<number, string>>({});
+  const [trkEng, setTrkEng] = useState<Record<number, string>>({});   // per-track engine tag from @STATE tracks[].eng (e.g. 'opll'); Dexed tracks carry none
+  const [opllIdx, setOpllIdx] = useState<Record<number, number>>({});   // per-track OPLL ROM-instrument index (0..14); OPLL voices don't use the /dexed catalog, they step @TRK<i>.INSTR=
+  const [trkSong, setTrkSong] = useState<Record<number, string>>({});   // per-track LOADED MIDI song from @STATE tracks[].song — hydrates on connect (esp. C/D, whose live playerX isn't in @STATE)
   const [selVoiceX, setSelVoiceX] = useState<Record<number, string>>({});   // browser sel key, keyed by 0-based voice index (>=2)
   const [trkVolX, setTrkVolX] = useState<Record<number, number>>({});       // per-extra-voice level (@TRK<i>.VOL), local echo
   // Per-extra-voice (index >=2) MIDI-player + arp state, so Synth C/D get the SAME submenu as A/B
@@ -548,7 +636,7 @@ export default function App() {
   // = the selected loop's config, st[]/p[] = per-loop state (same 0..4 codes as `rec`) and
   // 0..1 progress, capS = the selected loop's capacity in seconds (bars that don't fit are
   // disabled). See planning/audio-looper/DESIGN.md.
-  const [aloop, setAloop] = useState({ sel: 0, bars: 4, mono: false, follow: true, capS: 0,
+  const [aloop, setAloop] = useState({ sel: 0, bars: 4, mono: false, follow: true, capS: 0, level: 100,
                                        st: [0, 0, 0], p: [0, 0, 0] });
   const [selVoice2, setSelVoice2] = useState('');   // voice-2 browser highlight (independent of voice 1)
   const [arp2, setArp2] = useState({ on: false, pat: 0, rate: 0, oct: 1, latch: false });
@@ -607,7 +695,21 @@ export default function App() {
     }
     // Voices 2 / Arp 2 — build capabilities (SHOW the cards) + the keyboard half's state.
     if (j.caps) setCaps({ voice2: !!j.caps.voice2, arp2: !!j.caps.arp2, rec: !!j.caps.rec,
-                          recedit: !!j.caps.recedit, audioloop: Math.max(0, j.caps.audioloop | 0) });
+                          recedit: !!j.caps.recedit, audioloop: Math.max(0, j.caps.audioloop | 0), fx: !!j.caps.fx,
+                          usbaudio: !!j.caps.usbaudio });
+    // USB Audio interface status (usbaudio builds only emit j.usb): host-stream active flag,
+    // USB-in return level, and the over/underrun counters used to spot host↔codec clock drift.
+    if (j.usb) setUsbAudio(u => ({
+      active: !!j.usb.active,
+      gain: j.usb.gain != null ? Math.max(0, Math.min(150, j.usb.gain | 0)) : u.gain,
+      rxover: j.usb.rxover != null ? (j.usb.rxover | 0) : u.rxover,
+      txunder: j.usb.txunder != null ? (j.usb.txunder | 0) : u.txunder,
+    }));
+    // FX reverb state (type + params); firmware emits on/freeze as 0|1 -> coerce to bool.
+    if (j.fx) setFx(f => ({ ...f, ...j.fx, on: !!j.fx.on, freeze: !!j.fx.freeze }));
+    // Grey-out reasons for built-but-unavailable features + PSRAM presence (both @STATE top-level).
+    if (j.unavail !== undefined) setUnavail(j.unavail || {});
+    if (j.psram !== undefined) setPsram(j.psram | 0);
     // Runtime pool partition (only 4-voice pool builds emit j.pool).
     if (j.pool) setPool({
       has: true,
@@ -650,14 +752,26 @@ export default function App() {
     if (Array.isArray(j.tracks)) {
       const next: Record<number, { src: string; srcch: number }> = {};
       const names: Record<number, string> = {};
-      let nSynth = 0;
-      for (const t of j.tracks) if (t && t.kind === 'synth' && t.i != null) {
-        next[t.i | 0] = { src: t.src || 'none', srcch: t.srcch | 0 };
-        if (typeof t.name === 'string') names[t.i | 0] = t.name;
-        nSynth++;
+      const engs: Record<number, string> = {};
+      const songs: Record<number, string> = {};
+      let nSynth = 0; let dIdx: number | null = null;
+      for (const t of j.tracks) if (t && t.i != null) {
+        if (t.kind === 'synth') {
+          next[t.i | 0] = { src: t.src || 'none', srcch: t.srcch | 0 };
+          if (typeof t.name === 'string') names[t.i | 0] = t.name;
+          if (typeof t.eng === 'string') engs[t.i | 0] = t.eng;   // 'opll' etc; absent = Dexed
+          if (typeof t.song === 'string') songs[t.i | 0] = t.song;   // loaded MIDI song (hydrates all cards, incl. C/D)
+          nSynth++;
+        } else if (t.kind === 'drum' && t.src != null) {   // firmware with live finger-drumming (drum router)
+          next[t.i | 0] = { src: t.src || 'none', srcch: t.srcch | 0 };
+          dIdx = t.i | 0;
+        }
       }
       setTrkSubs(next);
       setTrkNames(names);
+      setTrkEng(engs);
+      setTrkSong(songs);
+      setDrumSrcIdx(dIdx);
       if (nSynth > 0) setSynthCount(nSynth);   // how many synth cards to render (data-driven)
     }
   }
@@ -682,6 +796,11 @@ export default function App() {
       // The device's opaque app-owned state blob (emitted with @STATE and echoed on save).
       // Restore the settings the firmware can't derive; ignore anything unrecognized.
       try { hydrateApp(JSON.parse(line.slice(5))); } catch {}
+    } else if (line.startsWith('@TRK')) {
+      // Sync the local OPLL instrument index from the device confirmation (@TRK<i>.INSTR=<idx>) so
+      // Next/Prev step from the true current instrument, not a stale 0.
+      const m = line.match(/^@TRK(\d+)\.INSTR=(\d+)/);
+      if (m) setOpllIdx(mp => ({ ...mp, [+m[1]]: +m[2] }));
     } else if (line.indexOf('"conn"') >= 0 && line.indexOf('"vol"') >= 0) {
       const m = line.match(/\{.*\}/); if (m) { try { const j = JSON.parse(m[0]); setBt({ conn: !!j.conn, peer: j.peer || '' }); if (j.vol != null) setVol(j.vol); } catch {} }
     } else if (line.startsWith('@SONGP=')) {
@@ -799,10 +918,27 @@ export default function App() {
     }, 4000);
     return () => { cancelled = true; clearInterval(id); };
   }, [tp, tkind]);
+
+  // Foreground auto-reconnect. Mobile OSes suspend the JS runtime and tear down the WebSocket/
+  // BLE link whenever the app is backgrounded (screen off, phone in pocket) — there's no
+  // reliable way to hold a plain socket open across that, so instead of fighting it we make the
+  // return trip cheap: when the app comes back to the foreground, silently re-establish the
+  // link. The cached catalog (above) means this reconnect skips the multi-file download, so it
+  // lands in a second or two with no visible "Loading catalog…" pass. We DON'T auto-reconnect
+  // if the user explicitly tapped Disconnect (userDiscRef), and skip on web where the OS never
+  // suspends a foreground tab (a Web Serial reconnect would also re-prompt for the port).
+  useEffect(() => {
+    if (Platform.OS === 'web') return;
+    const sub = RNAppState.addEventListener('change', (st: AppStateStatus) => {
+      if (st !== 'active') return;
+      if (!userDiscRef.current && !connectingRef.current && !tp.isConnected()) connect(true);
+    });
+    return () => sub.remove();
+  }, [tp]);
   // (elapsed-seconds ticker now lives inside <LoadScreen>, which mounts exactly while the
   // catalog is loading — so it no longer re-renders App every second.)
   async function load() {
-    try { const c = await loadCatalog(tp, progBus.emit); setCat(c); setLoaded(true); progBus.emit(null); }
+    try { const c = await loadCatalog(tp, progBus.emit, catalogCache); setCat(c); setLoaded(true); progBus.emit(null); }
     catch (e: any) {
       progBus.emit(null);
       const yes = Platform.OS === 'web'
@@ -887,6 +1023,17 @@ export default function App() {
     else if (it.key[0] === 'b') { setSelVoicePath('Bundled'); tp.dxVoice(it.i); }
   };
   const stepVoice = (dir: number, target: number = 1) => {
+    // OPLL voices (hetero builds, Synth C/D) have 15 fixed ROM instruments and NO /dexed library —
+    // step @TRK<i>.INSTR=<0..14>, never the Dexed catalog. The name comes back via @STATE.tracks[].name
+    // (requestState pulls it). Without this branch, stepping an OPLL voice loaded Dexed voices (bug).
+    const oi = target - 1;
+    if (trkEng[oi] === 'opll') {
+      const ni = Math.max(0, Math.min(14, (opllIdx[oi] ?? 0) + dir));
+      setOpllIdx(m => ({ ...m, [oi]: ni }));
+      tp.trk(oi, 'INSTR=' + ni);
+      tp.requestState();
+      return;
+    }
     const sel = target >= 3 ? (selVoiceX[target - 1] ?? '') : target === 2 ? selVoice2 : selVoice;
     // In a visible list (a cart's voices or the bundled set), step within it so the
     // selection stays scrolled into view.
@@ -1034,7 +1181,7 @@ export default function App() {
   const arpActions = (A: ArpSlotT) => (<>
     <HdrBtn label="‹" stop onPress={() => A.stepNav(-1)} />
     <HdrBtn label="›" stop onPress={() => A.stepNav(1)} />
-    <HdrBtn label="▶" onPress={A.play} />
+    <HdrBtn label="▶" onPress={A.play} active={A.arp.on} />
     <HdrBtn label="■" stop onPress={A.stop} />
   </>);
   const arpBody = (A: ArpSlotT) => (
@@ -1042,7 +1189,7 @@ export default function App() {
       {/* Play and Stop are independent (not a toggle): Play re-triggers a running arp,
           Stop bypasses it. The active state is shown by which button is highlighted. */}
       <Row>
-        <Pressable style={[s.btn, s.grow1, A.arp.on && s.btnOn]} onPress={A.play}>
+        <Pressable style={[s.btn, s.grow1, A.arp.on ? s.btnOn : s.btnIdle]} onPress={A.play}>
           <Text style={s.btnText}>▶  {A.arp.on ? 'Restart' : 'Play'}</Text>
         </Pressable>
         <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={A.stop}>
@@ -1091,6 +1238,12 @@ export default function App() {
   // so it survives an app reload/reconnect. The device stores it opaquely; the app owns it.
   const persistApp = (patch: Partial<AppState>) => { appStateRef.current = { ...appStateRef.current, ...patch }; tp.saveAppState(appStateRef.current); };
 
+  // Each deck's CURRENT FOLDER file list (ordered, as {playArg, displayName}), published by that
+  // deck's FolderBrowser as the user navigates. This is what makes ‹/› and auto-advance step within
+  // the folder you're viewing instead of the flat catalog. Keyed by deckKey ('song1'/'song2'/'drum'/
+  // 'x<v>'); a deck whose browser was never opened just isn't in the map (step falls back to catalog).
+  const folderFilesRef = useRef<Record<string, { arg: string; name: string }[]>>({});
+
   // ===== MIDI player deck =====================================================================
   // ONE definition of what a MIDI player IS — state + every handler — parameterized by the voice
   // it drives. Deck 1 is voice 1 (@SONG*), deck 2 is voice 2 (@SONG2*). The renderers below
@@ -1108,6 +1261,7 @@ export default function App() {
     playFile: (arg: string, disp: string) => void;   // FolderBrowser tap: restart this file/baked song now (arg = full SD path or baked name)
     play: () => void; stop: () => void; step: (dir: number) => void;
     applyEnd: (m: EndMode) => void; cycleEnd: () => void;
+    onFolderList: (files: { arg: string; name: string }[]) => void;   // FolderBrowser publishes the current folder here
     onNaturalEnd: () => void;   // wired into the device's position feed (@SONGP=-1 / @SONG2P=-1)
     // Per-track browse target, so the SAME player component serves any track. Every deck now roots
     // the browser at /midi so any synth can reach ALL folders (songs, drums, loops, tests, custom),
@@ -1128,6 +1282,7 @@ export default function App() {
     // @APP so it survives leaving the page / reconnecting. Undefined for song decks (the device
     // reports their current song in @STATE, so there's nothing extra to persist).
     persistSel?: (arg: string) => void;
+    deckKey: string;   // folderFilesRef key so this deck's ‹/› step within the folder its browser shows
     // Per-track browse target + step catalog, so the SAME deck serves any track. Browser default = /midi.
     catalog?: Song[]; browseRoot?: string; injectFolders?: InjFolder[]; noEndMode?: boolean;
   }): SongDeckT => {
@@ -1142,6 +1297,20 @@ export default function App() {
     // fullPath. Auto-advance / ‹ › still step through the whole flat catalog (cat.songs); the
     // browser's per-folder view is a separate, richer picker (see note in playerSongBody).
     const pickNext = (dir: number): Song | null => {
+      // Prefer the FOLDER the user is browsing (its FolderBrowser publishes an ordered file list): ‹/›
+      // and auto-advance step within THAT folder — matching what's on screen. Fall back to the flat
+      // catalog only when no folder list exists (a baked song, or the browser was never opened).
+      const folder = folderFilesRef.current[cfg.deckKey];
+      if (folder && folder.length) {
+        const fi = folder.findIndex(f => f.arg === P.song);
+        if (em === 'shuffle' && folder.length > 1) {
+          let r = fi; while (r === fi) r = Math.floor(Math.random() * folder.length);
+          return { name: folder[r].name, file: folder[r].arg };
+        }
+        const b = fi < 0 ? (dir > 0 ? -1 : 0) : fi;
+        const f = folder[((b + dir) % folder.length + folder.length) % folder.length];
+        return { name: f.name, file: f.arg };
+      }
       const songs = catalog;
       if (!songs.length) return null;
       const idx = songs.findIndex(sg => songArg(sg) === P.song);
@@ -1162,13 +1331,22 @@ export default function App() {
       setSong: (name: string) => setP(p => ({ ...p, song: name })),
       // FolderBrowser tap: restart THIS file/baked song now (arg = full SD path, or a baked name).
       playFile: (arg: string, disp: string) => { wire.restart(arg); persistSel(arg); setP(p => ({ ...p, song: arg, playing: true, name: disp, prog: -1 })); },
-      // Play = restart from the top on a fresh downbeat; prog -1 until the device reports position.
-      play: () => { const sg = catalog.find(x => songArg(x) === P.song) || catalog[0]; if (!sg) return; wire.restart(songArg(sg)); persistSel(songArg(sg)); setP(p => ({ ...p, song: songArg(sg), playing: true, name: sg.name, prog: -1 })); },
+      // Play = restart the CURRENTLY SELECTED track from the top on a fresh downbeat (whatever the
+      // browser/‹› last selected — P.song). Falls back to the folder's first file, then the flat
+      // catalog, so Play always does something. prog -1 until the device reports position.
+      play: () => {
+        const folder = folderFilesRef.current[cfg.deckKey];
+        const arg = P.song || folder?.[0]?.arg || (catalog[0] ? songArg(catalog[0]) : '');
+        if (!arg) return;
+        const nm = folder?.find(f => f.arg === arg)?.name || catalog.find(x => songArg(x) === arg)?.name || P.name || arg;
+        wire.restart(arg); persistSel(arg); setP(p => ({ ...p, song: arg, playing: true, name: nm, prog: -1 }));
+      },
       stop: () => { cfg.manualStopRef.current = true; wire.stop(); setP(p => ({ ...p, playing: false, prog: 0 })); },
       // ‹/› step through the catalog. Persist the new pick even when stopped, so leaving the page
       // (or reconnecting) reopens on the groove you stepped to — not the last one that played.
       step: (dir: number) => { const sg = pickNext(dir); if (!sg) return; persistSel(songArg(sg)); setP(p => { if (p.playing) { wire.restart(songArg(sg)); return { ...p, song: songArg(sg), name: sg.name }; } return { ...p, song: songArg(sg), name: sg.name }; }); },
       applyEnd, cycleEnd: () => { const i = END_MODES.findIndex(m => m.key === em); applyEnd(END_MODES[(i + 1) % END_MODES.length].key); },
+      onFolderList: files => { folderFilesRef.current[cfg.deckKey] = files; },
       // Runs when a song finishes on its own (not a manual Stop). 'stop' does nothing; 'repeat'
       // loops in firmware; continue/shuffle advance per the same pickNext rules.
       onNaturalEnd: () => { if (em === 'continue' || em === 'shuffle') { const nx = pickNext(1); if (nx) playOf(nx); } },
@@ -1176,12 +1354,12 @@ export default function App() {
     };
   };
   const songDeck1 = makeSongDeck({
-    v: 1, player, setPlayer, endMode, setEndMode, persistKey: 'end', manualStopRef,
+    v: 1, player, setPlayer, endMode, setEndMode, persistKey: 'end', manualStopRef, deckKey: 'song1',
     vol: songVol, onVol: setSongVol, commitVol: v => tp.songVol(v),
     wire: { play: a => tp.songPlay(a), restart: a => tp.songRestart(a), stop: () => tp.stopSong(), loop: on => tp.songLoop(on) },
   });
   const songDeck2 = makeSongDeck({
-    v: 2, player: player2, setPlayer: setPlayer2, endMode: endMode2, setEndMode: setEndMode2, persistKey: 'end2', manualStopRef: manualStop2Ref,
+    v: 2, player: player2, setPlayer: setPlayer2, endMode: endMode2, setEndMode: setEndMode2, persistKey: 'end2', manualStopRef: manualStop2Ref, deckKey: 'song2',
     // Player 2's level IS the voice-2 bus (the two halves share one mixer), so it moves the same
     // fader as the Synth / Voices 2 card rather than owning a private one.
     vol: voice2.vol, onVol: v => setVoice2(x => ({ ...x, vol: v })), commitVol: v => tp.voice2Vol(v),
@@ -1204,7 +1382,7 @@ export default function App() {
   });
   const drumSongs: Song[] = cat.grooves.map(g => ({ name: g.name, file: g.path }));   // grooves as the deck catalog
   const drumDeck = makeSongDeck({
-    v: 1, player: drumPlayerView, setPlayer: setDrumPlayerView, endMode: 'repeat', setEndMode: () => {}, persistKey: 'end', manualStopRef: drumStopRef,
+    v: 1, player: drumPlayerView, setPlayer: setDrumPlayerView, endMode: 'repeat', setEndMode: () => {}, persistKey: 'end', manualStopRef: drumStopRef, deckKey: 'drum',
     vol: drumVol, onVol: setDrumVol, commitVol: v => tp.drumVol(v),
     wire: { play: a => tp.playGrooveFile(a), restart: a => tp.playGrooveFile(a), stop: () => tp.stopDrums(), loop: () => {} },
     // The device reports the drum KIT in @STATE but not which groove is picked, so remember the
@@ -1234,21 +1412,46 @@ export default function App() {
   // `value`/`status` = the subtitle; `actions` = the header controls; `body` = the page.
   // `parent` (a section id) makes this a SUB-page reached from that parent's submenu instead of a
   // home card — its Back button returns to the parent, not home (see the render's onBack).
-  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; accent?: string; tint?: string; topRight?: React.ReactNode; parent?: string };
+  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; foot?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; accent?: string; tint?: string; topRight?: React.ReactNode; parent?: string; disabledReason?: string; asCard?: boolean };
 
+  // "Dexed: <name>" on the Dexed synth cards — mirrors the firmware's "OPLL: " prefix on OPLL tracks
+  // (HeteroOpll.h) so a hetero build reads "Dexed: X" / "OPLL: X" consistently. Applied at DISPLAY
+  // time (not baked into the stored name) so a hydrated voice and a freshly-picked one render the
+  // same. OPLL names already carry their tag (skip); only prefix on a Dexed-capable build.
+  const engName = (name: string, eng?: string) => eng === 'opll' ? name : (cat.hasDexed ? 'Dexed: ' + name : name);
   // The card/page subtitle: the currently-loaded instrument if one is picked, else a
   // summary of where the browser is (folder name or catalog counts).
   const synthValue = selVoiceName
-    || (vpath === '@bundled' ? 'Bundled' : vpath ? (vpath.split('/').pop() || '') : (cat.instruments.length ? cat.instruments.length + ' voices + SD library' : 'Library'));
+    ? engName(selVoiceName)
+    : (vpath === '@bundled' ? 'Bundled' : vpath ? (vpath.split('/').pop() || '') : (cat.instruments.length ? cat.instruments.length + ' voices + SD library' : 'Library'));
   // When an instrument is loaded, show its name AND full location (folder/cart path). The
   // path truncates from the LEFT (ellipsizeMode "head") so the deepest folder + cart stay
   // visible. No voice picked yet → undefined, so the card falls back to the browse summary.
   const synthSubtitle = selVoiceName ? (
     <>
-      <Text style={s.drawerValue} numberOfLines={1}>{selVoiceName}</Text>
+      <Text style={s.drawerValue} numberOfLines={1}>{engName(selVoiceName)}</Text>
       {!!selVoicePath && <Text style={s.pathLine} numberOfLines={1} ellipsizeMode="head">{selVoicePath}</Text>}
     </>
   ) : undefined;
+  // Available polyphony for a synth voice: Dexed pool voices report their engine count (@STATE.pool),
+  // and normal mode plays 2 notes per engine. OPLL voices don't expose a count → omit.
+  const polyNote = (vIdx: number): string =>
+    (pool.has && trkEng[vIdx] !== 'opll' && (pool.engines[vIdx] || 0) > 0) ? pool.engines[vIdx] * 2 + '-voice' : '';
+  // Shared synth-card subtitle (used by ALL Synth A-D cards so they're identical): the instrument
+  // (engine-prefixed), its library path, the loaded MIDI-player song (♪), and the voice/poly count.
+  const synthCardSub = (vIdx: number, instr?: string, path?: string, song?: string): React.ReactNode => {
+    // Prefer the live player name; fall back to @STATE tracks[].song so it's populated on FIRST open
+    // (esp. C/D, whose live playerX isn't in @STATE). Always render a song line — "♪ No song" when empty.
+    const sg = song || trkSong[vIdx] || '';
+    const extra = [sg ? '♪ ' + sg : '♪ No song', polyNote(vIdx)].filter(Boolean).join('   ·   ');
+    return (
+      <>
+        {!!instr && <Text style={s.drawerValue} numberOfLines={1}>{engName(instr, trkEng[vIdx])}</Text>}
+        {!!path && path !== 'Bundled' && <Text style={s.pathLine} numberOfLines={1} ellipsizeMode="head">{path}</Text>}
+        <Text style={s.pathLine} numberOfLines={1}>{extra}</Text>
+      </>
+    );
+  };
 
   // Synth/Voices navigation: breadcrumb trail + an up-one-level control. `cart` selected
   // ⇒ showing that cart's voices; `vpath` = the /dexed folder path ('@bundled' = bundled set).
@@ -1263,13 +1466,37 @@ export default function App() {
   else if (vpath) { let acc = ''; for (const seg of vpath.split('/')) { acc = acc ? acc + '/' + seg : seg; const p = acc; crumbs.push({ label: seg, go: () => { setCart(null); setVpath(p); } }); } }
   if (cart) crumbs.push({ label: cart.name, go: () => {} });
 
-  // Route the USB keyboard to synth `owner` (1 = main synth, 2 = the Voices-2 keyboard voice).
-  // The keyboard has exactly ONE owner: giving it to voice 2 enables the split; giving it back
-  // to voice 1 unifies the pool. The keyboard icon on each card reflects who holds it.
-  const takeKeyboard = (owner: 1 | 2) => { const on = owner === 2; setVoice2(v => ({ ...v, on })); tp.voice2Enable(on); };
-  const kbdBtn = (owner: 1 | 2) => caps.voice2
-    ? <KbdBtn owned={owner === 2 ? voice2.on : !voice2.on} onPress={() => takeKeyboard(owner)} />
-    : undefined;
+  // USB-keyboard ownership across ALL synth tracks (Thread C live-MIDI subscription). The header
+  // keyboard glyph on every synth card shows who hears the USB MIDI keyboard: WHITE = this synth is
+  // the one listening; GREY = tap to move the keyboard here. Exclusive — claiming USB for one synth
+  // strips it from the others (a DIN assignment on another synth is preserved). Reads/writes the same
+  // trkSubs the per-synth MIDI-Input selector uses (@TRK<i>.SRC), so the glyph and that selector stay
+  // in sync. Replaces the old @VOICE2 split toggle here: the pool split is permanent now, so USB
+  // routing is the real per-voice control (and it now works for Synth B/C/D, not just A).
+  const srcHasUsb = (src: string) => src === 'usb' || src === 'multi' || src === 'all';
+  const usbOwner = (i: number) => srcHasUsb(trkSubs[i]?.src ?? 'none');
+  const cmdForSrc = (src: string) => (src === 'multi' ? 'all' : src);   // readback 'multi' -> command 'all'
+  const claimUsb = (i: number) => {
+    // New readback src per synth track: the target gains USB (din -> multi, else usb); every other
+    // synth drops USB (multi -> din, usb -> none). Only changed tracks are written to the device.
+    const nextFor = (t: number, cur: string) =>
+      t === i ? ((cur === 'din' || cur === 'multi' || cur === 'all') ? 'multi' : 'usb')
+              : (srcHasUsb(cur) ? ((cur === 'multi' || cur === 'all') ? 'din' : 'none') : cur);
+    // Exclusive across every MIDI-capable track: the synth voices plus the drum track (finger-drumming)
+    // when the firmware exposes it. One USB keyboard has exactly one target.
+    const idxs: number[] = [];
+    for (let t = 0; t < synthCount; t++) idxs.push(t);
+    if (drumSrcIdx != null) idxs.push(drumSrcIdx);
+    const updates: Record<number, { src: string; srcch: number }> = {};
+    for (const t of idxs) {
+      const cur = trkSubs[t] ?? { src: 'none', srcch: 0 };
+      const ns = nextFor(t, cur.src);
+      if (ns !== cur.src) updates[t] = { src: ns, srcch: cur.srcch };
+    }
+    setTrkSubs(m => ({ ...m, ...updates }));
+    Object.keys(updates).forEach(k => tp.trk(+k, 'SRC=' + cmdForSrc(updates[+k].src)));
+  };
+  const usbKbd = (i: number) => <KbdBtn owned={usbOwner(i)} onPress={() => claimUsb(i)} />;
   // (The old "Synth B enable" ● On / ○ Off toggle was removed: the pool split is now PERMANENT on
   // every build that has a Synth B — the fixed 4-way split (4-voice) and the hetero build force it on
   // at boot and ignore @VOICE2, so there's nothing to enable. Synth B is always live.)
@@ -1391,7 +1618,7 @@ export default function App() {
   const playerActions = (D: SongDeckT) => (<>
     <HdrBtn label="‹" stop onPress={() => D.step(-1)} />
     <HdrBtn label="›" stop onPress={() => D.step(1)} />
-    <HdrBtn label="▶" onPress={D.play} />
+    <HdrBtn label="▶" onPress={D.play} active={D.player.playing} />
     <HdrBtn label="■" stop onPress={D.stop} />
     {!D.noEndMode && <HdrBtn label={(END_MODES.find(m => m.key === D.endMode) || END_MODES[3]).icon} stop onPress={D.cycleEnd} />}
   </>);
@@ -1411,7 +1638,8 @@ export default function App() {
       <View style={s.browseBox}>
         <FolderBrowser tp={tp} root={D.browseRoot ?? '/midi'} ext="mid" enabled={connected && loaded}
           selected={D.player.song} playing={D.player.playing ? D.player.song : undefined}
-          onSelectFile={(full, disp) => D.playFile(full, disp)} injectFolders={D.injectFolders ?? songInjectFolders} />
+          onSelectFile={(full, disp) => D.playFile(full, disp)} injectFolders={D.injectFolders ?? songInjectFolders}
+          onFolderList={D.onFolderList} />
       </View>
       {!D.noEndMode && <Row><Text style={[s.muted, { flex: 1 }]}>When finished</Text>
         {END_MODES.map(m => (
@@ -1476,6 +1704,20 @@ export default function App() {
     <HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1)} />
     <HdrBtn label="Next ›" stop onPress={() => stepVoice(1)} />
   </>);
+  // Quick-action cluster for a synth's HOME card: step the INSTRUMENT (voice) + play/stop/loop the
+  // track's MIDI player, so the common controls work without opening the card. `voiceTarget` is the
+  // stepVoice slot (1 = Synth A, 2 = Synth B, v+1 for the extra voices); the deck is the same one the
+  // MIDI Player page drives (so Play uses the folder-aware "play the selected track" logic).
+  const synthQuick = (voiceTarget: number, deck: SongDeckT, arpOn?: boolean, toggleArp?: () => void) => (
+    <>
+      <HdrBtn label="‹ Ins" stop onPress={() => stepVoice(-1, voiceTarget)} />
+      <HdrBtn label="Ins ›" stop onPress={() => stepVoice(1, voiceTarget)} />
+      <HdrBtn label="▶" onPress={deck.play} active={deck.player.playing} />
+      <HdrBtn label="■" stop onPress={deck.stop} />
+      {toggleArp && <HdrBtn label="Arp" onPress={toggleArp} active={!!arpOn} />}
+      <HdrBtn label={deck.endMode === 'repeat' ? '↻ On' : '↻'} stop onPress={() => deck.applyEnd(deck.endMode === 'repeat' ? 'stop' : 'repeat')} />
+    </>
+  );
   const synthBody = (
     <View style={s.synthWrap}>
       {/* Synth output level — the same control as the MIDI Player's Volume (both drive
@@ -1510,9 +1752,7 @@ export default function App() {
       <Text style={{ color: C.text, textAlign: 'center', fontSize: 30, fontWeight: '800' }}>{Math.round(bpm)} <Text style={{ fontSize: 15, color: C.muted }}>BPM</Text></Text>
       <View style={s.volRow}>
         <Pressable style={s.pill} onPress={() => stepBpm(-1)}><Text style={s.text}>−</Text></Pressable>
-        <Slider style={{ flex: 1, height: 34 }} minimumValue={40} maximumValue={240} step={1} value={bpm}
-          minimumTrackTintColor={C.accent} maximumTrackTintColor={C.border} thumbTintColor={C.accent}
-          onValueChange={setBpm} onSlidingComplete={b => tp.masterBpm(b)} />
+        <ThrottledSlider min={40} max={240} value={bpm} onChange={setBpm} onCommit={b => tp.masterBpm(b)} />
         <Pressable style={s.pill} onPress={() => stepBpm(1)}><Text style={s.text}>＋</Text></Pressable>
       </View>
       <Pressable style={[s.btn, s.btnGhost]} onPress={() => { const b = player.playing ? songBpm : 120; setBpm(b); tp.masterBpm(b); }}>
@@ -1526,7 +1766,7 @@ export default function App() {
     </>
   );
   const metroActions = (<>
-    <HdrBtn label="▶" onPress={playMetro} />
+    <HdrBtn label="▶" onPress={playMetro} active={metro.on} />
     <HdrBtn label="■" stop onPress={stopMetro} />
   </>);
   const metroBody = (
@@ -1534,7 +1774,7 @@ export default function App() {
       {/* Play/Stop here are the SAME master transport as the top bar (this is the app-wide clock);
           Mute toggles only whether you hear the click. Active state = which button is lit. */}
       <Row>
-        <Pressable style={[s.btn, s.grow1, metro.on && s.btnOn]} onPress={playMetro}>
+        <Pressable style={[s.btn, s.grow1, metro.on ? s.btnOn : s.btnIdle]} onPress={playMetro}>
           <Text style={s.btnText}>▶  {metro.on ? 'Running' : 'Play'}</Text>
         </Pressable>
         <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={stopMetro}>
@@ -1564,6 +1804,42 @@ export default function App() {
           </Pressable>
         ))}
       </Row>
+    </>
+  );
+  // REVERB — the FX master insert (caps.fx). One reverb per build: @STATE.fx.type picks the sliders
+  // (plate = size/damp/diffuse/shimmer/freeze; spring = time/treble/bass); both share Enable + Mix.
+  // Each control sends @FX.<PARAM> on release (throttle-friendly); state hydrates from @STATE.fx.
+  const reverbBody = (
+    <>
+      <Row><View style={{ flex: 1 }}>
+          <Text style={s.text}>Enable reverb</Text>
+          <Text style={s.muted}>Inserts the {fx.type === 'spring' ? 'spring' : 'plate'} reverb on the master output. Off = clean (bypassed).</Text>
+        </View>
+        <Switch value={fx.on} onValueChange={v => { setFx(f => ({ ...f, on: v })); tp.fx('ON=' + (v ? 1 : 0)); }} /></Row>
+      <Text style={[s.text, { marginTop: 6 }]}>Dry / Wet</Text>
+      <VolSlider label="Mix" value={fx.mix} max={100} onChange={v => setFx(f => ({ ...f, mix: v }))} onCommit={v => tp.fx('MIX=' + v)} disabled={!connected} />
+      {fx.type === 'spring' ? (
+        <>
+          <Text style={[s.text, { marginTop: 6 }]}>Character</Text>
+          <VolSlider label="Time"   value={fx.time}   max={100} onChange={v => setFx(f => ({ ...f, time: v }))}   onCommit={v => tp.fx('TIME=' + v)}   disabled={!connected} />
+          <VolSlider label="Treble" value={fx.treble} max={100} onChange={v => setFx(f => ({ ...f, treble: v }))} onCommit={v => tp.fx('TREBLE=' + v)} disabled={!connected} />
+          <VolSlider label="Bass"   value={fx.bass}   max={100} onChange={v => setFx(f => ({ ...f, bass: v }))}   onCommit={v => tp.fx('BASS=' + v)}   disabled={!connected} />
+        </>
+      ) : (
+        <>
+          <Text style={[s.text, { marginTop: 6 }]}>Space</Text>
+          <VolSlider label="Size"    value={fx.size} max={100} onChange={v => setFx(f => ({ ...f, size: v }))}    onCommit={v => tp.fx('SIZE=' + v)}    disabled={!connected} />
+          <VolSlider label="Damping" value={fx.damp} max={100} onChange={v => setFx(f => ({ ...f, damp: v }))}    onCommit={v => tp.fx('DAMP=' + v)}    disabled={!connected} />
+          <VolSlider label="Diffuse" value={fx.diff} max={100} onChange={v => setFx(f => ({ ...f, diff: v }))}    onCommit={v => tp.fx('DIFF=' + v)}    disabled={!connected} />
+          <Text style={[s.text, { marginTop: 6 }]}>Shimmer</Text>
+          <VolSlider label="Amount"  value={fx.shimmer} max={100} onChange={v => setFx(f => ({ ...f, shimmer: v }))} onCommit={v => tp.fx('SHIMMER=' + v)} disabled={!connected} />
+          <Row><View style={{ flex: 1 }}>
+              <Text style={s.text}>Freeze</Text>
+              <Text style={s.muted}>Hold the reverb tail infinitely.</Text>
+            </View>
+            <Switch value={fx.freeze} onValueChange={v => { setFx(f => ({ ...f, freeze: v })); tp.fx('FREEZE=' + (v ? 1 : 0)); }} /></Row>
+        </>
+      )}
     </>
   );
   // The Drums card's "Loops" page + header transport REUSE the synth deck component: playerSongBody
@@ -1624,7 +1900,7 @@ export default function App() {
     const mstop = (manualStopRefX.current[v] ??= { current: false });
     // MIDI-player deck for this voice — the drumDeck pattern (a view over playerX[v]) wired to @TRK<i>.
     const deck = makeSongDeck({
-      v: 1, persistKey: 'end', manualStopRef: mstop,
+      v: 1, persistKey: 'end', manualStopRef: mstop, deckKey: 'x' + v,
       player: playerX[v] ?? { song: '', playing: false, name: '', prog: 0 },
       setPlayer: upd => setPlayerX(m => { const cur = m[v] ?? { song: '', playing: false, name: '', prog: 0 }; return { ...m, [v]: typeof upd === 'function' ? (upd as any)(cur) : upd }; }),
       endMode: endModeX[v] ?? 'stop', setEndMode: em => setEndModeX(m => ({ ...m, [v]: em })),
@@ -1652,15 +1928,23 @@ export default function App() {
     };
     // Top card = a submenu (like Synthesizer A/B); its three children are the sub-pages.
     extraSynthCards.push({
-      id: parentId, title: 'Synthesizer ' + letter, show: synthCount > v, accent: theme.accent, tint: theme.tint,
-      value: trkNames[v] || 'None',
-      subtitle: trkNames[v] ? <Text style={s.drawerValue} numberOfLines={1}>{trkNames[v]}</Text> : undefined,
+      id: parentId, title: 'Synthesizer ' + letter, show: synthCount > v, asCard: true, accent: theme.accent, tint: theme.tint,
+      value: trkNames[v] ? engName(trkNames[v], trkEng[v]) : 'None',
+      topRight: usbKbd(v),   // per-track USB-keyboard claim (white = this synth hears the USB MIDI keyboard)
+      actions: synthQuick(v + 1, deck, arpState.on, () => { const on = !arpState.on; setA({ on }); tp.trk(v, 'ARPON=' + (on ? 1 : 0)); }),
+      foot: <VolSlider label="Vol" value={trkVolX[v] ?? 100} onChange={n => setTrkVolX(m => ({ ...m, [v]: n }))} onCommit={n => tp.trk(v, 'VOL=' + n)} disabled={!connected} />,
+      subtitle: synthCardSub(v, trkNames[v], undefined, playerX[v]?.name),
       body: <SubMenu getItems={() => sections.filter(x => x.parent === parentId).sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={theme.accent} tint={theme.tint} />,
     });
+    // Child order matches Synth A/B: MIDI Player, then Synth/Voices, then Arpeggiator (these custom
+    // ids aren't in SECTION_ORDER, so the SubMenu's stable sort preserves this push order).
     extraChildCards.push(
+      { id: parentId + 'p', title: 'MIDI Player', show: false, parent: parentId, accent: theme.accent, tint: theme.tint,
+        value: playerValue(deck), progress: playerProgress(deck), actions: playerActions(deck), body: playerBody(deck) },
       {
         id: parentId + 'v', title: 'Synth / Voices', show: false, parent: parentId, fullHeight: true, accent: theme.accent, tint: theme.tint,
-        value: trkNames[v] || 'None',
+        value: trkNames[v] ? engName(trkNames[v], trkEng[v]) : 'None',
+        topRight: usbKbd(v),
         actions: <><HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1, v + 1)} /><HdrBtn label="Next ›" stop onPress={() => stepVoice(1, v + 1)} /></>,
         body: (
           <View style={s.synthWrap}>
@@ -1670,8 +1954,6 @@ export default function App() {
           </View>
         ),
       },
-      { id: parentId + 'p', title: 'MIDI Player', show: false, parent: parentId, accent: theme.accent, tint: theme.tint,
-        value: playerValue(deck), progress: playerProgress(deck), actions: playerActions(deck), body: playerBody(deck) },
       { id: parentId + 'a', title: 'Arpeggiator', show: false, parent: parentId, accent: theme.accent, tint: theme.tint,
         value: arpValue(arpSlot), actions: arpActions(arpSlot), body: arpBody(arpSlot) },
     );
@@ -1764,10 +2046,24 @@ export default function App() {
       actions: metroActions,
       body: metroBody,
     },
+    // REVERB — FX master insert (caps.fx). Top-level card; sliders adapt to the built reverb type.
+    {
+      id: 'reverb', title: 'Reverb', show: caps.fx, value: fx.on ? 'On' : 'Off',
+      subtitle: fx.type === 'spring' ? 'Spring' : 'Plate',
+      // On the tile: quick On/Off + wet Mix, so you can dial reverb without opening the card.
+      foot: (
+        <>
+          <Row><Text style={[s.text, { flex: 1 }]}>{fx.on ? 'On' : 'Off'}</Text>
+            <Switch value={fx.on} onValueChange={v => { setFx(f => ({ ...f, on: v })); tp.fx('ON=' + (v ? 1 : 0)); }} /></Row>
+          <VolSlider label="Mix" value={fx.mix} max={100} onChange={v => setFx(f => ({ ...f, mix: v }))} onCommit={v => tp.fx('MIX=' + v)} disabled={!connected || !fx.on} />
+        </>
+      ),
+      body: reverbBody,
+    },
     // SYNTH / VOICES — folder browser over bundled voices + the whole /dexed library
     {
       id: 'synth', title: 'Synth / Voices', show: false, parent: 'synthesizer', accent: THEME.synthA.accent, tint: THEME.synthA.tint, value: synthValue, subtitle: synthSubtitle, fullHeight: true,   // Synthesizer A sub-page
-      topRight: kbdBtn(1),
+      topRight: usbKbd(0),
       actions: synthActions,
       body: synthBody,
     },
@@ -1776,14 +2072,9 @@ export default function App() {
     // (song/arp/drums), engines 4-7 are this voice, played live by a USB-host keyboard.
     {
       id: 'synth2', title: 'Synth / Voices 2', show: false, parent: 'synthesizerB', fullHeight: true, accent: THEME.synthB.accent, tint: THEME.synthB.tint,   // Synthesizer B sub-page
-      topRight: kbdBtn(2),
-      value: (voice2.name || 'None'),
-      subtitle: voice2.name ? (
-        <>
-          <Text style={s.drawerValue} numberOfLines={1}>{voice2.name}</Text>
-          {!!voice2.path && <Text style={s.pathLine} numberOfLines={1} ellipsizeMode="head">{voice2.path}</Text>}
-        </>
-      ) : undefined,
+      topRight: usbKbd(1),
+      value: (voice2.name ? engName(voice2.name) : 'None'),
+      subtitle: synthCardSub(1, voice2.name, voice2.path, player2.name),
       actions: synth2Actions,
       body: synth2Body,
     },
@@ -1791,24 +2082,23 @@ export default function App() {
     // Arpeggiator. Its page lists them as the original cards (keeping their quick-action shortcuts);
     // tapping one opens that child's own existing page (Back returns here).
     {
-      id: 'synthesizer', title: 'Synthesizer A', show: true, value: synthValue, subtitle: synthSubtitle,
+      id: 'synthesizer', title: 'Synthesizer A', show: true, value: synthValue, subtitle: synthCardSub(0, selVoiceName, selVoicePath, player.name), asCard: true,
       accent: THEME.synthA.accent, tint: THEME.synthA.tint,
-      topRight: kbdBtn(1),   // keyboard-ownership icon: tap to route the USB MIDI controller to this (voice-1) synth
+      topRight: usbKbd(0),   // keyboard-ownership icon: tap to route the USB MIDI controller to this (voice-0) synth
+      actions: synthQuick(1, songDeck1, arp.on, () => { const on = !arp.on; setArp(a => ({ ...a, on })); tp.arpOn(on); }),
+      foot: <VolSlider label="Vol" value={songVol} onChange={setSongVol} onCommit={v => tp.songVol(v)} disabled={!connected} />,
       body: <SubMenu getItems={() => sections.filter(x => x.parent === 'synthesizer').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.synthA.accent} tint={THEME.synthA.tint} />,
     },
     // SYNTHESIZER B — the keyboard-split voice-2 side as a submenu: Synth/Voices 2 and Arpeggiator 2.
     // No MIDI (single song player). Card shows on caps.voice2; the Arpeggiator 2 child only joins the
     // submenu when caps.arp2 is compiled in (its parent is set conditionally below).
     {
-      id: 'synthesizerB', title: 'Synthesizer B', show: caps.voice2, accent: THEME.synthB.accent, tint: THEME.synthB.tint,
-      topRight: kbdBtn(2),
-      value: (voice2.name || 'None'),
-      subtitle: voice2.name ? (
-        <>
-          <Text style={s.drawerValue} numberOfLines={1}>{voice2.name}</Text>
-          {!!voice2.path && <Text style={s.pathLine} numberOfLines={1} ellipsizeMode="head">{voice2.path}</Text>}
-        </>
-      ) : undefined,
+      id: 'synthesizerB', title: 'Synthesizer B', show: caps.voice2, asCard: true, accent: THEME.synthB.accent, tint: THEME.synthB.tint,
+      topRight: usbKbd(1),
+      value: (voice2.name ? engName(voice2.name) : 'None'),
+      subtitle: synthCardSub(1, voice2.name, voice2.path, player2.name),
+      actions: synthQuick(2, songDeck2, arp2.on, caps.arp2 ? () => { const on = !arp2.on; setArp2(x => ({ ...x, on })); tp.arp2On(on); } : undefined),
+      foot: <VolSlider label="Vol" value={voice2.vol} onChange={v => setVoice2(x => ({ ...x, vol: v }))} onCommit={v => tp.voice2Vol(v)} disabled={!connected} />,
       body: <SubMenu getItems={() => sections.filter(x => x.parent === 'synthesizerB').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.synthB.accent} tint={THEME.synthB.tint} />,
     },
     // VOICE POOL — runtime engine allocation (4-voice pool builds only; @STATE.pool). Redistribute the
@@ -1822,11 +2112,12 @@ export default function App() {
     // 0 on a board with no spare RAM). Records the MASTER MIX as audio (not MIDI) into
     // bar-locked, crossfaded loops. See planning/audio-looper/DESIGN.md.
     {
-      id: 'audioloop', title: 'Audio Loop', show: caps.audioloop > 0,
+      id: 'audioloop', title: 'Audio Loop', show: caps.audioloop > 0 || !!unavail.audioloop, disabledReason: unavail.audioloop,
       accent: THEME.audioloop.accent, tint: THEME.audioloop.tint,
       value: (caps.audioloop > 1 ? 'Loop ' + (aloop.sel + 1) + ' · ' : '') + AL_STATES[alSt()]
              + '  ·  ' + aloop.bars + ' bar' + (aloop.bars > 1 ? 's' : '') + (aloop.mono ? ' · mono' : ''),
       progress: alSt() >= 2 ? alProg() : undefined,
+      foot: <VolSlider label="Vol" value={aloop.level} max={100} onChange={v => setAloop(a => ({ ...a, level: v }))} onCommit={v => tp.audioLoopLevel(v)} disabled={!connected} />,
       actions: (<>
         <HdrBtn label="●" onPress={alRecord} />
         <HdrBtn label="■" stop onPress={alStopBtn} />
@@ -1876,6 +2167,33 @@ export default function App() {
         </>
       ),
     },
+    // USB AUDIO — the box as a 24-bit/48k USB sound card (build-flag gated, caps.usbaudio →
+    // TDSP_USB_AUDIO). Host audio streams IN to the mix bus and the full mix streams back OUT
+    // to the host for recording. Shows the live stream status + the USB-in return level.
+    // See planning/usb-audio-mixkit/DESIGN.md.
+    {
+      id: 'usbaudio', title: 'USB Audio', show: caps.usbaudio || !!unavail.usbaudio, disabledReason: unavail.usbaudio,
+      accent: THEME.usb.accent, tint: THEME.usb.tint,
+      value: (usbAudio.active ? 'Streaming' : 'Idle') + '  ·  24-bit / 48 kHz',
+      foot: <VolSlider label="USB In" value={usbAudio.gain} onChange={v => setUsbAudio(u => ({ ...u, gain: v }))} onCommit={v => tp.usbAudioGain(v)} disabled={!connected} />,
+      body: (
+        <>
+          <Text style={s.muted}>The device appears to your computer as a class-compliant 24-bit / 48 kHz sound card. Audio played on the computer comes IN and joins the mix; the whole mix streams back OUT so you can record the performance in a DAW.</Text>
+          <Row>
+            <Text style={[s.text, { flex: 1 }]}>Host stream</Text>
+            <View style={[s.pill, usbAudio.active && s.pillOn]}>
+              <Text style={s.text}>{usbAudio.active ? '● Streaming' : '○ Idle'}</Text>
+            </View>
+          </Row>
+          <Text style={s.sectionLbl}>USB In level</Text>
+          <Text style={s.muted}>How loud the computer's audio sits in the mix. Your computer's own volume still controls the stream itself.</Text>
+          <VolSlider label="USB In" value={usbAudio.gain} onChange={v => setUsbAudio(u => ({ ...u, gain: v }))} onCommit={v => tp.usbAudioGain(v)} disabled={!connected} />
+          {(usbAudio.rxover > 0 || usbAudio.txunder > 0) && (
+            <Text style={s.muted}>Clock drift: {usbAudio.rxover} in-overrun{usbAudio.rxover === 1 ? '' : 's'} · {usbAudio.txunder} out-underrun{usbAudio.txunder === 1 ? '' : 's'}</Text>
+          )}
+        </>
+      ),
+    },
     // MIDI PLAYER — select a song; Play/Stop in the header. A Synthesizer A sub-page.
     {
       id: 'player', title: 'MIDI Player', show: false, parent: 'synthesizer',
@@ -1908,9 +2226,18 @@ export default function App() {
     // adapted to browse drum loops instead of a melodic voice. Shown on drum-capable builds
     // (cat.hasDrums). The header ▶ ■ transport plays/stops the selected groove, like a synth's player.
     {
-      id: 'drumtrack', title: 'Drums', show: cat.hasDrums, accent: THEME.drums.accent, tint: THEME.drums.tint,
+      id: 'drumtrack', title: 'Drums', show: cat.hasDrums || !!unavail.drums, disabledReason: unavail.drums,
+      accent: THEME.drums.accent, tint: THEME.drums.tint,
+      topRight: drumSrcIdx != null ? usbKbd(drumSrcIdx) : undefined,   // finger-drum the kit from the USB keyboard
       value: playerValue(drumDeck), progress: playerProgress(drumDeck), actions: playerActions(drumDeck),
-      body: <SubMenu getItems={() => sections.filter(x => x.parent === 'drumtrack').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.drums.accent} tint={THEME.drums.tint} />,
+      foot: <VolSlider label="Vol" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />,
+      body: (
+        <View style={{ gap: 10 }}>
+          {/* Drum level right on the landing page (mirrors the per-synth Volume), not only inside Kit/Loops. */}
+          <VolSlider label="Volume" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />
+          <SubMenu getItems={() => sections.filter(x => x.parent === 'drumtrack').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.drums.accent} tint={THEME.drums.tint} />
+        </View>
+      ),
     },
     // DRUM LOOPS — mirrors the synth's MIDI Player (playerSongBody(drumDeck)): browse /midi (all
     // folders) + Play/Stop. Same reusable deck component as the synths — a Drums sub-page.
@@ -1939,9 +2266,7 @@ export default function App() {
           <Text style={s.sectionLbl}>Output volume</Text>
           <View style={s.volRow}>
             <Pressable style={s.pill} onPress={() => stepVol(-1)}><Text style={s.text}>−</Text></Pressable>
-            <Slider style={{ flex: 1, height: 34 }} minimumValue={0} maximumValue={100} step={1} value={vol}
-              minimumTrackTintColor={C.accent} maximumTrackTintColor={C.border} thumbTintColor={C.accent}
-              disabled={!connected} onValueChange={setVol} onSlidingComplete={v => tp.masterVolume(v)} />
+            <ThrottledSlider max={100} value={vol} onChange={setVol} onCommit={v => tp.masterVolume(v)} disabled={!connected} />
             <Pressable style={s.pill} onPress={() => stepVol(1)}><Text style={s.text}>＋</Text></Pressable>
           </View>
           <Text style={s.muted}>{vol <= 0 ? 'Muted' : Math.round(vol) + ' / 100  ·  ' + volDb(vol) + ' dB'}</Text>
@@ -1967,8 +2292,8 @@ export default function App() {
   // (play → pick a voice → tempo → arp → drums), then system (connection, BT, codec).
   // Unlisted ids fall to the end in their definition order (stable sort).
   // Order for the home grid AND for each submenu's children (SubMenu sorts by this too).
-  const SECTION_ORDER = ['synthesizer', 'synthesizerB', 'synthX2', 'synthX3', 'drumtrack', 'audioloop', 'tempo', 'bt', 'settings',
-    'player', 'synth', 'arp', 'synth2', 'player2', 'arp2', 'drumloops', 'drumkit', 'bpm', 'metro', 'conn', 'codec'];
+  const SECTION_ORDER = ['synthesizer', 'synthesizerB', 'synthX2', 'synthX3', 'drumtrack', 'reverb', 'audioloop', 'usbaudio', 'tempo', 'bt', 'settings',
+    'player', 'synth', 'arp', 'player2', 'synth2', 'arp2', 'drumloops', 'drumkit', 'bpm', 'metro', 'conn', 'codec'];   // all synths: MIDI Player, Synth/Voices, Arp
   const ord = (id: string) => { const i = SECTION_ORDER.indexOf(id); return i < 0 ? 999 : i; };
   const visible = sections.filter(x => x.show).sort((a, b) => ord(a.id) - ord(b.id));
   // A routed page may be a home card OR a submenu sub-page (parent set, not in `visible`), so
@@ -2020,9 +2345,7 @@ export default function App() {
         </View>
         <View style={s.volRow}>
           <Text style={s.volLbl}>VOL</Text>
-          <Slider style={{ flex: 1, height: 34 }} minimumValue={0} maximumValue={100} step={1}
-            value={vol} minimumTrackTintColor={C.accent} maximumTrackTintColor={C.border} thumbTintColor={C.accent}
-            disabled={!connected} onValueChange={setVol} onSlidingComplete={v => tp.masterVolume(v)} />
+          <ThrottledSlider max={100} value={vol} onChange={setVol} onCommit={v => tp.masterVolume(v)} disabled={!connected} />
           <Text style={s.volVal}>{Math.round(vol)}</Text>
         </View>
       </View>
@@ -2101,8 +2424,8 @@ export default function App() {
               <View style={s.home}>
                 {visible.map(sec => (
                   <View key={sec.id} style={[s.cell, { width: `${100 / cols}%` }]}>
-                    <Card title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions}
-                      onPress={() => setRoute(sec.id)} style={s.cardGrid} accent={sec.accent} topRight={sec.topRight} />
+                    <Card title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions} foot={sec.foot}
+                      onPress={() => setRoute(sec.id)} style={s.cardGrid} accent={sec.accent} topRight={sec.topRight} disabledReason={sec.disabledReason} />
                   </View>
                 ))}
               </View>
@@ -2113,7 +2436,9 @@ export default function App() {
           {cur && !cur.fullHeight && (
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 400 }}>
               <View style={s.page}>
-                <PageHeader title={cur.title} value={cur.value} status={cur.status} subtitle={cur.subtitle} progress={cur.progress} actions={cur.actions} onBack={() => setRoute(cur.parent || 'home')} accent={cur.accent} topRight={cur.topRight} />
+                {cur.asCard
+                  ? <Card title={cur.title} value={cur.value} status={cur.status} subtitle={cur.subtitle} progress={cur.progress} actions={cur.actions} foot={cur.foot} accent={cur.accent} topRight={cur.topRight} onBack={() => setRoute(cur.parent || 'home')} />
+                  : <PageHeader title={cur.title} value={cur.value} status={cur.status} subtitle={cur.subtitle} progress={cur.progress} actions={cur.actions} onBack={() => setRoute(cur.parent || 'home')} accent={cur.accent} topRight={cur.topRight} />}
                 <View style={s.pageBody}>{cur.body}</View>
               </View>
             </ScrollView>
@@ -2162,11 +2487,14 @@ const s = StyleSheet.create({
   // homepage grid of cards; capped width so it reads well on a wide desktop window too
   home: { flexDirection: 'row', flexWrap: 'wrap', padding: 5, maxWidth: 1040, width: '100%', alignSelf: 'center' },
   cell: { padding: 5 },                                  // grid gutter (width % set inline per column count)
-  cardGrid: { marginHorizontal: 0, marginTop: 0, height: 152 },      // fixed → every card is the same size
+  cardGrid: { marginHorizontal: 0, marginTop: 0, height: 176 },      // fixed → every card is the same size (tall enough for instrument + loaded song line)
   submenu: { gap: 10 },                                  // submenu pages stack their cards full-width, one per row
   card: { backgroundColor: C.card, borderWidth: 1, borderColor: C.border, borderRadius: 10, marginHorizontal: 10, marginTop: 8, overflow: 'hidden' },
+  cardOff: { opacity: 0.45 },                                   // built-but-unavailable feature (see @STATE unavail)
+  cardReason: { color: '#f7b955', fontSize: 13, marginTop: 2 }, // amber "⚠ PSRAM required" line on a greyed card
   cardHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingHorizontal: 14, paddingTop: 12 },
   cardActions: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingBottom: 12, marginTop: 'auto' },   // pinned to the card bottom
+  cardFoot: { paddingHorizontal: 14, paddingTop: 6, paddingBottom: 8, gap: 6 },   // inline controls on the tile (volume slider / reverb on+mix)
   hidden: { display: 'none' },
   drawerLeft: { flex: 1, gap: 2 },
   drawerTitle: { color: C.text, fontWeight: '600', fontSize: 15 },
@@ -2237,11 +2565,13 @@ const s = StyleSheet.create({
   grow1: { flex: 1 },
   headActions: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0 },   // content-sized → buttons keep natural width on the page header
   hdrActionsRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, paddingHorizontal: 14, paddingBottom: 12, marginTop: -2 },
-  hdrBtn: { backgroundColor: '#238636', height: HDR_H, paddingHorizontal: 12, borderRadius: 8, flexGrow: 1, flexBasis: 0, minWidth: 44, alignItems: 'center', justifyContent: 'center' },
+  hdrBtn: { backgroundColor: '#238636', height: HDR_H, paddingHorizontal: 7, borderRadius: 8, flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 34, alignItems: 'center', justifyContent: 'center' },
   hdrBtnStop: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
-  hdrBtnText: { color: C.text, fontSize: 15, fontWeight: '700' },
+  hdrBtnIdle: { backgroundColor: C.chip },   // play ▶ when NOT playing: dark (green only while playing)
+  hdrBtnText: { color: C.text, fontSize: 13, fontWeight: '700' },
   btnGhost: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
-  btnOn: { borderWidth: 2, borderColor: C.accent },   // active-transport highlight (arp running)
+  btnOn: { backgroundColor: '#238636', borderWidth: 2, borderColor: C.accent },   // PLAYING: green fill + bright border
+  btnIdle: { backgroundColor: C.chip },               // NOT playing: dark fill (overrides s.btn green) so the state reads at a glance
   btnRecOn: { borderWidth: 2, borderColor: THEME.recorder.accent },   // armed / capturing (red)
   btnText: { color: C.text, fontSize: 13, fontWeight: '600' },
   input: { backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 7, color: C.text, paddingHorizontal: 10, paddingVertical: 8, fontSize: 14 },

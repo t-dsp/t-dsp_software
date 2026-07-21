@@ -335,6 +335,7 @@ export class BleTransport implements Transport {
   stopSong2() { this.relay('@SONG2=stop'); }
   song2Loop(on: boolean) { this.relay('@LOOP2=' + (on ? 1 : 0)); }
   trk(index: number, cmd: string) { this.relay('@TRK' + index + '.' + cmd); }
+  fx(cmd: string) { this.relay('@FX.' + cmd); }
   launchQuantize(on: boolean) { this.relay('@QUANTIZE=' + (on ? 1 : 0)); }
   metronome(on: boolean) { this.relay('@METRO=' + (on ? 1 : 0)); }
   metronomeMute(muted: boolean) { this.relay('@METROMUTE=' + (muted ? 1 : 0)); }
@@ -415,6 +416,7 @@ export class BleTransport implements Transport {
   audioLoopPlay(on: boolean) { this.relay('@ALPLAY=' + (on ? 1 : 0)); }
   audioLoopClear() { this.relay('@ALCLR'); }
   audioLoopSave(name: string) { this.relay('@ALSAVE=' + name); }
+  usbAudioGain(pct: number) { this.relay('@USBGAIN=' + Math.max(0, Math.min(150, Math.round(pct)))); }
   // ESP32-LOCAL Bluetooth control (act on the receiver, not the Teensy) → opcodes.
   espPair() { this.cmd(CMD.PAIRING_MODE); }
   espReconnect() { this.cmd(CMD.RECONNECT); }
