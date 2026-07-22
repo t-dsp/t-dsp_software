@@ -4539,6 +4539,9 @@ void loop() {
         // starving (=> mid-sample dropout => click). Distinguishes the two click causes.
         Serial.printf(" vp=%d ur=%lu", g_drumSamplerSink.voicesPlaying(),
                       (unsigned long)newdigate::g_tvpUnderruns);
+#ifdef TDSP_DRUM_DFD
+        Serial.printf(" sr=%lu", (unsigned long)dfd::g_dfdShortReads);   // SD short-read retries (truncation cause)
+#endif
 #endif
         Serial.printf("\n");
         g_maxLoopGapUs = 0;   // per-second worst-case window
