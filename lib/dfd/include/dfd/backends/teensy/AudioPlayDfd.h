@@ -54,7 +54,7 @@ public:
     // is slope-continuous at both ends (see fadeGain) so even a loud SUB-BASS tail (an 808 kick,
     // ~50 Hz) fades without the corner-click a linear ramp leaves. update() finishes the stop at 0.
     // (Named softStop, not release(), to avoid clashing with AudioStream::release(block).)
-    void softStop() { if (_voice && _voice->active()) beginFade(_gain, 0.0f, kReleaseFrames, /*releasing=*/true); }
+    void softStop(int frames = kReleaseFrames) { if (_voice && _voice->active()) beginFade(_gain, 0.0f, frames, /*releasing=*/true); }
 
     bool isPlaying() { return _voice && _voice->active(); }
     bool releasing() const { return _releasing; }
@@ -93,7 +93,7 @@ public:
             uint32_t endFrame = _lenFrames;
             if (kMaxPlayFrames > 0 && (uint32_t)kMaxPlayFrames < endFrame) endFrame = kMaxPlayFrames;
             uint32_t played = _voice->framesPlayed();
-            if (played + (uint32_t)kReleaseFrames >= endFrame) {
+            if (played + (uint32_t)kEndFadeFrames >= endFrame) {   // short fade at the natural end
                 uint32_t rem = (endFrame > played) ? (endFrame - played) : 1;
                 beginFade(_gain, 0.0f, (int)rem, /*releasing=*/true);
             }
@@ -130,8 +130,16 @@ private:
 #ifndef TDSP_DFD_ATTACK_FRAMES
 #define TDSP_DFD_ATTACK_FRAMES 48
 #endif
+    // RETRIGGER/steal release: fades a still-ringing hit out when a new one takes over. Long by
+    // default (~120 ms) — a loud low kick is ~45 Hz (22 ms/cycle), so it needs SEVERAL cycles to
+    // fade without an audible click; 30 ms (~1 cycle) clicks. The overlap with the incoming hit is
+    // inaudible (kick gaps are 375 ms+).
 #ifndef TDSP_DFD_RELEASE_FRAMES
-#define TDSP_DFD_RELEASE_FRAMES 1440
+#define TDSP_DFD_RELEASE_FRAMES 5760
+#endif
+    // Short fade for the NATURAL end (a quiet tail) and the hi-hat choke (must stay tight): ~30 ms.
+#ifndef TDSP_DFD_ENDFADE_FRAMES
+#define TDSP_DFD_ENDFADE_FRAMES 1440
 #endif
     // Optional decay cap (stereo frames). 0 = play the whole sample; >0 caps over-long one-shots
     // (e.g. a 6.4 s 808 tail that strains no-PSRAM streaming) — the auto end-fade lands at the cap.
@@ -140,7 +148,12 @@ private:
 #endif
     static constexpr int kAttackFrames  = TDSP_DFD_ATTACK_FRAMES;
     static constexpr int kReleaseFrames = TDSP_DFD_RELEASE_FRAMES;
+    static constexpr int kEndFadeFrames = TDSP_DFD_ENDFADE_FRAMES;
     static constexpr int kMaxPlayFrames = TDSP_DFD_MAX_PLAY_FRAMES;
+
+public:
+    static constexpr int endFadeFrames() { return kEndFadeFrames; }   // for the consumer's choke fade
+private:
 
     // Arm a fade from `from` to `to` over `len` frames (smoothstep). len<=0 applies instantly.
     void beginFade(float from, float to, int len, bool releasing) {

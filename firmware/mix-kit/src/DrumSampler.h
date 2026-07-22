@@ -124,7 +124,7 @@ public:
         // releases any ringing hat (a short fade, not a hard cut, so open->closed doesn't snap).
         if (isHat(note))
             for (int v = 0; v < kVoices; ++v)
-                if (isHat(_voiceNote[v]) && g_drumSdV[v].isPlaying()) voiceSoftStop(g_drumSdV[v]);
+                if (isHat(_voiceNote[v]) && g_drumSdV[v].isPlaying()) voiceSoftStop(g_drumSdV[v], kChokeFadeFrames);
 
         // Pick a FRESH voice for the new hit so a retrigger never hard-cuts the ringing one:
         // prefer a truly idle voice; only steal (least-remaining tail) when every voice is busy.
@@ -283,13 +283,23 @@ private:
         for (const char *p = nm; *p && isdigit((unsigned char)*p); ++p) n = n * 10 + (*p - '0');
         return n;
     }
+    static constexpr int kChokeFadeFrames = 1440;   // ~30 ms: TIGHT hi-hat choke (open->closed)
+
     // Soft-stop (declick fade-out) on the DFD engine; a plain hard stop on the legacy backend
-    // (AudioPlaySdResmp has no envelope). Keeps both builds compiling from one call site.
+    // (AudioPlaySdResmp has no envelope). Keeps both builds compiling from one call site. The
+    // no-arg form uses the long RETRIGGER release (sub-bass-safe); pass `frames` for a tighter fade.
     static inline void voiceSoftStop(DrumSdVoice &pl) {
 #ifdef TDSP_DRUM_DFD
         pl.softStop();
 #else
         pl.stop();
+#endif
+    }
+    static inline void voiceSoftStop(DrumSdVoice &pl, int frames) {
+#ifdef TDSP_DRUM_DFD
+        pl.softStop(frames);
+#else
+        (void)frames; pl.stop();
 #endif
     }
 
