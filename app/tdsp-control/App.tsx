@@ -638,6 +638,10 @@ export default function App() {
   // all from @STATE tracks[]. Voices 0/1 keep their bespoke cards (Synth A/B); voices 2+ get a
   // generated card driven by @TRK<i>.* (selVoiceX = the browser selection per extra voice index).
   const [synthCount, setSynthCount] = useState(1);
+  // Drum track index (= synthCount) as a ref, so the onLine() handler reads it fresh without being
+  // re-subscribed on every synthCount change — used to route the drum track's @TRK.INSTRS reply.
+  const drumIdxRef = useRef(1);
+  useEffect(() => { drumIdxRef.current = synthCount; }, [synthCount]);
   const [trkNames, setTrkNames] = useState<Record<number, string>>({});
   const [trkEng, setTrkEng] = useState<Record<number, string>>({});   // per-track engine tag from @STATE tracks[].eng (e.g. 'opll'); Dexed tracks carry none
   const [opllIdx, setOpllIdx] = useState<Record<number, number>>({});   // per-track CURRENT instrument index for NON-Dexed engines (synced from the @TRK<i>.INSTR= echo); they step @TRK<i>.INSTR=, not the /dexed catalog
@@ -844,9 +848,12 @@ export default function App() {
       // current-flag / @STATE.drumfont drive which one is highlighted.
       setFonts(parseFonts(line.slice(7)));
     } else if (line.startsWith('@DRUMFONT=')) {
-      // Swap-complete ack from the device (it rewrote /tdsp/drumkits.ndjson for the new font). Reload
-      // the catalog bypassing the cache to pull the new font's kit list, then re-hydrate every card.
-      load(true).finally(() => tp.requestState());
+      // Swap-complete ack. The kit SET changed, but the device already holds the new list in RAM — pull
+      // the drum track's live @TRK.INSTRS (an instant reply, handled above to refresh cat.drumkits) and
+      // re-hydrate state. NO catalog reload / SD re-read: reading /tdsp/drumkits.ndjson on every swap
+      // was the source of the "reload catalog" errors + laggy, unreliable kit changes.
+      tp.trk(drumIdxRef.current, 'INSTRS');
+      tp.requestState();
     } else if (line.startsWith('@DRUMFONTERR=')) {
       // The swap failed (missing/too-big font); the device kept the previous font. Refresh the picker
       // so its highlight snaps back to what's actually resident.
@@ -859,7 +866,16 @@ export default function App() {
       // The engine's PATCH LIST (@TRK<i>.INSTRS=<name0>\x1f<name1>…) — the non-Dexed engines' own voice
       // picker. Matched before .INSTR= so "@TRK2.INSTRS=" doesn't get eaten by the .INSTR= regex.
       const ml = line.match(/^@TRK(\d+)\.INSTRS=(.*)$/);
-      if (ml) { setTrkEngInstrs(mp => ({ ...mp, [+ml[1]]: ml[2] === '' ? [] : ml[2].split('\x1f') })); return; }
+      if (ml) {
+        const idx = +ml[1];
+        const names = ml[2] === '' ? [] : ml[2].split('\x1f');
+        setTrkEngInstrs(mp => ({ ...mp, [idx]: names }));
+        // The DRUM track's patch list IS its kit list. Mirror it straight into cat.drumkits (selection
+        // is by index; prog is unused app-side) so a drum-font swap refreshes the picker from this
+        // instant RAM reply — NOT by re-reading /tdsp/drumkits.ndjson off the SD.
+        if (idx === drumIdxRef.current) setCat(c => ({ ...c, drumkits: names.map((name, i) => ({ name, prog: i })) }));
+        return;
+      }
       // Sync the local instrument index from the device confirmation (@TRK<i>.INSTR=<idx>) so
       // Next/Prev step from the true current instrument, not a stale 0.
       const m = line.match(/^@TRK(\d+)\.INSTR=(\d+)/);
@@ -1001,17 +1017,33 @@ export default function App() {
   }, [tp]);
   // (elapsed-seconds ticker now lives inside <LoadScreen>, which mounts exactly while the
   // catalog is loading — so it no longer re-renders App every second.)
+  // Serialize catalog loads. The transport services ONE @READ at a time, so a drum-font swap firing
+  // load(true) while the connect-time load is still running — or two rapid swaps/kit changes — would
+  // collide ("a file read is in progress"), throw, and pop the "Catalog load failed / rebuild?" dialog
+  // while leaving the kit list STALE (so the change looks like it "did nothing"). Coalesce instead: if
+  // a load is already in flight, remember the request and run ONE more pass when it finishes, so the
+  // catalog always ends on the latest swap. bypassCache sticks once any coalesced request asks for it
+  // (a swap must skip the differential cache — the device rewrote drumkits.ndjson but NOT index.ndjson).
+  const loadingRef = useRef(false);
+  const reloadPendingRef = useRef<boolean | null>(null);
   async function load(bypassCache = false) {
-    // bypassCache: after a runtime drum-font swap the device rewrites /tdsp/drumkits.ndjson but NOT
-    // index.ndjson, so the differential cache would short-circuit and keep the OLD kit names — skip it.
-    try { const c = await loadCatalog(tp, progBus.emit, bypassCache ? undefined : catalogCache); setCat(c); setLoaded(true); progBus.emit(null); }
-    catch (e: any) {
-      progBus.emit(null);
-      const yes = Platform.OS === 'web'
-        ? (globalThis as any).confirm?.('Catalog load failed: ' + (e?.message || e) + '\n\nRebuild it now (@REINDEX)?')
-        : true;
-      if (yes) await reindex();
-    }
+    if (loadingRef.current) { reloadPendingRef.current = (reloadPendingRef.current ?? false) || bypassCache; return; }
+    loadingRef.current = true;
+    try {
+      for (;;) {
+        reloadPendingRef.current = null;
+        try { const c = await loadCatalog(tp, progBus.emit, bypassCache ? undefined : catalogCache); setCat(c); setLoaded(true); progBus.emit(null); }
+        catch (e: any) {
+          progBus.emit(null);
+          const yes = Platform.OS === 'web'
+            ? (globalThis as any).confirm?.('Catalog load failed: ' + (e?.message || e) + '\n\nRebuild it now (@REINDEX)?')
+            : true;
+          if (yes) await reindex();
+        }
+        if (reloadPendingRef.current === null) break;   // nobody asked for another pass while we ran
+        bypassCache = reloadPendingRef.current;          // a swap/change arrived mid-load — reload once more
+      }
+    } finally { loadingRef.current = false; }
   }
   async function reindex() { setBusy(true); try { await tp.reindex(); await load(); } finally { setBusy(false); } }
 
@@ -2061,12 +2093,17 @@ export default function App() {
         // repopulates once the device acks (@DRUMFONT= → catalog reload).
         <>
           <Text style={[s.muted, { marginTop: 8 }]}>Drum Font: {drumFont.display || fonts.find(f => f.current)?.display || '—'}</Text>
-          <Row><ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              {fonts.map((f, i) => {
-                const on = drumFont.path ? f.path === drumFont.path : f.current;
-                return <Pressable key={i} style={[s.pill, on && s.pillOn]} disabled={!connected} onPress={() => { setDrumFont({ path: f.path, display: f.display }); tp.drumFont(f.path); }}><Text style={s.text}>{f.display}</Text></Pressable>;
-              })}
-          </ScrollView></Row>
+          {/* Vertical scrollable font list — mirrors the kit list below (commit 014a26c). The Mars
+              per-pack library is ~45 fonts, and a horizontal pill row hid the tail exactly like the
+              kit list did. Fixed ROW_H rows, bounded height so it scrolls in-card. */}
+          <View style={{ height: Math.min(Math.max(fonts.length, 1), 7) * ROW_H, borderWidth: 1, borderColor: C.border, borderRadius: 7, marginTop: 4 }}>
+            <FlatList data={fonts} nestedScrollEnabled keyExtractor={(_, i) => 'df' + i}
+              getItemLayout={(_, index) => ({ length: ROW_H, offset: ROW_H * index, index })}
+              renderItem={({ item }) => {
+                const on = drumFont.path ? item.path === drumFont.path : item.current;
+                return <ListBtn label={item.display} sel={on} onPress={() => { setDrumFont({ path: item.path, display: item.display }); tp.drumFont(item.path); }} />;
+              }} />
+          </View>
         </>
       )}
       {caps.drumkitsel ? (
