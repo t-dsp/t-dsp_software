@@ -2033,6 +2033,18 @@ export default function App() {
   // underscore (GM/acoustic kit display names) are already human-readable, so leave them untouched.
   const prettyKit = (s: string) => s && s.includes('_') ? s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : s;
   const drumKitName = prettyKit(cat.drumkits[drums.kit]?.name || '');
+  // ‹ Prev / Next › through the kit list (wraps). Same @DRUMKIT the picker sends; the instrument
+  // sub-card's `actions` render these on BOTH the Kit card and its detail page.
+  const cycleKit = (dir: number) => {
+    const n = cat.drumkits.length;
+    if (!n) return;
+    const k = (((drums.kit || 0) + dir) % n + n) % n;
+    setDrums(d => ({ ...d, kit: k }));
+    tp.drumKit(k);
+  };
+  const kitNav = caps.drumkitsel && cat.drumkits.length > 1
+    ? <><HdrBtn label="‹ Prev" stop onPress={() => cycleKit(-1)} /><HdrBtn label="Next ›" stop onPress={() => cycleKit(1)} /></>
+    : undefined;
   // A fixed-voice engine (OPLL rhythm, caps.drumkitsel === false) has no GM kits — say so instead of
   // showing a kit name the engine ignores. GM/sampled engines append the loaded kit.
   const drumDetail = !caps.drumkitsel ? drumEngineLabel + '  ·  fixed rhythm voice'
@@ -2295,6 +2307,7 @@ export default function App() {
     instrument: {
       title: caps.drumkitsel ? 'Kit' : 'Drum Voice', subtitle: drumDetail,
       value: caps.drumkitsel ? (cat.drumkits[drums.kit]?.name || '—') : (cat.drumEngine || 'OPLL') + ' rhythm',
+      actions: kitNav,   // ‹ Prev / Next › kit — renders on both the Kit card and its detail page
       body: drumKitBody,
     },
   });
