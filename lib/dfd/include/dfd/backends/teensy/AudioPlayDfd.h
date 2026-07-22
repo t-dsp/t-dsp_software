@@ -38,11 +38,24 @@ public:
         _voice->setSource(src);
         _voice->play(0, src.totalSamples(), loop, 0, rate);
         _lenFrames = _voice->framesTotal();
+        // Declick ATTACK: rise from silence over kAttackFrames so a fresh voice never steps from 0
+        // to a non-zero sample[0]. Kept sub-millisecond so the drum transient is preserved.
+        _gain = 0.0f; _gainTarget = 1.0f; _releasing = false;
         return _voice->active();
     }
 
-    void stop() { if (_voice) _voice->stop(); }
+    // HARD stop — immediate silence (voice teardown / kit change). No declick; the caller is
+    // tearing the source down, so a ramp would read stale geometry (see Region::play()).
+    void stop() { if (_voice) _voice->stop(); _gain = 1.0f; _gainTarget = 1.0f; _releasing = false; }
+
+    // SOFT stop — ramp the tail to zero over kReleaseFrames, THEN stop the voice. This kills the
+    // "snap" when a still-ringing hit is retriggered / stolen / hi-hat-choked: the OUTGOING voice
+    // is faded out instead of cut at a non-zero sample. update() finishes the stop at gain 0.
+    // (Named softStop, not release(), to avoid clashing with AudioStream::release(block).)
+    void softStop() { if (_voice && _voice->active()) { _gainTarget = 0.0f; _releasing = true; } }
+
     bool isPlaying() { return _voice && _voice->active(); }
+    bool releasing() const { return _releasing; }
     void setPlaybackRate(float r) { if (_voice) _voice->setRate(r); }
 
     // STREAM PATH: refill the ring. Call from loop() for every node whose voice isPlaying().
@@ -68,10 +81,27 @@ public:
 
         int16_t scratch[AUDIO_BLOCK_SAMPLES * 2];
         _voice->read(scratch, AUDIO_BLOCK_SAMPLES);
-        if (_voice->channels() >= 2) {
-            for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) { bl->data[i] = scratch[i*2]; br->data[i] = scratch[i*2+1]; }
+        const bool stereo = _voice->channels() >= 2;
+
+        if (_gain >= 1.0f && !_releasing) {
+            // Fast path: unity gain, no ramp in flight — plain copy (bit-identical to no declick).
+            if (stereo) for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) { bl->data[i] = scratch[i*2]; br->data[i] = scratch[i*2+1]; }
+            else        for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) { bl->data[i] = scratch[i];   br->data[i] = scratch[i]; }
         } else {
-            for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) { bl->data[i] = scratch[i]; br->data[i] = scratch[i]; }
+            // Declick ramp: step _gain toward _gainTarget each frame and scale L/R. Attack rises to
+            // 1 (kAttackStep); a softStop() release falls to 0 (kReleaseStep) and stops the voice.
+            const float step = _releasing ? kReleaseStep : kAttackStep;
+            float g = _gain;
+            for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+                if      (g < _gainTarget) { g += step; if (g > _gainTarget) g = _gainTarget; }
+                else if (g > _gainTarget) { g -= step; if (g < _gainTarget) g = _gainTarget; }
+                const int16_t l = stereo ? scratch[i*2]   : scratch[i];
+                const int16_t r = stereo ? scratch[i*2+1] : scratch[i];
+                bl->data[i] = (int16_t)(l * g);
+                br->data[i] = (int16_t)(r * g);
+            }
+            _gain = g;
+            if (_releasing && _gain <= 0.0f) { _voice->stop(); _releasing = false; }
         }
         transmit(bl, 0);
         transmit(br, 1);
@@ -80,8 +110,17 @@ public:
     }
 
 private:
+    // Declick ramp lengths (frames @ AUDIO_SAMPLE_RATE_EXACT). Overridable per build; defaults are
+    // ~0.33 ms attack (transient-preserving) and ~5.3 ms release (enough to erase a mid-tone cut).
+    static constexpr int   kAttackFrames  = 16;
+    static constexpr int   kReleaseFrames = 256;
+    static constexpr float kAttackStep    = 1.0f / (float)kAttackFrames;
+    static constexpr float kReleaseStep   = 1.0f / (float)kReleaseFrames;
+
     Voice*   _voice = nullptr;
     uint32_t _lenFrames = 0;
+    float    _gain = 1.0f, _gainTarget = 1.0f;   // declick envelope (1 = pass-through fast path)
+    bool     _releasing = false;
 };
 
 } // namespace dfd

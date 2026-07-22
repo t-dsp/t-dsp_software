@@ -120,13 +120,21 @@ public:
         if (note >= kNumNotes) return;
         const char *path = _path[note];
         if (!path[0]) return;                       // no sample mapped for this GM note
-        // Hi-hat choke: closed(42)/pedal(44)/open(46) are one exclusive class — a new hat
-        // silences any ringing hat first (open-then-closed = the hat shuts).
-        if (isHat(note)) {
+        // Hi-hat choke: closed(42)/pedal(44)/open(46) are one exclusive class — a new hat SOFT-
+        // releases any ringing hat (a short fade, not a hard cut, so open->closed doesn't snap).
+        if (isHat(note))
             for (int v = 0; v < kVoices; ++v)
-                if (isHat(_voiceNote[v]) && g_drumSdV[v].isPlaying()) { g_drumSdV[v].stop(); _voiceNote[v] = -1; }
-        }
-        const int v = pickVoice(note);
+                if (isHat(_voiceNote[v]) && g_drumSdV[v].isPlaying()) voiceSoftStop(g_drumSdV[v]);
+
+        // Pick a FRESH voice for the new hit so a retrigger never hard-cuts the ringing one:
+        // prefer a truly idle voice; only steal (least-remaining tail) when every voice is busy.
+        int v = idleVoice();
+        if (v < 0) v = pickStealVoice();
+        // Declick the OUTGOING same-note hit (retrigger): fade its tail out on ITS OWN voice while
+        // the new hit starts on `v`. The ~5 ms overlap is inaudible; the alternative is the snap.
+        for (int w = 0; w < kVoices; ++w)
+            if (w != v && _voiceNote[w] == (int8_t)note && g_drumSdV[w].isPlaying()) voiceSoftStop(g_drumSdV[w]);
+
         DrumSdVoice &pl = g_drumSdV[v];
         pl.stop();                                  // clean any tail on a stolen voice
         // Trigger from the PERSISTENT per-note source (opened once in setKit) — no per-hit SD.open()
@@ -275,15 +283,25 @@ private:
         for (const char *p = nm; *p && isdigit((unsigned char)*p); ++p) n = n * 10 + (*p - '0');
         return n;
     }
-    // Voice pick: retrigger of the same note steals its voice; else an idle (finished) voice; else the
-    // oldest-started voice.
-    int pickVoice(uint8_t note) {
-        for (int v = 0; v < kVoices; ++v) if (_voiceNote[v] == (int8_t)note) return v;   // retrigger this note
-        for (int v = 0; v < kVoices; ++v) if (!g_drumSdV[v].isPlaying()) return v;        // a finished (idle) voice
-        // All voices busy -> steal the one CLOSEST TO ITS NATURAL END (least remaining), so we clip the
-        // least-audible tail. The old policy stole the OLDEST-STARTED voice = the longest-ringing sample
-        // (a crash/ride/open-hat mid-decay) — exactly the trailing tail you'd hear cut. SD is proven fast
-        // enough for full polyphony (@DRUMSTRESS: 0 underruns), so stealing is the only cut source.
+    // Soft-stop (declick fade-out) on the DFD engine; a plain hard stop on the legacy backend
+    // (AudioPlaySdResmp has no envelope). Keeps both builds compiling from one call site.
+    static inline void voiceSoftStop(DrumSdVoice &pl) {
+#ifdef TDSP_DRUM_DFD
+        pl.softStop();
+#else
+        pl.stop();
+#endif
+    }
+
+    // First idle (finished) voice, or -1 if all are sounding.
+    int idleVoice() {
+        for (int v = 0; v < kVoices; ++v) if (!g_drumSdV[v].isPlaying()) return v;
+        return -1;
+    }
+    // All voices busy -> steal the one CLOSEST TO ITS NATURAL END (least remaining), so we clip the
+    // least-audible tail (a crash/ride mid-decay is spared). Retrigger/choke declick is handled by
+    // the caller via voiceSoftStop() on the outgoing voice; this is the last-resort hard steal.
+    int pickStealVoice() {
         int best = 0; uint32_t bestRem = 0xFFFFFFFFu;
         for (int v = 0; v < kVoices; ++v) {
             const uint32_t len = g_drumSdV[v].lengthMillis(), pos = g_drumSdV[v].positionMillis();
