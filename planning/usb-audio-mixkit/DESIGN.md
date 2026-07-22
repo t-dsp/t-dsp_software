@@ -6,7 +6,13 @@ mix bus** (DAW/Spotify/backing tracks → TAC5212 out) and **the full mix stream
 host** for recording — plus **native USB-device MIDI** (a DAW can play the synths) as a free
 bonus of the required USB descriptor.
 
-**Status:** proposal — not yet implemented
+**Status:** IMPLEMENTED + flashed (2026-07-21). Flag `TDSP_USB_AUDIO` + external sub-mixer live in
+`firmware/mix-kit/src/main.cpp`; env `teensy41_dexed2_opll2_drumvoice_fx_usbaudio` (2 Dexed + 2
+melodic OPLL + OPLL rhythm drums + spring reverb + 24-bit USB audio) built green and flashed to the
+local board (SN 18402920). Verified: enumerates as "Teensy MIDI/Audio" sound card + COM serial;
+`@STATE.caps.usbaudio=1`, `@STATE.usb` block present, `@USBGAIN` echoes; cpu ~8.6%, codec OK. App
+USB Audio card is caps-gated and now lights up. Optical/BT bypass is wired but dormant on this board
+(neither populated). Remaining: the optional runtime "external → reverb" send (currently hard DRY).
 **Owner:** Jay
 **Last updated:** 2026-07-21
 

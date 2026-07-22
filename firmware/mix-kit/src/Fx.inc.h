@@ -48,8 +48,13 @@ static void fxTick() {
 
 FLASHMEM static void fxApplyAll() {
     g_fxReverb.bypass_setMode(BYPASS_MODE_PASS);   // "off" = clean dry, never muted
-    g_fxMixTarget = g_fxMixCur = g_fx.mix / 100.0f;   // snap the glide at init
+#if TDSP_FX_SEND
+    g_fxMixTarget = g_fxMixCur = 1.0f;             // SEND bus: reverb is 100% wet; dry lives on the master
+    g_fxReverb.mix(1.0f);
+#else
+    g_fxMixTarget = g_fxMixCur = g_fx.mix / 100.0f;   // INSERT: snap the wet/dry glide at init
     g_fxReverb.mix(g_fxMixCur);
+#endif
 #if TDSP_FX_PLATE
     g_fxReverb.size(g_fx.size / 100.0f);
     g_fxReverb.hidamp(g_fx.damp / 100.0f);
@@ -67,20 +72,66 @@ FLASHMEM static void fxApplyAll() {
 #endif
     g_fxReverb.bypass_set(!g_fx.on);
 }
-FLASHMEM static void fxInit() { fxApplyAll(); }
+#if TDSP_FX_SEND
+// ---- SEND matrix (per-voice aux sends into the reverb bus) ----------------------------------
+// Each track keeps its dry path to the master; a per-track SEND gain feeds the reverb; the reverb's
+// 100%-wet output returns to the master through post slot 3 at the RETURN level. All sends boot at 0
+// (pure send: every track dry until you raise a send). See planning/plate-reverb-fx/SEND_MATRIX.md.
+static uint8_t g_fxSend[8] = {0};   // per-track send level %, indexed by track (0..3 synths, kSynthVoices = drums)
+static uint8_t g_fxReturn = 60;     // wet return level %
+
+// Track index convention (matches @STATE tracks[] + the app's send rows):
+//   0..kSynthVoices-1 = Synth A..D -> fxIn1 slots 0..3
+//   kSynthVoices      = Drums      -> fxIn2 slot 1
+//   kSynthVoices + 1  = Audio Loop -> fxIn2 slot 2 (tap present only when TDSP_AUDIOLOOP)
+static const int kFxLoopTrk = kSynthVoices + 1;
+
+// Map a track index -> its slot in the fxIn cascade and set the send gain. Mono-fed nodes drive L+R alike.
+static void fxSendApply(int trk, int pct) {
+    if (trk < 0 || trk >= (int)(sizeof(g_fxSend))) return;
+    pct = pct < 0 ? 0 : (pct > 100 ? 100 : pct);
+    g_fxSend[trk] = (uint8_t)pct;
+    const float g = pct / 100.0f;
+    if (trk >= 0 && trk < kSynthVoices && trk < 4) { fxIn1L.gain(trk, g); fxIn1R.gain(trk, g); }   // Synth A-D
+    else if (trk == kSynthVoices)                  { fxIn2L.gain(1, g);   fxIn2R.gain(1, g); }      // Drums
+    else if (trk == kFxLoopTrk)                    { fxIn2L.gain(2, g);   fxIn2R.gain(2, g); }      // Audio loop
+}
+static void fxReturnApply() {
+    const float g = g_fxReturn / 100.0f;
+    postL.gain(3, g); postR.gain(3, g);
+}
+FLASHMEM static void fxSendInit() {
+    fxIn2L.gain(0, 1.0f); fxIn2R.gain(0, 1.0f);            // fxIn1 sub-sum passes through the cascade unattenuated
+    for (int i = 0; i < (int)sizeof(g_fxSend); ++i) fxSendApply(i, g_fxSend[i]);   // boot sends (all 0 = dry)
+    fxReturnApply();
+}
+#endif  // TDSP_FX_SEND
+
+FLASHMEM static void fxInit() {
+    fxApplyAll();
+#if TDSP_FX_SEND
+    fxSendInit();
+#endif
+}
 
 // The "fx" object for @STATE (and the bare @FX query). "type" tells the app which reverb +
 // which sliders to render.
 static void fxEmitJson(Stream& reply) {
 #if TDSP_FX_PLATE
     reply.printf("{\"type\":\"plate\",\"on\":%d,\"mix\":%d,\"size\":%d,\"damp\":%d,\"lodamp\":%d,"
-                 "\"diff\":%d,\"lowpass\":%d,\"hipass\":%d,\"shimmer\":%d,\"pitch\":%d,\"freeze\":%d}",
+                 "\"diff\":%d,\"lowpass\":%d,\"hipass\":%d,\"shimmer\":%d,\"pitch\":%d,\"freeze\":%d",
                  g_fx.on ? 1 : 0, g_fx.mix, g_fx.size, g_fx.damp, g_fx.lodamp, g_fx.diff,
                  g_fx.lowpass, g_fx.hipass, g_fx.shimmer, g_fx.pitch, g_fx.freeze ? 1 : 0);
 #else  // TDSP_FX_SPRING
-    reply.printf("{\"type\":\"spring\",\"on\":%d,\"mix\":%d,\"time\":%d,\"treble\":%d,\"bass\":%d}",
+    reply.printf("{\"type\":\"spring\",\"on\":%d,\"mix\":%d,\"time\":%d,\"treble\":%d,\"bass\":%d",
                  g_fx.on ? 1 : 0, g_fx.mix, g_fx.time, g_fx.treble, g_fx.bass);
 #endif
+#if TDSP_FX_SEND
+    // SEND-mode extras: routing mode + wet return + the audio-loop send (per-synth/drum sends ride
+    // in @STATE tracks[].fxsend). Lets the app render the Return slider + loop send row.
+    reply.printf(",\"route\":\"send\",\"return\":%d,\"loopsend\":%d", g_fxReturn, g_fxSend[kFxLoopTrk]);
+#endif
+    reply.print("}");
 }
 
 // @FX command surface. Common @FX.ON/@FX.MIX; the rest is reverb-specific. Returns true if the
@@ -91,7 +142,15 @@ static bool handleFxCmd(const char* line, Stream& reply) {
     const char* eq = strchr(line, '=');
     const int v = eq ? atoi(eq + 1) : 0;
     if      (strncmp(line, "@FX.ON=", 7) == 0)  { g_fx.on = (v != 0); g_fxReverb.bypass_set(!g_fx.on); reply.printf("@FX.ON=%d\n", g_fx.on ? 1 : 0); }
+#if TDSP_FX_SEND
+    // SEND bus: the reverb is 100% wet, so "MIX" means the wet RETURN level. @FX.MIX is kept as an
+    // alias so an insert-era client still works; the per-track sends arrive via @TRK<i>.FXSEND.
+    else if (strncmp(line, "@FX.RETURN=", 11) == 0 ||
+             strncmp(line, "@FX.MIX=", 8) == 0)     { g_fxReturn = fxClamp(v, 0, 100); fxReturnApply(); reply.printf("@FX.RETURN=%d\n", g_fxReturn); }
+    else if (strncmp(line, "@FX.LOOPSEND=", 13) == 0){ fxSendApply(kFxLoopTrk, fxClamp(v, 0, 100));       reply.printf("@FX.LOOPSEND=%d\n", g_fxSend[kFxLoopTrk]); }
+#else
     else if (strncmp(line, "@FX.MIX=", 8) == 0) { g_fx.mix = fxClamp(v, 0, 100); g_fxMixTarget = g_fx.mix / 100.0f; reply.printf("@FX.MIX=%d\n", g_fx.mix); }  // glide via fxTick()
+#endif
 #if TDSP_FX_PLATE
     else if (strncmp(line, "@FX.SIZE=", 9) == 0)     { g_fx.size = fxClamp(v, 0, 100);    g_fxReverb.size(g_fx.size / 100.0f);       reply.printf("@FX.SIZE=%d\n", g_fx.size); }
     else if (strncmp(line, "@FX.DAMP=", 9) == 0)     { g_fx.damp = fxClamp(v, 0, 100);    g_fxReverb.hidamp(g_fx.damp / 100.0f);     reply.printf("@FX.DAMP=%d\n", g_fx.damp); }

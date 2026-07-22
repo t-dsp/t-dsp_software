@@ -102,6 +102,7 @@
 // binding, so Voice 1 & Voice 2 share ONE helper family. Phase 1 of the Tracks refactor —
 // see Track.h / planning/tracks/DESIGN.md. Forward-declares only; no behavior change yet.
 #include "Track.h"
+#include "TrackEngine.h"   // ITrackEngine: uniform per-track engine surface (adapters land in TrackEngineImpl.inc.h)
 
 #ifdef TDSP_FLASHERX
 #include "FlasherXUpdate.inc.h"   // @FXUP -> OTA self-update (lib/FlasherX). Opt-in.
@@ -222,16 +223,22 @@ static const int kSynthVoices = TDSP_SYNTH_VOICES;
 #ifndef TDSP_OPLL_ENGINES
 #define TDSP_OPLL_ENGINES 0                       // melodic OPLL voices appended after the Dexed ones
 #endif
+#ifndef TDSP_PLAITS_ENGINES
+#define TDSP_PLAITS_ENGINES 0                     // melodic Plaits tracks appended after the OPLL ones (HeteroPlaits.h)
+#endif
 #if TDSP_HETERO
-static const int kDexedVoices = TDSP_DEXED_VOICES;     // tracks [0, kDexedVoices) are Dexed
-static_assert(TDSP_DEXED_VOICES + TDSP_OPLL_ENGINES == TDSP_SYNTH_VOICES,
-              "TDSP_SYNTH_VOICES must equal TDSP_DEXED_VOICES + TDSP_OPLL_ENGINES");
+static const int kDexedVoices = TDSP_DEXED_VOICES;     // tracks [0, kDexedVoices)                        = Dexed
+static const int kOpllVoices  = TDSP_OPLL_ENGINES;     // tracks [kDexedVoices, +kOpllVoices)             = OPLL
+// tracks [kDexedVoices + kOpllVoices, kSynthVoices) = Plaits (TDSP_PLAITS_ENGINES of them)
+static_assert(TDSP_DEXED_VOICES + TDSP_OPLL_ENGINES + TDSP_PLAITS_ENGINES == TDSP_SYNTH_VOICES,
+              "TDSP_SYNTH_VOICES must equal DEXED + OPLL + PLAITS engine counts");
 #else
 static const int kDexedVoices = kSynthVoices;          // homogeneous: every voice is Dexed (or the sole backend)
+static const int kOpllVoices  = 0;
 #endif
-// Compile-time engine kind for voice v (used by the per-track command dispatch + @STATE "eng").
-static inline const char *voiceEngineName(int v) { return (v >= kDexedVoices) ? "opll" : "dexed"; }
-static inline bool        voiceIsOpll(int v)      { return TDSP_HETERO && v >= kDexedVoices; }
+// Compile-time engine-kind predicates for a track index (per-track dispatch + inventory binding).
+static inline bool voiceIsOpll(int v)   { return TDSP_HETERO && v >= kDexedVoices && v < kDexedVoices + kOpllVoices; }
+static inline bool voiceIsPlaits(int v) { return TDSP_HETERO && v >= kDexedVoices + kOpllVoices; }
 
 tdsp::MidiFilePlayer   g_playerV[kSynthVoices];   // one song player per synth voice
 tdsp::MidiFilePlayer  &g_player = g_playerV[0];   // alias: voice 0 (all existing g_player refs)
@@ -345,6 +352,17 @@ AudioEffectPlateReverb_F32  g_fxReverb;   // rich; ~190 KB RAM2 heap
 #elif TDSP_FX_SPRING
 AudioEffectSpringReverb_F32 g_fxReverb;   // ~37 KB heap — fits no-PSRAM
 #endif
+#if TDSP_FX_SEND
+// Aux SEND matrix (per-voice): each track sends into this cascaded FX-input mixer, which feeds the
+// reverb (100% wet); the wet return rejoins at the master-out (post) mixer, so a track is DRY unless
+// its send is raised. fxIn1 = Synth A/B/C/D sends; fxIn2 = fxIn1 + Drums + Audio-loop sends. Send
+// gains start at 0 (all dry) — @TRK<i>.FXSEND raises them. See planning/plate-reverb-fx/SEND_MATRIX.md.
+AudioMixer4_F32 fxIn1L, fxIn1R, fxIn2L, fxIn2R;
+AudioConnection_F32 c_fxCascL(fxIn1L, 0, fxIn2L, 0);   // A/B/C/D sub-sum -> fxIn2 slot 0
+AudioConnection_F32 c_fxCascR(fxIn1R, 0, fxIn2R, 0);
+AudioConnection_F32 c_fxRevInL(fxIn2L, 0, g_fxReverb, 0);
+AudioConnection_F32 c_fxRevInR(fxIn2R, 0, g_fxReverb, 1);
+#endif
 #endif
 AudioAnalyzePeak_F32   peakSpdif, peakOut;
 #if TDSP_ROLE_BT_RECEIVER
@@ -386,7 +404,7 @@ AudioConnection_F32 c_spR    (spdifIn,    1, outR, 2);
 AudioConnection_F32 c_usbL   (usbIn,      0, extL, 2);   // USB host audio -> external sub-mix slot 2
 AudioConnection_F32 c_usbR   (usbIn,      1, extR, 2);
 #endif
-#if TDSP_METRONOME || TDSP_EXT_MIX
+#if TDSP_METRONOME || TDSP_EXT_MIX || TDSP_FX_SEND
 // Master-out mixer. The instrument chain reaches the DAC through slot 0; the metronome click
 // (slot 1) and the external inputs (slot 2) are injected HERE — AFTER the reverb insert AND
 // after the audio-loop record-bus tap — so NEITHER is reverbed nor captured in audio loops.
@@ -400,6 +418,10 @@ AudioConnection_F32 c_metR  (testTone, 0, postR, 1);
 #if TDSP_EXT_MIX
 AudioConnection_F32 c_extPL (extL,     0, postL, 2);   // external inputs (USB/optical/BT), DRY
 AudioConnection_F32 c_extPR (extR,     0, postR, 2);
+#endif
+#if TDSP_FX_SEND
+AudioConnection_F32 c_fxRetL(g_fxReverb, 0, postL, 3);   // reverb wet RETURN (post-everything); level = postL.gain(3) via @FX.RETURN
+AudioConnection_F32 c_fxRetR(g_fxReverb, 1, postR, 3);
 #endif
 AudioConnection_F32 c_postL (postL, 0, tdmOut, 0);
 AudioConnection_F32 c_postR (postR, 0, tdmOut, 1);
@@ -423,7 +445,7 @@ tdsp::AudioLooper   g_aloop[TDSP_AUDIOLOOP_N];
 AudioMixer4_F32     finalL, finalR;
 AudioConnection_F32 c_finBusL(outL, 0, finalL, 0);        // record bus -> final slot 0
 AudioConnection_F32 c_finBusR(outR, 0, finalR, 0);
-#if TDSP_FX
+#if TDSP_FX && !TDSP_FX_SEND
 AudioConnection_F32 c_fxInL  (finalL, 0, g_fxReverb, 0);  // final mix -> reverb insert
 AudioConnection_F32 c_fxInR  (finalR, 0, g_fxReverb, 1);
 AudioConnection_F32 c_finOutL(g_fxReverb, 0, TDSP_DAC_L_NODE, TDSP_DAC_L_SLOT);  // reverb -> post/DAC
@@ -461,7 +483,7 @@ static uint8_t  g_aloopN   = 0;                          // loops that actually 
 static int16_t *g_aloopBuf[TDSP_AUDIOLOOP_N]        = { 0 };
 static uint32_t g_aloopBufSamples[TDSP_AUDIOLOOP_N] = { 0 };
 #else
-#if TDSP_FX
+#if TDSP_FX && !TDSP_FX_SEND
 AudioConnection_F32 c_fxInL  (outL,       0, g_fxReverb, 0);   // master sum -> reverb insert
 AudioConnection_F32 c_fxInR  (outR,       0, g_fxReverb, 1);
 AudioConnection_F32 c_outL   (g_fxReverb, 0, TDSP_DAC_L_NODE, TDSP_DAC_L_SLOT);   // reverb -> post/DAC
@@ -573,8 +595,8 @@ static bool g_sdReady = false;
 // Needs PSRAM for the resident font. See DrumTsf.h. (No effect on GM backends, which
 // already render ch10 drums themselves.)
 // The two parallel drum voices both own mix slot 2 — exactly one at a time.
-#if defined(TDSP_DRUM_TSF) && defined(TDSP_DRUM_VOICE)
-  #error "TDSP_DRUM_TSF (TinySoundFont) and TDSP_DRUM_VOICE (OPLL) are mutually exclusive — pick one drum voice."
+#if (defined(TDSP_DRUM_TSF) + defined(TDSP_DRUM_VOICE) + defined(TDSP_DRUM_PLAITS)) > 1
+  #error "TDSP_DRUM_TSF / TDSP_DRUM_VOICE / TDSP_DRUM_PLAITS are mutually exclusive — they all own the drum mix slot; pick one drum voice."
 #endif
 #ifdef TDSP_DRUM_TSF
   #include "DrumTsf.h"      // sampled full GM kit; needs PSRAM (resident font)
@@ -582,9 +604,46 @@ static bool g_sdReady = false;
 #ifdef TDSP_DRUM_VOICE
   #include "DrumVoice.h"    // OPLL 5-sound rhythm; ~9 KB, no PSRAM
 #endif
-#if TDSP_HETERO
-  #include "HeteroOpll.h"   // Thread D: melodic OPLL voice(s) ALONGSIDE the Dexed pool (heterogeneous inventory)
+#ifdef TDSP_DRUM_PLAITS
+  #include "DrumPlaits.h"   // authentic Plaits drum models (13/14/15) as a small pool; no PSRAM
 #endif
+#if TDSP_OPLL_ENGINES >= 1
+  #include "HeteroOpll.h"   // Thread D: melodic OPLL voice(s) ALONGSIDE the primary (heterogeneous inventory)
+                            // Gated on OPLL_ENGINES (not just HETERO): a hetero inventory may have ZERO
+                            // hetero-OPLL voices (e.g. a 0-Dexed OPLL-primary + Plaits build).
+#endif
+#if TDSP_HETERO_PLAITS
+  #include "HeteroPlaits.h" // a melodic Plaits track ALONGSIDE the others (generalized inventory)
+#endif
+
+#if TDSP_FX_SEND
+// Per-voice SEND taps -> the FX-input cascade (declared with g_fxReverb above). Each tap taps a
+// track's PRE-master-sum node (so it can be sent independently of its dry level); the SEND LEVEL is
+// the fxIn mixer's per-slot gain (0 = dry, set by @TRK<i>.FXSEND / fxSendApply). Dexed + OPLL engines
+// are mono -> feed both fxIn L and R. Guarded per source so a build only wires the sends it has.
+#if defined(TDSP_SYNTH_DEXED_POOL)
+AudioConnection_F32 c_sendAl(dxpTrim,          0, fxIn1L, 0), c_sendAr(dxpTrim,          0, fxIn1R, 0);   // Synth A (Dexed engines 0-3)
+#if TDSP_VOICE2
+AudioConnection_F32 c_sendBl(dxpTrimB,         0, fxIn1L, 1), c_sendBr(dxpTrimB,         0, fxIn1R, 1);   // Synth B (Dexed engines 4-7)
+#endif
+#endif
+#if TDSP_OPLL_ENGINES >= 1
+AudioConnection_F32 c_sendCl(g_hoOpllTrim[0],  0, fxIn1L, 2), c_sendCr(g_hoOpllTrim[0],  0, fxIn1R, 2);   // Synth C (OPLL 0)
+#if TDSP_OPLL_ENGINES >= 2
+AudioConnection_F32 c_sendDl(g_hoOpllTrim[1],  0, fxIn1L, 3), c_sendDr(g_hoOpllTrim[1],  0, fxIn1R, 3);   // Synth D (OPLL 1)
+#endif
+#endif
+#if TDSP_DRUM_TSF
+AudioConnection_F32 c_sendDrl(g_drumTsfToF32L, 0, fxIn2L, 1), c_sendDrr(g_drumTsfToF32R, 0, fxIn2R, 1);   // Drums (TSF, stereo)
+#elif TDSP_DRUM_VOICE
+AudioConnection_F32 c_sendDrl(g_drumVoiceToF32, 0, fxIn2L, 1), c_sendDrr(g_drumVoiceToF32, 0, fxIn2R, 1);  // Drums (OPLL rhythm, mono -> L+R)
+#elif TDSP_DRUM_PLAITS
+AudioConnection_F32 c_sendDrl(g_drumPlaitsToF32, 0, fxIn2L, 1), c_sendDrr(g_drumPlaitsToF32, 0, fxIn2R, 1); // Drums (Plaits pool, mono -> L+R)
+#endif
+#if TDSP_AUDIOLOOP
+AudioConnection_F32 c_sendLpl(g_aloop[0],      0, fxIn2L, 2), c_sendLpr(g_aloop[0],      1, fxIn2R, 2);   // Audio loop 0
+#endif
+#endif  // TDSP_FX_SEND
 
 #include "CatalogDb.h"   // on-demand /tdsp/ catalog database (@REINDEX); client-triggered
 // Parallel drum-voice label for the catalog header (a melodic synth + a dedicated drum engine).
@@ -592,8 +651,19 @@ static bool g_sdReady = false;
   static const char *kDrumEngineName = "OPLL";
 #elif defined(TDSP_DRUM_TSF)
   static const char *kDrumEngineName = "TSF";
+#elif defined(TDSP_DRUM_PLAITS)
+  static const char *kDrumEngineName = "Plaits";
 #else
   static const char *kDrumEngineName = "";   // GM engines render their own ch10 drums
+#endif
+// Does picking a "kit" actually change the drum sound? GM sampled engines (a TSF drum font, or a GM
+// synth rendering ch10) switch kit via a channel-10 program change. The OPLL rhythm voice (DrumVoice.h)
+// has a FIXED 5-sound set (BD / SD / TOM / TOP-CYM / HH) and IGNORES the program (see drumApplyKit) —
+// so the app must not offer GM kits there. Reported to the app as caps.drumkitsel.
+#if defined(TDSP_DRUM_VOICE) || defined(TDSP_DRUM_PLAITS)
+  static const bool kDrumKitSelectable = false;   // OPLL rhythm / Plaits models: fixed sounds; @DRUMKIT is a no-op
+#else
+  static const bool kDrumKitSelectable = true;    // TSF / GM: kit = a ch10 program change
 #endif
 
 // Catalog relevance (compile-time, from the synth build) -> fed into EngineCaps so the app
@@ -1180,6 +1250,7 @@ static char g_appState[256] = "";
 // MidiFileEvent[] (full channel/program/velocity). The player is non-blocking
 // (g_player.tick() in loop) and drives the synth via g_synthSink.
 static void applyMidiMode(bool mpe);   // defined below; test songs flip mode on start
+static void trackEnginesSetMpe(bool mpe);   // defined in TrackEngineImpl.inc.h; MPE toggle across ALL track engines
 static void drumApplyKit();            // defined below; the drum Track's prep applies the GM kit
 static void muteSongDrums(bool mute);  // defined below; drum-track start/stop mutes the song's ch10
 static bool drumEngineOk();            // defined below; does the active engine render ch10 drums?
@@ -1302,10 +1373,12 @@ static inline bool loopHoldsGrid(const tdsp::MidiLooper &L) {
 // content — it just ticks the shared clock, so it does not count here (the lock is the way to pin a
 // hand-dialled tempo). Call BEFORE the newly-firing track's play(), so it reflects only the OTHERS.
 static bool transportHasContent() {
-    bool any = g_player.isPlaying() || g_drumPlayer.isPlaying();
-#if TDSP_VOICE2
-    any = any || g_player2.isPlaying();     // player 2 also holds the grid
-#endif
+    // EVERY synth voice's player holds the grid, not just voice 0/1 — the hetero OPLL/Plaits tracks
+    // (voices 2+) count too. Missing them re-zeroed the conductor when a new synth started while an
+    // extra voice was looping, so the looping voice stalled until the clock circled back (the "Plaits
+    // freezes for N measures" bug). g_playerV[] spans all voices (g_player==[0], g_player2==[1]).
+    bool any = g_drumPlayer.isPlaying();
+    for (int v = 0; v < kSynthVoices; v++) if (g_playerV[v].isPlaying()) { any = true; break; }
 #if TDSP_RECORDER
     // A running loop holds the grid too. Without this, arming synth B's recorder while only synth
     // A's loop is going looks "idle" and re-zeroes the clock — restarting A's loop. Each recorder
@@ -2529,7 +2602,10 @@ static void applyMidiMode(bool mpe) {
     // MPE is single-timbre: a song's per-channel program changes shouldn't apply, so the
     // whole performance (and the MPE test song) uses the SELECTED instrument, not the file's.
     g_player.setProgramChangeEnabled(!mpe);
-    synthSetMpeMode(mpe);   // backend hook (no-op except TSF)
+    // Reconfigure EVERY track's engine for the new mode via the vtable — the primary Dexed pool AND
+    // the hetero OPLL/Plaits tracks (fixes: hetero engines used to stay in poly mode because only the
+    // primary backend's synthSetMpeMode() was called). A new engine gets MPE by overriding setMpeMode.
+    trackEnginesSetMpe(mpe);
     Serial.printf("[mode] %s\n", mpe ? "MPE (per-note bend/pressure)" : "normal MIDI");
 }
 
@@ -2633,6 +2709,9 @@ FLASHMEM static bool handleArpLine(const char* line, Print& reply, tdsp::ArpFilt
     return true;
 }
 
+// Uniform per-track engine adapters + g_trackEngine[] inventory (additive; nothing reads it yet).
+#include "TrackEngineImpl.inc.h"
+
 // Track-indexed command dispatch (Phase 3): "@TRK<i>.<CMD>[=<arg>]" routes a UNIFORM interface
 // to any track by index — g_tracks[0..n-1] (synth voices) or g_drumTrack (the drum). This is what
 // lets the app drive N cards from the @STATE tracks[] array with one command family, so a future
@@ -2660,6 +2739,30 @@ static void handleTrkCmd(const char* s, Stream& reply) {
     else if (strncmp(cmd, "RESTART=", 8) == 0) { if (isDrum) drumStartFile(arg); else trackRestart(*t, arg); }
     else if (strncmp(cmd, "STOP", 4) == 0)     { if (isDrum) drumStop(); else songStop(*t); }
     else if (strncmp(cmd, "VOL=", 4) == 0)     { if (t->setLevel) t->setLevel(atoi(arg)); }
+    // List THIS track's engine instruments (index-ordered, \x1f-separated) so the app renders the
+    // engine's OWN patch picker (OPLL ROM voices / Plaits models / any future engine) instead of the
+    // Dexed cart library. Engine-agnostic via the ITrackEngine vtable — a new engine needs no new code.
+    else if (strncmp(cmd, "INSTRS", 6) == 0) {
+        ITrackEngine *e = isDrum ? g_drumTrackEngine : g_trackEngine[i];
+        reply.printf("@TRK%d.INSTRS=", i);
+        const int n = e->numInstruments();
+        for (int k = 0; k < n; k++) { if (k) reply.write((uint8_t)0x1f); reply.print(e->instrumentName(k)); }
+        reply.print("\n");
+    }
+    // Drum KIT select through the uniform track surface: @TRK<nSynth>.INSTR=<kit> -> the drum engine's
+    // setInstrument (== setDrumKit), mirroring @DRUMKIT= but via the same @TRK<i> path the app uses for
+    // synth voices — so a componentized per-track card drives the kit exactly like an instrument. Not
+    // hetero-gated (works on any drum build); guarded on appliesKit() so a fixed-voice OPLL rhythm engine
+    // (no GM kits) ignores it and just echoes. @DRUMKIT= stays for back-compat.
+    else if (isDrum && strncmp(cmd, "INSTR=", 6) == 0) {
+        if (g_drumTrackEngine->appliesKit()) g_drumTrackEngine->setInstrument(atoi(arg));
+        reply.printf("@TRK%d.INSTR=%d\n", i, g_drumTrackEngine->instrument());
+    }
+#if TDSP_FX_SEND
+    // Per-track reverb SEND level (0..100). Track index maps 1:1 onto the fxIn cascade slot
+    // (synths -> fxIn1, drums -> fxIn2). Dry path is untouched. See planning/.../SEND_MATRIX.md.
+    else if (strncmp(cmd, "FXSEND=", 7) == 0)  { fxSendApply(i, atoi(arg)); reply.printf("@TRK%d.FXSEND=%d\n", i, g_fxSend[i]); }
+#endif
     else if (strncmp(cmd, "LOOP=", 5) == 0)    { if (!isDrum) { *t->loop = (atoi(arg) != 0); t->player->setLooping(*t->loop); } }   // a groove always loops
     // Whole arp surface for the track (ON/PAT/RATE/OCT/LATCH/GATE/SWING/PRESET/SEQ) — reuse the
     // shared arp parser with a synthetic "ARP" prefix so "@TRK<i>.ARPPAT=" -> handleArpLine "PAT=".
@@ -2675,28 +2778,20 @@ static void handleTrkCmd(const char* s, Stream& reply) {
     // are all handled here (the OPLL has no /dexed carts); a Dexed voice's DXVOICE/DXPICK fall through
     // to the unchanged Dexed block below. This whole block is HETERO-only so non-hetero builds are
     // byte-identical.
-    else if (voiceIsOpll(i) && !isDrum &&
-             (strncmp(cmd, "INSTR=", 6) == 0 || strncmp(cmd, "DXVOICE=", 8) == 0)) {
-        heteroOpllSetInstrument(i - kDexedVoices, atoi(strchr(cmd, '=') + 1));
-        reply.printf("@TRK%d.INSTR=%d\n", i, heteroOpllInstrument(i - kDexedVoices));
+    // Engine-agnostic instrument select (migrated to the ITrackEngine vtable): @TRK<i>.INSTR=<idx>
+    // (and OPLL's DXVOICE= alias, which has no cart library) route to whatever engine the track is —
+    // the adapter forwards to the same per-kind functions the two hand-written branches used to call.
+    else if (!isDrum && (strncmp(cmd, "INSTR=", 6) == 0 ||
+             (voiceIsOpll(i) && strncmp(cmd, "DXVOICE=", 8) == 0))) {
+        g_trackEngine[i]->setInstrument(atoi(strchr(cmd, '=') + 1));
+        reply.printf("@TRK%d.INSTR=%d\n", i, g_trackEngine[i]->instrument());
     }
+#if TDSP_OPLL_ENGINES >= 1
     else if (voiceIsOpll(i) && !isDrum && strncmp(cmd, "DXPICK=", 7) == 0) {
         // OPLL has no cart library — ignore the pick but echo so the app doesn't hang on a reply.
         reply.printf("@TRK%d.DXPICKED=\t0\t%s\n", i, heteroOpllInstrumentName(heteroOpllInstrument(i - kDexedVoices)));
     }
-    else if (!voiceIsOpll(i) && !isDrum && strncmp(cmd, "INSTR=", 6) == 0) {
-        // INSTR alias on a DEXED voice == DXVOICE (bundled index). Kept HETERO-only so the app can
-        // use one engine-agnostic command family across a mixed board.
-        int idx = atoi(strchr(cmd, '=') + 1);
-#if TDSP_SYNTH_VOICES >= 4 && !TDSP_HETERO
-        synthSetInstrumentV(i, idx);
-#elif TDSP_VOICE2
-        if (i == 1) synthSetInstrument2(idx); else synthSetInstrument(idx);
-#else
-        synthSetInstrument(idx);
 #endif
-        reply.printf("@TRK%d.INSTR=%d\n", i, idx);
-    }
 #endif
 #if defined(TDSP_SYNTH_DEXED) || defined(TDSP_SYNTH_DEXED_POOL)
     // Voice select for this track. DXPICK=<relCart>\t<voice> (library pick) / DXVOICE=<idx> (bundled).
@@ -2714,13 +2809,7 @@ static void handleTrkCmd(const char* s, Stream& reply) {
         reply.printf("@TRK%d.DXPICKED=%s\t%d\t%s\n", i, buf, voice, nm ? nm : "?");
     }
     else if (strncmp(cmd, "DXVOICE=", 8) == 0 && !isDrum) {
-#if TDSP_SYNTH_VOICES >= 4 && !TDSP_HETERO
-        synthSetInstrumentV(i, atoi(arg));
-#elif TDSP_VOICE2
-        if (i == 1) synthSetInstrument2(atoi(arg)); else synthSetInstrument(atoi(arg));
-#else
-        synthSetInstrument(atoi(arg));
-#endif
+        g_trackEngine[i]->setInstrument(atoi(arg));   // bundled-index select (vtable; DXPICK cart pick stays Dexed-specific)
     }
 #endif
 }
@@ -3328,51 +3417,57 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         // Each synth entry also carries its live-MIDI subscription (Thread C): "src" = which input
         // device feeds it ("din"/"usb"/"bt"/"serial"/"none"/"multi"), "srcch" = channel filter (0=all).
         reply.print(",\"tracks\":[");
-        reply.printf("{\"i\":0,\"kind\":\"synth\",\"playing\":%d,\"on\":1,\"arp\":1,\"src\":\"%s\",\"srcch\":%d,\"name\":",
-                     g_tracks[0].player->isPlaying() ? 1 : 0, midihub::srcName(g_tracks[0].liveSrcMask), midihub::chNum(g_tracks[0].srcChMask));
-        tdsp::catdb::jsonStr(reply, synthInstrumentName(synthInstrument()));
-        reply.print(",\"song\":"); tdsp::catdb::jsonStr(reply, g_tracks[0].name); reply.print("}");   // loaded MIDI song for this track
+        // ONE loop over the track inventory (the ITrackEngine vtable): every synth track emits
+        // identically — its engine kind (engTag()), current voice display name (currentName()), and
+        // player/live-MIDI state — so a build with ANY mix of engines (incl. no Dexed) needs no
+        // per-kind block here. This is what removes the "Dexed is the primary" assumption from @STATE.
+        // Wire-compat: Dexed's engTag() is "" so it stays absent exactly as before; OPLL/Plaits/… carry
+        // their tag. "on"/"arp" are Track-level: voice 1 gates on @VOICE2 / TDSP_ARP2, others always on.
+        for (int v = 0; v < kSynthVoices; ++v) {
+            Track &t = g_tracks[v];
+            int on = 1, arp = 1;
 #if TDSP_VOICE2
-        // Voice 1 is "on" once Synth B is enabled (@VOICE2), OR always on a fixed 4-way pool build.
-        reply.printf(",{\"i\":1,\"kind\":\"synth\",\"playing\":%d,\"on\":%d,\"arp\":%d,\"src\":\"%s\",\"srcch\":%d,\"name\":",
-                     g_tracks[1].player->isPlaying() ? 1 : 0, ((TDSP_SYNTH_VOICES >= 4) || g_voice2On) ? 1 : 0, TDSP_ARP2 ? 1 : 0,
-                     midihub::srcName(g_tracks[1].liveSrcMask), midihub::chNum(g_tracks[1].srcChMask));
-        tdsp::catdb::jsonStr(reply, synthInstrumentName(g_synthInstrument2));
-        reply.print(",\"song\":"); tdsp::catdb::jsonStr(reply, g_tracks[1].name); reply.print("}");
+            if (v == 1) { on = ((TDSP_SYNTH_VOICES >= 4) || g_voice2On) ? 1 : 0; arp = TDSP_ARP2 ? 1 : 0; }
 #endif
-#if TDSP_SYNTH_VOICES >= 4 && !TDSP_HETERO
-        // Voices 3/4 of the fixed 4-way Dexed pool: always on, each with its own arp + subscription.
-        // Name = the picked cart voice if any, else the bundled instrument (per-voice arrayed state).
-        for (int v = 2; v < kSynthVoices; ++v) {
-            Track &t = g_tracks[v];
-            reply.printf(",{\"i\":%d,\"kind\":\"synth\",\"playing\":%d,\"on\":1,\"arp\":1,\"src\":\"%s\",\"srcch\":%d,\"name\":",
-                         v, t.player->isPlaying() ? 1 : 0, midihub::srcName(t.liveSrcMask), midihub::chNum(t.srcChMask));
-            const char *nm = g_curCartNameV[v][0] ? g_curCartNameV[v] : synthInstrumentName(g_synthInstrumentV[v]);
-            tdsp::catdb::jsonStr(reply, nm);
-            reply.print(",\"song\":"); tdsp::catdb::jsonStr(reply, t.name); reply.print("}");
-        }
-#elif TDSP_HETERO
-        // HETERO inventory (Thread D): the melodic OPLL voice(s) after the Dexed ones. "eng":"opll"
-        // tells the app this track is a DIFFERENT engine kind (the Dexed voices carry no eng — the
-        // app infers them from caps.engines: tracks [0,dexed) are Dexed, the rest OPLL). Always on.
-        for (int v = kDexedVoices; v < kSynthVoices; ++v) {
-            Track &t = g_tracks[v];
-            reply.printf(",{\"i\":%d,\"kind\":\"synth\",\"eng\":\"opll\",\"playing\":%d,\"on\":1,\"arp\":1,\"src\":\"%s\",\"srcch\":%d,\"name\":",
-                         v, t.player->isPlaying() ? 1 : 0, midihub::srcName(t.liveSrcMask), midihub::chNum(t.srcChMask));
-            tdsp::catdb::jsonStr(reply, heteroOpllInstrumentName(heteroOpllInstrument(v - kDexedVoices)));
-            reply.print(",\"song\":"); tdsp::catdb::jsonStr(reply, t.name); reply.print("}");
-        }
+            reply.printf("%s{\"i\":%d,\"kind\":\"synth\",\"playing\":%d,\"on\":%d,\"arp\":%d,\"src\":\"%s\",\"srcch\":%d",
+                         v ? "," : "", v, t.player->isPlaying() ? 1 : 0, on, arp,
+                         midihub::srcName(t.liveSrcMask), midihub::chNum(t.srcChMask));
+            const char *eng = g_trackEngine[v]->engTag();
+            if (eng[0]) { reply.print(",\"eng\":"); tdsp::catdb::jsonStr(reply, eng); }
+            // ninstr = this engine's instrument count, so the app can step ‹/› with wrap and knows to
+            // show the engine's OWN patch list (via @TRK<i>.INSTRS) instead of the Dexed cart library.
+            reply.printf(",\"ninstr\":%d", g_trackEngine[v]->numInstruments());
+            reply.print(",\"name\":"); tdsp::catdb::jsonStr(reply, g_trackEngine[v]->currentName());
+            reply.print(",\"song\":"); tdsp::catdb::jsonStr(reply, t.name);
+#if TDSP_FX_SEND
+            reply.printf(",\"fxsend\":%d", g_fxSend[v]);
 #endif
-        reply.printf(",{\"i\":%d,\"kind\":\"drum\",\"playing\":%d,\"on\":%d,\"arp\":0,\"src\":\"%s\",\"srcch\":%d,\"name\":",
+            reply.print("}");
+        }
+        // The drum track emitted through the SAME ITrackEngine vtable (its DrumTrackEngineAdapter) as the
+        // synth tracks: kind:"drum" plus engTag()/ninstr/currentName() exactly like a synth entry, so the
+        // app's per-track hydrate treats it uniformly — ninstr (the kit count) lets a componentized track
+        // card step kits the same way it steps voices. "playing"/"on"/src stay direct reads (Track-level,
+        // no vtable). Wire-compat: the drum's engTag() is "" so no "eng" appears, as before.
+        reply.printf(",{\"i\":%d,\"kind\":\"drum\",\"playing\":%d,\"on\":%d,\"arp\":0,\"src\":\"%s\",\"srcch\":%d",
                      kSynthVoices, g_drumTrack.player->isPlaying() ? 1 : 0, drumEngineOk() ? 1 : 0,
                      midihub::srcName(g_drumTrack.liveSrcMask), midihub::chNum(g_drumTrack.srcChMask));
-        tdsp::catdb::jsonStr(reply, g_curDrumName); reply.print("}]");
+        {
+            const char *deng = g_drumTrackEngine->engTag();
+            if (deng[0]) { reply.print(",\"eng\":"); tdsp::catdb::jsonStr(reply, deng); }
+            reply.printf(",\"ninstr\":%d", g_drumTrackEngine->numInstruments());
+            reply.print(",\"name\":"); tdsp::catdb::jsonStr(reply, g_drumTrackEngine->currentName());
+        }
+#if TDSP_FX_SEND
+        reply.printf(",\"fxsend\":%d", g_fxSend[kSynthVoices]);
+#endif
+        reply.print("}]");
         // Build-time capabilities so the app SHOWS the Voices-2 / arp-2 cards only on builds
         // that have them compiled in (both are pool-only, build-flag gated). caps.tracks = the
         // compiled track count (2 synth voices + 1 drum, or 1+1 on a non-voice2 build).
         // caps.audioloop = the number of audio loops that ACTUALLY allocated (0 = the board
         // couldn't spare the RAM -> the app hides the card), not just the build flag.
-        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"tracks\":%d,\"audioloop\":%d,\"fx\":%d,\"usbaudio\":%d}",
+        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"tracks\":%d,\"audioloop\":%d,\"fx\":%d,\"usbaudio\":%d,\"drumkitsel\":%d}",
                      TDSP_VOICE2 ? 1 : 0, (TDSP_VOICE2 && TDSP_ARP2) ? 1 : 0, TDSP_RECORDER ? 1 : 0,
                      TDSP_RECORDER_EDIT ? 1 : 0, kSynthVoices + 1,   // N synth voices + the drum track
 #if TDSP_AUDIOLOOP
@@ -3382,6 +3477,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
 #endif
                      , TDSP_FX ? 1 : 0   // caps.fx: the app shows the Reverb card only on FX builds
                      , TDSP_USB_AUDIO ? 1 : 0   // caps.usbaudio: the app shows the USB Audio card only on USB-audio builds
+                     , kDrumKitSelectable ? 1 : 0   // caps.drumkitsel: 0 = fixed drum voice (OPLL) -> app hides the GM kit picker
                      );
         // PSRAM presence (top-level, MB): the app greys PSRAM-dependent cards with a reason when 0.
         reply.printf(",\"psram\":%u", (unsigned)external_psram_size);
@@ -3428,6 +3524,143 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     else return false;
     return true;
 }
+
+#if TDSP_HETERO
+// Bind a track's per-index SONG STATE (follow/buf/name/loop/tempo/…) from the i-th backing slot, so a
+// hetero voice can sit at ANY track index instead of being forced onto the hardcoded index-2/3 (*3/*4)
+// slots — the per-track-state coupling that blocked a 0-Dexed inventory (planning/multi-engine-tracks).
+// The per-slot scalars are UNCHANGED (aliases into them here); index i == the track's own index resolves
+// to the SAME slot the old hardcoded assignment used, so current builds are byte-identical. Only the
+// index-uniform SONG-STATE fields are set here; engine/router/sink/level/caps stay per-block (per-role).
+// Table guards mirror the scalar #ifs (slot1 = VOICE2, slot2 = VOICES>=3, slot3 = VOICES>=4), so the
+// table has exactly kSynthVoices entries.
+FLASHMEM static void bindTrackSongState(Track &t, int i) {
+    tdsp::PlayerFollower* const followTbl[kSynthVoices] = { &g_songFollow,
+#if TDSP_VOICE2
+        &g_songFollow2,
+#endif
+#if TDSP_SYNTH_VOICES >= 3
+        &g_songFollow3,
+#endif
+#if TDSP_SYNTH_VOICES >= 4
+        &g_songFollow4,
+#endif
+    };
+    tdsp::MidiFileEvent* const bufTbl[kSynthVoices] = { g_buf,
+#if TDSP_VOICE2
+        g_buf2,
+#endif
+#if TDSP_SYNTH_VOICES >= 3
+        g_buf3,
+#endif
+#if TDSP_SYNTH_VOICES >= 4
+        g_buf4,
+#endif
+    };
+    const int bufCapTbl[kSynthVoices] = { MAX_EVENTS,
+#if TDSP_VOICE2
+        MAX_EVENTS2,
+#endif
+#if TDSP_SYNTH_VOICES >= 3
+        MAX_EVENTS3,
+#endif
+#if TDSP_SYNTH_VOICES >= 4
+        MAX_EVENTS3,
+#endif
+    };
+    char* const nameTbl[kSynthVoices] = { g_curSongName,
+#if TDSP_VOICE2
+        g_curSong2Name,
+#endif
+#if TDSP_SYNTH_VOICES >= 3
+        g_curSong3Name,
+#endif
+#if TDSP_SYNTH_VOICES >= 4
+        g_curSong4Name,
+#endif
+    };
+    char* const argTbl[kSynthVoices] = { g_curSongArg,
+#if TDSP_VOICE2
+        g_curSong2Arg,
+#endif
+#if TDSP_SYNTH_VOICES >= 3
+        g_curSong3Arg,
+#endif
+#if TDSP_SYNTH_VOICES >= 4
+        g_curSong4Arg,
+#endif
+    };
+    bool* const loopTbl[kSynthVoices] = { &g_loop,
+#if TDSP_VOICE2
+        &g_song2Loop,
+#endif
+#if TDSP_SYNTH_VOICES >= 3
+        &g_song3Loop,
+#endif
+#if TDSP_SYNTH_VOICES >= 4
+        &g_song4Loop,
+#endif
+    };
+    bool* const wasTbl[kSynthVoices] = { &g_songWasPlaying,
+#if TDSP_VOICE2
+        &g_song2WasPlaying,
+#endif
+#if TDSP_SYNTH_VOICES >= 3
+        &g_song3WasPlaying,
+#endif
+#if TDSP_SYNTH_VOICES >= 4
+        &g_song4WasPlaying,
+#endif
+    };
+    float* const bpmTbl[kSynthVoices] = { &g_songBpm,
+#if TDSP_VOICE2
+        &g_song2Bpm,
+#endif
+#if TDSP_SYNTH_VOICES >= 3
+        &g_song3Bpm,
+#endif
+#if TDSP_SYNTH_VOICES >= 4
+        &g_song4Bpm,
+#endif
+    };
+    uint8_t* const bpbTbl[kSynthVoices] = { &g_songBpb,
+#if TDSP_VOICE2
+        &g_song2Bpb,
+#endif
+#if TDSP_SYNTH_VOICES >= 3
+        &g_song3Bpb,
+#endif
+#if TDSP_SYNTH_VOICES >= 4
+        &g_song4Bpb,
+#endif
+    };
+    double* const loopBeatsTbl[kSynthVoices] = { &g_songLoopBeats,
+#if TDSP_VOICE2
+        &g_song2LoopBeats,
+#endif
+#if TDSP_SYNTH_VOICES >= 3
+        &g_song3LoopBeats,
+#endif
+#if TDSP_SYNTH_VOICES >= 4
+        &g_song4LoopBeats,
+#endif
+    };
+    bool* const launchTbl[kSynthVoices] = { &g_songLaunchPending,
+#if TDSP_VOICE2
+        &g_song2LaunchPending,
+#endif
+#if TDSP_SYNTH_VOICES >= 3
+        &g_song3LaunchPending,
+#endif
+#if TDSP_SYNTH_VOICES >= 4
+        &g_song4LaunchPending,
+#endif
+    };
+    t.follow = followTbl[i]; t.buf = bufTbl[i]; t.bufCap = bufCapTbl[i];
+    t.name = nameTbl[i]; t.arg = argTbl[i]; t.loop = loopTbl[i]; t.wasPlaying = wasTbl[i];
+    t.bpm = bpmTbl[i]; t.bpb = bpbTbl[i]; t.loopBeats = loopBeatsTbl[i]; t.launchPending = launchTbl[i];
+}
+#endif  // TDSP_HETERO
 
 // Populate g_tracks[] — pointers to the per-voice objects declared at file scope + caps. Called
 // once from setup(). The three caps flags carry the deliberately voice-1-ONLY behaviors (global
@@ -3502,27 +3735,42 @@ FLASHMEM static void tracksInit() {
     // uniform stack into a different engine kind. OPLL #0 reuses the index-2 extra-voice state
     // (g_songFollow3/g_buf3/g_curSong3*); OPLL #1 (if built, TDSP_OPLL_ENGINES>=2) reuses the
     // index-3 state (g_songFollow4/g_buf4/g_curSong4*).
-    { Track &t2 = g_tracks[kDexedVoices];
-      t2.player = &g_playerV[kDexedVoices]; t2.arp = &g_arpFilterV[kDexedVoices]; t2.router = &g_routerV[kDexedVoices];
-      t2.follow = &g_songFollow3; t2.looper = nullptr;
-      t2.sink = g_hoOpllVoiceSink[0]; t2.buf = g_buf3; t2.bufCap = MAX_EVENTS3; t2.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
+#if TDSP_OPLL_ENGINES >= 1
+    { const int idx = kDexedVoices; Track &t2 = g_tracks[idx];
+      t2.player = &g_playerV[idx]; t2.arp = &g_arpFilterV[idx]; t2.router = &g_routerV[idx]; t2.looper = nullptr;
+      t2.sink = g_hoOpllVoiceSink[0]; t2.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
       t2.setLevel = heteroOpllSetVol0; t2.tag = "song3";
       t2.caps = { false, false, false, /*splitGuarded*/false,
                   false, false, false, false, false, /*tempoSourceWhenIdle*/true };
-      t2.name = g_curSong3Name; t2.arg = g_curSong3Arg; t2.loop = &g_song3Loop; t2.wasPlaying = &g_song3WasPlaying;
-      t2.bpm = &g_song3Bpm; t2.bpb = &g_song3Bpb; t2.loopBeats = &g_song3LoopBeats; t2.launchPending = &g_song3LaunchPending;
+      bindTrackSongState(t2, idx);   // follow/buf/name/loop/tempo BY INDEX (== old *3 slot at idx 2; index-flexible for 0-Dexed)
       t2.liveSrcMask = 0; t2.srcChMask = 0; }
+#endif
 #if TDSP_OPLL_ENGINES >= 2
-    { Track &t3 = g_tracks[kDexedVoices + 1];
-      t3.player = &g_playerV[kDexedVoices + 1]; t3.arp = &g_arpFilterV[kDexedVoices + 1]; t3.router = &g_routerV[kDexedVoices + 1];
-      t3.follow = &g_songFollow4; t3.looper = nullptr;
-      t3.sink = g_hoOpllVoiceSink[1]; t3.buf = g_buf4; t3.bufCap = MAX_EVENTS3; t3.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
+    { const int idx = kDexedVoices + 1; Track &t3 = g_tracks[idx];
+      t3.player = &g_playerV[idx]; t3.arp = &g_arpFilterV[idx]; t3.router = &g_routerV[idx]; t3.looper = nullptr;
+      t3.sink = g_hoOpllVoiceSink[1]; t3.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
       t3.setLevel = heteroOpllSetVol1; t3.tag = "song4";
       t3.caps = { false, false, false, /*splitGuarded*/false,
                   false, false, false, false, false, /*tempoSourceWhenIdle*/true };
-      t3.name = g_curSong4Name; t3.arg = g_curSong4Arg; t3.loop = &g_song4Loop; t3.wasPlaying = &g_song4WasPlaying;
-      t3.bpm = &g_song4Bpm; t3.bpb = &g_song4Bpb; t3.loopBeats = &g_song4LoopBeats; t3.launchPending = &g_song4LaunchPending;
+      bindTrackSongState(t3, idx);   // BY INDEX (== old *4 slot at idx 3)
       t3.liveSrcMask = 0; t3.srcChMask = 0; }
+#endif
+#if TDSP_HETERO_PLAITS
+    // Melodic PLAITS track (generalized inventory): after the Dexed + OPLL voices, at index
+    // pv = kDexedVoices + kOpllVoices. Its per-track song state is now bound BY INDEX via
+    // bindTrackSongState() (the *3/*4 slots are no longer hardcoded) — so the Plaits track can sit at
+    // ANY index, including index 0/1 in a 0-Dexed inventory. Guard: pv must be a real synth-voice index.
+    static_assert((kDexedVoices + kOpllVoices) < kSynthVoices,
+                  "HeteroPlaits track index (DEXED+OPLL) must be < kSynthVoices");
+    { const int pv = kDexedVoices + kOpllVoices;
+      Track &tp = g_tracks[pv];
+      tp.player = &g_playerV[pv]; tp.arp = &g_arpFilterV[pv]; tp.router = &g_routerV[pv];
+      tp.looper = nullptr; tp.sink = g_hpVoiceSink;
+      tp.chMask = tdsp::MidiFilePlayer::kMaskNoDrums; tp.setLevel = heteroPlaitsSetVol;
+      tp.caps = { false, false, false, false, false, false, false, false, false, /*tempoSourceWhenIdle*/true };
+      tp.tag = (pv == 2) ? "song3" : "song4";   // cosmetic log label (unchanged for current builds)
+      bindTrackSongState(tp, pv);   // follow/buf/name/loop/tempo BY INDEX (was the pv==2/3 *3/*4 special-case)
+      tp.liveSrcMask = 0; tp.srcChMask = 0; }
 #endif
 #endif
 
@@ -3577,6 +3825,7 @@ FLASHMEM static void trackWireSetup(Track &t) {
 FLASHMEM void setup() {
     hardResetCodecPower();
     tracksInit();
+    trackEnginesInit();   // bind each track to its ITrackEngine (additive; call sites migrate onto it next)
 
     Serial.begin(115200);
     uint32_t t0 = millis();
@@ -3755,7 +4004,12 @@ FLASHMEM void setup() {
     // live alongside them — the hetero build has no runtime @VOICE2 toggle; every voice is a
     // permanent Track. The split is enabled whenever the build has a second Dexed voice (TDSP_VOICE2),
     // independent of the TOTAL voice count (which now also counts the melodic OPLL tracks).
-    heteroOpllBegin();
+#if TDSP_OPLL_ENGINES >= 1
+    heteroOpllBegin();   // skipped when the hetero inventory has no hetero-OPLL voices (e.g. 0-Dexed OPLL-primary + Plaits)
+#endif
+#if TDSP_HETERO_PLAITS
+    heteroPlaitsBegin();   // bring up the melodic Plaits track + open its mix slot
+#endif
 #if TDSP_VOICE2
     g_voice2On = true;
     synthSetVoice2Enabled(true);   // split engines 4..7 off as Dexed voice 1 (g_synthSinkB)
@@ -3783,6 +4037,14 @@ FLASHMEM void setup() {
     if (drumVoiceBegin()) {
         g_drumNoteMapper.setDownstream(&g_drumVoiceSink);
         g_drumPlayer.setSink(&g_drumNoteMapper); g_drumTrack.sink = &g_drumVoiceSink;
+        g_engineHasDrums = true;
+    }
+#endif
+#ifdef TDSP_DRUM_PLAITS
+    // Same idea with the authentic Plaits drum pool (no PSRAM): route ch10 to it + mark drums OK.
+    if (drumPlaitsBegin()) {
+        g_drumNoteMapper.setDownstream(&g_drumPlaitsSink);
+        g_drumPlayer.setSink(&g_drumNoteMapper); g_drumTrack.sink = &g_drumPlaitsSink;
         g_engineHasDrums = true;
     }
 #endif
@@ -3876,6 +4138,9 @@ void loop() {
     // ticks the slow LED heartbeat and returns false.
     if (kit.service(Serial)) return;
 
+#ifdef TDSP_DRUM_PLAITS
+    g_drumPlaitsSink.service();   // release one-shot Plaits drum gates whose ~6 ms hold has elapsed
+#endif
     // Anti-zipper param glides (cheap, self-gated ~1 kHz): ramp the master DAC gain + FX mix toward
     // their targets so the app's throttled slider drags fade smoothly instead of stepping.
     masterVolTick();
@@ -4169,7 +4434,7 @@ void loop() {
         float psp = peakSpdif.available() ? peakSpdif.read() : 0.0f;
         float po  = peakOut.available()   ? peakOut.read()   : 0.0f;
         Serial.printf("alive up=%lus  bpm=%.0f(%s)  codec=%s(%s)  spdif=%s inFreq=%.0f  "
-                      "btPeak=%.3f spdifPeak=%.3f outPeak=%.3f  cpuMax=%.1f%% memMax=%u\n",
+                      "btPeak=%.3f spdifPeak=%.3f outPeak=%.3f  cpuMax=%.1f%% memMax=%u f32Max=%u\n",
                       (unsigned long)(millis() / 1000),
                       (double)g_masterBpm, g_conductor.running() ? "run" : "idle",
                       g_codecOk ? "OK" : "FAIL", g_codecMsg,
@@ -4180,9 +4445,11 @@ void loop() {
                       0.0f,   // optical IN compiled out (TDSP_NO_SPDIF_IN)
 #endif
                       pbt, psp, po,
-                      AudioProcessorUsageMax(), AudioMemoryUsageMax());
+                      AudioProcessorUsageMax(), AudioMemoryUsageMax(),
+                      (unsigned)AudioStream_F32::f32_memory_used_max);   // DIAG: F32 block pool peak vs AudioMemory_F32(N)
         AudioProcessorUsageMaxReset();   // make cpuMax a per-second rolling peak
         AudioMemoryUsageMaxReset();
+        AudioStream_F32::f32_memory_used_max = 0;
 #ifdef TDSP_SYNTH_DEXED_POOL
         // Synth-sum clip watch (pre-0.62 mix): shows per-engine int16 railing that the
         // final outPeak hides. During real song playback, railed>0 == audible clipping.

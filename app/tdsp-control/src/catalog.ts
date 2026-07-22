@@ -47,7 +47,7 @@ export const EMPTY_CATALOG: Catalog = {
 // and storage-agnostic. Bump CACHE_VER whenever the Catalog shape changes, so an old cached
 // blob from a previous app build is ignored instead of deserialized into the new shape.
 export interface CatalogCache { get(): Promise<string | null>; set(v: string): Promise<void>; }
-const CACHE_VER = 1;
+const CACHE_VER = 2;   // bumped: groove-fetch gate now falls back to files[] announcement — invalidate old (possibly groove-less) caches
 interface CachedCatalog { cv: number; ix: string; catalog: Catalog; }
 
 function parseNdjson<T = any>(text: string): T[] {
@@ -132,8 +132,18 @@ export async function loadCatalog(t: Transport, onProgress?: (p: LoadProgress) =
   // Fetch ONLY the catalogs this flashed engine can actually use (meta capability flags) —
   // not everything on the card. Absent flag → assume present (old firmware, back-compat).
   // instruments + songs are always relevant (current voices / any engine plays MIDI).
-  const wantSf = meta.sf !== false;        // soundfonts: only SF2/TSF can load an SD .sf2 as the main synth
-  const wantDrums = meta.drums !== false;  // grooves + drum kits: only a drum-capable engine
+  // Announced non-empty catalog files (files[] = {type,bytes}). Used as a robust fallback: if the
+  // device actually WROTE a grooves/drumkits/soundfont file, fetch it even when the capability flag
+  // is stale/false (e.g. a drum engine that failed to come up still leaves a populated grooves.ndjson,
+  // and gating on the flag alone would leave the app's drum catalog empty -> dead ‹/› + no default).
+  const announced = (type: string) => Array.isArray(meta.files) && meta.files.some((f: any) => f && f.type === type && (f.bytes | 0) > 0);
+  const wantSf = meta.sf !== false || announced('soundfonts');        // soundfonts: only SF2/TSF can load an SD .sf2 as the main synth
+  // Grooves + drum kits: fetch when the engine is drum-capable OR the device announces a non-empty
+  // file (robust to a stale/false flag). NOTE: the drum deck's ‹/› + default now source their loop
+  // list from a paged @LS browse of /drums (see App.tsx), NOT this bulk grooves.ndjson — the aggregated
+  // manifest is 100 KB+ and one dropped transport frame fails the whole read. This fetch is kept only
+  // for the "Grooves: N" stat + a fallback; drum browsing no longer depends on it.
+  const wantDrums = meta.drums !== false || announced('grooves') || announced('drumkits');
   const fetch = FETCH.filter(f =>
     f.type === 'soundfonts' ? wantSf
       : (f.type === 'grooves' || f.type === 'drumkits') ? wantDrums

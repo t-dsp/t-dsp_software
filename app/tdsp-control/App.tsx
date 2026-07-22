@@ -169,7 +169,12 @@ function Card({ title, value, status, subtitle, actions, foot, progress, onPress
         {onBack && <Pressable onPress={onBack} hitSlop={10} style={s.chevBtn}><Text style={s.chev}>‹</Text></Pressable>}
         <View style={s.drawerLeft}>
           <Text style={[s.drawerTitle, accent && { color: accent }]} numberOfLines={1}>{title}</Text>
-          {off ? <Text style={s.cardReason} numberOfLines={1}>⚠  {disabledReason}</Text> : (subtitle ?? <Subtitle value={value} status={status} />)}
+          {off ? <Text style={s.cardReason} numberOfLines={1}>⚠  {disabledReason}</Text>
+            : subtitle != null
+              // A plain-string subtitle must be wrapped in styled <Text> — a bare string lands unstyled
+              // (near-black default) and vanishes on the dark card. JSX subtitles pass through as-is.
+              ? (typeof subtitle === 'string' ? <Text style={s.drawerValue} numberOfLines={1}>{subtitle}</Text> : subtitle)
+              : <Subtitle value={value} status={status} />}
           {!off && progress != null && <ProgressBar value={progress} />}
         </View>
         {!off && topRight}
@@ -352,7 +357,7 @@ function SubMenu({ getItems, onOpen, accent, tint }: { getItems: () => any[]; on
   return (
     <View style={s.submenu}>
       {getItems().map(sec => (
-        <Card key={sec.id} title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} actions={sec.actions}
+        <Card key={sec.id} title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} actions={sec.actions} foot={sec.foot}
           onPress={() => onOpen(sec.id)} style={s.cardGrid} accent={accent ?? sec.accent} tint={tint ?? sec.tint} topRight={sec.topRight} disabledReason={sec.disabledReason} />
       ))}
     </View>
@@ -375,12 +380,13 @@ const stripExt = (name: string, ext?: string) => {
   const suf = ext ? '.' + ext : '.mid';
   return name.toLowerCase().endsWith(suf.toLowerCase()) ? name.slice(0, -suf.length) : name;
 };
-function FolderBrowser({ tp, root, ext, enabled, selected, playing, onSelectFile, injectFolders, onFolderList }: {
+function FolderBrowser({ tp, root, ext, enabled, selected, playing, onSelectFile, injectFolders, onFolderList, filesFirst }: {
   tp: Transport; root: string; ext?: string; enabled: boolean;
   selected?: string; playing?: string;
   onSelectFile: (fullPath: string, displayName: string) => void;
   injectFolders?: InjectFolder[];
   onFolderList?: (files: { arg: string; name: string }[]) => void;   // publish the current folder's ordered files (for header ‹/›)
+  filesFirst?: boolean;   // render files ABOVE subfolders (drums: keep the named grooves on top, genre folders below)
 }) {
   const [path, setPath] = useState(root);                        // current REAL folder (absolute SD path)
   const [virt, setVirt] = useState<InjectFolder | null>(null);   // inside an injected virtual folder
@@ -461,8 +467,11 @@ function FolderBrowser({ tp, root, ext, enabled, selected, playing, onSelectFile
       ) : (
         <ScrollView style={s.picker} nestedScrollEnabled>
           {atRoot && (injectFolders || []).map(f => <ListBtn key={'@' + f.name} label={'📁 ' + f.name} onPress={() => setVirt(f)} />)}
-          {entries.filter(e => e.type === 'D').map(e => <ListBtn key={'d/' + e.name} label={'📁 ' + e.name} onPress={() => setPath(path + '/' + e.name)} />)}
-          {entries.filter(e => e.type === 'F').map(e => fileRow(path + '/' + e.name, stripExt(e.name, ext)))}
+          {(() => {
+            const folders = entries.filter(e => e.type === 'D').map(e => <ListBtn key={'d/' + e.name} label={'📁 ' + e.name} onPress={() => setPath(path + '/' + e.name)} />);
+            const files = entries.filter(e => e.type === 'F').map(e => fileRow(path + '/' + e.name, stripExt(e.name, ext)));
+            return filesFirst ? [...files, ...folders] : [...folders, ...files];   // drums keep grooves on top
+          })()}
           {!!err && <Text style={[s.muted, { padding: 12 }]}>⚠ {err}</Text>}
           {!err && entries.length === 0 && (!atRoot || !(injectFolders || []).length) && <Text style={s.muted}>(empty folder)</Text>}
         </ScrollView>
@@ -573,7 +582,7 @@ export default function App() {
   // selection + volume + arp state; the folder browser is shared (pickVoice takes a target).
   // caps.audioloop is a COUNT (how many audio loops the device actually allocated —
   // RAM/PSRAM dependent), not a bool: 0 hides the Audio Loop card entirely.
-  const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, recedit: false, audioloop: 0, fx: false, usbaudio: false });
+  const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, recedit: false, audioloop: 0, fx: false, usbaudio: false, drumkitsel: true });
   // USB Audio interface (build-flag gated, caps.usbaudio → TDSP_USB_AUDIO). The device is a
   // 24-bit/48k USB sound card: host audio in → mix bus, the mix out → host. `active` = the host
   // has the audio stream open (playing/recording); `gain` = the USB-in return level (0..150 %,
@@ -585,7 +594,14 @@ export default function App() {
   // The card renders the type-appropriate sliders. Off = clean bypass (the build sounds identical).
   const [fx, setFx] = useState({ type: 'plate' as 'plate' | 'spring', on: false, mix: 30,
     size: 70, damp: 40, lodamp: 10, diff: 65, lowpass: 100, hipass: 0, shimmer: 0, pitch: 0, freeze: false,
-    time: 55, treble: 40, bass: 30 });
+    time: 55, treble: 40, bass: 30,
+    // SEND-mode extras (firmware @STATE.fx.route === 'send'): the reverb is a per-voice aux SEND bus
+    // rather than a master insert. `return` = wet return level (the old "mix"); `loopsend` = audio-loop
+    // send; per-synth/drum sends live in `trkSend` (from @STATE tracks[].fxsend). route stays 'insert'
+    // on insert-only builds so the card renders the classic master reverb.
+    route: 'insert' as 'insert' | 'send', return: 60, loopsend: 0 });
+  // Per-track reverb SEND levels (0..100) keyed by track index, hydrated from @STATE tracks[].fxsend.
+  const [trkSend, setTrkSend] = useState<Record<number, number>>({});
   // Features compiled in but unavailable right now, keyed by card id -> reason (e.g. "PSRAM required").
   // The firmware reports these in @STATE.unavail; a card whose id is present renders greyed with the
   // reason instead of hiding. psram = MB of soldered PSRAM (0 on the no-PSRAM boards).
@@ -605,13 +621,22 @@ export default function App() {
   // (drum @STATE entry carries "src"); null on older firmware / no drum engine, so the drums card
   // hides its keyboard button. Kept separate from synthCount so claimUsb can include it exclusively.
   const [drumSrcIdx, setDrumSrcIdx] = useState<number | null>(null);
+  // The running firmware has a live, drum-capable track (from @STATE tracks[] kind:"drum", on:1).
+  // This is GROUND TRUTH for "this build renders drums" — independent of the cached SD catalog,
+  // whose meta.drums can lag (the on-device catalog auto-heal keys on the synth NAME, so toggling
+  // a parallel drum voice on the same synth doesn't rebuild it). We OR it into the Drums card's
+  // visibility so a working drum engine is never hidden by a stale catalog; a Refresh reloads the
+  // grooves/kits. See project_drum_grooves / the OPLL DrumVoice build.
+  const [drumLive, setDrumLive] = useState(false);
   // Data-driven synth voices (Phase 3): how many synth cards to render + each voice's name/level,
   // all from @STATE tracks[]. Voices 0/1 keep their bespoke cards (Synth A/B); voices 2+ get a
   // generated card driven by @TRK<i>.* (selVoiceX = the browser selection per extra voice index).
   const [synthCount, setSynthCount] = useState(1);
   const [trkNames, setTrkNames] = useState<Record<number, string>>({});
   const [trkEng, setTrkEng] = useState<Record<number, string>>({});   // per-track engine tag from @STATE tracks[].eng (e.g. 'opll'); Dexed tracks carry none
-  const [opllIdx, setOpllIdx] = useState<Record<number, number>>({});   // per-track OPLL ROM-instrument index (0..14); OPLL voices don't use the /dexed catalog, they step @TRK<i>.INSTR=
+  const [opllIdx, setOpllIdx] = useState<Record<number, number>>({});   // per-track CURRENT instrument index for NON-Dexed engines (synced from the @TRK<i>.INSTR= echo); they step @TRK<i>.INSTR=, not the /dexed catalog
+  const [trkNinstr, setTrkNinstr] = useState<Record<number, number>>({});     // per-track engine instrument COUNT (from @STATE tracks[].ninstr) — lets ‹/› wrap for any engine
+  const [trkEngInstrs, setTrkEngInstrs] = useState<Record<number, string[]>>({});   // per-track engine PATCH LIST (from @TRK<i>.INSTRS) — the non-Dexed engines' own voice picker
   const [trkSong, setTrkSong] = useState<Record<number, string>>({});   // per-track LOADED MIDI song from @STATE tracks[].song — hydrates on connect (esp. C/D, whose live playerX isn't in @STATE)
   const [selVoiceX, setSelVoiceX] = useState<Record<number, string>>({});   // browser sel key, keyed by 0-based voice index (>=2)
   const [trkVolX, setTrkVolX] = useState<Record<number, number>>({});       // per-extra-voice level (@TRK<i>.VOL), local echo
@@ -696,7 +721,9 @@ export default function App() {
     // Voices 2 / Arp 2 — build capabilities (SHOW the cards) + the keyboard half's state.
     if (j.caps) setCaps({ voice2: !!j.caps.voice2, arp2: !!j.caps.arp2, rec: !!j.caps.rec,
                           recedit: !!j.caps.recedit, audioloop: Math.max(0, j.caps.audioloop | 0), fx: !!j.caps.fx,
-                          usbaudio: !!j.caps.usbaudio });
+                          usbaudio: !!j.caps.usbaudio,
+                          // absent (older firmware) -> assume selectable; explicit 0 = a fixed drum voice (OPLL) with no GM kits
+                          drumkitsel: j.caps.drumkitsel !== 0 });
     // USB Audio interface status (usbaudio builds only emit j.usb): host-stream active flag,
     // USB-in return level, and the over/underrun counters used to spot host↔codec clock drift.
     if (j.usb) setUsbAudio(u => ({
@@ -754,24 +781,34 @@ export default function App() {
       const names: Record<number, string> = {};
       const engs: Record<number, string> = {};
       const songs: Record<number, string> = {};
-      let nSynth = 0; let dIdx: number | null = null;
+      const sends: Record<number, number> = {};   // per-track reverb SEND level (send-matrix builds)
+      const ninstrs: Record<number, number> = {};   // per-track engine instrument count (for ‹/› wrap)
+      let nSynth = 0; let dIdx: number | null = null; let dLive = false;
       for (const t of j.tracks) if (t && t.i != null) {
+        if (typeof t.fxsend === 'number') sends[t.i | 0] = Math.max(0, Math.min(100, t.fxsend | 0));   // reverb send (synths + drums)
+        if (typeof t.ninstr === 'number') ninstrs[t.i | 0] = t.ninstr | 0;
         if (t.kind === 'synth') {
           next[t.i | 0] = { src: t.src || 'none', srcch: t.srcch | 0 };
           if (typeof t.name === 'string') names[t.i | 0] = t.name;
           if (typeof t.eng === 'string') engs[t.i | 0] = t.eng;   // 'opll' etc; absent = Dexed
           if (typeof t.song === 'string') songs[t.i | 0] = t.song;   // loaded MIDI song (hydrates all cards, incl. C/D)
           nSynth++;
-        } else if (t.kind === 'drum' && t.src != null) {   // firmware with live finger-drumming (drum router)
-          next[t.i | 0] = { src: t.src || 'none', srcch: t.srcch | 0 };
-          dIdx = t.i | 0;
+        } else if (t.kind === 'drum') {
+          if (t.on) dLive = true;                            // a live, drum-capable track exists (ground truth)
+          if (t.src != null) {                               // firmware with live finger-drumming (drum router)
+            next[t.i | 0] = { src: t.src || 'none', srcch: t.srcch | 0 };
+            dIdx = t.i | 0;
+          }
         }
       }
       setTrkSubs(next);
       setTrkNames(names);
       setTrkEng(engs);
       setTrkSong(songs);
+      setTrkSend(sends);
+      setTrkNinstr(ninstrs);
       setDrumSrcIdx(dIdx);
+      setDrumLive(dLive);
       if (nSynth > 0) setSynthCount(nSynth);   // how many synth cards to render (data-driven)
     }
   }
@@ -797,7 +834,11 @@ export default function App() {
       // Restore the settings the firmware can't derive; ignore anything unrecognized.
       try { hydrateApp(JSON.parse(line.slice(5))); } catch {}
     } else if (line.startsWith('@TRK')) {
-      // Sync the local OPLL instrument index from the device confirmation (@TRK<i>.INSTR=<idx>) so
+      // The engine's PATCH LIST (@TRK<i>.INSTRS=<name0>\x1f<name1>…) — the non-Dexed engines' own voice
+      // picker. Matched before .INSTR= so "@TRK2.INSTRS=" doesn't get eaten by the .INSTR= regex.
+      const ml = line.match(/^@TRK(\d+)\.INSTRS=(.*)$/);
+      if (ml) { setTrkEngInstrs(mp => ({ ...mp, [+ml[1]]: ml[2] === '' ? [] : ml[2].split('\x1f') })); return; }
+      // Sync the local instrument index from the device confirmation (@TRK<i>.INSTR=<idx>) so
       // Next/Prev step from the true current instrument, not a stale 0.
       const m = line.match(/^@TRK(\d+)\.INSTR=(\d+)/);
       if (m) setOpllIdx(mp => ({ ...mp, [+m[1]]: +m[2] }));
@@ -949,6 +990,28 @@ export default function App() {
   }
   async function reindex() { setBusy(true); try { await tp.reindex(); await load(); } finally { setBusy(false); } }
 
+  // Startup default: once the catalog is loaded, PRELOAD the first drum groove so the Drums card
+  // opens with a loop ready (the first song in the list) instead of "—". Only when nothing is
+  // already selected — a groove restored from @APP (remember-where-you-left-it) or one the user
+  // picked wins over this default. On a fresh device boot @APP is empty, so this is exactly the
+  // "at startup, preload a loop" behaviour. Selection only (not auto-played); hit ▶ to start it.
+  // Preselect a real, curated first loop from the manifest (prefer a top-level /drums groove). Keep a
+  // still-valid restored/user pick; fall back when the pick isn't in the catalog so the deck is never
+  // stuck on "—". (The reliable groove LIST comes from the Drum Loops FolderBrowser rooted at /drums —
+  // ‹/› step its published folder. A separate background @LS walk was removed: the transport allows one
+  // @LS in flight, so the walk kept SUPERSEDING the FolderBrowser's own @LS -> "⚠ superseded".)
+  useEffect(() => {
+    if (!loaded) return;
+    // Default to the first Featured groove ('/drums/01 Rock Straight.mid' = FEATURED_GROOVES[0], the
+    // curated starter that's ALWAYS on the card) so the Drums card opens with a loop ready to ▶. Keep
+    // any restored @APP pick or user selection. This must NOT gate on cat.grooves: the 143 KB grooves
+    // manifest often doesn't load (the browser lists grooves via live @LS, not the manifest), and the
+    // old `cat.grooves.length === 0 -> return` left NO loop selected on exactly those setups. The old
+    // default also searched cat.grooves for a '/drums/'-prefixed path, but manifest paths are
+    // '/midi/drums/...' so it never matched — the Featured starter is the reliable curated first loop.
+    setDrums(d => d.sel ? d : { ...d, sel: '/drums/01 Rock Straight.mid' });
+  }, [loaded]);
+
   // Lazy /dexed browse: fetch the current folder level via @DXLS whenever the path changes
   // (skip the synthetic '@bundled' view). @DXLS is paged (32 entries/page), so walk all pages
   // and concatenate — a folder can hold hundreds of carts. The `alive` gate drops a stale
@@ -998,6 +1061,15 @@ export default function App() {
       : vpath === '@bundled' ? cat.instruments.map(v => ({ key: 'b' + v.i, label: v.name, i: v.i }))
         : [], [cart, cartVoices, vpath, cat.instruments]);
   const listId = voiceData.length ? (cart ? 'c' + cart.rel : '@bundled') : 'br:' + vpath;   // identity of the currently-shown picker list
+  // A non-Dexed engine (OPLL, Plaits, any future engine) uses a FIXED patch list — its ‹/› step
+  // @TRK<i>.INSTR and its browser shows @TRK<i>.INSTRS, never the Dexed /dexed cart library.
+  const isPickerEngine = (eng?: string) => !!eng && eng !== 'dexed';
+  // Fetch each non-Dexed track's patch list once its engine is known (from @STATE), for the browser.
+  useEffect(() => {
+    if (!connected) return;
+    Object.keys(trkEng).forEach(k => { const i = +k; if (isPickerEngine(trkEng[i]) && !trkEngInstrs[i]) tp.trk(i, 'INSTRS'); });
+  }, [connected, trkEng]);   // eslint-disable-line react-hooks/exhaustive-deps
+
   // Pick a voice for slot `target` (1 = main synth, 2 = the keyboard's Voices-2). Both share
   // the same browse state (cart/folder position) but have independent selection + device
   // targets (@DXVOICE/@DXPICK vs @DXVOICE2/@DXPICK2).
@@ -1023,12 +1095,15 @@ export default function App() {
     else if (it.key[0] === 'b') { setSelVoicePath('Bundled'); tp.dxVoice(it.i); }
   };
   const stepVoice = (dir: number, target: number = 1) => {
-    // OPLL voices (hetero builds, Synth C/D) have 15 fixed ROM instruments and NO /dexed library —
-    // step @TRK<i>.INSTR=<0..14>, never the Dexed catalog. The name comes back via @STATE.tracks[].name
-    // (requestState pulls it). Without this branch, stepping an OPLL voice loaded Dexed voices (bug).
+    // ANY non-Dexed engine (OPLL ROM voices, Plaits models, any future engine) has a FIXED patch list
+    // and NO /dexed cart library — step @TRK<i>.INSTR with WRAP over the engine's own instrument count
+    // (@STATE.ninstr), never the Dexed catalog. The name comes back via @STATE.tracks[].name. This one
+    // branch covers every engine, so a new synth needs no new code (fixes OPLL AND Plaits AND future).
     const oi = target - 1;
-    if (trkEng[oi] === 'opll') {
-      const ni = Math.max(0, Math.min(14, (opllIdx[oi] ?? 0) + dir));
+    if (isPickerEngine(trkEng[oi])) {
+      const n = trkNinstr[oi] || 0;
+      const cur = opllIdx[oi] ?? 0;
+      const ni = n > 0 ? ((cur + dir) % n + n) % n : Math.max(0, cur + dir);   // wrap if count known, else clamp (device bounds it)
       setOpllIdx(m => ({ ...m, [oi]: ni }));
       tp.trk(oi, 'INSTR=' + ni);
       tp.requestState();
@@ -1268,7 +1343,7 @@ export default function App() {
     // not just one — undefined falls back to the /midi default (see FolderBrowser root below).
     // noEndMode hides the end-mode row (a drum groove always loops). This makes the deck replicable
     // across tracks.
-    browseRoot?: string; injectFolders?: InjFolder[]; noEndMode?: boolean;
+    browseRoot?: string; injectFolders?: InjFolder[]; noEndMode?: boolean; filesFirst?: boolean;
   };
   const makeSongDeck = (cfg: {
     v: 1 | 2;
@@ -1284,7 +1359,11 @@ export default function App() {
     persistSel?: (arg: string) => void;
     deckKey: string;   // folderFilesRef key so this deck's ‹/› step within the folder its browser shows
     // Per-track browse target + step catalog, so the SAME deck serves any track. Browser default = /midi.
-    catalog?: Song[]; browseRoot?: string; injectFolders?: InjFolder[]; noEndMode?: boolean;
+    catalog?: Song[]; browseRoot?: string; injectFolders?: InjFolder[]; noEndMode?: boolean; filesFirst?: boolean;
+    // Deterministic stepping: ‹/› + Play walk the `catalog` (this deck's own list) and IGNORE whatever
+    // folder the browser last showed. The drum card uses this so its next/prev always cycle drum
+    // grooves — not the /midi folder you happened to browse into (which broke drum ‹/›).
+    stepCatalogOnly?: boolean;
   }): SongDeckT => {
     const { player: P, setPlayer: setP, endMode: em, wire } = cfg;
     const persistSel = cfg.persistSel ?? (() => {});
@@ -1300,7 +1379,7 @@ export default function App() {
       // Prefer the FOLDER the user is browsing (its FolderBrowser publishes an ordered file list): ‹/›
       // and auto-advance step within THAT folder — matching what's on screen. Fall back to the flat
       // catalog only when no folder list exists (a baked song, or the browser was never opened).
-      const folder = folderFilesRef.current[cfg.deckKey];
+      const folder = cfg.stepCatalogOnly ? undefined : folderFilesRef.current[cfg.deckKey];
       if (folder && folder.length) {
         const fi = folder.findIndex(f => f.arg === P.song);
         if (em === 'shuffle' && folder.length > 1) {
@@ -1335,7 +1414,7 @@ export default function App() {
       // browser/‹› last selected — P.song). Falls back to the folder's first file, then the flat
       // catalog, so Play always does something. prog -1 until the device reports position.
       play: () => {
-        const folder = folderFilesRef.current[cfg.deckKey];
+        const folder = cfg.stepCatalogOnly ? undefined : folderFilesRef.current[cfg.deckKey];
         const arg = P.song || folder?.[0]?.arg || (catalog[0] ? songArg(catalog[0]) : '');
         if (!arg) return;
         const nm = folder?.find(f => f.arg === arg)?.name || catalog.find(x => songArg(x) === arg)?.name || P.name || arg;
@@ -1350,7 +1429,7 @@ export default function App() {
       // Runs when a song finishes on its own (not a manual Stop). 'stop' does nothing; 'repeat'
       // loops in firmware; continue/shuffle advance per the same pickNext rules.
       onNaturalEnd: () => { if (em === 'continue' || em === 'shuffle') { const nx = pickNext(1); if (nx) playOf(nx); } },
-      browseRoot: cfg.browseRoot, injectFolders: cfg.injectFolders, noEndMode: cfg.noEndMode,
+      browseRoot: cfg.browseRoot, injectFolders: cfg.injectFolders, noEndMode: cfg.noEndMode, filesFirst: cfg.filesFirst,
     };
   };
   const songDeck1 = makeSongDeck({
@@ -1380,7 +1459,22 @@ export default function App() {
     const nx = typeof upd === 'function' ? (upd as (p: PlayerT) => PlayerT)(cur) : upd;
     return { ...d, sel: nx.song || null, playing: nx.playing ? (nx.name || grooveDisp(nx.song)) : null };
   });
-  const drumSongs: Song[] = cat.grooves.map(g => ({ name: g.name, file: g.path }));   // grooves as the deck catalog
+  // The card keeps drums in TWO places: the big genre library at /midi/drums (browsed live) and a small
+  // curated starter set at /drums (NOT in the firmware's /midi/drums scan, so it never reaches the
+  // manifest). Surface those curated grooves as a folder at the TOP of the drum browser — the same
+  // "folder of built-ins" pattern as the song browser — so they stay one tap away above the genre
+  // folders. They play by verbatim path (@DRUMF uses a leading '/' as-is). Fixed shipped set → static.
+  const FEATURED_GROOVES = ['01 Rock Straight', '02 Funk 16ths', '03 Pop Backbeat',
+    '04 Hip-Hop Boom Bap', '05 Jazz Swing Ride', '06 Latin Clave']
+    .map(n => ({ name: n, arg: '/drums/' + n + '.mid' }));
+  const drumInjectFolders = [{ name: '★ Featured', leaves: FEATURED_GROOVES }];
+  // Deck catalog = the grooves manifest, FALLING BACK to the Featured set. ‹/› (and Play) use this
+  // catalog whenever the browser hasn't published a folder yet — so next/prev/loop-name work from the
+  // FIRST load, not only after you open the browser or hand-pick a loop. Also covers the common case
+  // where the 143 KB /midi/drums manifest didn't load (then cat.grooves is empty).
+  const drumSongs: Song[] = (cat.grooves.length
+    ? cat.grooves.map(g => ({ name: g.name, file: g.path }))
+    : FEATURED_GROOVES.map(g => ({ name: g.name, file: g.arg })));
   const drumDeck = makeSongDeck({
     v: 1, player: drumPlayerView, setPlayer: setDrumPlayerView, endMode: 'repeat', setEndMode: () => {}, persistKey: 'end', manualStopRef: drumStopRef, deckKey: 'drum',
     vol: drumVol, onVol: setDrumVol, commitVol: v => tp.drumVol(v),
@@ -1388,7 +1482,10 @@ export default function App() {
     // The device reports the drum KIT in @STATE but not which groove is picked, so remember the
     // selection ourselves (in @APP) on every pick/step — that's what lets Drums reopen where you left it.
     persistSel: a => persistApp({ groove: a }),
-    catalog: drumSongs, browseRoot: '/midi', injectFolders: [], noEndMode: true,   // a groove always loops
+    // Root at /midi/drums: a live @LS shows the 25 genre folders (country/swing/funk/…) — the big
+    // library. The ★ Featured folder (injected above) sits at the top with the 6 curated /drums starter
+    // grooves. So: Featured one tap away, full genre library right below. No manifest dependency.
+    catalog: drumSongs, browseRoot: '/midi/drums', injectFolders: drumInjectFolders, noEndMode: true,   // a groove always loops
   });
   // Master transport Play/Stop. Play (@METRO=1) starts the clock + defines the downbeat if idle
   // (idempotent while running); everything locks to it. Stop (@METRO=0) halts + clears the stage.
@@ -1414,11 +1511,21 @@ export default function App() {
   // home card — its Back button returns to the parent, not home (see the render's onBack).
   type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; foot?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; accent?: string; tint?: string; topRight?: React.ReactNode; parent?: string; disabledReason?: string; asCard?: boolean };
 
-  // "Dexed: <name>" on the Dexed synth cards — mirrors the firmware's "OPLL: " prefix on OPLL tracks
-  // (HeteroOpll.h) so a hetero build reads "Dexed: X" / "OPLL: X" consistently. Applied at DISPLAY
-  // time (not baked into the stored name) so a hydrated voice and a freshly-picked one render the
-  // same. OPLL names already carry their tag (skip); only prefix on a Dexed-capable build.
-  const engName = (name: string, eng?: string) => eng === 'opll' ? name : (cat.hasDexed ? 'Dexed: ' + name : name);
+  // "Dexed: <name>" on the Dexed synth cards — mirrors the firmware's own prefixes on the other
+  // engines ("OPLL: X" HeteroOpll.h, "Plaits: X" HeteroPlaits.h, …) so a hetero build reads
+  // consistently. Applied at DISPLAY time (not baked into the stored name). ONLY the Dexed voices
+  // (eng absent/inferred, or "dexed") get the prefix here — every other engine's name ALREADY carries
+  // its tag from the firmware, so re-prefixing double-labels it ("Dexed: Plaits: …"). Prefix only on a
+  // Dexed-capable build.
+  const ENGINE_LABELS: Record<string, string> = { opll: 'OPLL', plaits: 'Plaits', opl3: 'OPL3', ymfm: 'YM2151', rings: 'Rings', va: 'VA', sf2: 'SF2' };
+  const engName = (name: string, eng?: string) => {
+    if (!eng || eng === 'dexed') return cat.hasDexed ? 'Dexed: ' + name : name;
+    const lbl = ENGINE_LABELS[eng] || eng.toUpperCase();
+    if (name.startsWith(lbl + ':')) return name;   // firmware already labels the voice with its engine (e.g. Plaits)
+    // Show ENGINE: voice — the ENGINE is what the tag says (e.g. opll->OPLL), not the voice-BANK prefix the
+    // firmware groups voices under ("ROM: "/"PSS-140: " for OPLL, "GM: " for GM banks). Strip that bank.
+    return lbl + ': ' + name.replace(/^(ROM|PSS-140|GM):\s*/, '');
+  };
   // The card/page subtitle: the currently-loaded instrument if one is picked, else a
   // summary of where the browser is (folder name or catalog counts).
   const synthValue = selVoiceName
@@ -1505,6 +1612,20 @@ export default function App() {
   // Both share the browse position (cart/folder) but keep their own selection + list ref, and
   // pick into their own voice slot. `target` routes taps to voice 1 or voice 2.
   const voiceBrowserBody = (target: number) => {
+    // NON-DEXED engine (OPLL / Plaits / any future engine): show the ENGINE'S OWN fixed patch list
+    // (from @TRK<i>.INSTRS), not the Dexed /dexed cart browser. Tapping a row selects that patch;
+    // the current one is highlighted. Row labels strip the firmware's "OPLL: "/"Plaits: " prefix.
+    const oi = target - 1;
+    if (isPickerEngine(trkEng[oi])) {
+      const list = trkEngInstrs[oi] ?? [];
+      const cur = opllIdx[oi] ?? 0;
+      return !list.length
+        ? <View style={{ padding: 20, alignItems: 'center' }}><ActivityIndicator color={C.accent} /><Text style={[s.muted, { marginTop: 8 }]}>Loading {String(trkEng[oi]).toUpperCase()} voices…</Text></View>
+        : <FlatList data={list} style={s.picker} nestedScrollEnabled keyExtractor={(_, i) => 'e' + i}
+            getItemLayout={(_, index) => ({ length: ROW_H, offset: ROW_H * index, index })} onScrollToIndexFailed={() => {}}
+            renderItem={({ item, index }) => <ListBtn label={item.includes(': ') ? item.slice(item.indexOf(': ') + 2) : item} sel={index === cur}
+              onPress={() => { setOpllIdx(m => ({ ...m, [oi]: index })); tp.trk(oi, 'INSTR=' + index); tp.requestState(); }} />} />;
+    }
     const sel = target >= 3 ? (selVoiceX[target - 1] ?? '') : target === 2 ? selVoice2 : selVoice;
     const lref = target >= 3 ? refFor(voiceRefX, target - 1) : target === 2 ? voiceRef2 : voiceRef;
     const bref = target >= 3 ? refFor(browseRefX, target - 1) : target === 2 ? browseRef2 : browseRef;
@@ -1639,7 +1760,7 @@ export default function App() {
         <FolderBrowser tp={tp} root={D.browseRoot ?? '/midi'} ext="mid" enabled={connected && loaded}
           selected={D.player.song} playing={D.player.playing ? D.player.song : undefined}
           onSelectFile={(full, disp) => D.playFile(full, disp)} injectFolders={D.injectFolders ?? songInjectFolders}
-          onFolderList={D.onFolderList} />
+          onFolderList={D.onFolderList} filesFirst={D.filesFirst} />
       </View>
       {!D.noEndMode && <Row><Text style={[s.muted, { flex: 1 }]}>When finished</Text>
         {END_MODES.map(m => (
@@ -1715,7 +1836,7 @@ export default function App() {
       <HdrBtn label="▶" onPress={deck.play} active={deck.player.playing} />
       <HdrBtn label="■" stop onPress={deck.stop} />
       {toggleArp && <HdrBtn label="Arp" onPress={toggleArp} active={!!arpOn} />}
-      <HdrBtn label={deck.endMode === 'repeat' ? '↻ On' : '↻'} stop onPress={() => deck.applyEnd(deck.endMode === 'repeat' ? 'stop' : 'repeat')} />
+      <HdrBtn label="↻" active={deck.endMode === 'repeat'} onPress={() => deck.applyEnd(deck.endMode === 'repeat' ? 'stop' : 'repeat')} />
     </>
   );
   const synthBody = (
@@ -1806,10 +1927,60 @@ export default function App() {
       </Row>
     </>
   );
-  // REVERB — the FX master insert (caps.fx). One reverb per build: @STATE.fx.type picks the sliders
-  // (plate = size/damp/diffuse/shimmer/freeze; spring = time/treble/bass); both share Enable + Mix.
-  // Each control sends @FX.<PARAM> on release (throttle-friendly); state hydrates from @STATE.fx.
-  const reverbBody = (
+  // REVERB — the FX card (caps.fx). One reverb per build: @STATE.fx.type picks the character sliders
+  // (plate = size/damp/diffuse/shimmer/freeze; spring = time/treble/bass). ROUTE (@STATE.fx.route)
+  // picks the topology: 'insert' = classic master reverb (Enable + Dry/Wet + character); 'send' = a
+  // per-voice aux SEND bus (Enable + a send slider per track + a wet Return + character). Each control
+  // sends @FX.<PARAM> / @TRK<i>.FXSEND on release (throttle-friendly); state hydrates from @STATE.
+  //
+  // Shared character params — identical in both topologies (they shape the reverb, not the routing).
+  const fxCharacter = fx.type === 'spring' ? (
+    <>
+      <Text style={[s.text, { marginTop: 6 }]}>Character</Text>
+      <VolSlider label="Time"   value={fx.time}   max={100} onChange={v => setFx(f => ({ ...f, time: v }))}   onCommit={v => tp.fx('TIME=' + v)}   disabled={!connected} />
+      <VolSlider label="Treble" value={fx.treble} max={100} onChange={v => setFx(f => ({ ...f, treble: v }))} onCommit={v => tp.fx('TREBLE=' + v)} disabled={!connected} />
+      <VolSlider label="Bass"   value={fx.bass}   max={100} onChange={v => setFx(f => ({ ...f, bass: v }))}   onCommit={v => tp.fx('BASS=' + v)}   disabled={!connected} />
+    </>
+  ) : (
+    <>
+      <Text style={[s.text, { marginTop: 6 }]}>Space</Text>
+      <VolSlider label="Size"    value={fx.size} max={100} onChange={v => setFx(f => ({ ...f, size: v }))}    onCommit={v => tp.fx('SIZE=' + v)}    disabled={!connected} />
+      <VolSlider label="Damping" value={fx.damp} max={100} onChange={v => setFx(f => ({ ...f, damp: v }))}    onCommit={v => tp.fx('DAMP=' + v)}    disabled={!connected} />
+      <VolSlider label="Diffuse" value={fx.diff} max={100} onChange={v => setFx(f => ({ ...f, diff: v }))}    onCommit={v => tp.fx('DIFF=' + v)}    disabled={!connected} />
+      <Text style={[s.text, { marginTop: 6 }]}>Shimmer</Text>
+      <VolSlider label="Amount"  value={fx.shimmer} max={100} onChange={v => setFx(f => ({ ...f, shimmer: v }))} onCommit={v => tp.fx('SHIMMER=' + v)} disabled={!connected} />
+      <Row><View style={{ flex: 1 }}>
+          <Text style={s.text}>Freeze</Text>
+          <Text style={s.muted}>Hold the reverb tail infinitely.</Text>
+        </View>
+        <Switch value={fx.freeze} onValueChange={v => { setFx(f => ({ ...f, freeze: v })); tp.fx('FREEZE=' + (v ? 1 : 0)); }} /></Row>
+    </>
+  );
+  // One send-matrix row: a throttled slider (0..100) tapping a track into the reverb bus.
+  const fxSendRow = (key: string, label: string, value: number, onChange: (v: number) => void, onCommit: (v: number) => void) => (
+    <VolSlider key={key} label={label} value={value} max={100} onChange={onChange} onCommit={onCommit} disabled={!connected || !fx.on} />
+  );
+  const reverbBody = fx.route === 'send' ? (
+    <>
+      <Row><View style={{ flex: 1 }}>
+          <Text style={s.text}>Enable reverb</Text>
+          <Text style={s.muted}>Turns the {fx.type === 'spring' ? 'spring' : 'plate'} reverb bus on. Raise a track's send to reverb it; sends at 0 stay dry.</Text>
+        </View>
+        <Switch value={fx.on} onValueChange={v => { setFx(f => ({ ...f, on: v })); tp.fx('ON=' + (v ? 1 : 0)); }} /></Row>
+      <Text style={[s.text, { marginTop: 8 }]}>Sends</Text>
+      <Text style={s.muted}>How much of each track feeds the reverb. 0 = fully dry.</Text>
+      {Array.from({ length: synthCount }).map((_, v) =>
+        fxSendRow('snd' + v, 'Synth ' + String.fromCharCode(65 + v) + (trkNames[v] ? ' · ' + engName(trkNames[v], trkEng[v]) : ''),
+          trkSend[v] ?? 0, val => setTrkSend(m => ({ ...m, [v]: val })), val => tp.trk(v, 'FXSEND=' + val)))}
+      {(cat.hasDrums || drumLive) &&
+        fxSendRow('snddrum', 'Drums', trkSend[synthCount] ?? 0, val => setTrkSend(m => ({ ...m, [synthCount]: val })), val => tp.trk(synthCount, 'FXSEND=' + val))}
+      {caps.audioloop > 0 &&
+        fxSendRow('sndloop', 'Audio Loop', fx.loopsend, val => setFx(f => ({ ...f, loopsend: val })), val => tp.fx('LOOPSEND=' + val))}
+      <Text style={[s.text, { marginTop: 10 }]}>Return</Text>
+      <VolSlider label="Wet" value={fx.return} max={100} onChange={v => setFx(f => ({ ...f, return: v }))} onCommit={v => tp.fx('RETURN=' + v)} disabled={!connected || !fx.on} />
+      {fxCharacter}
+    </>
+  ) : (
     <>
       <Row><View style={{ flex: 1 }}>
           <Text style={s.text}>Enable reverb</Text>
@@ -1818,41 +1989,46 @@ export default function App() {
         <Switch value={fx.on} onValueChange={v => { setFx(f => ({ ...f, on: v })); tp.fx('ON=' + (v ? 1 : 0)); }} /></Row>
       <Text style={[s.text, { marginTop: 6 }]}>Dry / Wet</Text>
       <VolSlider label="Mix" value={fx.mix} max={100} onChange={v => setFx(f => ({ ...f, mix: v }))} onCommit={v => tp.fx('MIX=' + v)} disabled={!connected} />
-      {fx.type === 'spring' ? (
-        <>
-          <Text style={[s.text, { marginTop: 6 }]}>Character</Text>
-          <VolSlider label="Time"   value={fx.time}   max={100} onChange={v => setFx(f => ({ ...f, time: v }))}   onCommit={v => tp.fx('TIME=' + v)}   disabled={!connected} />
-          <VolSlider label="Treble" value={fx.treble} max={100} onChange={v => setFx(f => ({ ...f, treble: v }))} onCommit={v => tp.fx('TREBLE=' + v)} disabled={!connected} />
-          <VolSlider label="Bass"   value={fx.bass}   max={100} onChange={v => setFx(f => ({ ...f, bass: v }))}   onCommit={v => tp.fx('BASS=' + v)}   disabled={!connected} />
-        </>
-      ) : (
-        <>
-          <Text style={[s.text, { marginTop: 6 }]}>Space</Text>
-          <VolSlider label="Size"    value={fx.size} max={100} onChange={v => setFx(f => ({ ...f, size: v }))}    onCommit={v => tp.fx('SIZE=' + v)}    disabled={!connected} />
-          <VolSlider label="Damping" value={fx.damp} max={100} onChange={v => setFx(f => ({ ...f, damp: v }))}    onCommit={v => tp.fx('DAMP=' + v)}    disabled={!connected} />
-          <VolSlider label="Diffuse" value={fx.diff} max={100} onChange={v => setFx(f => ({ ...f, diff: v }))}    onCommit={v => tp.fx('DIFF=' + v)}    disabled={!connected} />
-          <Text style={[s.text, { marginTop: 6 }]}>Shimmer</Text>
-          <VolSlider label="Amount"  value={fx.shimmer} max={100} onChange={v => setFx(f => ({ ...f, shimmer: v }))} onCommit={v => tp.fx('SHIMMER=' + v)} disabled={!connected} />
-          <Row><View style={{ flex: 1 }}>
-              <Text style={s.text}>Freeze</Text>
-              <Text style={s.muted}>Hold the reverb tail infinitely.</Text>
-            </View>
-            <Switch value={fx.freeze} onValueChange={v => { setFx(f => ({ ...f, freeze: v })); tp.fx('FREEZE=' + (v ? 1 : 0)); }} /></Row>
-        </>
-      )}
+      {fxCharacter}
     </>
   );
   // The Drums card's "Loops" page + header transport REUSE the synth deck component: playerSongBody
   // (drumDeck) / playerActions(drumDeck) / playerValue(drumDeck). No bespoke drum player — a drum
   // track is just another synth (see drumDeck above). Only the KIT page is drum-specific:
+  // What's actually generating the drums: the engine kind (@STATE catalog drumEngine — e.g. "OPLL"
+  // rhythm voice, or "TSF" sampled kit) and, when the engine has selectable GM kits, the loaded kit.
+  // Shown on the Drum Loops page + tile so it's clear what the grooves are playing through.
+  // cat.drumEngine = a SEPARATE drum voice (OPLL rhythm / TSF). When it's empty, the primary synth
+  // renders its own ch10 drums, so the drum engine IS the primary engine — name it (cat.engine, e.g.
+  // "OPLL (YM2413)" -> "OPLL") instead of a generic "GM".
+  const drumEngineLabel = cat.drumEngine ? cat.drumEngine + ' drum engine'
+    : cat.hasDrums ? (cat.engine ? cat.engine.split(/[\s(]/)[0] : 'GM') + ' drums'
+    : 'Drums';
+  const drumKitName = cat.drumkits[drums.kit]?.name || '';
+  // A fixed-voice engine (OPLL rhythm, caps.drumkitsel === false) has no GM kits — say so instead of
+  // showing a kit name the engine ignores. GM/sampled engines append the loaded kit.
+  const drumDetail = !caps.drumkitsel ? drumEngineLabel + '  ·  fixed rhythm voice'
+    : drumKitName ? drumEngineLabel + '  ·  Kit: ' + drumKitName
+    : drumEngineLabel;
   // KIT page — mirrors the synth's Synth / Voices: pick the GM drum kit (the drum "instrument") + level.
   const drumKitBody = (
     <>
       <VolSlider label="Volume" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />
-      <Text style={[s.muted, { marginTop: 8 }]}>Kit: {cat.drumkits[drums.kit]?.name || '—'}</Text>
-      <Row><ScrollView horizontal showsHorizontalScrollIndicator={false}>
-          {cat.drumkits.map((k, i) => <Pressable key={i} style={[s.pill, drums.kit === i && s.pillOn]} onPress={() => { setDrums(d => ({ ...d, kit: i })); tp.drumKit(i); }}><Text style={s.text}>{k.name}</Text></Pressable>)}
-      </ScrollView></Row>
+      {caps.drumkitsel ? (
+        <>
+          <Text style={[s.muted, { marginTop: 8 }]}>Kit: {cat.drumkits[drums.kit]?.name || '—'}</Text>
+          <Row><ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              {cat.drumkits.map((k, i) => <Pressable key={i} style={[s.pill, drums.kit === i && s.pillOn]} onPress={() => { setDrums(d => ({ ...d, kit: i })); tp.drumKit(i); }}><Text style={s.text}>{k.name}</Text></Pressable>)}
+          </ScrollView></Row>
+        </>
+      ) : (
+        // Fixed-voice drum engine (OPLL rhythm): no GM kits to pick — say what it actually is so the
+        // page isn't a list of switches that do nothing (caps.drumkitsel === false from the firmware).
+        <>
+          <Text style={[s.text, { marginTop: 8 }]}>{(cat.drumEngine || 'OPLL')} rhythm voice</Text>
+          <Text style={s.muted}>A fixed 5-sound rhythm set — Bass Drum, Snare, Tom, Top Cymbal, Hi-Hat. There are no swappable GM kits on this engine; grooves play straight through these sounds. (Flash a TSF drum-font build for selectable kits.)</Text>
+        </>
+      )}
     </>
   );
 
@@ -1890,6 +2066,43 @@ export default function App() {
   // when @STATE tracks[] reports that many synth voices (synthCount). Voices 0/1 keep their bespoke
   // cards (the Synth-B split toggle / shared voice-2 bus that don't apply to the fixed N-way pool).
   const DEF_ARP = { on: false, pat: 0, rate: 0, oct: 1, latch: false };
+  // ── makeTrackCard: the ONE per-track card+detail component ────────────────────────────────────
+  // A track (a synth voice OR the drum track) renders as a parent submenu card + its child pages.
+  // This factory owns that STRUCTURE — the stable child ids (parentId+'p'/'v'/'a'), the parent↔child
+  // linkage, the SubMenu wiring, and the shared player renderers — while each caller supplies the
+  // CONTENT (bodies, labels, actions) for its engine kind. So the drum track is LITERALLY the same
+  // component as a synth voice, just fed a groove browser + Kit page instead of a MIDI player + voice
+  // browser (the two genuine divergences, passed in as `player.body` / `instrument`). Returns the
+  // parent card and its children separately so callers slot them into the two section groups.
+  type TrackCardCfg = {
+    parentId: string; title: string; theme: { accent: string; tint: string };
+    show: boolean; disabledReason?: string; deck: SongDeckT;
+    landing: { value: string; subtitle?: React.ReactNode; topRight?: React.ReactNode; actions?: React.ReactNode;
+               progress?: number; foot?: React.ReactNode; bodyPrefix?: React.ReactNode };
+    player: { title: string; fullHeight?: boolean; body: React.ReactNode };
+    instrument: { title: string; value: string; subtitle?: React.ReactNode; topRight?: React.ReactNode;
+                  actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean };
+    arp?: ArpSlotT;
+  };
+  const makeTrackCard = (c: TrackCardCfg): { parent: Section; children: Section[] } => {
+    const { parentId, theme, deck } = c;
+    const submenu = <SubMenu getItems={() => sections.filter(x => x.parent === parentId).sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={theme.accent} tint={theme.tint} />;
+    const parent: Section = {
+      id: parentId, title: c.title, show: c.show, asCard: true, accent: theme.accent, tint: theme.tint,
+      disabledReason: c.disabledReason, value: c.landing.value, subtitle: c.landing.subtitle,
+      topRight: c.landing.topRight, actions: c.landing.actions, progress: c.landing.progress, foot: c.landing.foot,
+      body: c.landing.bodyPrefix ? <View style={{ gap: 10 }}>{c.landing.bodyPrefix}{submenu}</View> : submenu,
+    };
+    const children: Section[] = [
+      { id: parentId + 'p', title: c.player.title, show: false, parent: parentId, fullHeight: c.player.fullHeight, accent: theme.accent, tint: theme.tint,
+        value: playerValue(deck), progress: playerProgress(deck), actions: playerActions(deck), body: c.player.body },
+      { id: parentId + 'v', title: c.instrument.title, show: false, parent: parentId, fullHeight: c.instrument.fullHeight, accent: theme.accent, tint: theme.tint,
+        value: c.instrument.value, subtitle: c.instrument.subtitle, topRight: c.instrument.topRight, actions: c.instrument.actions, body: c.instrument.body },
+    ];
+    if (c.arp) children.push({ id: parentId + 'a', title: 'Arpeggiator', show: false, parent: parentId, accent: theme.accent, tint: theme.tint,
+      value: arpValue(c.arp), actions: arpActions(c.arp), body: arpBody(c.arp) });
+    return { parent, children };
+  };
   const extraSynthCards: Section[] = [];
   const extraChildCards: Section[] = [];
   for (let v = 2; v < synthCount; v++) {
@@ -1926,37 +2139,29 @@ export default function App() {
       setOct: n => { setA({ oct: n }); tp.trk(v, 'ARPOCT=' + n); setPid(''); },
       setLatch: b => { setA({ latch: b }); tp.trk(v, 'ARPLATCH=' + (b ? 1 : 0)); setPid(''); },
     };
-    // Top card = a submenu (like Synthesizer A/B); its three children are the sub-pages.
-    extraSynthCards.push({
-      id: parentId, title: 'Synthesizer ' + letter, show: synthCount > v, asCard: true, accent: theme.accent, tint: theme.tint,
-      value: trkNames[v] ? engName(trkNames[v], trkEng[v]) : 'None',
-      topRight: usbKbd(v),   // per-track USB-keyboard claim (white = this synth hears the USB MIDI keyboard)
-      actions: synthQuick(v + 1, deck, arpState.on, () => { const on = !arpState.on; setA({ on }); tp.trk(v, 'ARPON=' + (on ? 1 : 0)); }),
-      foot: <VolSlider label="Vol" value={trkVolX[v] ?? 100} onChange={n => setTrkVolX(m => ({ ...m, [v]: n }))} onCommit={n => tp.trk(v, 'VOL=' + n)} disabled={!connected} />,
-      subtitle: synthCardSub(v, trkNames[v], undefined, playerX[v]?.name),
-      body: <SubMenu getItems={() => sections.filter(x => x.parent === parentId).sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={theme.accent} tint={theme.tint} />,
-    });
-    // Child order matches Synth A/B: MIDI Player, then Synth/Voices, then Arpeggiator (these custom
-    // ids aren't in SECTION_ORDER, so the SubMenu's stable sort preserves this push order).
-    extraChildCards.push(
-      { id: parentId + 'p', title: 'MIDI Player', show: false, parent: parentId, accent: theme.accent, tint: theme.tint,
-        value: playerValue(deck), progress: playerProgress(deck), actions: playerActions(deck), body: playerBody(deck) },
-      {
-        id: parentId + 'v', title: 'Synth / Voices', show: false, parent: parentId, fullHeight: true, accent: theme.accent, tint: theme.tint,
-        value: trkNames[v] ? engName(trkNames[v], trkEng[v]) : 'None',
-        topRight: usbKbd(v),
-        actions: <><HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1, v + 1)} /><HdrBtn label="Next ›" stop onPress={() => stepVoice(1, v + 1)} /></>,
-        body: (
-          <View style={s.synthWrap}>
-            <VolSlider label="Volume" value={trkVolX[v] ?? 100} disabled={!connected} onChange={n => setTrkVolX(m => ({ ...m, [v]: n }))} onCommit={n => tp.trk(v, 'VOL=' + n)} />
-            {voiceBrowserBody(v + 1)}
-            {midiInputBody(v)}
-          </View>
-        ),
+    // A generated synth voice = one makeTrackCard: MIDI Player + Synth/Voices + Arpeggiator children,
+    // same structure the drum track uses. Bespoke bits (voice browser, USB-kbd claim, arp) are passed in.
+    const synthTrackVol = <VolSlider label="Volume" value={trkVolX[v] ?? 100} disabled={!connected} onChange={n => setTrkVolX(m => ({ ...m, [v]: n }))} onCommit={n => tp.trk(v, 'VOL=' + n)} />;
+    const engLabel = trkNames[v] ? engName(trkNames[v], trkEng[v]) : 'None';
+    const { parent, children } = makeTrackCard({
+      parentId, title: 'Synthesizer ' + letter, theme, show: synthCount > v, deck,
+      landing: {
+        value: engLabel,
+        topRight: usbKbd(v),   // per-track USB-keyboard claim (white = this synth hears the USB MIDI keyboard)
+        actions: synthQuick(v + 1, deck, arpState.on, () => { const on = !arpState.on; setA({ on }); tp.trk(v, 'ARPON=' + (on ? 1 : 0)); }),
+        foot: <VolSlider label="Vol" value={trkVolX[v] ?? 100} onChange={n => setTrkVolX(m => ({ ...m, [v]: n }))} onCommit={n => tp.trk(v, 'VOL=' + n)} disabled={!connected} />,
+        subtitle: synthCardSub(v, trkNames[v], undefined, playerX[v]?.name),
       },
-      { id: parentId + 'a', title: 'Arpeggiator', show: false, parent: parentId, accent: theme.accent, tint: theme.tint,
-        value: arpValue(arpSlot), actions: arpActions(arpSlot), body: arpBody(arpSlot) },
-    );
+      player: { title: 'MIDI Player', body: playerBody(deck) },
+      instrument: {
+        title: 'Synth / Voices', fullHeight: true, value: engLabel, topRight: usbKbd(v),
+        actions: <><HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1, v + 1)} /><HdrBtn label="Next ›" stop onPress={() => stepVoice(1, v + 1)} /></>,
+        body: <View style={s.synthWrap}>{synthTrackVol}{voiceBrowserBody(v + 1)}{midiInputBody(v)}</View>,
+      },
+      arp: arpSlot,
+    });
+    extraSynthCards.push(parent);
+    extraChildCards.push(...children);
   }
 
   // Runtime pool partition (4-voice pool builds): redistribute the 8 Dexed engines among the 4 voices
@@ -1982,9 +2187,76 @@ export default function App() {
     </View>
   );
 
+  // Per-track FX child page (send-matrix builds only): a card on each track's submenu (synths A-D AND
+  // Drums) listing the effects fed FROM that track — today the reverb send (+ the shared bus's on/
+  // return status); future effects add rows here. Gated as a whole: an FX-less build or an insert-mode
+  // reverb (applied to the whole master, not per-track) yields an empty array, so no FX card appears.
+  // parent/theme match each track's own card; id ends in 'f' (ord 999 -> sorts last, after Arp / Kit).
+  // Shares the same trkSend state + @TRK<i>.FXSEND wire as the Reverb card's send matrix.
+  const synthFxTheme = (v: number) => (v === 0 ? THEME.synthA : v === 1 ? THEME.synthB : v === 2 ? THEME.synthC : THEME.synthD);
+  const synthFxParent = (v: number) => (v === 0 ? 'synthesizer' : v === 1 ? 'synthesizerB' : 'synthX' + v);
+  const makeFxCard = (trkIdx: number, parentId: string, th: { accent: string; tint: string }): Section => {
+    const snd = trkSend[trkIdx] ?? 0;
+    const revName = fx.type === 'spring' ? 'Spring Reverb' : 'Plate Reverb';
+    return {
+      id: parentId + 'f', title: 'FX', show: false, parent: parentId, accent: th.accent, tint: th.tint,
+      value: snd > 0 ? 'Send ' + snd + '%' : 'Dry',
+      subtitle: revName,
+      // Inline on the tile: the reverb SEND for this track, so you can dial it without opening the
+      // sub-page (matches the Reverb card's own quick-slider foot). The full effect detail is inside.
+      foot: <VolSlider label="Send" value={snd} max={100}
+        onChange={n => setTrkSend(m => ({ ...m, [trkIdx]: n }))}
+        onCommit={n => tp.trk(trkIdx, 'FXSEND=' + n)} disabled={!connected || !fx.on} />,
+      body: (
+        <View style={s.synthWrap}>
+          <Text style={s.muted}>Effects fed from this track. Each send sets how much of this track goes to the shared effect — 0 keeps it dry. Character &amp; return live on the Reverb card.</Text>
+          <Row><View style={{ flex: 1 }}>
+              <Text style={s.text}>{revName}</Text>
+              <Text style={s.muted}>{fx.on ? 'Bus on · wet return ' + fx.return + '%' : 'Bus off — enable it below or on the Reverb card'}</Text>
+            </View>
+            <Switch value={fx.on} onValueChange={on => { setFx(f => ({ ...f, on })); tp.fx('ON=' + (on ? 1 : 0)); }} /></Row>
+          <VolSlider label="Send" value={snd} max={100}
+            onChange={n => setTrkSend(m => ({ ...m, [trkIdx]: n }))}
+            onCommit={n => tp.trk(trkIdx, 'FXSEND=' + n)} disabled={!connected || !fx.on} />
+        </View>
+      ),
+    } as Section;
+  };
+  const fxCards: Section[] = (caps.fx && fx.route === 'send')
+    ? [
+        ...Array.from({ length: synthCount }).map((_, v) => makeFxCard(v, synthFxParent(v), synthFxTheme(v))),
+        makeFxCard(synthCount, 'drumtrack', THEME.drums),   // Drums track (index kSynthVoices == synthCount)
+      ]
+    : [];
+
+  // The drum track is the SAME component as a synth voice — one makeTrackCard. Its two genuine
+  // divergences: the player child browses grooves (playerSongBody over drumDeck's /midi/drums root)
+  // and the "instrument" child is the GM Kit picker (drumKitBody) instead of a voice browser; it also
+  // has no Arpeggiator child. The landing shows the groove transport (tap ▶ plays a groove) + Volume.
+  const drumCard = makeTrackCard({
+    parentId: 'drumtrack', title: 'Drums', theme: THEME.drums,
+    show: cat.hasDrums || drumLive || !!unavail.drums, disabledReason: unavail.drums, deck: drumDeck,
+    landing: {
+      value: playerValue(drumDeck), progress: playerProgress(drumDeck), actions: playerActions(drumDeck),
+      subtitle: drumEngineLabel,   // show WHICH drum engine (OPLL/TSF/GM) plays these grooves, like the synth cards name their engine
+      topRight: drumSrcIdx != null ? usbKbd(drumSrcIdx) : undefined,   // finger-drum the kit from the USB keyboard
+      foot: <VolSlider label="Vol" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />,
+      // Drum level right on the landing page (mirrors the per-synth Volume), not only inside Kit/Loops.
+      bodyPrefix: <VolSlider label="Volume" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />,
+    },
+    player: { title: 'Drum Loops', fullHeight: true, body: playerSongBody(drumDeck) },
+    instrument: {
+      title: caps.drumkitsel ? 'Kit' : 'Drum Voice', subtitle: drumDetail,
+      value: caps.drumkitsel ? (cat.drumkits[drums.kit]?.name || '—') : (cat.drumEngine || 'OPLL') + ' rhythm',
+      body: drumKitBody,
+    },
+  });
+
   const sections: Section[] = [
     ...extraSynthCards,
     ...extraChildCards,
+    ...fxCards,
+    ...drumCard.children,
     // CONNECTION — catalog stats. A Settings sub-page (reached from the Settings submenu).
     {
       id: 'conn', title: 'Connection', show: false, parent: 'settings', status: cat.engine || 'connected',
@@ -1995,7 +2267,7 @@ export default function App() {
           {loaded && (
             <View style={s.statGrid}>
               <Stat label="Instruments" n={cat.instruments.length} sub="+ SD library" />
-              <Stat label="Grooves" n={cat.grooves.length} />
+              <Stat label="Grooves" n={drumSongs.length} />
               <Stat label="Songs" n={cat.songs.length} />
               {cat.hasSf && <Stat label="Soundfonts" n={cat.soundfonts.length} />}
               <Stat label="Drum kits" n={cat.drumkits.length} />
@@ -2049,13 +2321,16 @@ export default function App() {
     // REVERB — FX master insert (caps.fx). Top-level card; sliders adapt to the built reverb type.
     {
       id: 'reverb', title: 'Reverb', show: caps.fx, value: fx.on ? 'On' : 'Off',
-      subtitle: fx.type === 'spring' ? 'Spring' : 'Plate',
-      // On the tile: quick On/Off + wet Mix, so you can dial reverb without opening the card.
+      subtitle: (fx.type === 'spring' ? 'Spring' : 'Plate') + (fx.route === 'send' ? ' · Send bus' : ''),
+      // On the tile: quick On/Off + the wet level (Return in send mode, Dry/Wet Mix in insert mode),
+      // so you can dial reverb without opening the card. Per-track sends live inside the card.
       foot: (
         <>
           <Row><Text style={[s.text, { flex: 1 }]}>{fx.on ? 'On' : 'Off'}</Text>
             <Switch value={fx.on} onValueChange={v => { setFx(f => ({ ...f, on: v })); tp.fx('ON=' + (v ? 1 : 0)); }} /></Row>
-          <VolSlider label="Mix" value={fx.mix} max={100} onChange={v => setFx(f => ({ ...f, mix: v }))} onCommit={v => tp.fx('MIX=' + v)} disabled={!connected || !fx.on} />
+          {fx.route === 'send'
+            ? <VolSlider label="Return" value={fx.return} max={100} onChange={v => setFx(f => ({ ...f, return: v }))} onCommit={v => tp.fx('RETURN=' + v)} disabled={!connected || !fx.on} />
+            : <VolSlider label="Mix" value={fx.mix} max={100} onChange={v => setFx(f => ({ ...f, mix: v }))} onCommit={v => tp.fx('MIX=' + v)} disabled={!connected || !fx.on} />}
         </>
       ),
       body: reverbBody,
@@ -2222,36 +2497,10 @@ export default function App() {
       value: arpValue(arpSlot2), actions: arpActions(arpSlot2),
       body: arpBody(arpSlot2),
     },
-    // DRUMS — a TOP-LEVEL Track card, built EXACTLY like a synth: a submenu (Drum Loops + Kit),
-    // adapted to browse drum loops instead of a melodic voice. Shown on drum-capable builds
-    // (cat.hasDrums). The header ▶ ■ transport plays/stops the selected groove, like a synth's player.
-    {
-      id: 'drumtrack', title: 'Drums', show: cat.hasDrums || !!unavail.drums, disabledReason: unavail.drums,
-      accent: THEME.drums.accent, tint: THEME.drums.tint,
-      topRight: drumSrcIdx != null ? usbKbd(drumSrcIdx) : undefined,   // finger-drum the kit from the USB keyboard
-      value: playerValue(drumDeck), progress: playerProgress(drumDeck), actions: playerActions(drumDeck),
-      foot: <VolSlider label="Vol" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />,
-      body: (
-        <View style={{ gap: 10 }}>
-          {/* Drum level right on the landing page (mirrors the per-synth Volume), not only inside Kit/Loops. */}
-          <VolSlider label="Volume" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />
-          <SubMenu getItems={() => sections.filter(x => x.parent === 'drumtrack').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.drums.accent} tint={THEME.drums.tint} />
-        </View>
-      ),
-    },
-    // DRUM LOOPS — mirrors the synth's MIDI Player (playerSongBody(drumDeck)): browse /midi (all
-    // folders) + Play/Stop. Same reusable deck component as the synths — a Drums sub-page.
-    {
-      id: 'drumloops', title: 'Drum Loops', show: false, parent: 'drumtrack', fullHeight: true, accent: THEME.drums.accent, tint: THEME.drums.tint,
-      // fullHeight keeps this page MOUNTED (hidden when inactive), like Synth / Voices — so the
-      // groove browser reopens on the folder you left instead of snapping back to the /midi root.
-      value: playerValue(drumDeck), actions: playerActions(drumDeck), body: playerSongBody(drumDeck),
-    },
-    // KIT — mirrors the synth's Synth / Voices: the drum instrument (GM kit) + level. A Drums sub-page.
-    {
-      id: 'drumkit', title: 'Kit', show: false, parent: 'drumtrack', accent: THEME.drums.accent, tint: THEME.drums.tint,
-      value: cat.drumkits[drums.kit]?.name || '—', body: drumKitBody,
-    },
+    // DRUMS — a TOP-LEVEL Track card built through the SAME makeTrackCard factory as the synth voices
+    // (its Drum Loops + Kit children come from drumCard.children, spread above). The header ▶ ■ transport
+    // plays/stops the selected groove; shown on drum-capable builds (cat.hasDrums).
+    drumCard.parent,
     // TAC5212 — codec output level + DAC high-pass filter. A Settings sub-page (Settings submenu).
     {
       id: 'codec', title: 'TAC5212', show: false, parent: 'settings',
@@ -2293,7 +2542,9 @@ export default function App() {
   // Unlisted ids fall to the end in their definition order (stable sort).
   // Order for the home grid AND for each submenu's children (SubMenu sorts by this too).
   const SECTION_ORDER = ['synthesizer', 'synthesizerB', 'synthX2', 'synthX3', 'drumtrack', 'reverb', 'audioloop', 'usbaudio', 'tempo', 'bt', 'settings',
-    'player', 'synth', 'arp', 'player2', 'synth2', 'arp2', 'drumloops', 'drumkit', 'bpm', 'metro', 'conn', 'codec'];   // all synths: MIDI Player, Synth/Voices, Arp
+    'player', 'synth', 'arp', 'player2', 'synth2', 'arp2', 'bpm', 'metro', 'conn', 'codec'];   // all synths: MIDI Player, Synth/Voices, Arp
+  // NB: the drum children (drumtrackp/drumtrackv) and generated-synth children (synthXNp/v/a) are NOT
+  // listed here — like all makeTrackCard children they fall to ord()=999 and keep their push order.
   const ord = (id: string) => { const i = SECTION_ORDER.indexOf(id); return i < 0 ? 999 : i; };
   const visible = sections.filter(x => x.show).sort((a, b) => ord(a.id) - ord(b.id));
   // A routed page may be a home card OR a submenu sub-page (parent set, not in `visible`), so
