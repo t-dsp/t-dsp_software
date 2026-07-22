@@ -228,6 +228,9 @@ def main():
                     "tools/build_mars_kits.py, e.g. c:/tmp/mars-curated/drums) to /drums. The "
                     "<kit>/<n>-*.wav one-shots the TDSP_DRUM_SD/DFD sampler streams; like loops "
                     "these are NOT tracked in the repo, so pass the staged dir explicitly.")
+    ap.add_argument("--skip-manifest", action="store_true", help="do NOT push the repo manifest "
+                    "asset sets (assets/); push only the explicit staged dirs (--drums-src / "
+                    "--loops-src / --soundfont). Use when topping up one set on a board.")
     args = ap.parse_args()
 
     if args.list:
@@ -238,15 +241,16 @@ def main():
             print(f"{p.device}  {p.description}")
         return 0
 
-    # Build the work list from the manifest.
+    # Build the work list from the manifest (unless the caller is topping up staged sets only).
     plan = []   # (label, files[])
-    for s in ASSET_SETS:
-        src_abs = os.path.join(REPO_ROOT, s["src"])
-        if not os.path.isdir(src_abs):
-            print(f"skip  {s['name']}: source not found ({s['src']})", file=sys.stderr)
-            continue
-        files = collect(src_abs, s["sd_root"], s["glob"])
-        plan.append((f"{s['name']} -> {s['sd_root']}", files))
+    if not args.skip_manifest:
+        for s in ASSET_SETS:
+            src_abs = os.path.join(REPO_ROOT, s["src"])
+            if not os.path.isdir(src_abs):
+                print(f"skip  {s['name']}: source not found ({s['src']})", file=sys.stderr)
+                continue
+            files = collect(src_abs, s["sd_root"], s["glob"])
+            plan.append((f"{s['name']} -> {s['sd_root']}", files))
 
     # Loops are staged (not committed), so their source is an explicit dir, not assets/.
     # Push the .mid tree AND its catalog.tsv (the loops manifest points the app at it).
