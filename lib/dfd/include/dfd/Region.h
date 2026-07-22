@@ -44,6 +44,11 @@ public:
         : _alloc(&alloc), _cfg(cfg) {
         _head = _alloc->alloc(_cfg.headSamples, /*preferFast=*/true);
         _ring = _alloc->alloc(_cfg.ringSamples, /*preferFast=*/true);
+        // ZERO the buffers: allocators hand back uninitialized memory (plain malloc on a no-PSRAM
+        // board), and any read of an as-yet-unwritten slot must be silence, not stale garbage
+        // (which is broadband HISS). Cheap: once, off the audio path.
+        if (_head) for (uint32_t i = 0; i < _cfg.headSamples; ++i) _head[i] = 0;
+        if (_ring) for (uint32_t i = 0; i < _cfg.ringSamples; ++i) _ring[i] = 0;
     }
 
     ~Region() {

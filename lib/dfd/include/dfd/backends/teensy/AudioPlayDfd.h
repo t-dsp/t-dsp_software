@@ -85,6 +85,20 @@ public:
         _voice->read(scratch, AUDIO_BLOCK_SAMPLES);
         const bool stereo = _voice->channels() >= 2;
 
+        // AUTO END-FADE: ramp out over the final kReleaseFrames as the voice reaches its natural end
+        // (or the optional decay cap), so a sample that does NOT end at silence — or an over-long
+        // tail — never steps to 0 (the "click when the bass ends"). Triggered once; the fade lands
+        // right at endFrame. This is the natural-end sibling of softStop (which handles interruptions).
+        if (!_releasing && _lenFrames > 0) {
+            uint32_t endFrame = _lenFrames;
+            if (kMaxPlayFrames > 0 && (uint32_t)kMaxPlayFrames < endFrame) endFrame = kMaxPlayFrames;
+            uint32_t played = _voice->framesPlayed();
+            if (played + (uint32_t)kReleaseFrames >= endFrame) {
+                uint32_t rem = (endFrame > played) ? (endFrame - played) : 1;
+                beginFade(_gain, 0.0f, (int)rem, /*releasing=*/true);
+            }
+        }
+
         if (_fadeLen == 0 && _gain >= 1.0f) {
             // Fast path: unity gain, no fade in flight — plain copy (bit-identical to no declick).
             if (stereo) for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) { bl->data[i] = scratch[i*2]; br->data[i] = scratch[i*2+1]; }
@@ -119,8 +133,14 @@ private:
 #ifndef TDSP_DFD_RELEASE_FRAMES
 #define TDSP_DFD_RELEASE_FRAMES 1440
 #endif
+    // Optional decay cap (stereo frames). 0 = play the whole sample; >0 caps over-long one-shots
+    // (e.g. a 6.4 s 808 tail that strains no-PSRAM streaming) — the auto end-fade lands at the cap.
+#ifndef TDSP_DFD_MAX_PLAY_FRAMES
+#define TDSP_DFD_MAX_PLAY_FRAMES 0
+#endif
     static constexpr int kAttackFrames  = TDSP_DFD_ATTACK_FRAMES;
     static constexpr int kReleaseFrames = TDSP_DFD_RELEASE_FRAMES;
+    static constexpr int kMaxPlayFrames = TDSP_DFD_MAX_PLAY_FRAMES;
 
     // Arm a fade from `from` to `to` over `len` frames (smoothstep). len<=0 applies instantly.
     void beginFade(float from, float to, int len, bool releasing) {
