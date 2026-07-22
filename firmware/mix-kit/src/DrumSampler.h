@@ -38,9 +38,13 @@
 #define TDSP_DRUM_SD_VOICES 8          // 8 simultaneous one-shots (kick+snare+hats+toms+cymbals overlap)
 #endif
 
-// 8 stereo SD players (out 0 = L, out 1 = R). Each streams its WAV off the card on play; the
-// per-play ring buffers come from the heap only while a voice is sounding (no PSRAM needed).
-AudioPlaySdResmp      g_drumSdV[TDSP_DRUM_SD_VOICES];
+// The audio graph (the 2x4 mixer tree below) is HARDWIRED to 8 players — the AudioConnections
+// reference g_drumSdV[0..7] — so this object array is ALWAYS 8. TDSP_DRUM_SD_VOICES caps only how
+// many voices are ever TRIGGERED (heap ~28 KB per sounding voice), NOT the object count: shrinking
+// this array below 8 would bind the voice-4..7 connections to out-of-bounds objects and the audio
+// ISR would walk corrupt connections -> silent reset. Keep them decoupled.
+static constexpr int kDrumSdMaxVoices = 8;
+AudioPlaySdResmp      g_drumSdV[kDrumSdMaxVoices];
 // Two-stage int16 mixer tree per channel: mix[0]/mix[1] sum voices 0-3 / 4-7, mix[2] sums the two.
 AudioMixer4           g_drumSdMixL[3], g_drumSdMixR[3];
 AudioConvert_I16toF32 g_drumSdToF32L, g_drumSdToF32R;
@@ -66,7 +70,9 @@ static AudioConnection_F32 c_ds_outR(g_drumSdToF32R, 0, outR, TDSP_DRUM_SLOT);
 // subfolder of /drums; setKit() scans it into path[note] by the leading integer of each WAV.
 class DrumSamplerSink : public tdsp::MidiSink {
 public:
-    static constexpr int kVoices     = TDSP_DRUM_SD_VOICES;
+    // TRIGGERED voices — clamped to the 8 wired objects. Fewer = less peak heap; the extra wired
+    // players (kVoices..7) simply never get a playWav() so they stay silent.
+    static constexpr int kVoices     = (TDSP_DRUM_SD_VOICES < kDrumSdMaxVoices) ? TDSP_DRUM_SD_VOICES : kDrumSdMaxVoices;
     static constexpr int kNumNotes   = 128;
     static constexpr int kPathLen    = 80;   // "/drums/<folder>/<n>-<name>.wav"
     static constexpr int kMaxKits    = 64;
