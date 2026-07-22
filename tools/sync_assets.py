@@ -224,6 +224,10 @@ def main():
     ap.add_argument("--loops-src", help="also push a STAGED loops dir (from tools/fetch_loops.py, "
                     "e.g. c:/tmp/t-dsp-loops/loops) to /midi/loops. Loops are NOT tracked in the "
                     "repo, so they are pushed from wherever they were staged, not from assets/.")
+    ap.add_argument("--drums-src", help="also push a STAGED SD drum-kit tree (from "
+                    "tools/build_mars_kits.py, e.g. c:/tmp/mars-curated/drums) to /drums. The "
+                    "<kit>/<n>-*.wav one-shots the TDSP_DRUM_SD/DFD sampler streams; like loops "
+                    "these are NOT tracked in the repo, so pass the staged dir explicitly.")
     args = ap.parse_args()
 
     if args.list:
@@ -256,6 +260,16 @@ def main():
             if os.path.isfile(cat):
                 files.append((cat, "/midi/loops/catalog.tsv"))
             plan.append(("loops -> /midi/loops", files))
+
+    # Drum kits are staged (built by tools/build_mars_kits.py, not committed), so their source is
+    # an explicit dir. Recurse the <kit>/ subfolders (collect preserves the relpath) onto /drums.
+    if args.drums_src:
+        drums_abs = os.path.abspath(args.drums_src)
+        if not os.path.isdir(drums_abs):
+            print(f"skip  drums: --drums-src not found ({drums_abs})", file=sys.stderr)
+        else:
+            files = collect(drums_abs, "/drums", ".wav")
+            plan.append(("drums -> /drums", files))
 
     if args.soundfont:
         sf2_src = args.sf2_src or os.path.join(REPO_ROOT, "tools/sf2/fonts/gm_tim.sf2")
