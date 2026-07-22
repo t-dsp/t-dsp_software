@@ -33,6 +33,8 @@ public:
     // a one-shot (drums). The Source must stay valid until the voice stops.
     bool play(Source& src, bool loop = false, float rate = 1.0f) {
         if (!allocated()) return false;
+        _voice->stop();                 // fully close down the prior sample before rebinding the
+                                        // source — the ISR sees silence while play() re-anchors.
         _voice->setSource(src);
         _voice->play(0, src.totalSamples(), loop, 0, rate);
         _lenFrames = _voice->framesTotal();

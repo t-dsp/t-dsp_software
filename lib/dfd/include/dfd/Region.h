@@ -74,7 +74,14 @@ public:
     // (defaults to start). Clamps length to the source. Loads the head and primes the ring
     // (both off the audio path) so the first read() is glitch-free.
     void play(uint32_t start, uint32_t length, bool loop = false, uint32_t loopStart = 0) {
-        if (!ok() || !_src) { _active = false; return; }
+        // Quiesce FIRST, before touching any geometry. The audio ISR (read()) and this setup run
+        // on different contexts; if update() lands while _start/_regionEnd/_bodyStart/_pos are only
+        // half-rewritten, sampleAt() would index the head/ring with a mismatched anchor and emit
+        // garbage (audible static). Holding _active=false across the whole rewrite — and only
+        // arming it once the head is loaded AND the ring primed (bottom of this fn) — makes a
+        // retrigger/steal/kit-change glitch-free regardless of whether the caller pre-stopped us.
+        _active = false;
+        if (!ok() || !_src) return;
         _ch = _src->channels(); if (_ch < 1) _ch = 1;
 
         uint32_t total = _src->totalSamples();
@@ -94,8 +101,8 @@ public:
         _pos = _start;
         // Empty ring anchored at bodyStart; primeRing() fills it before we return.
         _winStart = _winEnd = _bodyStart;
-        _active = true;
         primeRing();
+        _active = true;   // arm only now — head loaded, ring primed, geometry fully consistent
     }
 
     // Seek the playhead. If `sample` is within the head it restarts-from-head instantly; if it
@@ -106,13 +113,13 @@ public:
         if (sample < _start) sample = _start;
         if (sample >= _regionEnd) { if (_loop) sample = _loopStart; else { _pos = _regionEnd; _active = false; return; } }
         _pos = sample;
-        _active = true;
         if (sample < _bodyStart) {
             // Landing in the head; the ring must be anchored at bodyStart for the handoff.
             if (!(_winStart <= _bodyStart && _bodyStart < _winEnd)) _winStart = _winEnd = _bodyStart;
         } else if (!(_winStart <= sample && sample < _winEnd)) {
             _winStart = _winEnd = sample;   // cold jump into the body: refetch from here
         }
+        _active = true;   // arm last, once _pos and the ring window agree (see play())
     }
 
     // Silence this region immediately (audio path stops on the next block). No I/O.
