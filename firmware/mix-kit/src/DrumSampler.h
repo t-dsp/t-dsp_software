@@ -126,25 +126,17 @@ public:
             for (int v = 0; v < kVoices; ++v)
                 if (isHat(_voiceNote[v]) && g_drumSdV[v].isPlaying()) voiceSoftStop(g_drumSdV[v]);
 
-        // Pick a FRESH voice for the new hit: prefer a truly idle voice; only steal (least-remaining
-        // tail, declicked in play()) when every voice is busy.
+        // Pick a FRESH voice for the new hit so a retrigger never hard-cuts the ringing one:
+        // prefer a truly idle voice; only steal (least-remaining tail) when every voice is busy.
         int v = idleVoice();
         if (v < 0) v = pickStealVoice();
-        // Declick-CUT the outgoing same-note hit (retrigger) with a smooth release on ITS OWN voice
-        // while the new hit starts on `v`. Cutting (rather than letting every hit ring its full
-        // decay) is deliberate: these Mars one-shots are VERY long (the 808 kick is 6.4 s), so
-        // ringing them all would pin every voice (vp=8), which starves the SD stream and makes the
-        // groove jitter — badly so when switching loops (old + new hits pile up). Low voice
-        // occupancy keeps timing tight; the smooth release keeps the cut clickless.
+        // Declick the OUTGOING same-note hit (retrigger): fade its tail out on ITS OWN voice while
+        // the new hit starts on `v`. The ~5 ms overlap is inaudible; the alternative is the snap.
         for (int w = 0; w < kVoices; ++w)
             if (w != v && _voiceNote[w] == (int8_t)note && g_drumSdV[w].isPlaying()) voiceSoftStop(g_drumSdV[w]);
 
         DrumSdVoice &pl = g_drumSdV[v];
-#ifndef TDSP_DRUM_DFD
-        pl.stop();                                  // legacy backend: clean any tail before reuse
-        // (DFD: NO hard stop here — play() declicks from the voice's last emitted level, so a stolen
-        //  still-ringing voice re-anchors smoothly instead of stepping to the new attack.)
-#endif
+        pl.stop();                                  // clean any tail on a stolen voice
         // Trigger from the PERSISTENT per-note source (opened once in setKit) — no per-hit SD.open()
         // FAT lookup. One voice per note (pickVoice) => one reader per handle. (@DRUMSTRESS's
         // synthetic burst over-reports underruns — its busy-wait doesn't refill like a real groove's

@@ -38,24 +38,15 @@ public:
         _voice->setSource(src);
         _voice->play(0, src.totalSamples(), loop, 0, rate);
         _lenFrames = _voice->framesTotal();
-        // Declick START: unity gain (the drum transient is preserved in full), and arm a decaying
-        // OFFSET that cancels the step between the LAST sample this node emitted and the new
-        // sample[0]. That makes both a fresh start (last≈0) AND a hard voice STEAL/reuse (last at
-        // some mid-decay level, e.g. a ringing 808 sub-bass) continuous — no instant jump to the new
-        // attack. Computed on the first update() (once the new samples are readable).
-        _gain = 1.0f; _fadeLen = 0; _fadePos = 0; _releasing = false;
-        _dcArm = true;
+        // Declick ATTACK: rise from silence over kAttackFrames so a fresh voice never steps from 0
+        // to a non-zero sample[0]. Kept short so the drum transient is preserved.
+        beginFade(0.0f, 1.0f, kAttackFrames, /*releasing=*/false);
         return _voice->active();
     }
 
     // HARD stop — immediate silence (voice teardown / kit change). No declick; the caller is
-    // tearing the source down, so a ramp would read stale geometry (see Region::play()). Zero the
-    // held-output memory so the NEXT play() declicks from silence, not a stale level.
-    void stop() {
-        if (_voice) _voice->stop();
-        _gain = 1.0f; _fadeLen = 0; _fadePos = 0; _releasing = false;
-        _dcArm = false; _dcLen = 0; _lastOutL = 0.0f; _lastOutR = 0.0f;
-    }
+    // tearing the source down, so a ramp would read stale geometry (see Region::play()).
+    void stop() { if (_voice) _voice->stop(); _gain = 1.0f; _fadeLen = 0; _fadePos = 0; _releasing = false; }
 
     // SOFT stop — smoothstep the tail to zero over kReleaseFrames (STARTING from the current gain),
     // THEN stop the voice. Kills the "snap" when a still-ringing hit is retriggered / stolen /
@@ -94,42 +85,24 @@ public:
         _voice->read(scratch, AUDIO_BLOCK_SAMPLES);
         const bool stereo = _voice->channels() >= 2;
 
-        // Arm the declick offset now that the new samples are readable: offset = (last emitted) -
-        // (new sample[0]); it decays to 0 over kDeclickFrames, so output[0] == last emitted (no step).
-        if (_dcArm) {
-            _dcL = _lastOutL - (float)scratch[0];
-            _dcR = _lastOutR - (float)(stereo ? scratch[1] : scratch[0]);
-            _dcPos = 0; _dcLen = kDeclickFrames; _dcArm = false;
-        }
-
-        const bool fading = (_fadeLen > 0) || (_gain < 1.0f);
-        const bool dcing  = (_dcLen > 0 && _dcPos < _dcLen);
-        if (!fading && !dcing) {
-            // Fast path: unity gain, no fade/offset in flight — plain copy (bit-identical to none).
+        if (_fadeLen == 0 && _gain >= 1.0f) {
+            // Fast path: unity gain, no fade in flight — plain copy (bit-identical to no declick).
             if (stereo) for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) { bl->data[i] = scratch[i*2]; br->data[i] = scratch[i*2+1]; }
             else        for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) { bl->data[i] = scratch[i];   br->data[i] = scratch[i]; }
         } else {
+            // Fade in flight: advance the smoothstep envelope one frame at a time and scale L/R.
             for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
                 if (_fadePos < _fadeLen) { _fadePos++; _gain = fadeGain(); }
-                float dl = 0.0f, dr = 0.0f;
-                if (_dcPos < _dcLen) {                  // decaying declick offset (smoothstep -> 0)
-                    const float frac = 1.0f - smoothstep((float)_dcPos / (float)_dcLen);
-                    dl = _dcL * frac; dr = _dcR * frac; _dcPos++;
-                }
-                const float l = (float)(stereo ? scratch[i*2]   : scratch[i]);
-                const float r = (float)(stereo ? scratch[i*2+1] : scratch[i]);
-                bl->data[i] = clip16((l + dl) * _gain);
-                br->data[i] = clip16((r + dr) * _gain);
+                const int16_t l = stereo ? scratch[i*2]   : scratch[i];
+                const int16_t r = stereo ? scratch[i*2+1] : scratch[i];
+                bl->data[i] = (int16_t)(l * _gain);
+                br->data[i] = (int16_t)(r * _gain);
             }
-            if (_fadePos >= _fadeLen) {                 // gain fade complete this block
+            if (_fadePos >= _fadeLen) {                 // fade complete this block
                 _gain = _fadeTo; _fadeLen = 0;
                 if (_releasing) { _voice->stop(); _releasing = false; }
             }
-            if (_dcPos >= _dcLen) _dcLen = 0;
         }
-        // Remember the last emitted sample so the NEXT play() can declick from it.
-        _lastOutL = (float)bl->data[AUDIO_BLOCK_SAMPLES - 1];
-        _lastOutR = (float)br->data[AUDIO_BLOCK_SAMPLES - 1];
         transmit(bl, 0);
         transmit(br, 1);
         release(bl);
@@ -137,26 +110,17 @@ public:
     }
 
 private:
-    // Declick lengths (frames @ AUDIO_SAMPLE_RATE_EXACT). Overridable per build. The RELEASE (a
-    // softStop fade) and the START-offset decay are both ~30 ms — longer than one sub-bass cycle
-    // (50 Hz = 20 ms) so an 808 kick fades / re-anchors over a full cycle, never chopped mid-cycle.
+    // Declick fade lengths (frames @ AUDIO_SAMPLE_RATE_EXACT). Overridable per build. Attack is
+    // short (~1 ms) to keep the drum transient; release is ~30 ms — longer than one sub-bass cycle
+    // (50 Hz = 20 ms) so an 808 kick tail fades over a full cycle, not chopped mid-cycle.
+#ifndef TDSP_DFD_ATTACK_FRAMES
+#define TDSP_DFD_ATTACK_FRAMES 48
+#endif
 #ifndef TDSP_DFD_RELEASE_FRAMES
 #define TDSP_DFD_RELEASE_FRAMES 1440
 #endif
-#ifndef TDSP_DFD_DECLICK_FRAMES
-#define TDSP_DFD_DECLICK_FRAMES 1440
-#endif
+    static constexpr int kAttackFrames  = TDSP_DFD_ATTACK_FRAMES;
     static constexpr int kReleaseFrames = TDSP_DFD_RELEASE_FRAMES;
-    static constexpr int kDeclickFrames = TDSP_DFD_DECLICK_FRAMES;
-
-    // smoothstep p*p*(3-2p): 0->1 with zero SLOPE at both ends (no corner-click a linear ramp leaves).
-    static float smoothstep(float p) { return p * p * (3.0f - 2.0f * p); }
-
-    static int16_t clip16(float v) {
-        if (v >  32767.0f) return  32767;
-        if (v < -32768.0f) return -32768;
-        return (int16_t)v;
-    }
 
     // Arm a fade from `from` to `to` over `len` frames (smoothstep). len<=0 applies instantly.
     void beginFade(float from, float to, int len, bool releasing) {
@@ -164,19 +128,20 @@ private:
         _releasing = releasing;
         _gain = (_fadeLen == 0) ? to : from;
     }
-    float fadeGain() const { return _fadeFrom + (_fadeTo - _fadeFrom) * smoothstep((float)_fadePos / (float)_fadeLen); }
+    // Current envelope gain via smoothstep p*p*(3-2p): zero SLOPE at both ends, so no corner-click
+    // (the artifact a linear ramp leaves on a loud low-frequency tail).
+    float fadeGain() const {
+        const float p  = (float)_fadePos / (float)_fadeLen;   // 0..1 across the fade
+        const float ss = p * p * (3.0f - 2.0f * p);
+        return _fadeFrom + (_fadeTo - _fadeFrom) * ss;
+    }
 
     Voice*   _voice = nullptr;
     uint32_t _lenFrames = 0;
     float    _gain = 1.0f;                 // current output gain (1 = pass-through fast path)
     float    _fadeFrom = 1.0f, _fadeTo = 1.0f;
-    int      _fadeLen = 0, _fadePos = 0;   // gain-fade progress in frames (_fadeLen 0 = no fade)
+    int      _fadeLen = 0, _fadePos = 0;   // fade progress in frames (_fadeLen 0 = no fade)
     bool     _releasing = false;           // this fade ends by stopping the voice
-    // Start-declick offset (cancels the step from the last emitted sample into a new/stolen note).
-    float    _dcL = 0.0f, _dcR = 0.0f;     // offset magnitude captured at the first block after play
-    int      _dcLen = 0, _dcPos = 0;       // offset-decay progress in frames (_dcLen 0 = inactive)
-    bool     _dcArm = false;               // compute the offset on the next update()
-    float    _lastOutL = 0.0f, _lastOutR = 0.0f;   // last emitted sample (for the next declick)
 };
 
 } // namespace dfd

@@ -14,11 +14,6 @@
 
 namespace dfd {
 
-// Diagnostic: how many times a mid-file SD read came back SHORT and had to be retried (each such
-// event would have truncated the sample without the retry loop below). Inline global (C++17) so the
-// consumer can print it; a nonzero value at runtime confirms the short-read/truncation cause.
-inline volatile uint32_t g_dfdShortReads = 0;
-
 class SdSource : public Source {
 public:
     SdSource() {}
@@ -71,24 +66,13 @@ public:
     uint8_t  channels()     const override { return (uint8_t)_channels; }
 
     // Seek + read `count` interleaved int16 samples at `offsetSamples`. NON-realtime (service()).
-    // LOOPS until the full request is satisfied: SdFat::read legitimately returns SHORT mid-file
-    // (cluster boundary / contention), and the caller (Region::fillRing) treats a short read as
-    // EOF and CLAMPS the region — which would chop a long sample mid-decay (an audible cut/click).
-    // Only a real zero/negative read (true EOF or error) ends the loop early.
     uint32_t read(uint32_t offsetSamples, int16_t* dst, uint32_t count) override {
         if (!_ok || !_file || offsetSamples >= _dataSamples) return 0;
         uint32_t avail = _dataSamples - offsetSamples;
         if (count > avail) count = avail;
         _file->seek(_dataStart + (uint64_t)offsetSamples * 2);
-        uint8_t* p = (uint8_t*)dst;
-        uint32_t need = count * 2, done = 0;
-        while (done < need) {
-            int got = _file->read(p + done, need - done);
-            if (got <= 0) break;                    // true EOF / error only
-            done += (uint32_t)got;
-            if (done < need) g_dfdShortReads++;     // came back short mid-file -> retrying
-        }
-        return done / 2;
+        int got = _file->read((uint8_t*)dst, count * 2);
+        return (got > 0) ? (uint32_t)got / 2 : 0;
     }
 
 private:
