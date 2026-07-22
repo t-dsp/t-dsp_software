@@ -13,11 +13,19 @@
 #include "IndexableSDFile.h"
 #include "ResamplingReader.h"
 
-// Settings for SD card buffering
+// Settings for SD card buffering. Each streaming voice's ring = SAMPLE_SIZE*COUNT int16 from the
+// heap while sounding. On a RAM-tight no-PSRAM board (e.g. mix-kit TDSP_DRUM_SD, ~144 KB free OCRAM)
+// the default 7-deep ring (~28 KB/voice) can't fit enough simultaneous voices, so polyphonic hits
+// fail to allocate and drop. Override COUNT with -D TDSP_SD_RESAMPLE_BUFFER_COUNT=<n> (e.g. 4 ->
+// ~16 KB/voice, 8 voices ~128 KB) to fit them all. Default matches upstream.
 #undef RESAMPLE_BUFFER_SAMPLE_SIZE
 #undef RESAMPLE_BUFFER_COUNT
 #define RESAMPLE_BUFFER_SAMPLE_SIZE 2048
+#ifdef TDSP_SD_RESAMPLE_BUFFER_COUNT
+#define RESAMPLE_BUFFER_COUNT 		  TDSP_SD_RESAMPLE_BUFFER_COUNT
+#else
 #define RESAMPLE_BUFFER_COUNT 		  7
+#endif
 
 namespace newdigate {
 

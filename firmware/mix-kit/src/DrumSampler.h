@@ -75,7 +75,7 @@ public:
     static constexpr int kVoices     = (TDSP_DRUM_SD_VOICES < kDrumSdMaxVoices) ? TDSP_DRUM_SD_VOICES : kDrumSdMaxVoices;
     static constexpr int kNumNotes   = 128;
     static constexpr int kPathLen    = 80;   // "/drums/<folder>/<n>-<name>.wav"
-    static constexpr int kMaxKits    = 64;
+    static constexpr int kMaxKits    = 128;  // the full "…From Mars" library is ~92 kit folders
     static constexpr int kKitNameLen = 25;   // <=24 chars + NUL
 
     DrumSamplerSink() { for (int v = 0; v < kVoices; ++v) _voiceNote[v] = -1; }
