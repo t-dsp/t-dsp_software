@@ -1,0 +1,16 @@
+{
+  "name": "dfd",
+  "version": "0.1.0",
+  "description": "Direct-From-Disk streaming sample engine — a resident head + streamed body ring per region, so note-starts, loop wraps and stutter restarts never wait on storage. Portable C++17 core (Source/Allocator injected) with Teensy (SD/PSRAM/AudioStream) and host backends.",
+  "keywords": "audio, streaming, sampler, teensy, dfd, disk-streaming",
+  "license": "MIT",
+  "headers": ["dfd/Region.h", "dfd/backends/teensy/AudioPlayDfd.h"],
+  "frameworks": "arduino",
+  "platforms": "teensy",
+  "export": {
+    "exclude": ["test"]
+  },
+  "build": {
+    "srcFilter": ["-<*>"]
+  }
+}

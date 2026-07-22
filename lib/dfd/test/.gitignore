@@ -1,0 +1,4 @@
+test_region.exe
+test_region
+*.obj
+_build_tests.bat
