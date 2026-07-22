@@ -234,6 +234,7 @@ def build_kit(zip_path, display, program, chosen, emit_dir, kit_key):
     mono_f, meta = [], []
     stereo_cache = {}
     kit_peak = 1e-9
+    note_peak = {}                       # per-GM-note peak, for kick-anchored normalization
     with zipfile.ZipFile(zip_path) as zf:
         for note, name, member in chosen:
             data = zf.read(member)
@@ -242,13 +243,27 @@ def build_kit(zip_path, display, program, chosen, emit_dir, kit_key):
             tmp = os.path.join(emit_dir, "_tmp.wav")
             sf.write(tmp, x, sr, subtype="PCM_16")
             mono, stereo = F.load_normalize(tmp)
-            kit_peak = max(kit_peak, float(np.max(np.abs(mono))), float(np.max(np.abs(stereo))))
+            p = max(float(np.max(np.abs(mono))), float(np.max(np.abs(stereo))))
+            kit_peak = max(kit_peak, p)
+            note_peak[note] = max(note_peak.get(note, 0.0), p)
             mono_f.append(mono)
             stereo_cache[note] = stereo
             meta.append(dict(note=note, name=name))
     os.remove(os.path.join(emit_dir, "_tmp.wav")) if os.path.exists(os.path.join(emit_dir, "_tmp.wav")) else None
 
-    gain = F.PEAK_TARGET / kit_peak
+    # Normalization: per-kit *kick-anchored* gain, not per-kit *peak*. Grooves are kick-driven,
+    # so anchoring the kick (GM 36, fallback 35) to KICK_TARGET makes perceived loudness
+    # consistent across kits — whereas peak-normalizing lets a loud crash/outlier under-normalize
+    # the kick, so 909 (big open crash) played ~11 dB quieter than 808 under peak-norm.
+    # One gain per kit preserves the kit's internal balance; a clip guard keeps the loudest
+    # sample under PEAK_CEIL so kits whose crash is louder than the kick still don't clip.
+    KICK_TARGET = 0.70                    # kick lands ~-3 dBFS
+    PEAK_CEIL   = 0.985                   # nothing in the kit exceeds this
+    kick_peak = note_peak.get(36) or note_peak.get(35)
+    if kick_peak and kick_peak > 1e-6:
+        gain = min(KICK_TARGET / kick_peak, PEAK_CEIL / kit_peak)
+    else:
+        gain = F.PEAK_TARGET / kit_peak   # no kick in this kit -> fall back to peak-norm
     kit_out = os.path.join(emit_dir, kit_key)
     os.makedirs(kit_out, exist_ok=True)
     hits = []
