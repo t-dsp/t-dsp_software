@@ -127,13 +127,17 @@ public:
                 if (isHat(_voiceNote[v]) && g_drumSdV[v].isPlaying()) voiceSoftStop(g_drumSdV[v]);
 
         // Pick a FRESH voice for the new hit: prefer a truly idle voice; only steal (least-remaining
-        // tail, declicked in play()) when every voice is busy. A struck drum is NOT cut on a
-        // retrigger — it rings its FULL natural decay and simply overlaps the next hit. (This is the
-        // fix for "the loop stops the note decaying": nothing severs a ringing sample; polyphony +
-        // the least-remaining steal reclaim voices only when genuinely exhausted.) The hi-hat choke
-        // above is the one intentional exclusive-class cut.
+        // tail, declicked in play()) when every voice is busy.
         int v = idleVoice();
         if (v < 0) v = pickStealVoice();
+        // Declick-CUT the outgoing same-note hit (retrigger) with a smooth release on ITS OWN voice
+        // while the new hit starts on `v`. Cutting (rather than letting every hit ring its full
+        // decay) is deliberate: these Mars one-shots are VERY long (the 808 kick is 6.4 s), so
+        // ringing them all would pin every voice (vp=8), which starves the SD stream and makes the
+        // groove jitter — badly so when switching loops (old + new hits pile up). Low voice
+        // occupancy keeps timing tight; the smooth release keeps the cut clickless.
+        for (int w = 0; w < kVoices; ++w)
+            if (w != v && _voiceNote[w] == (int8_t)note && g_drumSdV[w].isPlaying()) voiceSoftStop(g_drumSdV[w]);
 
         DrumSdVoice &pl = g_drumSdV[v];
 #ifndef TDSP_DRUM_DFD

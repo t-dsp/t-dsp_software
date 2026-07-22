@@ -2181,6 +2181,10 @@ FLASHMEM static void sendFonts(Print &out) {
 // SYNCHRO START (PSS-140): arm — preload now and let the first live note be the downbeat (maybeSynchroStart).
 static void drumLaunchPath(const char* path) {
     g_drumArmed = false;
+    // NOTE: intentionally do NOT silence the sampler's ringing voices here — switching grooves is a
+    // valid STACKING gesture (loop A / loop B / loop A ...) where the prior loop's tails SHOULD ring
+    // on. Voice pileup is bounded instead by the low per-groove occupancy (retriggers cut, see
+    // DrumSampler onNoteOn), so stacked grooves stay well under the voice cap without a flush.
     if (g_drumSynchro) {
         if (trackPreload(g_drumTrack, path)) {   // stash the groove; the first live note fires it
             g_drumArmed = true;
