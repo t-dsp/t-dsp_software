@@ -25,7 +25,40 @@
 #include <Audio.h>
 #include <SD.h>
 #include <MidiSink.h>
+// Two interchangeable streaming backends behind ONE audio graph + one sink:
+//   DEFAULT — teensy-variable-playback's AudioPlaySdResmp (proven, the working build).
+//   TDSP_DRUM_DFD — the dfd Direct-From-Disk engine (lib/dfd): a resident head + streamed body
+//     ring per voice, so the trigger/restart path never waits on SD (planning/dfd-sampler).
+// Both are int16-stereo AudioStream nodes, so the mixer tree + connections below are identical;
+// only the per-note trigger + voice allocation differ (see the TDSP_DRUM_DFD branches).
+#ifdef TDSP_DRUM_DFD
+#include <dfd/backends/teensy/AudioPlayDfd.h>
+#include <dfd/backends/teensy/SdSource.h>
+#include <dfd/backends/teensy/PsramAllocator.h>
+using DrumSdVoice = dfd::AudioPlayDfd;
+// Head/ring/history sizing in interleaved int16 SAMPLES (a stereo frame = 2 samples). H MUST
+// exceed the worst-case SD stall (DESIGN §1/§7): this board's @DRUMSTRESS showed 0 underruns at
+// the old 85 ms ring, so the empirical worst stall is < 85 ms. The generous 64 KB/voice default
+// below is for a PSRAM build; the no-PSRAM env (teensy41_dexed_pool_nobt_drumsd_dfd) OVERRIDES
+// these smaller to fit the ~144 KB OCRAM heap — see platformio.ini for the budget math.
+#ifndef TDSP_DFD_HEAD_SAMPLES
+#define TDSP_DFD_HEAD_SAMPLES 32768   // 64 KB/voice head (~340 ms stereo) — PSRAM-blessed default
+#endif
+#ifndef TDSP_DFD_RING_SAMPLES
+#define TDSP_DFD_RING_SAMPLES 4096    // 8 KB/voice body ring (~43 ms stereo)
+#endif
+#ifndef TDSP_DFD_HISTORY_SAMPLES
+#define TDSP_DFD_HISTORY_SAMPLES 0    // no backward look-behind yet (stutter is phase 3)
+#endif
+#ifdef TDSP_TVP_UNDERRUN_COUNT
+// DFD builds don't include teensy-variable-playback (which declares this), so forward-declare the
+// underrun tally here; the definition is at the file end (guarded the same way).
+namespace newdigate { extern volatile uint32_t g_tvpUnderruns; }
+#endif
+#else
 #include <TeensyVariablePlayback.h>   // AudioPlaySdResmp (LDF auto-finds lib/teensy-variable-playback)
+using DrumSdVoice = AudioPlaySdResmp;
+#endif
 
 // The output mix slot the drum kit lands on. Default 2 (S/PDIF-in dropped via TDSP_NO_SPDIF_IN
 // frees it), matching the other drum voices. A build that parks another engine on slot 2 can
@@ -44,7 +77,7 @@
 // this array below 8 would bind the voice-4..7 connections to out-of-bounds objects and the audio
 // ISR would walk corrupt connections -> silent reset. Keep them decoupled.
 static constexpr int kDrumSdMaxVoices = 8;
-AudioPlaySdResmp      g_drumSdV[kDrumSdMaxVoices];
+DrumSdVoice           g_drumSdV[kDrumSdMaxVoices];   // AudioPlaySdResmp (default) or dfd::AudioPlayDfd
 // Two-stage int16 mixer tree per channel: mix[0]/mix[1] sum voices 0-3 / 4-7, mix[2] sums the two.
 AudioMixer4           g_drumSdMixL[3], g_drumSdMixR[3];
 AudioConvert_I16toF32 g_drumSdToF32L, g_drumSdToF32R;
@@ -94,15 +127,21 @@ public:
                 if (isHat(_voiceNote[v]) && g_drumSdV[v].isPlaying()) { g_drumSdV[v].stop(); _voiceNote[v] = -1; }
         }
         const int v = pickVoice(note);
-        AudioPlaySdResmp &pl = g_drumSdV[v];
+        DrumSdVoice &pl = g_drumSdV[v];
         pl.stop();                                  // clean any tail on a stolen voice
+        // Trigger from the PERSISTENT per-note source (opened once in setKit) — no per-hit SD.open()
+        // FAT lookup. One voice per note (pickVoice) => one reader per handle. (@DRUMSTRESS's
+        // synthetic burst over-reports underruns — its busy-wait doesn't refill like a real groove's
+        // loop(), so don't trust that number; watch @DRUMJIT under a real groove instead.)
+#ifdef TDSP_DRUM_DFD
+        // DFD: the resident head is loaded here (loop() context, off the audio ISR) so the AUDIO
+        // path never touches SD; the body streams behind it via serviceVoices(). One-shot, rate 1.0.
+        if (!_noteSrc[note].ok() || !pl.play(_noteSrc[note], /*loop=*/false)) { _voiceNote[v] = -1; return; }
+#else
         pl.enableInterpolation(false);              // one-shots play at native rate — no resample
-        // Play from the PERSISTENT open handle (opened once in setKit) — no per-hit SD.open() FAT
-        // lookup. One voice per note (pickVoice) => one reader per handle. Ear-verified: loops play
-        // much more reliably this way. (@DRUMSTRESS's synthetic burst over-reports underruns — its
-        // busy-wait doesn't refill like a real groove's loop(), so don't trust that number for this.)
         if (!_noteFile[note] || !pl.playWavHandle(_noteFile[note])) { _voiceNote[v] = -1; return; }
         pl.setPlaybackRate(1.0f);
+#endif
         _voiceNote[v]    = (int8_t)note;
         _voiceStartMs[v] = millis();
     }
@@ -164,9 +203,16 @@ public:
         }
         d.close();
         // Open a PERSISTENT handle per mapped note so triggers stream from it (seek 0) with NO per-hit
-        // SD.open() FAT lookup — the residual drum-skip source. ~a dozen handles per kit.
+        // SD.open() FAT lookup — the residual drum-skip source. ~a dozen handles per kit. The DFD
+        // backend also parses each WAV header ONCE here (into the per-note SdSource) so a trigger
+        // only seeks+reads — never re-parses.
         for (int n = 0; n < kNumNotes; ++n)
-            if (_path[n][0]) _noteFile[n] = SD.open(_path[n]);
+            if (_path[n][0]) {
+                _noteFile[n] = SD.open(_path[n]);
+#ifdef TDSP_DRUM_DFD
+                if (_noteFile[n]) _noteSrc[n].open(_noteFile[n]);   // &_noteFile[n] is a stable array slot
+#endif
+            }
         Serial.printf("[drumsd] kit \"%s\": %d note sample(s)\n", _kitFolders[i], mapped);
     }
 
@@ -177,9 +223,27 @@ public:
     // Reclaim voices whose SD stream has ended (so pickVoice's oldest-tracking stays honest). Cheap;
     // call once per main-loop pass.
     void pollVoices() {
+#ifdef TDSP_DRUM_DFD
+        // DFD stream pump: refill every sounding voice's body ring from loop() context (the SOLE
+        // caller of SD reads on the audio side). Runs every loop() pass, well ahead of the ring
+        // drain. Also mirror the aggregate underrun tally into g_tvpUnderruns for @DRUMSTRESS.
+        serviceVoices();
+#endif
         for (int v = 0; v < kVoices; ++v)
             if (_voiceNote[v] >= 0 && !g_drumSdV[v].isPlaying()) _voiceNote[v] = -1;
     }
+
+#ifdef TDSP_DRUM_DFD
+    void serviceVoices() {
+        for (int v = 0; v < kVoices; ++v)
+            if (g_drumSdV[v].isPlaying()) g_drumSdV[v].service();
+#ifdef TDSP_TVP_UNDERRUN_COUNT
+        uint32_t sum = 0;
+        for (int v = 0; v < kVoices; ++v) sum += g_drumSdV[v].underruns();
+        newdigate::g_tvpUnderruns = sum;           // defined at file end; matches @DRUMSTRESS's read
+#endif
+    }
+#endif
 
     // --- diagnostics (SD polyphony stress test; see @DRUMSTRESS) --------------
     // Fire up to n distinct mapped notes AT ONCE (worst-case simultaneous streaming). Returns the
@@ -233,6 +297,9 @@ private:
     uint32_t _voiceStartMs[kVoices] = {};
     char     _path[kNumNotes][kPathLen] = {};
     File     _noteFile[kNumNotes];    // persistent per-note open handles (setKit opens; triggers seek 0)
+#ifdef TDSP_DRUM_DFD
+    dfd::SdSource _noteSrc[kNumNotes]; // per-note DFD source (WAV header parsed once in setKit; wraps _noteFile)
+#endif
     char     _kitFolders[kMaxKits][kKitNameLen] = {};
     int      _numKits = 0;
     int      _curKit  = 0;
@@ -255,6 +322,22 @@ FLASHMEM static bool drumSamplerBegin() {
     outL.gain(TDSP_DRUM_SLOT, 0.62f); outR.gain(TDSP_DRUM_SLOT, 0.62f);   // drum bus make-up (mirrors the synth slot / TSF)
     extern bool g_sdReady;
     if (!g_sdReady) { Serial.println("[drumsd] no SD card -> drums idle (need /drums/<kit>/*.wav)"); return false; }
+#ifdef TDSP_DRUM_DFD
+    // Allocate each TRIGGERED voice's head + body ring ONCE, off the audio path (PSRAM if present,
+    // else the OCRAM heap). Only kVoices allocate (objects kVoices..7 stay silent), so the heap
+    // cost is kVoices*(head+ring). See platformio.ini for the no-PSRAM budget.
+    static dfd::PsramAllocator s_dfdAlloc;
+    const dfd::RegionConfig dfdCfg{ (uint32_t)TDSP_DFD_HEAD_SAMPLES,
+                                    (uint32_t)TDSP_DFD_RING_SAMPLES,
+                                    (uint32_t)TDSP_DFD_HISTORY_SAMPLES };
+    int dfdOk = 0;
+    for (int v = 0; v < DrumSamplerSink::kVoices; ++v)
+        if (g_drumSdV[v].begin(s_dfdAlloc, dfdCfg)) ++dfdOk;
+    Serial.printf("[drumsd] DFD backend: %d/%d voice(s) allocated (head %lu + ring %lu samples, %s)\n",
+                  dfdOk, (int)DrumSamplerSink::kVoices, (unsigned long)TDSP_DFD_HEAD_SAMPLES,
+                  (unsigned long)TDSP_DFD_RING_SAMPLES, s_dfdAlloc.hasPsram() ? "PSRAM" : "heap");
+    if (dfdOk == 0) { Serial.println("[drumsd] DFD: no voices allocated (heap exhausted?) -> drums idle"); return false; }
+#endif
     g_drumSamplerSink.scanKits();
     if (g_drumSamplerSink.numKits() == 0) { Serial.println("[drumsd] no /drums/<kit> folders -> drums idle"); return false; }
     g_drumSamplerSink.setKit(0);
