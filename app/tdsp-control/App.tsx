@@ -2300,8 +2300,6 @@ export default function App() {
       subtitle: drumEngineLabel,   // show WHICH drum engine (OPLL/TSF/GM) plays these grooves, like the synth cards name their engine
       topRight: drumSrcIdx != null ? usbKbd(drumSrcIdx) : undefined,   // finger-drum the kit from the USB keyboard
       foot: <VolSlider label="Vol" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />,
-      // Drum level right on the landing page (mirrors the per-synth Volume), not only inside Kit/Loops.
-      bodyPrefix: <VolSlider label="Volume" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />,
     },
     player: { title: 'Drum Loops', fullHeight: true, body: playerSongBody(drumDeck) },
     instrument: {
