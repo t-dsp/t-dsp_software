@@ -595,8 +595,8 @@ static bool g_sdReady = false;
 // Needs PSRAM for the resident font. See DrumTsf.h. (No effect on GM backends, which
 // already render ch10 drums themselves.)
 // The two parallel drum voices both own mix slot 2 — exactly one at a time.
-#if (defined(TDSP_DRUM_TSF) + defined(TDSP_DRUM_VOICE) + defined(TDSP_DRUM_PLAITS)) > 1
-  #error "TDSP_DRUM_TSF / TDSP_DRUM_VOICE / TDSP_DRUM_PLAITS are mutually exclusive — they all own the drum mix slot; pick one drum voice."
+#if (defined(TDSP_DRUM_TSF) + defined(TDSP_DRUM_VOICE) + defined(TDSP_DRUM_PLAITS) + defined(TDSP_DRUM_SD)) > 1
+  #error "TDSP_DRUM_TSF / TDSP_DRUM_VOICE / TDSP_DRUM_PLAITS / TDSP_DRUM_SD are mutually exclusive — they all own the drum mix slot; pick one drum voice."
 #endif
 #ifdef TDSP_DRUM_TSF
   #include "DrumTsf.h"      // sampled full GM kit; needs PSRAM (resident font)
@@ -606,6 +606,9 @@ static bool g_sdReady = false;
 #endif
 #ifdef TDSP_DRUM_PLAITS
   #include "DrumPlaits.h"   // authentic Plaits drum models (13/14/15) as a small pool; no PSRAM
+#endif
+#ifdef TDSP_DRUM_SD
+  #include "DrumSampler.h"  // SD-streaming one-shot kit (8 AudioPlaySdResmp voices); no PSRAM
 #endif
 #if TDSP_OPLL_ENGINES >= 1
   #include "HeteroOpll.h"   // Thread D: melodic OPLL voice(s) ALONGSIDE the primary (heterogeneous inventory)
@@ -639,6 +642,8 @@ AudioConnection_F32 c_sendDrl(g_drumTsfToF32L, 0, fxIn2L, 1), c_sendDrr(g_drumTs
 AudioConnection_F32 c_sendDrl(g_drumVoiceToF32, 0, fxIn2L, 1), c_sendDrr(g_drumVoiceToF32, 0, fxIn2R, 1);  // Drums (OPLL rhythm, mono -> L+R)
 #elif TDSP_DRUM_PLAITS
 AudioConnection_F32 c_sendDrl(g_drumPlaitsToF32, 0, fxIn2L, 1), c_sendDrr(g_drumPlaitsToF32, 0, fxIn2R, 1); // Drums (Plaits pool, mono -> L+R)
+#elif TDSP_DRUM_SD
+AudioConnection_F32 c_sendDrl(g_drumSdToF32L, 0, fxIn2L, 1), c_sendDrr(g_drumSdToF32R, 0, fxIn2R, 1);       // Drums (SD sampler, stereo)
 #endif
 #if TDSP_AUDIOLOOP
 AudioConnection_F32 c_sendLpl(g_aloop[0],      0, fxIn2L, 2), c_sendLpr(g_aloop[0],      1, fxIn2R, 2);   // Audio loop 0
@@ -653,6 +658,8 @@ AudioConnection_F32 c_sendLpl(g_aloop[0],      0, fxIn2L, 2), c_sendLpr(g_aloop[
   static const char *kDrumEngineName = "TSF";
 #elif defined(TDSP_DRUM_PLAITS)
   static const char *kDrumEngineName = "Plaits";
+#elif defined(TDSP_DRUM_SD)
+  static const char *kDrumEngineName = "Sampler";
 #else
   static const char *kDrumEngineName = "";   // GM engines render their own ch10 drums
 #endif
@@ -933,7 +940,7 @@ static void setMix(float bt, float tone, float spdif) {
     (void)bt;   // no BT receiver: mix slot 0 has no source
 #endif
     outL.gain(1, tone);  outR.gain(1, tone);
-#if !defined(TDSP_DRUM_TSF) && !defined(TDSP_DRUM_VOICE)
+#if !defined(TDSP_DRUM_TSF) && !defined(TDSP_DRUM_VOICE) && !defined(TDSP_DRUM_SD)
     outL.gain(2, spdif); outR.gain(2, spdif);
 #else
     (void)spdif;   // slot 2 is the drum voice's bus in this build (drum*Begin owns its gain)
@@ -1835,9 +1842,18 @@ static const int kNumDrumKits = sizeof(kDrumKits) / sizeof(kDrumKits[0]);
 struct RtDrumKit { char name[24]; uint8_t prog; };
 static RtDrumKit g_rtKits[24];
 static int       g_numRtKits = 0;
+#if defined(TDSP_DRUM_SD)
+// SD sampler: a "kit" is a subfolder of /drums (scanned by DrumSampler). The kit list IS the scanned
+// folder list, and the "program" is just the folder index — drumApplyKit() sends it as a ch10 program
+// change that DrumSamplerSink::onProgramChange maps back to setKit(). No GM kDrumKits table here.
+static inline int         numDrumKits()      { return g_drumSamplerSink.numKits(); }
+static inline const char *drumKitName(int i) { return g_drumSamplerSink.kitName(i); }
+static inline uint8_t     drumKitProg(int i) { return (uint8_t)i; }
+#else
 static inline int         numDrumKits()      { return g_numRtKits > 0 ? g_numRtKits : kNumDrumKits; }
 static inline const char *drumKitName(int i) { return g_numRtKits > 0 ? g_rtKits[i].name : kDrumKits[i].name; }
 static inline uint8_t     drumKitProg(int i) { return g_numRtKits > 0 ? g_rtKits[i].prog : kDrumKits[i].prog; }
+#endif
 
 #if TDSP_HAS_SDCARD
 // Populate g_rtKits from a font's sibling <font>.tsv (written by fetch_drumkits.py /
@@ -1982,6 +1998,8 @@ static void drumApplyKit() {
     g_drumTsfSink.onProgramChange(10, prog);   // kit lives on the dedicated drum TSF
 #elif defined(TDSP_DRUM_VOICE)
     g_drumVoiceSink.onProgramChange(10, prog); // OPLL rhythm ignores it, but stays consistent
+#elif defined(TDSP_DRUM_SD)
+    g_drumSamplerSink.onProgramChange(10, prog); // prog = folder index -> setKit()
 #else
     g_synthSink->onProgramChange(10, prog);
 #endif
@@ -2298,7 +2316,7 @@ static void setDrumVol(int pct) {
     if (pct < 0) pct = 0;
     if (pct > 150) pct = 150;
     g_drumVolPct = pct;
-#if defined(TDSP_DRUM_VOICE) || defined(TDSP_DRUM_TSF)
+#if defined(TDSP_DRUM_VOICE) || defined(TDSP_DRUM_TSF) || defined(TDSP_DRUM_SD)
     // The parallel drum voice owns mix slot 2, so scale THAT bus — a clean output
     // attenuation where signal + noise fall together. Velocity scaling made the OPLL
     // rhythm noisy at low levels: its hats/cymbals are noise generators whose level barely
@@ -4257,6 +4275,15 @@ FLASHMEM void setup() {
         g_engineHasDrums = true;
     }
 #endif
+#ifdef TDSP_DRUM_SD
+    // Same idea with the SD-streaming one-shot kit (no PSRAM): route ch10 to it + mark drums OK.
+    // Idles gracefully (returns false -> drumEngineOk() stays false) when /drums has no kit folders.
+    if (drumSamplerBegin()) {
+        g_drumNoteMapper.setDownstream(&g_drumSamplerSink);
+        g_drumPlayer.setSink(&g_drumNoteMapper); g_drumTrack.sink = &g_drumSamplerSink;
+        g_engineHasDrums = true;
+    }
+#endif
     applyMidiMode(TDSP_DEFAULT_MPE != 0);   // start mode (board-configurable; default normal MIDI, after synthBegin)
 
 #if TDSP_HAS_SDCARD
@@ -4270,9 +4297,17 @@ FLASHMEM void setup() {
         bool have = tdsp::catdb::readStoredEngine(stored, sizeof stored, &storedVer);
         bool engineChanged  = !have || strcmp(stored, synthName()) != 0;
         bool versionChanged = storedVer != tdsp::catdb::kCatalogVersion;   // builder layout/content bumped
-        if (engineChanged || versionChanged) {
-            Serial.printf("[catdb] catalog stale (engine %s->%s, v %d->%d) -> auto-reindex\n",
-                          have ? stored : "(none)", synthName(), storedVer, tdsp::catdb::kCatalogVersion);
+        // Also catch a DRUM-engine swap that kept the SAME melodic engine (e.g. OPLL/Plaits drums ->
+        // SD Sampler): readStoredEngine sees no change, so the app would keep the stale drumEngine
+        // label. Compare the stored parallel-drum label to this build's (engineCaps().drumEngine).
+        char storedDrum[32];
+        tdsp::catdb::readStoredDrumEngine(storedDrum, sizeof storedDrum);   // "" if absent
+        const char *curDrum = engineCaps().drumEngine ? engineCaps().drumEngine : "";
+        bool drumChanged = strcmp(storedDrum, curDrum) != 0;
+        if (engineChanged || versionChanged || drumChanged) {
+            Serial.printf("[catdb] catalog stale (engine %s->%s, drum %s->%s, v %d->%d) -> auto-reindex\n",
+                          have ? stored : "(none)", synthName(), storedDrum[0] ? storedDrum : "(none)",
+                          curDrum[0] ? curDrum : "(none)", storedVer, tdsp::catdb::kCatalogVersion);
             // forceAll: a builder-version bump can change the WRITER output without changing the
             // per-source signature (grooves went recursive), so rebuild every source, not just
             // the ones whose file count/bytes moved.
@@ -4349,6 +4384,9 @@ void loop() {
 
 #ifdef TDSP_DRUM_PLAITS
     g_drumPlaitsSink.service();   // release one-shot Plaits drum gates whose ~6 ms hold has elapsed
+#endif
+#ifdef TDSP_DRUM_SD
+    g_drumSamplerSink.pollVoices();   // reclaim SD drum voices whose one-shot stream has ended
 #endif
     // Anti-zipper param glides (cheap, self-gated ~1 kHz): ramp the master DAC gain + FX mix toward
     // their targets so the app's throttled slider drags fade smoothly instead of stepping.

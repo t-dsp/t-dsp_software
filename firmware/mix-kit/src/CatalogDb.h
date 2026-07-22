@@ -258,6 +258,32 @@ static bool readStoredEngine(char *out, size_t n, int *outVer = nullptr) {
     return true;
 }
 
+// Read the parallel drum-engine label ("drumEngine":"...") stored in /tdsp/index.ndjson. The manifest
+// only writes this field when the build HAS a dedicated drum voice (OPLL/TSF/Plaits/Sampler), so an
+// absent field yields "" — which correctly matches a GM/melodic build whose drumEngine is "". Lets
+// setup() force a rebuild when ONLY the drum engine changed (same melodic engine, e.g. Plaits->Sampler),
+// which readStoredEngine + kCatalogVersion alone would miss -> the app shows a stale drumEngine label.
+// Returns true if a non-empty label was read.
+static bool readStoredDrumEngine(char *out, size_t n) {
+    if (out && n) out[0] = 0;
+    if (!::g_sdReady || !out || n == 0) return false;
+    File f = SD.open("/tdsp/index.ndjson");
+    if (!f) return false;
+    char buf[256];
+    int got = f.read(buf, sizeof(buf) - 1);   // drumEngine sits in the meta near the front of the one-line manifest
+    f.close();
+    if (got <= 0) return false;
+    buf[got] = 0;
+    const char *key = "\"drumEngine\":\"";
+    const char *p = strstr(buf, key);
+    if (!p) return false;                     // field absent -> caller treats stored label as ""
+    p += strlen(key);
+    size_t i = 0;
+    while (*p && *p != '"' && i + 1 < n) out[i++] = *p++;
+    out[i] = 0;
+    return true;
+}
+
 // ---- top-level build -------------------------------------------------------
 // EngineCaps: which SD catalogs THIS engine can actually use. Written to index.ndjson
 // meta so the app fetches only what's needed (not everything on the card) and hides the
