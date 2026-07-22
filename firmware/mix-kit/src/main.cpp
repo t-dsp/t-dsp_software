@@ -4527,12 +4527,20 @@ void loop() {
         g_jitClock = 0;
         const float bpm = g_masterBpm > 1.0f ? g_masterBpm : 120.0f;
         const double msPerBeat = 60000.0 / (double)bpm;
-        Serial.printf("@JIT n=%lu maxLate=%.2f meanLate=%.2f std=%.2f maxLoopGap=%.0f bpm=%.1f\n",
+        Serial.printf("@JIT n=%lu maxLate=%.2f meanLate=%.2f std=%.2f maxLoopGap=%.0f bpm=%.1f",
                       (unsigned long)g_drumPlayer.jitterCount(),
                       g_drumPlayer.jitterMaxBeats()  * msPerBeat,
                       g_drumPlayer.jitterMeanBeats() * msPerBeat,
                       g_drumPlayer.jitterStdBeats()  * msPerBeat,
                       (double)g_maxLoopGapUs / 1000.0, (double)bpm);
+#ifdef TDSP_DRUM_SD
+        // SD drum sampler: live voice occupancy + streaming underruns. If vp pins at kVoices the
+        // groove is saturating polyphony (=> hard steals => click); if ur climbs the ring is
+        // starving (=> mid-sample dropout => click). Distinguishes the two click causes.
+        Serial.printf(" vp=%d ur=%lu", g_drumSamplerSink.voicesPlaying(),
+                      (unsigned long)newdigate::g_tvpUnderruns);
+#endif
+        Serial.printf("\n");
         g_maxLoopGapUs = 0;   // per-second worst-case window
     }
 
