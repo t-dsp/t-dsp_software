@@ -20,6 +20,7 @@ import { sortEntries } from './src/browse';
 import type { BrowseEntry } from './src/browse';
 import ArpStepGrid from './src/ui/ArpStepGrid';
 import PianoRoll from './src/ui/PianoRoll';
+import PlaitsPanel from './src/ui/PlaitsPanel';
 import ArpPresetBrowser from './src/ui/ArpPresetBrowser';
 import { ARP_PATTERNS as ARP_PAT, ARP_RATES, rateIndexFromFw, PAT_USER_SEQUENCE, DEFAULT_SHAPE, SeqStep, encodeSequence, encodeArpParams } from './src/arpSeq';
 import { applyArpPreset, ArpPreset, ARP_LIBRARY } from './src/arpLibrary';
@@ -637,6 +638,10 @@ export default function App() {
   const [opllIdx, setOpllIdx] = useState<Record<number, number>>({});   // per-track CURRENT instrument index for NON-Dexed engines (synced from the @TRK<i>.INSTR= echo); they step @TRK<i>.INSTR=, not the /dexed catalog
   const [trkNinstr, setTrkNinstr] = useState<Record<number, number>>({});     // per-track engine instrument COUNT (from @STATE tracks[].ninstr) — lets ‹/› wrap for any engine
   const [trkEngInstrs, setTrkEngInstrs] = useState<Record<number, string[]>>({});   // per-track engine PATCH LIST (from @TRK<i>.INSTRS) — the non-Dexed engines' own voice picker
+  // Plaits timbre macros, keyed by track index (from @STATE tracks[].harm/timbre/morph/lpgdecay/lpgcolor,
+  // 0..1000). The Plaits track carries these ON TOP of the shared model/INSTR path; the PlaitsPanel's
+  // knobs hydrate from here on connect and stream @TRK<i>.HARM=/TIMBRE=/… while turned. Only 'plaits' tracks appear.
+  const [plaitsMacros, setPlaitsMacros] = useState<Record<number, { harm: number; timbre: number; morph: number; decay: number; color: number }>>({});
   const [trkSong, setTrkSong] = useState<Record<number, string>>({});   // per-track LOADED MIDI song from @STATE tracks[].song — hydrates on connect (esp. C/D, whose live playerX isn't in @STATE)
   const [selVoiceX, setSelVoiceX] = useState<Record<number, string>>({});   // browser sel key, keyed by 0-based voice index (>=2)
   const [trkVolX, setTrkVolX] = useState<Record<number, number>>({});       // per-extra-voice level (@TRK<i>.VOL), local echo
@@ -783,6 +788,7 @@ export default function App() {
       const songs: Record<number, string> = {};
       const sends: Record<number, number> = {};   // per-track reverb SEND level (send-matrix builds)
       const ninstrs: Record<number, number> = {};   // per-track engine instrument count (for ‹/› wrap)
+      const macros: Record<number, { harm: number; timbre: number; morph: number; decay: number; color: number }> = {};   // Plaits timbre macros (0..1000)
       let nSynth = 0; let dIdx: number | null = null; let dLive = false;
       for (const t of j.tracks) if (t && t.i != null) {
         if (typeof t.fxsend === 'number') sends[t.i | 0] = Math.max(0, Math.min(100, t.fxsend | 0));   // reverb send (synths + drums)
@@ -792,6 +798,8 @@ export default function App() {
           if (typeof t.name === 'string') names[t.i | 0] = t.name;
           if (typeof t.eng === 'string') engs[t.i | 0] = t.eng;   // 'opll' etc; absent = Dexed
           if (typeof t.song === 'string') songs[t.i | 0] = t.song;   // loaded MIDI song (hydrates all cards, incl. C/D)
+          if (typeof t.harm === 'number')   // Plaits track: hydrate the panel's knobs
+            macros[t.i | 0] = { harm: t.harm | 0, timbre: t.timbre | 0, morph: t.morph | 0, decay: t.lpgdecay | 0, color: t.lpgcolor | 0 };
           nSynth++;
         } else if (t.kind === 'drum') {
           if (t.on) dLive = true;                            // a live, drum-capable track exists (ground truth)
@@ -807,6 +815,7 @@ export default function App() {
       setTrkSong(songs);
       setTrkSend(sends);
       setTrkNinstr(ninstrs);
+      setPlaitsMacros(macros);
       setDrumSrcIdx(dIdx);
       setDrumLive(dLive);
       if (nSynth > 0) setSynthCount(nSynth);   // how many synth cards to render (data-driven)
@@ -841,7 +850,18 @@ export default function App() {
       // Sync the local instrument index from the device confirmation (@TRK<i>.INSTR=<idx>) so
       // Next/Prev step from the true current instrument, not a stale 0.
       const m = line.match(/^@TRK(\d+)\.INSTR=(\d+)/);
-      if (m) setOpllIdx(mp => ({ ...mp, [+m[1]]: +m[2] }));
+      if (m) { setOpllIdx(mp => ({ ...mp, [+m[1]]: +m[2] })); return; }
+      // Plaits macro confirmation (@TRK<i>.HARM=/TIMBRE=/MORPH=/LPGDECAY=/LPGCOLOR=, 0..1000) — keep the
+      // panel's knobs in step with the device's clamped value. Optimistic drags already moved the knob;
+      // this reconciles it (and covers a value the firmware clamped differently than we sent).
+      const mm = line.match(/^@TRK(\d+)\.(HARM|TIMBRE|MORPH|LPGDECAY|LPGCOLOR)=(\d+)/);
+      if (mm) {
+        const key = ({ HARM: 'harm', TIMBRE: 'timbre', MORPH: 'morph', LPGDECAY: 'decay', LPGCOLOR: 'color' } as const)[mm[2] as 'HARM'];
+        setPlaitsMacros(mp => {
+          const prev = mp[+mm[1]] ?? { harm: 500, timbre: 500, morph: 500, decay: 600, color: 500 };
+          return { ...mp, [+mm[1]]: { ...prev, [key]: +mm[3] } };
+        });
+      }
     } else if (line.indexOf('"conn"') >= 0 && line.indexOf('"vol"') >= 0) {
       const m = line.match(/\{.*\}/); if (m) { try { const j = JSON.parse(m[0]); setBt({ conn: !!j.conn, peer: j.peer || '' }); if (j.vol != null) setVol(j.vol); } catch {} }
     } else if (line.startsWith('@SONGP=')) {
@@ -1616,6 +1636,17 @@ export default function App() {
     // (from @TRK<i>.INSTRS), not the Dexed /dexed cart browser. Tapping a row selects that patch;
     // the current one is highlighted. Row labels strip the firmware's "OPLL: "/"Plaits: " prefix.
     const oi = target - 1;
+    // PLAITS: a full voice EDITOR (model LED matrix + HARMONICS/TIMBRE/MORPH macros + LPG drawer) in
+    // place of the flat patch list — the models still ride the same @TRK<i>.INSTR= path, the macros add
+    // @TRK<i>.HARM=/TIMBRE=/… on top. Shows once the engine's model list has arrived (@TRK<i>.INSTRS).
+    if (trkEng[oi] === 'plaits') {
+      const list = trkEngInstrs[oi] ?? [];
+      return !list.length
+        ? <View style={{ padding: 20, alignItems: 'center' }}><ActivityIndicator color={C.accent} /><Text style={[s.muted, { marginTop: 8 }]}>Loading Plaits models…</Text></View>
+        : <PlaitsPanel models={list} ninstr={trkNinstr[oi] || list.length} curModel={opllIdx[oi] ?? 0} macros={plaitsMacros[oi]}
+            onSelectModel={idx => { setOpllIdx(m => ({ ...m, [oi]: idx })); tp.trk(oi, 'INSTR=' + idx); tp.requestState(); }}
+            onMacro={(field, permille) => tp.trk(oi, field + '=' + permille)} />;
+    }
     if (isPickerEngine(trkEng[oi])) {
       const list = trkEngInstrs[oi] ?? [];
       const cur = opllIdx[oi] ?? 0;
