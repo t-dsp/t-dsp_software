@@ -2060,9 +2060,13 @@ export default function App() {
       {caps.drumkitsel ? (
         <>
           <Text style={[s.muted, { marginTop: 8 }]}>Kit: {drumKitName || '—'}</Text>
-          <Row><ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              {cat.drumkits.map((k, i) => <Pressable key={i} style={[s.pill, drums.kit === i && s.pillOn]} onPress={() => { setDrums(d => ({ ...d, kit: i })); tp.drumKit(i); }}><Text style={s.text}>{prettyKit(k.name)}</Text></Pressable>)}
-          </ScrollView></Row>
+          {/* Vertical scrollable kit list (the Mars library is ~90 kits — a horizontal pill row hid the
+              tail). Mirrors the Voices FlatList: fixed ROW_H rows, bounded height so it scrolls in-card. */}
+          <View style={{ height: Math.min(Math.max(cat.drumkits.length, 1), 7) * ROW_H, borderWidth: 1, borderColor: C.border, borderRadius: 7, marginTop: 4 }}>
+            <FlatList data={cat.drumkits} nestedScrollEnabled keyExtractor={(_, i) => 'dk' + i}
+              getItemLayout={(_, index) => ({ length: ROW_H, offset: ROW_H * index, index })}
+              renderItem={({ item, index }) => <ListBtn label={prettyKit(item.name)} sel={drums.kit === index} onPress={() => { setDrums(d => ({ ...d, kit: index })); tp.drumKit(index); }} />} />
+          </View>
         </>
       ) : (
         // Fixed-voice drum engine (OPLL rhythm): no GM kits to pick — say what it actually is so the

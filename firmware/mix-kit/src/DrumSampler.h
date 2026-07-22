@@ -170,6 +170,21 @@ public:
             if (_voiceNote[v] >= 0 && !g_drumSdV[v].isPlaying()) _voiceNote[v] = -1;
     }
 
+    // --- diagnostics (SD polyphony stress test; see @DRUMSTRESS) --------------
+    // Fire up to n distinct mapped notes AT ONCE (worst-case simultaneous streaming). Returns the
+    // count actually triggered. Used to measure whether the no-PSRAM board can refill n voices' ring
+    // buffers fast enough (g_tvpUnderruns climbs on a starve) — i.e. "is SD fast enough for n hits".
+    int triggerN(int n) {
+        if (n > kVoices) n = kVoices;
+        int fired = 0;
+        for (int note = 0; note < kNumNotes && fired < n; ++note)
+            if (_path[note][0]) { onNoteOn(10, (uint8_t)note, 110); ++fired; }
+        return fired;
+    }
+    int voicesPlaying() const {
+        int c = 0; for (int v = 0; v < kVoices; ++v) if (g_drumSdV[v].isPlaying()) ++c; return c;
+    }
+
 private:
     static bool isHat(int note) { return note == 42 || note == 44 || note == 46; }
     static bool endsWithWav(const char *nm) {
@@ -188,11 +203,19 @@ private:
     // Voice pick: retrigger of the same note steals its voice; else an idle (finished) voice; else the
     // oldest-started voice.
     int pickVoice(uint8_t note) {
-        for (int v = 0; v < kVoices; ++v) if (_voiceNote[v] == (int8_t)note) return v;
-        for (int v = 0; v < kVoices; ++v) if (!g_drumSdV[v].isPlaying()) return v;
-        int oldest = 0; uint32_t om = _voiceStartMs[0];
-        for (int v = 1; v < kVoices; ++v) if (_voiceStartMs[v] < om) { om = _voiceStartMs[v]; oldest = v; }
-        return oldest;
+        for (int v = 0; v < kVoices; ++v) if (_voiceNote[v] == (int8_t)note) return v;   // retrigger this note
+        for (int v = 0; v < kVoices; ++v) if (!g_drumSdV[v].isPlaying()) return v;        // a finished (idle) voice
+        // All voices busy -> steal the one CLOSEST TO ITS NATURAL END (least remaining), so we clip the
+        // least-audible tail. The old policy stole the OLDEST-STARTED voice = the longest-ringing sample
+        // (a crash/ride/open-hat mid-decay) — exactly the trailing tail you'd hear cut. SD is proven fast
+        // enough for full polyphony (@DRUMSTRESS: 0 underruns), so stealing is the only cut source.
+        int best = 0; uint32_t bestRem = 0xFFFFFFFFu;
+        for (int v = 0; v < kVoices; ++v) {
+            const uint32_t len = g_drumSdV[v].lengthMillis(), pos = g_drumSdV[v].positionMillis();
+            const uint32_t rem = len > pos ? len - pos : 0;
+            if (rem < bestRem) { bestRem = rem; best = v; }
+        }
+        return best;
     }
 
     int8_t   _voiceNote[kVoices];
@@ -203,6 +226,13 @@ private:
     int      _curKit  = 0;
 };
 DrumSamplerSink g_drumSamplerSink;
+
+#ifdef TDSP_TVP_UNDERRUN_COUNT
+// SD-streaming underrun tally, ++'d inside teensy-variable-playback's IndexableFile when a voice's
+// buffer wasn't refilled in time (that sample plays as silence). @DRUMSTRESS resets + reads it.
+// Lives in newdigate:: to match the extern in IndexableFile.h (which is inside that namespace).
+namespace newdigate { volatile uint32_t g_tvpUnderruns = 0; }
+#endif
 
 // Bring up the SD drum kit: mixer gains 1.0, open the drum mix slot, scan /drums + load kit 0.
 // Returns true only if at least one kit folder exists (mirrors drumTsfBegin()'s "font loaded?"

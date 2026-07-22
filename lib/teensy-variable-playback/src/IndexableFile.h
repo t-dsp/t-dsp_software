@@ -422,6 +422,11 @@ public:
         if (match == nullptr)  // none of the buffers contains the required sample
 		{
 			fails++;
+#ifdef TDSP_TVP_UNDERRUN_COUNT
+			// Diagnostic tally of SD-streaming underruns (buffer not refilled in time -> this sample is
+			// silence). mix-kit @DRUMSTRESS reads it to measure no-PSRAM polyphonic streaming. See DrumSampler.h.
+			{ extern volatile uint32_t g_tvpUnderruns; ++g_tvpUnderruns; }
+#endif
 			zero = 0; 		// in case someone wrote to the reference at some point!
 			return zero;	// stutter, but don't crash due to reading filesystem under interrupt
         }

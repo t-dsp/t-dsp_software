@@ -3098,6 +3098,22 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         tdsp::catdb::buildCatalog(engineCaps(), catdbWriteBundled, millis());
         reply.printf("@DRUMRESCANNED\t%d\n", n);
     }
+    // @DRUMSTRESS=<n>: fire n one-shots AT ONCE and report SD-streaming underruns over ~0.9 s — the
+    // test for "can this no-PSRAM board read n simultaneous drum hits fast enough?". underruns>0 means
+    // the buffers starved (audible dropouts/cut tails); sweep n=1,2,4,6,8 to find the safe polyphony.
+    else if (strncmp(line, "@DRUMSTRESS=", 12) == 0) {
+#ifdef TDSP_TVP_UNDERRUN_COUNT
+        int n = atoi(line + 12); if (n < 1) n = 1;
+        newdigate::g_tvpUnderruns = 0;
+        const int fired = g_drumSamplerSink.triggerN(n);
+        const uint32_t t0 = millis();
+        while (millis() - t0 < 900) delay(2);   // audio ISR plays; yield()/EventResponder refills between
+        reply.printf("@DRUMSTRESS n=%d fired=%d underruns=%lu stillPlaying=%d\n",
+                     n, fired, (unsigned long)newdigate::g_tvpUnderruns, g_drumSamplerSink.voicesPlaying());
+#else
+        reply.println("@DRUMSTRESS unavailable (rebuild with -D TDSP_TVP_UNDERRUN_COUNT)");
+#endif
+    }
 #endif
     else if (strncmp(line, "@READ=", 6) == 0)     streamFile(reply, line + 6);  // generic file fetch (catalog transport)
     else if (strncmp(line, "@LS=", 4) == 0) {                                    // generic recursive dir list: @LS=<path>[\x1f<ext>]
