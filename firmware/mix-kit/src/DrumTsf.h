@@ -61,7 +61,12 @@ static bool drumTsfBegin() {
         g_drumFontIsKits = false;
         return false;
     }
-    tsf_set_output(g_drumTsfHandle, TSF_STEREO_UNWEAVED, (int)AUDIO_SAMPLE_RATE_EXACT, -4.0f);
+    // Global TSF render gain (dB). Default -4 for normalized GM fonts; quiet fonts (e.g. the Mars
+    // drum SF2, whose samples land ~-20 dBFS) can override with -D TDSP_DRUM_TSF_DB=<n> to boost.
+#ifndef TDSP_DRUM_TSF_DB
+#define TDSP_DRUM_TSF_DB -4.0f
+#endif
+    tsf_set_output(g_drumTsfHandle, TSF_STEREO_UNWEAVED, (int)AUDIO_SAMPLE_RATE_EXACT, (float)TDSP_DRUM_TSF_DB);
     tsf_set_max_voices(g_drumTsfHandle, 24);            // drums need fewer voices than a full melodic engine
     for (int ch = 0; ch < 16; ch++) {
         tsf_channel_set_presetnumber(g_drumTsfHandle, ch, 0, ch == 9 ? 1 : 0);  // tsf ch9 (MIDI 10) = drum bank 128

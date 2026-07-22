@@ -1,0 +1,35 @@
+# Repo-root .easignore — EAS archives the WHOLE monorepo from the git root, but the only EAS project
+# here is app/tdsp-control (a standalone Expo app that imports nothing from the embedded firmware
+# tree). Exclude everything the JS app build doesn't need so the upload is small (~1–2 MB, not 337 MB).
+# The app's own app/tdsp-control/.easignore only takes effect in git mode via this root file, and
+# EAS's NO_VCS mode ignores .easignore entirely — so keep the real exclusions here.
+
+# Embedded firmware / libraries / spikes / planning / tooling — irrelevant to the app build
+/firmware/
+/lib/
+/projects/
+/planning/
+/references/
+/tools/
+/temp/
+
+# regenerated dependencies + build artifacts anywhere in the tree
+**/node_modules/
+**/.expo/
+**/dist/
+**/web-build/
+**/.pio/
+**/expo-env.d.ts
+
+# credentials / secrets — must never leave the machine
+**/*.jks
+**/*.p8
+**/*.p12
+**/*.key
+**/*.mobileprovision
+
+# VCS / editor / OS cruft
+**/.git/
+**/.claude/
+**/.DS_Store
+**/*.log

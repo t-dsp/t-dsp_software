@@ -139,8 +139,31 @@ def pack_display(zip_name: str) -> str:
 
 
 def pack_shortname(zip_name: str) -> str:
-    m = re.match(r"\D*(\d+)", zip_name)
-    return (m.group(1) if m else re.sub(r"\.zip$", "", zip_name, flags=re.I)).lower()
+    """A short, filesystem-safe id for the pack: the stem before '…from mars'.
+    '808-from-mars.zip'->'808', 'lm1_from_mars'->'lm1', 'lo-fi_drum_machines…'->'lo_fi_drum_machines'."""
+    stem = re.sub(r"\.zip$", "", zip_name, flags=re.I)
+    stem = re.split(r"[-_ ]from[-_ ]mars", stem, flags=re.I)[0]
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", stem).strip("_").lower()
+    return safe or re.sub(r"\.zip$", "", zip_name, flags=re.I).lower()
+
+
+# Order of importance for --per-pack (matched as substrings of pack_shortname). The iconic
+# machines first, then notable/high-piece packs; anything unlisted sorts after, by piece count.
+PRIORITY = [
+    "808", "909", "linndrum", "lm1", "linn60", "dmx", "drumulator", "606", "707", "727",
+    "626", "505", "dr_bohm", "jupiter", "junos", "lo_fi_drum_machines", "vinyl_drum_machines",
+    "vinyl_drums", "vinyl_sp", "cassette_drums", "drumtrax", "lindrum", "dr_sample", "s950",
+    "sample_journal", "soviet_synths", "viscount", "wendel", "ekko", "tom", "indie_tapes",
+    "perkons", "dmx", "sp_909", "essential_wav_16bit",
+]
+
+
+def priority_rank(zip_name: str) -> int:
+    short = pack_shortname(zip_name)
+    for i, kw in enumerate(PRIORITY):
+        if kw in short:
+            return i
+    return len(PRIORITY)
 
 
 # --- pack scanning -----------------------------------------------------------
@@ -242,11 +265,61 @@ def build_kit(zip_path, display, program, chosen, emit_dir, kit_key):
                 hits=hits)
 
 
+def write_kit_tsv(out_dir: str, basename: str, built) -> str:
+    """Per-font kit list, same columns loadDrumKitsTsv() expects (drumkits.tsv format)."""
+    path = os.path.join(out_dir, basename + ".tsv")
+    with open(path, "w", encoding="utf-8", newline="\n") as fh:
+        fh.write("# program\tname\tlicense\tpieces\tdisplay\n")
+        for k in built:
+            fh.write("%d\t%s\t%s\t%d\t%s\n" %
+                     (k["program"], k["name"], k["license"], len(k["hits"]), k["display"]))
+    return path
+
+
+def emit_font(built, out_dir, basename, do_validate):
+    """Assemble <basename>.sf2 (+ .tsv), structural-check, optional tsf.h render.
+    Returns {path, tsv, bytes, kits, display} or None on structural failure."""
+    sf2_bytes = F.build_sf2(built)
+    path = os.path.join(out_dir, basename + ".sf2")
+    with open(path, "wb") as fh:
+        fh.write(sf2_bytes)
+    errs = F.structural_check(sf2_bytes, built)
+    if errs:
+        for e in errs:
+            print("    [validate] ERROR " + e)
+        return None
+    tsv = write_kit_tsv(out_dir, basename, built)
+    if do_validate:
+        F.render_check(path, built, out_dir)
+    return dict(path=path, tsv=tsv, bytes=len(sf2_bytes), kits=len(built),
+                display=built[0]["display"])
+
+
+def build_pack_kits(zip_path, display0, short, hits, split_variants, min_pieces, drums_dir):
+    """Build the list of kit dicts for one pack (variants -> programs when split_variants)."""
+    variants = sorted({h[3] for h in hits}) if split_variants else [None]
+    if split_variants and variants == ["Main"]:
+        variants = [None]
+    kits, program = [], 0
+    for var in variants:
+        chosen = pick_representatives(hits, var)
+        if len(chosen) < min_pieces:
+            continue
+        disp = display0 if var in (None, "Main") else "%s %s" % (short.upper(), var)
+        key = "%s_%s" % (short, (var or "main").lower())
+        kits.append(build_kit(zip_path, disp, program, chosen, drums_dir, key))
+        program += 1
+    return kits
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Build /sf2/drumkits.sf2 from 'Drums From Mars' packs.")
     ap.add_argument("--mars-dir", default=MARS_DIR_DEFAULT, help="folder holding the *.zip packs")
     ap.add_argument("--packs", help="comma list by number/name (e.g. 808,909); default: all complete")
     ap.add_argument("--all", action="store_true", help="every complete non-loop pack")
+    ap.add_argument("--per-pack", action="store_true",
+                    help="build one SWAPPABLE /sf2/mars_<pack>.sf2 per pack + a fonts.tsv manifest "
+                         "(for @DRUMFONT runtime swap); default drumkits.sf2 = top-priority pack")
     ap.add_argument("--split-variants", action="store_true",
                     help="each detected tone variant (Clean/Tube/Tape/…) becomes its own kit")
     ap.add_argument("--min-pieces", type=int, default=4, help="skip a kit with fewer GM pieces")
@@ -276,9 +349,62 @@ def main() -> int:
     if not packs:
         sys.exit("no matching complete packs (see --list)")
 
+    packs = sorted(packs, key=lambda fn: (priority_rank(fn), fn.lower()))
+
     os.makedirs(args.out, exist_ok=True)
     drums_dir = os.path.join(args.out, "drums")           # /drums/<kit>/ one-shot archive
     os.makedirs(drums_dir, exist_ok=True)
+
+    # ---- per-pack: one swappable /sf2/mars_<pack>.sf2 each + a fonts.tsv manifest ----
+    if args.per_pack:
+        import shutil
+        manifest = []   # (sd_path, display, kits, bytes, basename)
+        for fn in packs:
+            zip_path = os.path.join(args.mars_dir, fn)
+            display0, short = pack_display(fn), pack_shortname(fn)
+            hits = scan_pack(zip_path)
+            if not hits:
+                continue
+            kits = build_pack_kits(zip_path, display0, short, hits,
+                                   args.split_variants, args.min_pieces, drums_dir)
+            if not kits:
+                continue
+            base = "mars_%s" % short
+            info = emit_font(kits, args.out, base, not args.no_validate)
+            if not info:
+                print("  [%s] structural check failed — skipped" % display0); continue
+            mb = info["bytes"] / 1048576
+            flag = "  [>6MB: 16MB-board only]" if mb > 6.0 else ""
+            print("  /sf2/%s.sf2  %.2f MB  %d kit(s)  %s%s" % (base, mb, info["kits"], display0, flag))
+            manifest.append(("/sf2/%s.sf2" % base, display0, info["kits"], info["bytes"], base))
+        if not manifest:
+            sys.exit("no fonts built.")
+        top = manifest[0]                          # top-priority pack = the boot default
+        shutil.copyfile(os.path.join(args.out, top[4] + ".sf2"), os.path.join(args.out, "drumkits.sf2"))
+        shutil.copyfile(os.path.join(args.out, top[4] + ".tsv"), os.path.join(args.out, "drumkits.tsv"))
+        mpath = os.path.join(args.out, "fonts.tsv")
+        with open(mpath, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write("# path\tdisplay\tkits\tbytes\n")
+            for p, disp, k, b, _base in manifest:
+                fh.write("%s\t%s\t%d\t%d\n" % (p, disp, k, b))
+        total = sum(m[3] for m in manifest) / 1048576
+        print("\n[per-pack] %d font(s), %.1f MB total on card. manifest -> %s" % (len(manifest), total, mpath))
+        print("  boot default /sf2/drumkits.sf2 = %s (%.2f MB)" % (top[1], top[3] / 1048576))
+        big = [m[0] for m in manifest if m[3] / 1048576 > 6.0]
+        if big:
+            print("  [PSRAM] exceed the 8MB-board ~6MB ceiling (won't load on jay-mint): " + ", ".join(big))
+        if args.push:
+            files = []
+            for p, _disp, _k, _b, base in manifest:
+                files.append((os.path.join(args.out, base + ".sf2"), p))
+                files.append((os.path.join(args.out, base + ".tsv"), p[:-4] + ".tsv"))
+            files += [(os.path.join(args.out, "drumkits.sf2"), "/sf2/drumkits.sf2"),
+                      (os.path.join(args.out, "drumkits.tsv"), "/sf2/drumkits.tsv"),
+                      (mpath, "/sf2/fonts.tsv")]
+            F.push(files, args.port)
+        else:
+            print("\nDone. Push with: python tools/build_mars_kits.py --per-pack --push --port <PORT>")
+        return 0
 
     built = []
     program = 0
