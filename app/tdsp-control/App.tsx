@@ -2029,7 +2029,10 @@ export default function App() {
   const drumEngineLabel = cat.drumEngine ? cat.drumEngine + ' drum engine'
     : cat.hasDrums ? (cat.engine ? cat.engine.split(/[\s(]/)[0] : 'GM') + ' drums'
     : 'Drums';
-  const drumKitName = cat.drumkits[drums.kit]?.name || '';
+  // SD-sampler kits are /drums folder names ("808_clean"); prettify to "808 Clean". Names without an
+  // underscore (GM/acoustic kit display names) are already human-readable, so leave them untouched.
+  const prettyKit = (s: string) => s && s.includes('_') ? s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : s;
+  const drumKitName = prettyKit(cat.drumkits[drums.kit]?.name || '');
   // A fixed-voice engine (OPLL rhythm, caps.drumkitsel === false) has no GM kits — say so instead of
   // showing a kit name the engine ignores. GM/sampled engines append the loaded kit.
   const drumDetail = !caps.drumkitsel ? drumEngineLabel + '  ·  fixed rhythm voice'
@@ -2056,9 +2059,9 @@ export default function App() {
       )}
       {caps.drumkitsel ? (
         <>
-          <Text style={[s.muted, { marginTop: 8 }]}>Kit: {cat.drumkits[drums.kit]?.name || '—'}</Text>
+          <Text style={[s.muted, { marginTop: 8 }]}>Kit: {drumKitName || '—'}</Text>
           <Row><ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              {cat.drumkits.map((k, i) => <Pressable key={i} style={[s.pill, drums.kit === i && s.pillOn]} onPress={() => { setDrums(d => ({ ...d, kit: i })); tp.drumKit(i); }}><Text style={s.text}>{k.name}</Text></Pressable>)}
+              {cat.drumkits.map((k, i) => <Pressable key={i} style={[s.pill, drums.kit === i && s.pillOn]} onPress={() => { setDrums(d => ({ ...d, kit: i })); tp.drumKit(i); }}><Text style={s.text}>{prettyKit(k.name)}</Text></Pressable>)}
           </ScrollView></Row>
         </>
       ) : (

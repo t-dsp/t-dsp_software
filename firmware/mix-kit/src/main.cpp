@@ -3080,6 +3080,25 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
 #endif
     else if (strcmp(line, "@GETCAT") == 0)        refreshCatalog(reply);   // re-scan SD + send catalog
     else if (strcmp(line, "@REINDEX") == 0)       { tdsp::catdb::buildCatalog(engineCaps(), catdbWriteBundled, millis()); reply.println("@REINDEXED"); }  // rebuild /tdsp/*.ndjson DB (upsert)
+#if defined(TDSP_DRUM_SD)
+    // @DRUMRESCAN: re-scan /drums for kit folders WITHOUT a reflash (the SD sampler only scans at
+    // boot). Picks up kits pushed live over @WB; if drums went 0 -> N it wires the ch10 route + marks
+    // drums available, then rebuilds the catalog so the app's kit list refreshes. Reply carries the count.
+    else if (strcmp(line, "@DRUMRESCAN") == 0) {
+        g_drumSamplerSink.scanKits();
+        const int n = g_drumSamplerSink.numKits();
+        if (n > 0) {
+            g_drumNoteMapper.setDownstream(&g_drumSamplerSink);      // idempotent (same wiring setup() does)
+            g_drumPlayer.setSink(&g_drumNoteMapper); g_drumTrack.sink = &g_drumSamplerSink;
+            g_drumSamplerSink.setKit(g_drumSamplerSink.currentKit());
+            g_engineHasDrums = true;
+        } else {
+            g_engineHasDrums = false;
+        }
+        tdsp::catdb::buildCatalog(engineCaps(), catdbWriteBundled, millis());
+        reply.printf("@DRUMRESCANNED\t%d\n", n);
+    }
+#endif
     else if (strncmp(line, "@READ=", 6) == 0)     streamFile(reply, line + 6);  // generic file fetch (catalog transport)
     else if (strncmp(line, "@LS=", 4) == 0) {                                    // generic recursive dir list: @LS=<path>[\x1f<ext>]
         char buf[160]; strncpy(buf, line + 4, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
