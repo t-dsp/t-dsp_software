@@ -81,6 +81,13 @@ public:
         return new IndexableSDFile<RESAMPLE_BUFFER_SAMPLE_SIZE, RESAMPLE_BUFFER_COUNT>(_filename, _sd, file);
     }
 
+    // Reuse the already-allocated ring buffers for a new file (no per-play new/delete -> no heap
+    // fragmentation on rapid drum retriggers). Only the FIRST play on a voice allocates.
+    void reopenSourceBuffer(File& file) override {
+        if (_sourceBuffer) _sourceBuffer->reopen(file);
+        else _sourceBuffer = createSourceBuffer(file);
+    }
+
     uint32_t positionMillis(void) {
         if (_file_size == 0) return 0;
         if (!_useDualPlaybackHead) {

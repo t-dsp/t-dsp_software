@@ -454,6 +454,22 @@ public:
         }    
     }
 	
+	// Reuse this file-backed buffer for a NEW file WITHOUT freeing/reallocating the ring buffers.
+	// close() new/deletes the 4x ring buffers every play — on a small heap that per-hit churn
+	// fragments memory until an alloc can't find a contiguous block (drums "play 2 bars then skip").
+	// reopen() adopts a new file and resets the buffers' bookkeeping in place so preLoadBuffers()
+	// refills them. Caller MUST have stopped playback (audio ISR not reading these buffers) first.
+	void reopen(TFile& newFile) {
+		if (_file) _file.close();
+		_file = newFile;
+		bool intEnabled = NVIC_IS_ENABLED(IRQ_SOFTWARE) != 0;
+		AudioNoInterrupts();
+		for (auto && x : _buffers) { x->status = constructed; x->buffer_size = 0; x->index = 0; }
+		if (intEnabled) AudioInterrupts();
+		fails = 0;
+		prevPlaybackRate = 0.0f;
+	}
+
 	void setLoopType(loop_type l) { _loop_type = l; }
 	void setLoopStart(int32_t l) { _loop_start_blocks = l >> buffer_to_index_shift; }
 	void setLoopFinish(int32_t l) { _loop_finish_blocks = l >> buffer_to_index_shift; }

@@ -24,6 +24,15 @@ public:
     virtual int16_t getSourceBufferValue(long index) = 0;
     virtual void close(void) = 0;
 
+    // Install the sourceBuffer for a newly-opened file. DEFAULT: recreate it (delete + createSourceBuffer)
+    // — the historical per-play behavior (kept for the array/lfs/serialflash readers). The SD reader
+    // OVERRIDES this to REUSE the existing buffer's ring memory (IndexableFile::reopen) so rapid
+    // retriggers (drum one-shots) don't new/delete ~16 KB every hit and fragment a small heap.
+    virtual void reopenSourceBuffer(TFile& file) {
+        if (_sourceBuffer) { delete _sourceBuffer; _sourceBuffer = nullptr; }
+        _sourceBuffer = createSourceBuffer(file);
+    }
+
     void begin(void) 
     {
         if (_interpolationType != ResampleInterpolationType::resampleinterpolation_none) {
@@ -94,13 +103,22 @@ public:
 
     bool play(const char *filename, bool isWave, uint16_t numChannelsIfRaw = 0)
     {
-        close();
+        // Was close() — that FREES the ring buffers, forcing a new/delete of ~16 KB every play. Just
+        // STOP (the audio ISR gates on _playing); keep _sourceBuffer + its rings alive and REUSE them
+        // below via reopenSourceBuffer(). Reuse the filename buffer too (grow-only) — zero heap churn.
+        stop();
 
         if (!isWave) // if raw file, then hardcode the numChannels as per the parameter
             setNumChannels(numChannelsIfRaw);
 
-        _filename = new char[strlen(filename)+1] {0};
-        memcpy(_filename, filename, strlen(filename) + 1);
+        {
+            size_t need = strlen(filename) + 1;
+            if (_filename == nullptr || strlen(_filename) + 1 < need) {
+                if (_filename) delete [] _filename;
+                _filename = new char[need] {0};
+            }
+            memcpy(_filename, filename, need);
+        }
 
         TFile file = open(_filename);
 		
@@ -165,7 +183,7 @@ public:
 			_loop_finish = _file_samples;
 		}
         
-		_sourceBuffer = createSourceBuffer(file);
+		reopenSourceBuffer(file);   // reuse existing ring buffers (SD) or recreate (default)
 		setLoopType(_loopType);
 		setLoopStart(/*_samples_to_start*/(_loop_start));
 		setLoopFinish(/*_samples_to_start*/(_loop_finish));
