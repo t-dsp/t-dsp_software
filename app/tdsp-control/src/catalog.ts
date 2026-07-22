@@ -15,6 +15,20 @@ export interface Soundfont { path: string; name: string; bytes: number; }
 export interface Instrument { i: number; name: string; }
 export interface DrumKit { name: string; prog: number; }
 
+// A swappable drum SF2 (runtime @DRUMFONT swap; see planning/drums-from-mars/RUNTIME_FONT_SWAP.md).
+// Delivered live over the wire as a "@FONTS=" line (NOT the ndjson catalog), each item's fields
+// joined by US (0x1f): path\x1fdisplay\x1fkits\x1fcurrent, items '|'-separated.
+export interface DrumFont { path: string; display: string; kits: number; current: boolean; }
+
+/** Parse a device "@FONTS=<item>|<item>|…" line body (everything after the '='). */
+export function parseFonts(body: string): DrumFont[] {
+  if (!body) return [];
+  return body.split('|').filter(Boolean).map(item => {
+    const f = item.split('\x1f');
+    return { path: f[0] || '', display: f[1] || f[0] || '', kits: parseInt(f[2] || '0', 10) || 0, current: (f[3] || '0') === '1' };
+  }).filter(f => f.path);
+}
+
 export interface Catalog {
   engine: string;
   hasDrums: boolean;   // does the built engine render ch10 drums? (hides the Drums section when false)

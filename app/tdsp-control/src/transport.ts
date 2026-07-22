@@ -87,6 +87,12 @@ export interface Transport {
   playGrooveFile(name: string): void;
   stopDrums(): void;
   drumVol(pct: number): void;                         // drum-player level (@DRUMVOL=, 0..150 %), independent of the master @VOL
+  // ---- Runtime drum-font swap (build-flag gated; shown only when @STATE caps.drumfontsel → the sampled
+  // drum TSF build with >1 SF2 on the card). See planning/drums-from-mars/RUNTIME_FONT_SWAP.md. The list
+  // arrives as a "@FONTS=" line via onLine() (parse with catalog.parseFonts); the swap's completion is
+  // acked with a "@DRUMFONT=<path>" line (the app reloads the catalog for the new font's kits). ----
+  requestFonts(): void;                               // ask for the available drum fonts (@FONTS)
+  drumFont(path: string): void;                       // swap the resident drum SF2 (@DRUMFONT=<path>)
   songPlay(arg: string): void;                        // play by name/filename (@SONGF=) — mirrors playGrooveFile
   songRestart(arg: string): void;                     // hard restart from the top on a fresh downbeat (@SONGRESTART=): zeroes the clock, ignores launch-quantize
   stopSong(): void;

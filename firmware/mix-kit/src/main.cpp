@@ -1263,6 +1263,9 @@ static int  g_drumVolPct   = 100;   // drum level 0..150 (% of file velocity)
 static int  g_songVolPct   = 100;   // MIDI-player level 0..150 (% of file velocity), independent of @VOL master
 static bool g_drumSynchro  = false; // SYNCHRO START (PSS-140 style): groove starts on your first note
 static bool g_engineHasDrums = false;// engine renders ch10 (captured once at setup; not the live mask)
+#if defined(TDSP_DRUM_TSF)
+static int  g_drumFontCount  = 0;   // # of swappable drum fonts on the card (cached at boot); >1 -> caps.drumfontsel
+#endif
 
 // LAUNCH QUANTIZE (opt-in, default off): defer a song/groove START to the next bar edge of
 // the free-running master clock — the SAME grid the arp already steps on — so songs, grooves
@@ -1837,12 +1840,22 @@ static inline const char *drumKitName(int i) { return g_numRtKits > 0 ? g_rtKits
 static inline uint8_t     drumKitProg(int i) { return g_numRtKits > 0 ? g_rtKits[i].prog : kDrumKits[i].prog; }
 
 #if TDSP_HAS_SDCARD
-// Populate g_rtKits from /sf2/drumkits.tsv (written by fetch_drumkits.py alongside the font).
-// Only called when the acoustic font actually loaded (g_drumFontIsKits), so the menu always
-// matches what will sound. Silent no-op if the manifest is absent/empty (keeps GM kits).
-static void loadDrumKitsTsv() {
-    File f = SD.open("/sf2/drumkits.tsv");
-    if (!f) { Serial.println("[drum] drumkits.sf2 loaded but /sf2/drumkits.tsv missing -> keeping GM kit names"); return; }
+// Populate g_rtKits from a font's sibling <font>.tsv (written by fetch_drumkits.py /
+// build_mars_kits.py alongside the font: /sf2/drumkits.sf2 -> /sf2/drumkits.tsv,
+// /sf2/mars_909.sf2 -> /sf2/mars_909.tsv). The manifest cols are program, name, license,
+// pieces, display. Called at boot for the resident font and again on a runtime @DRUMFONT
+// swap. Resets g_numRtKits first, so a font WITHOUT a sibling .tsv falls back to the GM kit
+// names (g_numRtKits == 0) instead of keeping the previous font's kits.
+static void loadDrumKitsTsv(const char *fontPath) {
+    g_numRtKits = 0;                                       // fall back to GM names if the sibling .tsv is absent
+    // Derive "<font>.tsv" from the font path (replace a trailing .sf2, else append .tsv).
+    char tsvPath[80];
+    strncpy(tsvPath, fontPath, sizeof(tsvPath) - 1); tsvPath[sizeof(tsvPath) - 1] = 0;
+    char *dot = strrchr(tsvPath, '.');
+    if (dot && strcasecmp(dot, ".sf2") == 0) { strcpy(dot, ".tsv"); }
+    else { size_t L = strlen(tsvPath); if (L + 4 < sizeof(tsvPath)) strcpy(tsvPath + L, ".tsv"); }
+    File f = SD.open(tsvPath);
+    if (!f) { Serial.printf("[drum] %s missing -> keeping GM kit names\n", tsvPath); return; }
     int n = 0;
     while (f.available() && n < (int)(sizeof(g_rtKits) / sizeof(g_rtKits[0]))) {
         String line = f.readStringUntil('\n');
@@ -1862,7 +1875,7 @@ static void loadDrumKitsTsv() {
     }
     f.close();
     g_numRtKits = n;
-    Serial.printf("[drum] loaded %d acoustic kit(s) from /sf2/drumkits.tsv\n", n);
+    Serial.printf("[drum] loaded %d acoustic kit(s) from %s\n", n, tsvPath);
 }
 #endif
 
@@ -1973,6 +1986,174 @@ static void drumApplyKit() {
     g_synthSink->onProgramChange(10, prog);
 #endif
 }
+
+#if defined(TDSP_DRUM_TSF)
+// Count the swappable drum fonts on the card: rows in /sf2/fonts.tsv if present, else /sf2/*.sf2,
+// always including the boot default /sf2/drumkits.sf2. Cached at boot into g_drumFontCount and used
+// only for caps.drumfontsel (the app shows the Drum Font picker when there's more than one). FLASHMEM:
+// cold path, keep it out of ITCM (see reference_itcm_boundary_cliff).
+FLASHMEM static int drumFontCount() {
+    if (!g_sdReady) return 0;
+    int n = 0; bool haveKits = false;
+    File mf = SD.open("/sf2/fonts.tsv");
+    if (mf) {
+        while (mf.available()) {
+            String line = mf.readStringUntil('\n'); line.trim();
+            if (line.length() == 0 || line[0] == '#') continue;
+            int t1 = line.indexOf('\t');
+            String p = (t1 < 0) ? line : line.substring(0, t1); p.trim();
+            if (p.length() == 0) continue;
+            if (p == DRUM_KITS_FONT_PATH) haveKits = true;
+            ++n;
+        }
+        mf.close();
+    } else {
+        File d = SD.open("/sf2");
+        if (d && d.isDirectory()) {
+            for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+                const char *nm = f.name();
+                if (!f.isDirectory() && nm && endsWithExt(nm, "sf2")) {
+                    if (strcasecmp(nm, "drumkits.sf2") == 0) haveKits = true;
+                    ++n;
+                }
+                f.close();
+            }
+        }
+        if (d) d.close();
+    }
+    if (!haveKits && SD.exists((char *)DRUM_KITS_FONT_PATH)) ++n;
+    return n;
+}
+
+// Runtime drum-font swap (see planning/drums-from-mars/RUNTIME_FONT_SWAP.md). Runs in the command
+// handler (loop context), NEVER the audio ISR. The whole SF2 is PSRAM-resident, so this frees the old
+// font and loads a new one live. ISR-SAFETY is the #1 risk: the audio ISR both RENDERS from the tsf
+// (AudioSynthTsf::update reads m_tsf) AND MUTATES it (TsfSink derefs *g_drumTsfHandle). BOTH must be
+// detached from the live handle before tsf_close(), or the ISR reads freed PSRAM -> hardfault. On a
+// load failure we reload the previous font — never leave a freed/null handle live with the bus open.
+// FLASHMEM: cold path (ITCM budget).
+FLASHMEM static bool drumFontSwap(const char *path) {
+    if (!g_sdReady) { Serial.println("[drumfont] no SD card"); return false; }
+    if (!path || !path[0] || !SD.exists((char *)path)) {
+        Serial.printf("[drumfont] not found: %s\n", path ? path : "(null)");
+        return false;
+    }
+    // Remember the current font so a load failure can roll back to it.
+    char prevPath[sizeof(g_drumFontPath)];
+    strncpy(prevPath, g_drumFontPath, sizeof(prevPath)); prevPath[sizeof(prevPath) - 1] = 0;
+    tsf *old = g_drumTsfHandle;
+
+    // 1) Silence the drum bus (mix slot 2) and DETACH the handle from the audio ISR. Both the render
+    //    source (AudioSynthTsf) and the note sink (TsfSink) deref the handle in the ISR, so null BOTH
+    //    under AudioNoInterrupts before we free anything.
+    outL.gain(2, 0.0f); outR.gain(2, 0.0f);
+    AudioNoInterrupts();
+    g_drumTsfHandle = nullptr;      // TsfSink::_t deref -> note ops no-op
+    g_drumTsf.begin(nullptr);       // AudioSynthTsf::update sees null m_tsf -> renders silence
+    AudioInterrupts();
+
+    // 2) The ISR can no longer touch it — free the old font and load the new one.
+    if (old) tsf_close(old);
+    tsf *nu = tsfLoadFromSD(path);
+    if (!nu) {
+        Serial.printf("[drumfont] load FAILED: %s -> restoring %s\n", path, prevPath);
+        nu = (prevPath[0]) ? tsfLoadFromSD(prevPath) : nullptr;   // roll back
+        path = prevPath;
+        if (!nu) {                  // even the previous font won't reload -> leave drums idle (bus stays silent)
+            Serial.println("[drumfont] rollback FAILED too -> drums idle");
+            g_drumFontIsKits = false; g_drumFontPath[0] = 0; g_drumFontDisplay[0] = 0;
+            g_engineHasDrums = false;
+            return false;
+        }
+    }
+
+    // 3) Re-apply the EXACT setup drumTsfBegin() does — the font is fresh, nothing carries over.
+    tsf_set_output(nu, TSF_STEREO_UNWEAVED, (int)AUDIO_SAMPLE_RATE_EXACT, -4.0f);
+    tsf_set_max_voices(nu, 24);
+    for (int ch = 0; ch < 16; ch++) {
+        tsf_channel_set_presetnumber(nu, ch, 0, ch == 9 ? 1 : 0);
+        tsf_channel_set_pitchrange(nu, ch, 48.0f);
+    }
+
+    // 4) Republish the handle to the ISR + restore levels.
+    AudioNoInterrupts();
+    g_drumTsfHandle = nu;
+    g_drumTsf.begin(nu);
+    AudioInterrupts();
+    g_drumTsf.setGain(1.0f);
+    outL.gain(2, 0.62f); outR.gain(2, 0.62f);
+
+    // 5) Track the new font, reload its sibling kit list, reset to kit 0, mark drums available.
+    strncpy(g_drumFontPath, path, sizeof(g_drumFontPath) - 1);
+    g_drumFontPath[sizeof(g_drumFontPath) - 1] = 0;
+    drumFontDeriveDisplay(g_drumFontPath, g_drumFontDisplay, sizeof(g_drumFontDisplay));
+    loadDrumKitsTsv(g_drumFontPath);
+    g_drumFontIsKits = (g_numRtKits > 0);
+    g_drumKit = 0; drumApplyKit();
+    g_engineHasDrums = true;
+
+    Serial.printf("[drumfont] loaded %s (%d presets, %d kits)\n",
+                  g_drumFontPath, tsf_get_presetcount(nu), numDrumKits());
+    return true;
+}
+
+// Emit the available-fonts list for the app's Drum Font picker. Mirrors the @DRUMS/@MANIFESTS wire
+// framing: '|'-separated items, each item's fields joined by US (0x1f) as path\x1fdisplay\x1fkits\x1fcurrent
+// (current = 1 for the resident font). Source: /sf2/fonts.tsv (cols path\tdisplay\tkits\tbytes, '#'
+// header) when present, else a scan of /sf2/*.sf2; the boot default /sf2/drumkits.sf2 is always included.
+FLASHMEM static void sendFonts(Print &out) {
+    out.print("@FONTS=");
+    int emitted = 0; bool haveKits = false;
+    auto emitFont = [&](const char *p, const char *disp, const char *kits) {
+        if (emitted++) out.print('|');
+        out.print(p);    out.write((uint8_t)0x1f);
+        out.print(disp); out.write((uint8_t)0x1f);
+        out.print(kits); out.write((uint8_t)0x1f);
+        out.print(strcmp(p, g_drumFontPath) == 0 ? 1 : 0);
+    };
+    File mf = g_sdReady ? SD.open("/sf2/fonts.tsv") : File();
+    if (mf) {
+        while (mf.available()) {
+            String line = mf.readStringUntil('\n'); line.trim();
+            if (line.length() == 0 || line[0] == '#') continue;
+            // path \t display \t kits \t bytes
+            int t1 = line.indexOf('\t'); if (t1 < 0) continue;
+            String p = line.substring(0, t1); p.trim();
+            String rest = line.substring(t1 + 1);
+            int t2 = rest.indexOf('\t');
+            String disp = (t2 < 0) ? rest : rest.substring(0, t2); disp.trim();
+            String kits = "0";
+            if (t2 >= 0) { String r2 = rest.substring(t2 + 1); int t3 = r2.indexOf('\t');
+                           kits = (t3 < 0) ? r2 : r2.substring(0, t3); kits.trim(); }
+            if (p.length() == 0) continue;
+            if (disp.length() == 0) { char d[40]; drumFontDeriveDisplay(p.c_str(), d, sizeof d); disp = d; }
+            if (p == DRUM_KITS_FONT_PATH) haveKits = true;
+            emitFont(p.c_str(), disp.c_str(), kits.c_str());
+        }
+        mf.close();
+    } else if (g_sdReady) {
+        File d = SD.open("/sf2");
+        if (d && d.isDirectory()) {
+            for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+                const char *nm = f.name();
+                if (!f.isDirectory() && nm && endsWithExt(nm, "sf2")) {
+                    char p[80]; snprintf(p, sizeof p, "/sf2/%s", nm);
+                    char disp[40]; drumFontDeriveDisplay(p, disp, sizeof disp);
+                    if (strcasecmp(nm, "drumkits.sf2") == 0) haveKits = true;
+                    emitFont(p, disp, "0");
+                }
+                f.close();
+            }
+        }
+        if (d) d.close();
+    }
+    if (!haveKits && g_sdReady && SD.exists((char *)DRUM_KITS_FONT_PATH)) {
+        char disp[40]; drumFontDeriveDisplay(DRUM_KITS_FONT_PATH, disp, sizeof disp);
+        emitFont(DRUM_KITS_FONT_PATH, disp, "0");
+    }
+    out.print('\n');
+}
+#endif  // TDSP_DRUM_TSF
 
 // Launch a groove (by full SD path) through the drum Track — the SAME preload->fire path the song
 // players use, so a groove lands on the bar downbeat (launch-quantize aware) instead of overtaking a
@@ -2905,6 +3086,18 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     }
     else if (strncmp(line, "@DRUMF=", 7) == 0)    drumLaunchFile(line + 7); // @DRUMF=<filename> (browser, via catalog.tsv; bar-quantized if @QUANTIZE=1)
     else if (strncmp(line, "@DRUMKIT=", 9) == 0)   setDrumKit(atoi(line + 9));    // GM kit ("instrument")
+#if defined(TDSP_DRUM_TSF)
+    else if (strcmp(line, "@FONTS") == 0)          sendFonts(reply);             // list swappable drum fonts for the picker
+    else if (strncmp(line, "@DRUMFONT=", 10) == 0) {                             // swap the resident drum SF2 at runtime
+        if (drumFontSwap(line + 10)) {
+            catdbWriteBundled();                          // refresh /tdsp/drumkits.ndjson for the new font's kit list
+            sendFonts(reply);                             // updated fonts list (the current-flag moved)
+            reply.printf("@DRUMFONT=%s\n", g_drumFontPath);   // ack -> app reloads the catalog (fresh kits) + @STATE
+        } else {
+            reply.printf("@DRUMFONTERR=%s\n", line + 10);
+        }
+    }
+#endif
     else if (strncmp(line, "@DRUMMAP=", 9) == 0) {   // ch10 note-map mode: 0=GmReduce (fold Roland 22/26->42/46), 1=Passthrough
         // Passthrough is ONLY correct on a font that has real regions at 22/26 (a V-Drums/TD-11
         // kit); on a plain GM font it re-drops the edge hi-hats silent. Default GmReduce; this
@@ -3329,6 +3522,12 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
           reply.printf("\"song\":{\"playing\":%d,\"p\":%d,\"sync\":%d,\"vol\":%d,\"name\":", t.player->isPlaying() ? 1 : 0, t.player->positionPermille(), t.player->isSynced() ? 1 : 0, g_songVolPct);
           tdsp::catdb::jsonStr(reply, t.name); reply.print("},"); }
         reply.printf("\"drums\":{\"kit\":%d,\"playing\":%d,\"sync\":%d,\"vol\":%d,\"map\":%d},", g_drumKit, g_drumPlayer.isPlaying() ? 1 : 0, g_drumPlayer.isSynced() ? 1 : 0, g_drumVolPct, (int)g_drumNoteMapper.mode());
+#if defined(TDSP_DRUM_TSF)
+        // Runtime drum-font swap: which SF2 is resident now (path + short display label), so the app's
+        // Drum Font picker highlights the current one. caps.drumfontsel (below) gates the picker's visibility.
+        reply.print("\"drumfont\":{\"path\":"); tdsp::catdb::jsonStr(reply, g_drumFontPath);
+        reply.print(",\"display\":"); tdsp::catdb::jsonStr(reply, g_drumFontDisplay); reply.print("},");
+#endif
 #ifdef TDSP_METRONOME
         reply.printf("\"metro\":%d,\"metromuted\":%d,\"metrosig\":%d,\"metrovol\":%d,", g_conductor.running() ? 1 : 0, g_metroMuted ? 1 : 0, g_metroBpb, g_metroVolPct);   // transport running + click mute + time sig + click level
 #endif
@@ -3467,7 +3666,13 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         // compiled track count (2 synth voices + 1 drum, or 1+1 on a non-voice2 build).
         // caps.audioloop = the number of audio loops that ACTUALLY allocated (0 = the board
         // couldn't spare the RAM -> the app hides the card), not just the build flag.
-        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"tracks\":%d,\"audioloop\":%d,\"fx\":%d,\"usbaudio\":%d,\"drumkitsel\":%d}",
+        // caps.drumfontsel: the app shows the Drum Font picker only when this build has the sampled drum
+        // TSF AND the card carries more than one swappable font (else there's nothing to pick between).
+        int drumFontSel = 0;
+#if defined(TDSP_DRUM_TSF)
+        drumFontSel = (g_drumFontCount > 1) ? 1 : 0;
+#endif
+        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"tracks\":%d,\"audioloop\":%d,\"fx\":%d,\"usbaudio\":%d,\"drumkitsel\":%d,\"drumfontsel\":%d}",
                      TDSP_VOICE2 ? 1 : 0, (TDSP_VOICE2 && TDSP_ARP2) ? 1 : 0, TDSP_RECORDER ? 1 : 0,
                      TDSP_RECORDER_EDIT ? 1 : 0, kSynthVoices + 1,   // N synth voices + the drum track
 #if TDSP_AUDIOLOOP
@@ -3478,6 +3683,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
                      , TDSP_FX ? 1 : 0   // caps.fx: the app shows the Reverb card only on FX builds
                      , TDSP_USB_AUDIO ? 1 : 0   // caps.usbaudio: the app shows the USB Audio card only on USB-audio builds
                      , kDrumKitSelectable ? 1 : 0   // caps.drumkitsel: 0 = fixed drum voice (OPLL) -> app hides the GM kit picker
+                     , drumFontSel   // caps.drumfontsel: >1 swappable drum font on the card
                      );
         // PSRAM presence (top-level, MB): the app greys PSRAM-dependent cards with a reason when 0.
         reply.printf(",\"psram\":%u", (unsigned)external_psram_size);
@@ -4028,8 +4234,11 @@ FLASHMEM void setup() {
         g_drumPlayer.setSink(&g_drumNoteMapper); g_drumTrack.sink = &g_drumTsfSink;
         g_engineHasDrums = true;
         // If the acoustic multi-kit font loaded, swap the Drums menu to ITS kit list
-        // (/sf2/drumkits.tsv) so @DRUMKIT / the app select real kits by program.
-        if (g_drumFontIsKits) loadDrumKitsTsv();
+        // (its sibling <font>.tsv) so @DRUMKIT / the app select real kits by program.
+        if (g_drumFontIsKits) loadDrumKitsTsv(g_drumFontPath);
+#if defined(TDSP_DRUM_TSF)
+        g_drumFontCount = drumFontCount();   // cache the swappable-font count for caps.drumfontsel
+#endif
     }
 #endif
 #ifdef TDSP_DRUM_VOICE

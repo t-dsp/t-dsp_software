@@ -40,6 +40,24 @@ TsfSink         g_drumTsfSink(&g_drumTsfHandle);        // groove player's ch10 
 bool g_drumFontIsKits = false;
 #define DRUM_KITS_FONT_PATH "/sf2/drumkits.sf2"        // acoustic multi-kit font (fetch_drumkits.py)
 
+// Runtime-swappable drum font (see planning/drums-from-mars/RUNTIME_FONT_SWAP.md). g_drumFontPath is
+// the SD path of the currently-resident drum SF2 ("" until drumTsfBegin loads one); g_drumFontDisplay
+// is a short human label derived from the filename (basename minus ".sf2"). Both are updated by
+// drumTsfBegin() at boot and by drumFontSwap() on a live @DRUMFONT= swap, and reported in @STATE.
+char g_drumFontPath[64]    = "";
+char g_drumFontDisplay[40] = "";
+
+// Basename-minus-extension label for a font path: "/sf2/mars_909.sf2" -> "mars_909".
+static inline void drumFontDeriveDisplay(const char *path, char *out, size_t n) {
+    const char *base = path;
+    for (const char *p = path; *p; ++p) if (*p == '/' || *p == '\\') base = p + 1;
+    size_t i = 0;
+    for (; base[i] && i + 1 < n; ++i) out[i] = base[i];
+    out[i] = 0;
+    size_t L = strlen(out);
+    if (L > 4 && strcasecmp(out + L - 4, ".sf2") == 0) out[L - 4] = 0;
+}
+
 // Load the drum font, set channel 10 as GM drums, and open mix slot 2. Returns true if
 // the font loaded (samples resident in PSRAM). Call from setup() after the melodic
 // synthBegin() ran and g_sdReady is known.
@@ -70,6 +88,10 @@ static bool drumTsfBegin() {
     g_drumTsf.begin(g_drumTsfHandle);
     g_drumTsf.setGain(1.0f);
     outL.gain(2, 0.62f); outR.gain(2, 0.62f);           // drum bus make-up (mirrors the synth slot); setMix leaves slot 2 alone under TDSP_DRUM_TSF
+    // Record which font is now resident (for @STATE + the runtime swap's roll-back path).
+    strncpy(g_drumFontPath, fontPath, sizeof(g_drumFontPath) - 1);
+    g_drumFontPath[sizeof(g_drumFontPath) - 1] = 0;
+    drumFontDeriveDisplay(fontPath, g_drumFontDisplay, sizeof(g_drumFontDisplay));
     Serial.printf("[drumtsf] ready: %d presets, ch10 GM drums -> mix slot 2\n",
                   tsf_get_presetcount(g_drumTsfHandle));
     return true;

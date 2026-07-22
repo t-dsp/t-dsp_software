@@ -14,7 +14,7 @@ import Slider from '@react-native-community/slider';
 import { createTransport } from './src/transportFactory';
 import { createDiscovery } from './src/discoveryFactory';
 import type { TdspDevice } from './src/discovery';
-import { Catalog, CatalogCache, EMPTY_CATALOG, loadCatalog, LoadProgress, Song, songArg } from './src/catalog';
+import { Catalog, CatalogCache, DrumFont, EMPTY_CATALOG, loadCatalog, LoadProgress, parseFonts, Song, songArg } from './src/catalog';
 import type { Transport, DirPage, TransportKind } from './src/transport';
 import { sortEntries } from './src/browse';
 import type { BrowseEntry } from './src/browse';
@@ -582,7 +582,13 @@ export default function App() {
   // selection + volume + arp state; the folder browser is shared (pickVoice takes a target).
   // caps.audioloop is a COUNT (how many audio loops the device actually allocated —
   // RAM/PSRAM dependent), not a bool: 0 hides the Audio Loop card entirely.
-  const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, recedit: false, audioloop: 0, fx: false, usbaudio: false, drumkitsel: true });
+  const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, recedit: false, audioloop: 0, fx: false, usbaudio: false, drumkitsel: true, drumfontsel: false });
+  // Runtime drum-font swap (build-flag gated, caps.drumfontsel → the sampled-drum TSF build with >1 SF2
+  // on the card). `fonts` = the swappable list from the device's "@FONTS=" line; `drumFont` = the
+  // resident font (path + display) from @STATE.drumfont. Selecting one sends @DRUMFONT= (a picker, not
+  // a layer); the device acks with a "@DRUMFONT=" line, which triggers a catalog reload for the new kits.
+  const [fonts, setFonts] = useState<DrumFont[]>([]);
+  const [drumFont, setDrumFont] = useState<{ path: string; display: string }>({ path: '', display: '' });
   // USB Audio interface (build-flag gated, caps.usbaudio → TDSP_USB_AUDIO). The device is a
   // 24-bit/48k USB sound card: host audio in → mix bus, the mix out → host. `active` = the host
   // has the audio stream open (playing/recording); `gain` = the USB-in return level (0..150 %,
@@ -705,6 +711,8 @@ export default function App() {
     if (j.song?.vol != null) setSongVol(Math.max(0, Math.min(150, j.song.vol | 0)));
     if (j.drums) setDrums(d => ({ ...d, kit: j.drums.kit | 0, playing: j.drums.playing ? d.playing : null }));
     if (j.drums?.vol != null) setDrumVol(Math.max(0, Math.min(150, j.drums.vol | 0)));
+    // Resident drum font (runtime swap builds only emit j.drumfont): path + short display label.
+    if (j.drumfont) setDrumFont({ path: j.drumfont.path || '', display: j.drumfont.display || '' });
     if (j.voice) {
       if (j.voice.cart) {
         const rel = j.voice.cart;
@@ -723,7 +731,9 @@ export default function App() {
                           recedit: !!j.caps.recedit, audioloop: Math.max(0, j.caps.audioloop | 0), fx: !!j.caps.fx,
                           usbaudio: !!j.caps.usbaudio,
                           // absent (older firmware) -> assume selectable; explicit 0 = a fixed drum voice (OPLL) with no GM kits
-                          drumkitsel: j.caps.drumkitsel !== 0 });
+                          drumkitsel: j.caps.drumkitsel !== 0,
+                          // runtime drum-font swap: only the sampled-drum TSF build with >1 SF2 on the card sets this
+                          drumfontsel: !!j.caps.drumfontsel });
     // USB Audio interface status (usbaudio builds only emit j.usb): host-stream active flag,
     // USB-in return level, and the over/underrun counters used to spot host↔codec clock drift.
     if (j.usb) setUsbAudio(u => ({
@@ -829,6 +839,18 @@ export default function App() {
   useEffect(() => tp.onLine(line => {
     if (line.startsWith('@STATE=')) {
       try { hydrate(JSON.parse(line.slice(line.indexOf('=') + 1))); } catch {}
+    } else if (line.startsWith('@FONTS=')) {
+      // The swappable drum-font list (runtime @DRUMFONT swap). Parse into the picker's state; the
+      // current-flag / @STATE.drumfont drive which one is highlighted.
+      setFonts(parseFonts(line.slice(7)));
+    } else if (line.startsWith('@DRUMFONT=')) {
+      // Swap-complete ack from the device (it rewrote /tdsp/drumkits.ndjson for the new font). Reload
+      // the catalog bypassing the cache to pull the new font's kit list, then re-hydrate every card.
+      load(true).finally(() => tp.requestState());
+    } else if (line.startsWith('@DRUMFONTERR=')) {
+      // The swap failed (missing/too-big font); the device kept the previous font. Refresh the picker
+      // so its highlight snaps back to what's actually resident.
+      tp.requestFonts();
     } else if (line.startsWith('@APP=')) {
       // The device's opaque app-owned state blob (emitted with @STATE and echoed on save).
       // Restore the settings the firmware can't derive; ignore anything unrecognized.
@@ -927,6 +949,7 @@ export default function App() {
       await load();
       if (userDiscRef.current) { await disconnect(); return; }   // cancelled during the catalog load
       tp.requestState();   // pull the device's real current settings → hydrate every card (see @STATE handler)
+      tp.requestFonts();   // pull the swappable drum-font list (runtime @DRUMFONT builds) → the Drum Font picker
     }
     // A user cancel can surface as a connect rejection (port/scan aborted) — don't toast that.
     // The "one page owns the port" hint is Web-Serial-specific — over WiFi nothing owns a
@@ -978,8 +1001,10 @@ export default function App() {
   }, [tp]);
   // (elapsed-seconds ticker now lives inside <LoadScreen>, which mounts exactly while the
   // catalog is loading — so it no longer re-renders App every second.)
-  async function load() {
-    try { const c = await loadCatalog(tp, progBus.emit, catalogCache); setCat(c); setLoaded(true); progBus.emit(null); }
+  async function load(bypassCache = false) {
+    // bypassCache: after a runtime drum-font swap the device rewrites /tdsp/drumkits.ndjson but NOT
+    // index.ndjson, so the differential cache would short-circuit and keep the OLD kit names — skip it.
+    try { const c = await loadCatalog(tp, progBus.emit, bypassCache ? undefined : catalogCache); setCat(c); setLoaded(true); progBus.emit(null); }
     catch (e: any) {
       progBus.emit(null);
       const yes = Platform.OS === 'web'
@@ -2014,6 +2039,21 @@ export default function App() {
   const drumKitBody = (
     <>
       <VolSlider label="Volume" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />
+      {caps.drumfontsel && fonts.length > 0 && (
+        // Drum Font picker (runtime @DRUMFONT swap): switch which SF2 is resident. A picker, not a
+        // layer — one font is loaded at a time. Highlight the resident one (@STATE.drumfont.path,
+        // falling back to the list's current-flag). Selecting one swaps live; the kit list below
+        // repopulates once the device acks (@DRUMFONT= → catalog reload).
+        <>
+          <Text style={[s.muted, { marginTop: 8 }]}>Drum Font: {drumFont.display || fonts.find(f => f.current)?.display || '—'}</Text>
+          <Row><ScrollView horizontal showsHorizontalScrollIndicator={false}>
+              {fonts.map((f, i) => {
+                const on = drumFont.path ? f.path === drumFont.path : f.current;
+                return <Pressable key={i} style={[s.pill, on && s.pillOn]} disabled={!connected} onPress={() => { setDrumFont({ path: f.path, display: f.display }); tp.drumFont(f.path); }}><Text style={s.text}>{f.display}</Text></Pressable>;
+              })}
+          </ScrollView></Row>
+        </>
+      )}
       {caps.drumkitsel ? (
         <>
           <Text style={[s.muted, { marginTop: 8 }]}>Kit: {cat.drumkits[drums.kit]?.name || '—'}</Text>
