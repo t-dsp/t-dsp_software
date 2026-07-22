@@ -33,6 +33,10 @@ public:
         _sourceBuffer = createSourceBuffer(file);
     }
 
+    // As reopenSourceBuffer but the file is a BORROWED persistent handle (never closed here). SD
+    // reader overrides; only the SD playWavHandle() path uses this.
+    virtual void reopenBorrowedSourceBuffer(TFile& file) { reopenSourceBuffer(file); }
+
     void begin(void) 
     {
         if (_interpolationType != ResampleInterpolationType::resampleinterpolation_none) {
@@ -213,6 +217,58 @@ public:
     
     bool playWav(const char *filename){
         return play(filename, true);
+    }
+
+    // Play a WAV from an ALREADY-OPEN, caller-owned File (persistent per-sample handle). Seeks to 0,
+    // re-reads the header, reuses the ring buffers, and neither opens nor closes the file — so rapid
+    // retriggers skip the per-hit SD.open() FAT lookup (the residual drum-skip source).
+    bool playWavHandle(TFile& file) {
+        stop();
+        if (!file) return false;
+        file.seek(0);
+        _file_size = file.size();
+
+        // First play on this voice allocates the buffer via createSourceBuffer(), which copies
+        // _filename — so it must be non-null even on the handle path (play() sets it; playWavHandle
+        // didn't -> null deref). Set it once from the file's name; reuse thereafter (reopen path).
+        if (_sourceBuffer == nullptr) {
+            const char *nm = file.name(); if (!nm) nm = "";
+            if (_filename) delete [] _filename;
+            _filename = new char[strlen(nm) + 1] {0};
+            memcpy(_filename, nm, strlen(nm) + 1);
+        }
+
+        wav_header wav_header;
+        wav_data_header data_header;
+        WaveHeaderParser wavHeaderParser;
+        char buffer[36];
+        file.read(buffer, 36);
+        wavHeaderParser.readWaveHeaderFromBuffer((const char *) buffer, wav_header);
+        if (wav_header.bit_depth != 16) return false;
+        setNumChannels(wav_header.num_channels);
+        file.read(buffer, 8);
+        unsigned infoTagsSize;
+        if (!wavHeaderParser.readInfoTags((unsigned char *)buffer, 0, infoTagsSize)) return false;
+        file.seek(36 + infoTagsSize);
+        file.read(buffer, 8);
+        if (!wavHeaderParser.readDataHeader((unsigned char *)buffer, 0, data_header)) return false;
+        _header_offset = (44 + infoTagsSize) / 2;
+        _file_samples = ((data_header.data_bytes) / 2);
+        if (uint32_t(_file_size) <= _header_offset * sizeof(int16_t)) { _playing = false; return false; }
+        _file_samples /= _numChannels;
+        if (looptype_none == _loopType) { _loop_start = 0; _loop_finish = _file_samples; }
+
+        reopenBorrowedSourceBuffer(file);
+        setLoopType(_loopType);
+        setLoopStart(_loop_start);
+        setLoopFinish(_loop_finish);
+        reset();
+        if (_playbackRate >= 0.0f)
+            preLoadBuffers(_bufferPosition1, _bufferInPSRAM);
+        else
+            preLoadBuffers(_bufferPosition1, _bufferInPSRAM, false);
+        _playing = true;
+        return true;
     }
 
     bool play()

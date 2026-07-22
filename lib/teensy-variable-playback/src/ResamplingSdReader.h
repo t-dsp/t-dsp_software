@@ -88,6 +88,12 @@ public:
         else _sourceBuffer = createSourceBuffer(file);
     }
 
+    // Borrowed persistent handle: reuse the rings and mark the file not-owned (never closed here).
+    void reopenBorrowedSourceBuffer(File& file) override {
+        if (_sourceBuffer) _sourceBuffer->reopen(file, /*ownFile=*/false);
+        else { _sourceBuffer = createSourceBuffer(file); _sourceBuffer->setOwnsFile(false); }
+    }
+
     uint32_t positionMillis(void) {
         if (_file_size == 0) return 0;
         if (!_useDualPlaybackHead) {

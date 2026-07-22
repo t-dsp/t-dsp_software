@@ -97,7 +97,11 @@ public:
         AudioPlaySdResmp &pl = g_drumSdV[v];
         pl.stop();                                  // clean any tail on a stolen voice
         pl.enableInterpolation(false);              // one-shots play at native rate — no resample
-        if (!pl.playWav(path)) { _voiceNote[v] = -1; return; }
+        // Play from the PERSISTENT open handle (opened once in setKit) — no per-hit SD.open() FAT
+        // lookup. One voice per note (pickVoice) => one reader per handle. Ear-verified: loops play
+        // much more reliably this way. (@DRUMSTRESS's synthetic burst over-reports underruns — its
+        // busy-wait doesn't refill like a real groove's loop(), so don't trust that number for this.)
+        if (!_noteFile[note] || !pl.playWavHandle(_noteFile[note])) { _voiceNote[v] = -1; return; }
         pl.setPlaybackRate(1.0f);
         _voiceNote[v]    = (int8_t)note;
         _voiceStartMs[v] = millis();
@@ -136,8 +140,11 @@ public:
         if (i < 0) i = 0;
         if (i >= _numKits) i = _numKits - 1;
         _curKit = i;
-        for (int n = 0; n < kNumNotes; ++n) _path[n][0] = 0;
         onAllNotesOff(0);                           // stop any ringing voice from the old kit
+        for (int n = 0; n < kNumNotes; ++n) {       // drop the old kit's paths + persistent handles
+            _path[n][0] = 0;
+            if (_noteFile[n]) _noteFile[n].close();
+        }
 
         char dirPath[kPathLen];
         snprintf(dirPath, sizeof dirPath, "/drums/%s", _kitFolders[i]);
@@ -156,6 +163,10 @@ public:
             f.close();
         }
         d.close();
+        // Open a PERSISTENT handle per mapped note so triggers stream from it (seek 0) with NO per-hit
+        // SD.open() FAT lookup — the residual drum-skip source. ~a dozen handles per kit.
+        for (int n = 0; n < kNumNotes; ++n)
+            if (_path[n][0]) _noteFile[n] = SD.open(_path[n]);
         Serial.printf("[drumsd] kit \"%s\": %d note sample(s)\n", _kitFolders[i], mapped);
     }
 
@@ -221,6 +232,7 @@ private:
     int8_t   _voiceNote[kVoices];
     uint32_t _voiceStartMs[kVoices] = {};
     char     _path[kNumNotes][kPathLen] = {};
+    File     _noteFile[kNumNotes];    // persistent per-note open handles (setKit opens; triggers seek 0)
     char     _kitFolders[kMaxKits][kKitNameLen] = {};
     int      _numKits = 0;
     int      _curKit  = 0;

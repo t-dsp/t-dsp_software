@@ -24,6 +24,10 @@ public:
     }
     
 
+    // Play a WAV from a caller-owned, already-open File (persistent per-sample handle) — no per-hit
+    // SD.open(). The caller keeps the handle open across triggers; we only seek/read it.
+    bool playWavHandle(File& f) { return reader->playWavHandle(f); }
+
     virtual ~AudioPlaySdResmp() {
         delete reader;
     }

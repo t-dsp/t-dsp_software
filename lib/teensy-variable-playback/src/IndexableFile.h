@@ -436,8 +436,8 @@ public:
     }
 
     void close() {
-		// close file if open
-        if (_file.available()) {
+		// close file if open — but never a BORROWED persistent handle (caller owns it)
+        if (_ownsFile && _file.available()) {
             _file.close();
         }
 
@@ -459,9 +459,14 @@ public:
 	// fragments memory until an alloc can't find a contiguous block (drums "play 2 bars then skip").
 	// reopen() adopts a new file and resets the buffers' bookkeeping in place so preLoadBuffers()
 	// refills them. Caller MUST have stopped playback (audio ISR not reading these buffers) first.
-	void reopen(TFile& newFile) {
-		if (_file) _file.close();
+	// ownFile=false = a BORROWED persistent handle the caller keeps open across triggers (drum
+	// per-sample handles) — we must never open or close it, only seek/read. Eliminates per-hit
+	// SD.open() latency (the residual drum "skip"). Owned files (ownFile=true) are closed as before.
+	void setOwnsFile(bool owns) { _ownsFile = owns; }
+	void reopen(TFile& newFile, bool ownFile = true) {
+		if (_ownsFile && _file) _file.close();   // only close files WE own, never a borrowed handle
 		_file = newFile;
+		_ownsFile = ownFile;
 		bool intEnabled = NVIC_IS_ENABLED(IRQ_SOFTWARE) != 0;
 		AudioNoInterrupts();
 		for (auto && x : _buffers) { x->status = constructed; x->buffer_size = 0; x->index = 0; }
@@ -476,6 +481,7 @@ public:
 
 protected:
     TFile _file;
+    bool _ownsFile = true;   // false = borrowed persistent handle (never open/close it here)
     char *_filename;
 	
 	// we need a copy of the loop parameters in
