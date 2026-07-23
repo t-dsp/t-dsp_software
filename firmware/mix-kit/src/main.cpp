@@ -3066,6 +3066,12 @@ static void handleTrkCmd(const char* s, Stream& reply) {
     else if (i == 0 && strncmp(cmd, "MORPH=", 6) == 0)    { synthSetMorph(atoi(arg));  reply.printf("@TRK%d.MORPH=%d\n", i, g_plMorph); }
     else if (i == 0 && strncmp(cmd, "LPGDECAY=", 9) == 0) { synthSetDecay(atoi(arg));  reply.printf("@TRK%d.LPGDECAY=%d\n", i, g_plDecay); }
     else if (i == 0 && strncmp(cmd, "LPGCOLOR=", 9) == 0) { synthSetColor(atoi(arg));  reply.printf("@TRK%d.LPGCOLOR=%d\n", i, g_plColor); }
+    // MODEL select (the panel's LED matrix): the generic @TRK<i>.INSTR= path is HETERO-only, so on the
+    // solo/primary Plaits build route it to the primary engine (== synthSetInstrument -> Plaits model).
+    else if (i == 0 && strncmp(cmd, "INSTR=", 6) == 0) {
+        g_trackEngine[0]->setInstrument(atoi(arg));
+        reply.printf("@TRK%d.INSTR=%d\n", i, g_trackEngine[0]->instrument());
+    }
 #endif
     // Drum KIT select through the uniform track surface: @TRK<nSynth>.INSTR=<kit> -> the drum engine's
     // setInstrument (== setDrumKit), mirroring @DRUMKIT= but via the same @TRK<i> path the app uses for
