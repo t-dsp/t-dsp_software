@@ -7,17 +7,19 @@
 // (title + live value + the same header controls); tapping a card opens that section's
 // own page. No nav library — just a `route` string ('home' | section id).
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { View, Text, Pressable, ScrollView, FlatList, TextInput, Switch, StyleSheet, ActivityIndicator, Platform, Alert, useWindowDimensions, AppState as RNAppState } from 'react-native';
+import { View, Text, Pressable, ScrollView, FlatList, TextInput, Switch, ActivityIndicator, Platform, useWindowDimensions, AppState as RNAppState } from 'react-native';
 import type { AppStateStatus } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-import Slider from '@react-native-community/slider';
 import { createTransport } from './src/transportFactory';
 import { createDiscovery } from './src/discoveryFactory';
 import type { TdspDevice } from './src/discovery';
-import { Catalog, CatalogCache, DrumFont, EMPTY_CATALOG, loadCatalog, LoadProgress, parseFonts, Song, songArg } from './src/catalog';
+import { Catalog, DrumFont, EMPTY_CATALOG, loadCatalog, LoadProgress, parseFonts, Song, songArg } from './src/catalog';
 import type { Transport, DirPage, TransportKind } from './src/transport';
-import { sortEntries } from './src/browse';
-import type { BrowseEntry } from './src/browse';
+// UI split (Phase 1): the palette, shared StyleSheet, pure constants/helpers, and leaf components
+// now live in ./src/ui/*. App composes them; see src/ui/{theme,styles,constants,primitives}.
+import { C, THEME } from './src/ui/theme';
+import { s } from './src/ui/styles';
+import { EMPTY_DIR, parseDexFind, DexHit, DexRow, catalogCache, grooveDisp, TP_LABEL, DEFAULT_TP_LABEL, HPF_MODES, volDb, EndMode, END_MODES, REC_STATES, AppState, isEndMode, notify, ROW_H, VItem, InjectFolder } from './src/ui/constants';
+import { Subtitle, LoopStepGrid, BeatStrip, Card, PageHeader, ProgressBus, LoadScreen, HdrBtn, KbdBtn, Row, ThrottledSlider, VolSlider, Stat, ListBtn, BodyTabs, SubMenu, FolderBrowser } from './src/ui/primitives';
 import ArpStepGrid from './src/ui/ArpStepGrid';
 import PianoRoll from './src/ui/PianoRoll';
 import PlaitsPanel from './src/ui/PlaitsPanel';
@@ -26,518 +28,6 @@ import MpeMonitor from './src/ui/MpeMonitor';
 import { mpeBus, parseMpeLine } from './src/ui/mpeBus';
 import { ARP_PATTERNS as ARP_PAT, ARP_RATES, rateIndexFromFw, PAT_USER_SEQUENCE, DEFAULT_SHAPE, SeqStep, encodeSequence, encodeArpParams } from './src/arpSeq';
 import { applyArpPreset, ArpPreset, ARP_LIBRARY } from './src/arpLibrary';
-
-const EMPTY_DIR: DirPage = { path: '', page: 0, npages: 1, folders: [], carts: [] };
-
-// One /dexed search hit (the device's @dxfind reply, one line per matching cart): `rel` is the
-// cart path relative to /dexed (keeps .syx, ready for @DXPICK/@DXVL), `name` the display label,
-// `voices` its 32 voice names. The app decides WHICH rows to show (which voices matched vs a
-// folder/cart-name-only match), so the firmware stays a dumb line filter.
-type DexHit = { rel: string; name: string; voices: string[] };
-function parseDexFind(text: string): DexHit[] {
-  const out: DexHit[] = [];
-  for (const l of text.split('\n')) {
-    if (!l) continue;
-    const t1 = l.indexOf('\t');
-    const t2 = t1 >= 0 ? l.indexOf('\t', t1 + 1) : -1;
-    if (t1 < 0 || t2 < 0) continue;
-    out.push({ rel: l.slice(0, t1), name: l.slice(t1 + 1, t2), voices: l.slice(t2 + 1).split('\x1f') });
-  }
-  return out;
-}
-// A rendered search row: a matched folder (tap navigates in), a matched bank/cart file (tap opens
-// its voice list), or a matched voice (tap loads it). All three kinds appear together in the list.
-type DexRow =
-  | { kind: 'folder'; path: string; name: string }
-  | { kind: 'cart'; rel: string; name: string }
-  | { kind: 'voice'; rel: string; name: string; voice: number; vn: string };
-
-// Persistent catalog cache (AsyncStorage → localStorage on web). loadCatalog() short-circuits
-// the whole NDJSON download when the device's index.ndjson is byte-identical to last time, so a
-// reconnect (e.g. after the phone comes out of your pocket) is near-instant instead of a full
-// re-download. Keyed per engine so switching boards doesn't cross-contaminate. See catalog.ts.
-const CATALOG_KEY = 'tdsp.catalog.v1';
-const catalogCache: CatalogCache = {
-  get: () => AsyncStorage.getItem(CATALOG_KEY),
-  set: (v: string) => AsyncStorage.setItem(CATALOG_KEY, v),
-};
-// Display name for a groove SD path (basename minus .mid) — the drum-track card's "value".
-const grooveDisp = (p: string | null | undefined) => (p ? (p.split('/').pop() || '').replace(/\.mid$/i, '') : '');
-const kb = (n: number) => (n / 1024).toFixed(1);   // bytes -> "12.3" KB, for the load progress readout
-
-const C = { bg: '#0d1117', card: '#161b22', card2: '#0e131a', border: '#30363d', text: '#e6edf3', muted: '#8b949e', accent: '#3fb950', accent2: '#a371f7', sel: 'rgba(31,111,235,0.28)', chip: '#21262d' };
-// Per-section theme: a title/border accent + a translucent card background (over the dark app bg),
-// so each area reads as its own color and a submenu's sub-cards inherit the parent's tint. Each is
-// { accent, tint } — accent tints the title/left-border; tint is the see-through card fill.
-const th = (accent: string, a: number) => ({ accent, tint: accent + Math.round(a * 255).toString(16).padStart(2, '0') });
-const THEME = {
-  synthA:   th('#3fb950', 0.14),   // green
-  synthB:   th('#a371f7', 0.15),   // purple
-  synthC:   th('#2dd4bf', 0.14),   // teal (voice 3, 4-voice pool)
-  synthD:   th('#e3b341', 0.14),   // gold (voice 4)
-  tempo:    th('#e3b341', 0.14),   // amber
-  bt:       th('#58a6ff', 0.14),   // blue
-  usb:      th('#79c0ff', 0.14),   // light blue (USB audio interface)
-  settings: th('#ff7b72', 0.13),   // coral
-  recorder:  th('#f85149', 0.14),  // red (MIDI record)
-  audioloop: th('#f778ba', 0.14),  // pink (audio loop)
-  drums:     th('#f0883e', 0.14),  // orange (drum track)
-};
-const HDR_H = 38;   // shared height for page-header control buttons (back / keyboard / transport) so they line up
-// Friendly names for Transport.name (the wire values are 'USB' | 'BLE' | 'WIFI').
-const TP_LABEL: Record<string, string> = { USB: 'USB', BLE: 'Bluetooth', WIFI: 'Wi-Fi' };
-// What the 'default' transport actually is on this platform — Metro picks the factory
-// (Web Serial on desktop, BLE on native), so the picker label has to match.
-const DEFAULT_TP_LABEL = Platform.OS === 'web' ? 'USB' : 'Bluetooth';
-// TAC5212 DAC high-pass filter presets (@HPF mode). 0 = off (all-pass); the rest are
-// sub-audio cutoffs that block DC/rumble. Index === the firmware mode number.
-const HPF_MODES = [
-  { mode: 0, label: 'Off' },
-  { mode: 1, label: '1 Hz' },
-  { mode: 2, label: '12 Hz' },
-  { mode: 3, label: '96 Hz' },
-];
-// The header VOL / TAC5212 output slider maps 1..100% → -60..0 dB on the DAC (0 = mute),
-// mirroring the firmware's setMasterVolumePct. Shown as a dB readout in the codec section.
-const volDb = (pct: number) => (pct <= 0 ? '-∞' : (-60 + 0.60 * pct).toFixed(1));
-
-// What the MIDI player does when the current song finishes. The header button cycles
-// through these; default 'stop'. Only 'repeat' uses the firmware's seamless loop
-// (tp.songLoop); 'continue'/'shuffle' advance the song app-side when it ends (@SONGP=-1).
-type EndMode = 'shuffle' | 'repeat' | 'continue' | 'stop';
-const END_MODES: { key: EndMode; icon: string; label: string }[] = [
-  { key: 'shuffle',  icon: '🔀', label: 'Shuffle'    },  // twisted arrows → random next song
-  { key: 'repeat',   icon: '🔁', label: 'Repeat'     },  // spinning arrows → loop this song
-  { key: 'continue', icon: '➡',  label: 'Continue'   },  // arrow → play the next song
-  { key: 'stop',     icon: '◻',  label: 'Stop after' },  // hollow square → stop when it ends (default)
-];
-
-// Loop-recorder states, indexed by the firmware's 0..4 state code (@RECP / @STATE rec.st*).
-// Module scope so both the per-player record rows and the standalone Loop Recorder card use one list.
-const REC_STATES = ['Idle', 'Armed — play a note', 'Recording', 'Overdubbing', 'Looping'];
-
-// The opaque app-owned state we persist on the device (@APP=) so a reload/reconnect restores
-// it. Keep it small (device RAM buffer is fixed) and JSON-serializable; grow it as more
-// firmware-invisible UI settings need to survive a reconnect.
-type AppState = { end: EndMode; end2?: EndMode; groove?: string };   // end2 = MIDI Player 2's end-of-song mode; groove = last-selected drum groove path (the device only reports the kit, not the picked groove)
-const isEndMode = (v: any): v is EndMode => END_MODES.some(m => m.key === v);
-
-function notify(msg: string) { if (Platform.OS === 'web') (globalThis as any).alert?.(msg); else Alert.alert('T-DSP', msg); }
-
-// The subtitle line under a section title: the live accent value, else a muted status tag.
-const Subtitle = ({ value, status }: { value?: string; status?: string }) =>
-  !!value ? <Text style={s.drawerValue} numberOfLines={1}>{value}</Text>
-    : !!status ? <Text style={s.tag}>{status}</Text> : null;
-
-// A slim 0..1 progress bar (song playback position). Sits right under the track title.
-const ProgressBar = ({ value }: { value: number }) => (
-  <View style={s.progTrack}><View style={[s.progFill, { width: `${Math.max(0, Math.min(1, value)) * 100}%` }]} /></View>
-);
-
-// Loop-recorder step grid: `bars` groups of `sig` beat cells (the master meter). As a take records or
-// plays, cells fill left→right up to the live loop position (prog 0..1), the current step glows, and
-// each bar's downbeat is marked — so you can watch the take march to the end of the last bar and wrap.
-// recording=true tints it red (capturing), else green (playback). active=false shows the empty grid as
-// a preview of the chosen length. Driven by the device's loop-position feed (prog), so it's grid-accurate.
-const LoopStepGrid = ({ bars, sig, prog, active, recording }:
-  { bars: number; sig: number; prog: number; active: boolean; recording: boolean }) => {
-  const nBars = Math.max(1, bars | 0);
-  const nSig = Math.max(1, Math.min(16, sig | 0));
-  const total = nBars * nSig;
-  const p = Math.max(0, Math.min(0.99999, prog));
-  const cur = active ? Math.min(total - 1, Math.floor(p * total)) : -1;
-  return (
-    <View style={s.stepGrid}>
-      {Array.from({ length: nBars }).map((_, b) => (
-        <View key={b} style={s.stepBar}>
-          {Array.from({ length: nSig }).map((_, k) => {
-            const i = b * nSig + k;
-            const past = active && i < cur;
-            const on = active && i === cur;
-            return <View key={k} style={[
-              s.stepCell,
-              k === 0 && s.stepCellDown,
-              past && (recording ? s.stepCellRecPast : s.stepCellPast),
-              on && (recording ? s.stepCellRecOn : s.stepCellOn),
-            ]} />;
-          })}
-        </View>
-      ))}
-    </View>
-  );
-};
-
-// Header beat lights: one circle per beat of the bar, the current beat lit, beat 1 (the
-// downbeat / accent) in a distinct color. Two clock sources, preferring the device:
-//   • LIVE (`live`): the device's @BEAT feed — locked to the REAL master downbeat + meter.
-//   • LOCAL fallback: a self-correcting clock at the master BPM, for firmware that doesn't
-//     emit @BEAT. Matches the tempo but re-anchors its downbeat to "now" on tempo/meter change.
-// Only this component re-renders each beat (its own state), not the whole app.
-const DOWNBEAT = '#e3b341';   // amber — the accented beat 1, distinct from the green beats
-function BeatStrip({ sig, bpm, active, live }: { sig: number; bpm: number; active: boolean; live: { i: number; n: number } | null }) {
-  const [beat, setBeat] = useState(-1);
-  const anchor = useRef(0);
-  const useLive = active && !!live;
-  const beats = useLive ? live!.n : sig;   // device meter when live, else the @METROSIG setting
-  useEffect(() => {
-    if (useLive || !active || beats < 1 || bpm <= 0) { setBeat(-1); return; }   // live feed drives it directly — no local timer
-    const period = 60000 / bpm;   // ms per quarter-note beat
-    const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
-    anchor.current = now();
-    let timer: any;
-    // Self-correcting: each tick schedules the NEXT beat boundary off the fixed anchor,
-    // so setTimeout jitter never accumulates into drift.
-    const tick = () => {
-      const t = now();
-      const i = Math.floor((t - anchor.current) / period);
-      setBeat(((i % beats) + beats) % beats);
-      timer = setTimeout(tick, Math.max(0, anchor.current + (i + 1) * period - t));
-    };
-    tick();
-    return () => clearTimeout(timer);
-  }, [beats, bpm, active, useLive]);
-  if (!active || beats < 1) return null;
-  const lit = useLive ? live!.i : beat;
-  return (
-    <View style={s.beatStrip}>
-      {Array.from({ length: beats }, (_, i) => {
-        const on = i === lit, down = i === 0;
-        return <View key={i} style={[s.beatDot, down && s.beatDotDown, on && (down ? s.beatDotDownOn : s.beatDotOn)]} />;
-      })}
-    </View>
-  );
-}
-
-// Homepage card: the section's title, live value, and header controls. Fixed size so
-// every card matches. Title/value sit on top; controls always sit on their own row at
-// the bottom (a card is far narrower than the window, so they never share the title's
-// line). Only the › chevron opens the section — the card body itself is inert, so the
-// header controls (nested Pressables) never risk a stray navigation.
-// The SAME Card is used on the home grid AND as a section-page header (pass `onBack`): identical
-// content (title/subtitle/foot/actions), just a left back-arrow instead of the right open-chevron.
-function Card({ title, value, status, subtitle, actions, foot, progress, onPress, onBack, style, accent, tint, topRight, disabledReason }:
-  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; foot?: React.ReactNode; progress?: number; onPress?: () => void; onBack?: () => void; style?: any; accent?: string; tint?: string; topRight?: React.ReactNode; disabledReason?: string }) {
-  // A feature the firmware compiled in but that can't run right now (e.g. a PSRAM-only synth/looper/fx
-  // on a board without PSRAM, or a missing SD asset): grey the whole card, swap the subtitle for the
-  // reason, and make it inert (no chevron, no header actions) — the box is visible so the user knows
-  // it exists, with the reason shown, but it can't be opened or driven. See @STATE "unavail".
-  const off = !!disabledReason;
-  return (
-    <View style={[s.card, style, tint && { backgroundColor: tint }, accent && { borderLeftColor: accent, borderLeftWidth: 3 }, off && s.cardOff]}>
-      <View style={s.cardHead}>
-        {onBack && <Pressable onPress={onBack} hitSlop={10} style={s.chevBtn}><Text style={s.chev}>‹</Text></Pressable>}
-        <View style={s.drawerLeft}>
-          <Text style={[s.drawerTitle, accent && { color: accent }]} numberOfLines={1}>{title}</Text>
-          {off ? <Text style={s.cardReason} numberOfLines={1}>⚠  {disabledReason}</Text>
-            : subtitle != null
-              // A plain-string subtitle must be wrapped in styled <Text> — a bare string lands unstyled
-              // (near-black default) and vanishes on the dark card. JSX subtitles pass through as-is.
-              ? (typeof subtitle === 'string' ? <Text style={s.drawerValue} numberOfLines={1}>{subtitle}</Text> : subtitle)
-              : <Subtitle value={value} status={status} />}
-          {!off && progress != null && <ProgressBar value={progress} />}
-        </View>
-        {!off && topRight}
-        {!onBack && <Pressable onPress={off ? undefined : onPress} disabled={off} hitSlop={10} style={s.chevBtn}><Text style={[s.chev, off && { opacity: 0 }]}>❯</Text></Pressable>}
-      </View>
-      {!off && !!foot && <View style={s.cardFoot}>{foot}</View>}
-      {!off && !!actions && <View style={s.cardActions}>{actions}</View>}
-    </View>
-  );
-}
-
-// Section page header: a back arrow + the section title/value, with the same controls
-// available (on the right when wide, on their own row when narrow).
-function PageHeader({ title, value, status, subtitle, actions, progress, onBack, accent, tint, topRight }:
-  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; progress?: number; onBack: () => void; accent?: string; tint?: string; topRight?: React.ReactNode }) {
-  const { width } = useWindowDimensions();
-  const narrow = width < 640;
-  return (
-    <View style={[s.pageHead, tint && { backgroundColor: tint }, accent && { borderBottomColor: accent }]}>
-      <View style={s.pageHeadRow}>
-        <View style={s.drawerLeft}>
-          <Text style={[s.pageTitle, accent && { color: accent }]}>{title}</Text>
-          {subtitle ?? <Subtitle value={value} status={status} />}
-          {progress != null && <ProgressBar value={progress} />}
-        </View>
-        {topRight}
-        {!narrow && !!actions && <View style={s.headActions}>{actions}</View>}
-        {/* Back sits at the top-right of the page header (title/value stay on the left). */}
-        <Pressable style={s.backBtn} onPress={onBack}><Text style={s.backTxt}>❮</Text></Pressable>
-      </View>
-      {narrow && !!actions && <View style={s.hdrActionsRow}>{actions}</View>}
-    </View>
-  );
-}
-
-// A tiny pub/sub for catalog-load progress. The load emits ~10 updates/sec; if that drove
-// App-level state it would re-render the ENTIRE app that often, and those synchronous renders
-// starve the USB reader loop enough to stall the very transfer we're showing (a self-inflicted
-// hang — see catalog.ts throttle note). So progress flows through this bus to LoadScreen ONLY,
-// which owns its own state and re-renders in isolation. `last` lets a fresh subscriber catch up.
-class ProgressBus {
-  private listeners = new Set<(p: LoadProgress | null) => void>();
-  private last: LoadProgress | null = null;
-  emit = (p: LoadProgress | null) => { this.last = p; this.listeners.forEach(l => l(p)); };
-  get value() { return this.last; }
-  subscribe(l: (p: LoadProgress | null) => void) { this.listeners.add(l); l(this.last); return () => { this.listeners.delete(l); }; }   // replay latest so a subscriber can't miss the mount→effect gap
-}
-
-// The "Loading catalog…" screen. Owns progress + elapsed-seconds state locally (fed by the
-// ProgressBus) so its 10x/sec updates re-render this component alone, not the whole App.
-function LoadScreen({ bus, tpLabel }: { bus: ProgressBus; tpLabel: string }) {
-  const [prog, setProg] = useState<LoadProgress | null>(bus.value);
-  const [elapsed, setElapsed] = useState(0);
-  useEffect(() => bus.subscribe(setProg), [bus]);
-  // Ticks while this screen is mounted (i.e. connected but not yet loaded), so the load reads
-  // as "working" even if a single @READ stalls — a frozen bar looks broken.
-  useEffect(() => {
-    const t0 = Date.now();
-    const id = setInterval(() => setElapsed(Math.floor((Date.now() - t0) / 1000)), 1000);
-    return () => clearInterval(id);
-  }, []);
-  const pct = prog && prog.total > 0 ? Math.min(100, Math.round(100 * prog.done / prog.total)) : 0;
-  return (
-    <View style={s.loadWrap}>
-      <ActivityIndicator color={C.accent} size="large" />
-      <Text style={s.loadTitle}>Loading catalog…</Text>
-      {prog && prog.index > 0 && prog.det && prog.total > 0 ? (
-        // A file is streaming and the device reported sizes: live byte-fraction bar.
-        <>
-          <View style={s.loadTrack}><View style={[s.loadFill, { width: `${pct}%` }]} /></View>
-          <Text style={s.loadSub}>{prog.label} · {prog.index}/{prog.count} · {pct}% · {kb(prog.done)}/{kb(prog.total)} KB</Text>
-        </>
-      ) : (
-        // Reading the index, or old firmware with no sizes: name the step instead.
-        <Text style={s.loadSub}>{prog && prog.index > 0 ? `${prog.label} · ${prog.index}/${prog.count}` : 'Reading catalog index…'}</Text>
-      )}
-      <Text style={s.loadHint}>{elapsed}s elapsed{elapsed >= 6 ? ` · streaming over ${tpLabel}…` : ''}</Text>
-    </View>
-  );
-}
-
-// A transport button for a section header (nested Pressable → doesn't navigate the card).
-// All header buttons share one uniform width (s.hdrBtn.minWidth).
-// `active` (play buttons only): true = playing (green), false = idle (dark). Omit on non-play
-// buttons (nav/stop/±) so they keep their normal look.
-const HdrBtn = ({ label, onPress, stop, active }: { label: string; onPress: () => void; stop?: boolean; active?: boolean }) => (
-  <Pressable onPress={onPress} style={[s.hdrBtn, stop && s.hdrBtnStop, active === false && s.hdrBtnIdle]}><Text style={s.hdrBtnText} numberOfLines={1}>{label}</Text></Pressable>
-);
-// A small keyboard glyph drawn with Views so it can be tinted (an emoji can't): a bordered
-// body with five keys. WHITE = this synth owns the USB keyboard; GREY = another synth does.
-function KbdGlyph({ color }: { color: string }) {
-  return (
-    <View style={{ width: 26, height: 17, borderWidth: 1.5, borderColor: color, borderRadius: 3, paddingHorizontal: 2.5, paddingBottom: 2.5, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
-      {[0, 1, 2, 3, 4].map(i => <View key={i} style={{ width: 2.5, height: 7, backgroundColor: color, borderRadius: 1 }} />)}
-    </View>
-  );
-}
-// Keyboard-ownership control: tap a GREY keyboard to route the USB keyboard to this synth.
-const KbdBtn = ({ owned, onPress }: { owned: boolean; onPress: () => void }) => (
-  <Pressable onPress={onPress} hitSlop={10} style={s.kbdBtn}
-    accessibilityLabel={owned ? 'USB keyboard plays this synth' : 'Tap to play this synth with the USB keyboard'}>
-    <KbdGlyph color={owned ? C.text : C.muted} />
-  </Pressable>
-);
-const Row = ({ children }: any) => <View style={s.row}>{children}</View>;
-// Live-drag command rate. Sliders now send WHILE dragging (not just on release) so the change is
-// heard as you move — throttled to ~1 msg / SLIDER_TX_MS to stay inside the serial/BLE budget (the
-// ESP32 relay throttles at TX_GAP_MS=20ms and drops the queue tail past ~25 msg/s; see
-// project_serial_bridge_throttle). 60 ms ≈ 16 sends/s: the thumb tracks the finger at 60 fps
-// (onValueChange) while the device gets a smooth stream of small step=1 updates — continuous to the
-// ear without bursting the wire. (If a specific param still zippers, add firmware-side param
-// smoothing for it — decouples audio smoothness from the send rate.)
-const SLIDER_TX_MS = 60;
-// Slider that streams throttled onCommit()s during the drag: leading edge (immediate) + a trailing
-// timer so a HELD position still lands within SLIDER_TX_MS, and the exact final value on release.
-const ThrottledSlider = ({ value, onChange, onCommit, min = 0, max = 150, step = 1, disabled, style }:
-  { value: number; onChange: (v: number) => void; onCommit: (v: number) => void;
-    min?: number; max?: number; step?: number; disabled?: boolean; style?: any }) => {
-  const last = useRef(0); const pend = useRef<number | null>(null); const timer = useRef<any>(null);
-  useEffect(() => () => { if (timer.current) clearTimeout(timer.current); }, []);
-  const flush = () => {
-    if (timer.current) { clearTimeout(timer.current); timer.current = null; }
-    if (pend.current !== null) { last.current = Date.now(); const v = pend.current; pend.current = null; onCommit(v); }
-  };
-  const change = (v: number) => {
-    onChange(v);                                   // move the thumb/label immediately (60fps, no send)
-    pend.current = v;
-    const dt = Date.now() - last.current;
-    if (dt >= SLIDER_TX_MS) flush();               // leading edge
-    else if (!timer.current) timer.current = setTimeout(flush, SLIDER_TX_MS - dt);   // trailing edge
-  };
-  return (
-    <Slider style={style ?? { flex: 1, height: 34 }} minimumValue={min} maximumValue={max} step={step} value={value}
-      minimumTrackTintColor={C.accent} maximumTrackTintColor={C.border} thumbTintColor={C.accent}
-      disabled={disabled} onValueChange={change} onSlidingComplete={v => { pend.current = v; flush(); }} />
-  );
-};
-// A per-section level slider (0..150 %, 100 = the file's own velocity), independent of the master
-// @VOL. Streams throttled sends during the drag (ThrottledSlider) so you hear it ramp as you move.
-const VolSlider = ({ label, value, onChange, onCommit, disabled, max = 150 }:
-  { label: string; value: number; onChange: (v: number) => void; onCommit: (v: number) => void; disabled?: boolean; max?: number }) => (
-  <View style={s.volRow}>
-    <Text style={[s.muted, { width: 52 }]}>{label}</Text>
-    <ThrottledSlider value={value} onChange={onChange} onCommit={onCommit} max={max} disabled={disabled} />
-    <Text style={[s.muted, { width: 44, textAlign: 'right' }]}>{Math.round(value)}%</Text>
-  </View>
-);
-const Stat = ({ label, n, sub }: { label: string; n: number; sub?: string }) => (
-  <View style={s.stat}><Text style={s.statN}>{n}</Text><Text style={s.statL}>{label}</Text>{!!sub && <Text style={s.statSub}>{sub}</Text>}</View>
-);
-const ListBtn = ({ label, sel, onPress }: any) => (
-  <Pressable onPress={onPress} style={[s.listBtn, sel && s.listBtnSel]}><Text style={s.text} numberOfLines={1}>{label}</Text></Pressable>
-);
-// A submenu page: full-width cards (one per row) for a parent section's children (e.g. Settings →
-// Connection, TAC5212). Tapping a card opens that child's own existing page via onOpen(id).
-// `getItems` is a getter so it can read the sections array lazily (it isn't assigned yet when the
-// body is built).
-// `accent`/`tint`, when given, override each child's own colors so ALL sub-cards match the parent
-// tile — a quick visual cue for which section (e.g. which synthesizer) you're inside.
-// A tab strip INSIDE a page body (e.g. a MIDI player's Player / Looper split). This is not the
-// old page-level tab nav — the router still uses menu > submenu; these just split one card's own
-// content. Tab state is local, so switching never touches the route. Reuses the arp's tab styling.
-function BodyTabs({ tabs }: { tabs: { key: string; label: string; body: React.ReactNode }[] }) {
-  const [active, setActive] = useState(tabs[0]?.key);
-  const cur = tabs.find(t => t.key === active) || tabs[0];
-  return (
-    <View style={{ gap: 10 }}>
-      <View style={s.arpTabs}>
-        {tabs.map(t => (
-          <Pressable key={t.key} style={[s.arpTab, active === t.key && s.arpTabOn]} onPress={() => setActive(t.key)}>
-            <Text style={[s.arpTabTxt, active === t.key && s.arpTabTxtOn]}>{t.label}</Text>
-          </Pressable>
-        ))}
-      </View>
-      {cur?.body}
-    </View>
-  );
-}
-function SubMenu({ getItems, onOpen, accent, tint }: { getItems: () => any[]; onOpen: (id: string) => void; accent?: string; tint?: string }) {
-  return (
-    <View style={s.submenu}>
-      {getItems().map(sec => (
-        <Card key={sec.id} title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} actions={sec.actions} foot={sec.foot}
-          onPress={() => onOpen(sec.id)} style={s.cardGrid} accent={accent ?? sec.accent} tint={tint ?? sec.tint} topRight={sec.topRight} disabledReason={sec.disabledReason} />
-      ))}
-    </View>
-  );
-}
-const ROW_H = 41;   // fixed list-row height so FlatList.scrollToIndex is reliable
-type VItem = { key: string; label: string; i: number };
-
-// ---- <FolderBrowser> : the generic recursive SD file/folder browser (the @LS client) -------
-// One reusable component behind the MIDI-player and Drums file pickers (and, later, any SD tree
-// — samples/soundfonts). Drills folder-by-folder from `root` via transport.browse() (@LS), lists
-// files filtered by `ext` (sorted client-side by ./browse.sortEntries), and calls onSelectFile
-// with the FULL SD path + a display name. Mirrors the Voices browser's breadcrumb + up-button UX
-// and reuses ListBtn. `injectFolders` adds synthetic folders at the ROOT level whose leaves play
-// by their own arg (used for the baked "tests" songs, which live in flash, not on the card).
-// `enabled` gates the live fetch (connected + catalog loaded). `selected`/`playing` are the
-// currently-chosen / currently-playing arg (full path or a baked name) for row highlighting.
-type InjectFolder = { name: string; leaves: { name: string; arg: string }[] };
-const stripExt = (name: string, ext?: string) => {
-  const suf = ext ? '.' + ext : '.mid';
-  return name.toLowerCase().endsWith(suf.toLowerCase()) ? name.slice(0, -suf.length) : name;
-};
-function FolderBrowser({ tp, root, ext, enabled, selected, playing, onSelectFile, injectFolders, onFolderList, filesFirst }: {
-  tp: Transport; root: string; ext?: string; enabled: boolean;
-  selected?: string; playing?: string;
-  onSelectFile: (fullPath: string, displayName: string) => void;
-  injectFolders?: InjectFolder[];
-  onFolderList?: (files: { arg: string; name: string }[]) => void;   // publish the current folder's ordered files (for header ‹/›)
-  filesFirst?: boolean;   // render files ABOVE subfolders (drums: keep the named grooves on top, genre folders below)
-}) {
-  const [path, setPath] = useState(root);                        // current REAL folder (absolute SD path)
-  const [virt, setVirt] = useState<InjectFolder | null>(null);   // inside an injected virtual folder
-  const [entries, setEntries] = useState<BrowseEntry[] | null>(null);   // null = loading
-  const [err, setErr] = useState('');
-
-  // Reset to the root when the root prop changes (component reused across cards).
-  useEffect(() => { setPath(root); setVirt(null); }, [root]);
-
-  // Publish the current folder's ordered playable files up to the deck, so the header ‹/› step within
-  // the folder you're viewing (not the flat catalog). Recomputed whenever the visible list changes;
-  // while loading (entries === null) we keep the previous list so a mid-fetch ‹/› still works.
-  useEffect(() => {
-    if (!onFolderList) return;
-    if (virt) { onFolderList(virt.leaves.map(lf => ({ arg: lf.arg, name: lf.name }))); return; }
-    if (entries) onFolderList(entries.filter(e => e.type === 'F').map(e => ({ arg: path + '/' + e.name, name: stripExt(e.name, ext) })));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entries, virt, path, ext]);
-
-  // Live @LS fetch whenever the real path changes (skip while inside a virtual folder). The
-  // `alive` gate drops a stale reply when the user navigates away mid-fetch.
-  useEffect(() => {
-    if (!enabled || virt) { if (!enabled) setEntries(null); return; }
-    let alive = true;
-    setEntries(null); setErr('');
-    tp.browse(path, ext)
-      .then(r => { if (alive) setEntries(sortEntries(r.entries)); })
-      .catch(e => { if (alive) { setEntries([]); setErr(String((e as any)?.message || e || 'browse failed')); } });
-    return () => { alive = false; };
-  }, [path, ext, enabled, virt, tp]);
-
-  const atRoot = path === root && !virt;
-  const goUp = () => {
-    if (virt) { setVirt(null); return; }
-    if (path !== root) setPath(path.split('/').slice(0, -1).join('/') || '/');
-  };
-  // Breadcrumb: the root label, each folder segment below it, then the virtual folder (if any).
-  const rootName = root.split('/').pop() || root;
-  const rel = path.startsWith(root) ? path.slice(root.length).replace(/^\//, '') : '';
-  const segs = rel ? rel.split('/') : [];
-  const crumbs: { label: string; go: () => void }[] = [{ label: rootName, go: () => { setVirt(null); setPath(root); } }];
-  { let acc = root; for (const seg of segs) { acc += '/' + seg; const p = acc; crumbs.push({ label: seg, go: () => { setVirt(null); setPath(p); } }); } }
-  if (virt) crumbs.push({ label: virt.name, go: () => {} });
-
-  // One file/leaf row: mark `sel` when it's the chosen arg, prefix ♪ when it's playing.
-  const fileRow = (rowArg: string, disp: string) => (
-    <ListBtn key={rowArg} label={(playing === rowArg ? '♪ ' : '') + disp} sel={selected === rowArg}
-      onPress={() => onSelectFile(rowArg, disp)} />
-  );
-
-  return (
-    <>
-      <View style={s.navBar}>
-        <Pressable style={[s.upBtn, atRoot && s.upBtnOff]} onPress={goUp} disabled={atRoot}>
-          <Text style={s.upTxt}>‹</Text>
-        </Pressable>
-        <ScrollView horizontal style={s.crumbs} showsHorizontalScrollIndicator={false} contentContainerStyle={s.crumbsInner}>
-          {crumbs.map((c, i) => {
-            const last = i === crumbs.length - 1;
-            return (
-              <View key={i} style={s.crumbItem}>
-                {i > 0 && <Text style={s.crumbSep}>›</Text>}
-                <Pressable onPress={c.go} disabled={last}>
-                  <Text style={last ? s.crumbLast : s.crumbTxt} numberOfLines={1}>{c.label}</Text>
-                </Pressable>
-              </View>
-            );
-          })}
-        </ScrollView>
-      </View>
-      {!enabled ? <Text style={s.muted}>Connect to browse files.</Text> : virt ? (
-        <ScrollView style={s.picker} nestedScrollEnabled>
-          {virt.leaves.length === 0 ? <Text style={s.muted}>(empty)</Text>
-            : virt.leaves.map(lf => fileRow(lf.arg, lf.name))}
-        </ScrollView>
-      ) : entries === null ? (
-        <View style={{ padding: 20, alignItems: 'center' }}><ActivityIndicator color={C.accent} /><Text style={[s.muted, { marginTop: 8 }]}>Loading…</Text></View>
-      ) : (
-        <ScrollView style={s.picker} nestedScrollEnabled>
-          {atRoot && (injectFolders || []).map(f => <ListBtn key={'@' + f.name} label={'📁 ' + f.name} onPress={() => setVirt(f)} />)}
-          {(() => {
-            const folders = entries.filter(e => e.type === 'D').map(e => <ListBtn key={'d/' + e.name} label={'📁 ' + e.name} onPress={() => setPath(path + '/' + e.name)} />);
-            const files = entries.filter(e => e.type === 'F').map(e => fileRow(path + '/' + e.name, stripExt(e.name, ext)));
-            return filesFirst ? [...files, ...folders] : [...folders, ...files];   // drums keep grooves on top
-          })()}
-          {!!err && <Text style={[s.muted, { padding: 12 }]}>⚠ {err}</Text>}
-          {!err && entries.length === 0 && (!atRoot || !(injectFolders || []).length) && <Text style={s.muted}>(empty folder)</Text>}
-        </ScrollView>
-      )}
-    </>
-  );
-}
 
 export default function App() {
   // Transport selection (session-only — the app has no local persistence, so this resets
@@ -602,6 +92,25 @@ export default function App() {
   const [cat, setCat] = useState<Catalog>(EMPTY_CATALOG);
   const [loaded, setLoaded] = useState(false);
   const [route, setRoute] = useState<string>('home');   // 'home' or a section id
+  // Browser-style navigation history for the top menu bar's ← / → buttons. `hist` is the visited
+  // route stack, `histIdx` the current position within it. A fresh navigate() truncates any forward
+  // entries and pushes; goBack/goForward only move the index, leaving the stack intact — so you can
+  // step back and then forward again. resetNav() clears it (used on disconnect). ALL navigation
+  // (home cards, submenu opens, in-page back-to-parent arrows) routes through navigate() so the
+  // history stays coherent.
+  const [hist, setHist] = useState<string[]>(['home']);
+  const [histIdx, setHistIdx] = useState(0);
+  const navigate = (id: string) => {
+    if (id === route) return;
+    setRoute(id);
+    const nh = [...hist.slice(0, histIdx + 1), id];
+    setHist(nh); setHistIdx(nh.length - 1);
+  };
+  const goBack = () => { if (histIdx > 0) { const i = histIdx - 1; setHistIdx(i); setRoute(hist[i]); } };
+  const goForward = () => { if (histIdx < hist.length - 1) { const i = histIdx + 1; setHistIdx(i); setRoute(hist[i]); } };
+  const canBack = histIdx > 0;
+  const canForward = histIdx < hist.length - 1;
+  const resetNav = () => { setRoute('home'); setHist(['home']); setHistIdx(0); };
   const [vol, setVol] = useState(80);
   const [hpf, setHpf] = useState(0);                    // TAC5212 DAC high-pass filter mode (0=off)
   const lastHpfRef = useRef(2);                         // remembers the last non-off cutoff so the Enable switch can restore it
@@ -1081,7 +590,7 @@ export default function App() {
     catch (e: any) { if (!auto && !userDiscRef.current) notify('Connect failed: ' + e + (Platform.OS === 'web' && tkind !== 'wifi' ? '\n\nClose any control.html tab (one page owns the port), then retry.' : '')); }
     finally { connectingRef.current = false; setConnecting(false); }
   }
-  async function disconnect() { try { await tp.disconnect(); } catch {} setConnected(false); setConnecting(false); setLoaded(false); progBus.emit(null); setRoute('home'); }
+  async function disconnect() { try { await tp.disconnect(); } catch {} setConnected(false); setConnecting(false); setLoaded(false); progBus.emit(null); resetNav(); }
   // Button handlers wrap connect/disconnect so a *manual* disconnect suppresses auto-reconnect
   // (else the poll below would immediately reconnect and the Disconnect button would do nothing).
   // userDiscRef is set synchronously (before the async setState lands) so connect() sees a
@@ -2397,7 +1906,7 @@ export default function App() {
   };
   const makeTrackCard = (c: TrackCardCfg): { parent: Section; children: Section[] } => {
     const { parentId, theme, deck } = c;
-    const submenu = <SubMenu getItems={() => sections.filter(x => x.parent === parentId).sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={theme.accent} tint={theme.tint} />;
+    const submenu = <SubMenu getItems={() => sections.filter(x => x.parent === parentId).sort((a, b) => ord(a.id) - ord(b.id))} onOpen={navigate} accent={theme.accent} tint={theme.tint} />;
     const parent: Section = {
       id: parentId, title: c.title, show: c.show, asCard: true, accent: theme.accent, tint: theme.tint,
       disabledReason: c.disabledReason, value: c.landing.value, subtitle: c.landing.subtitle,
@@ -2617,7 +2126,7 @@ export default function App() {
     // drum-capable build, Metronome on a @METRO-capable build.
     {
       id: 'tempo', title: 'Tempo', show: true, value: Math.round(bpm) + ' BPM', accent: THEME.tempo.accent, tint: THEME.tempo.tint,
-      body: <SubMenu getItems={() => sections.filter(x => x.parent === 'tempo').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.tempo.accent} tint={THEME.tempo.tint} />,
+      body: <SubMenu getItems={() => sections.filter(x => x.parent === 'tempo').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={navigate} accent={THEME.tempo.accent} tint={THEME.tempo.tint} />,
     },
     // TEMPO / BPM — master tempo; song + drums lock to it (@BPM=). A Tempo sub-page.
     {
@@ -2791,7 +2300,7 @@ export default function App() {
     // as cards; tapping one opens that child's own existing page (Back returns here, per parent).
     {
       id: 'settings', title: 'Settings', show: true, status: 'system', accent: THEME.settings.accent, tint: THEME.settings.tint,
-      body: <SubMenu getItems={() => sections.filter(x => x.parent === 'settings')} onOpen={setRoute} accent={THEME.settings.accent} tint={THEME.settings.tint} />,
+      body: <SubMenu getItems={() => sections.filter(x => x.parent === 'settings')} onOpen={navigate} accent={THEME.settings.accent} tint={THEME.settings.tint} />,
     },
   ];
 
@@ -2808,6 +2317,20 @@ export default function App() {
   // A routed page may be a home card OR a submenu sub-page (parent set, not in `visible`), so
   // resolve it against ALL sections.
   const cur = route === 'home' ? null : sections.find(x => x.id === route);
+  // A submenu parent (its page renders a SubMenu grid of children) gets the FULL window width so the
+  // grid can spread into 3 columns, rather than the 720-cap used for ordinary single-card detail pages.
+  const curIsParent = !!cur && sections.some(x => x.parent === cur.id);
+  // Desktop-only left nav rail: a persistent list of every root section that dives straight into its
+  // detail page. Hidden on narrow (mobile) layouts, where the home grid + menu bar cover navigation.
+  const desktop = width >= 900;
+  // Which root section the current route belongs to (walk parent links up to a visible root), so the
+  // rail can highlight e.g. "Synthesizer A" while you're inside its Synth/Voices sub-page.
+  const rootOf = (id?: string): string | undefined => {
+    let sec = id ? sections.find(x => x.id === id) : undefined;
+    while (sec && sec.parent) sec = sections.find(x => x.id === sec!.parent);
+    return sec?.id;
+  };
+  const activeRootId = cur ? rootOf(cur.id) : undefined;
   // Full-height pages stay mounted so their scroll/folder position survives navigation. Include
   // routable sub-pages (parent set) too, not just home cards, so e.g. the Synth/Voices browser
   // reached via a submenu still persists.
@@ -2858,6 +2381,22 @@ export default function App() {
           <Text style={s.volVal}>{Math.round(vol)}</Text>
         </View>
       </View>
+
+      {/* ===== menu bar: browser-style back / forward through the navigation history, plus the
+          current location. Sits just below the header; only shown once there's content to navigate. ===== */}
+      {connected && loaded && (
+        <View style={s.menuBar}>
+          <Pressable style={[s.menuBtn, !canBack && s.menuBtnOff]} onPress={goBack} disabled={!canBack} accessibilityLabel="Back">
+            <Text style={s.menuBtnText}>←</Text></Pressable>
+          <Pressable style={[s.menuBtn, !canForward && s.menuBtnOff]} onPress={goForward} disabled={!canForward} accessibilityLabel="Forward">
+            <Text style={s.menuBtnText}>→</Text></Pressable>
+          {route !== 'home' && (
+            <Pressable style={s.menuBtn} onPress={() => navigate('home')} accessibilityLabel="Home">
+              <Text style={s.menuBtnText}>⌂</Text></Pressable>
+          )}
+          <Text style={s.menuHere} numberOfLines={1}>{cur ? cur.title : 'Home'}</Text>
+        </View>
+      )}
 
       {!connected && (
         <View style={s.connectHome}>
@@ -2926,7 +2465,30 @@ export default function App() {
       {connected && !loaded && <LoadScreen bus={progBus} tpLabel={TP_LABEL[tp.name]} />}
 
       {connected && loaded && (
-        <View style={{ flex: 1 }}>
+        <View style={{ flex: 1, flexDirection: 'row' }}>
+          {/* ===== desktop-only left nav rail: direct links that dive straight into each root
+                  section's detail page. Hidden on narrow (mobile) layouts. ===== */}
+          {desktop && (
+            <ScrollView style={s.sideBar} contentContainerStyle={{ paddingBottom: 40 }}>
+              <Pressable style={[s.sideItem, route === 'home' && s.sideItemOn]} onPress={() => navigate('home')}>
+                <View style={[s.sideDot, { backgroundColor: C.muted }]} />
+                <Text style={[s.sideLabel, route === 'home' && s.sideLabelOn]} numberOfLines={1}>Home</Text>
+              </Pressable>
+              {visible.map(sec => {
+                const on = activeRootId === sec.id;
+                const ac = sec.accent || C.accent;
+                return (
+                  <Pressable key={sec.id} style={[s.sideItem, on && s.sideItemOn, on && { borderLeftColor: ac }]}
+                    onPress={() => navigate(sec.id)} disabled={!!sec.disabledReason}>
+                    <View style={[s.sideDot, { backgroundColor: ac }, !!sec.disabledReason && { opacity: 0.4 }]} />
+                    <Text style={[s.sideLabel, on && s.sideLabelOn, !!sec.disabledReason && s.sideLabelOff]} numberOfLines={1}>{sec.title}</Text>
+                  </Pressable>
+                );
+              })}
+            </ScrollView>
+          )}
+          {/* ===== main content column ===== */}
+          <View style={s.content}>
           {/* ===== HOMEPAGE: a responsive grid of section cards ===== */}
           {!cur && (
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 400 }}>
@@ -2934,7 +2496,7 @@ export default function App() {
                 {visible.map(sec => (
                   <View key={sec.id} style={[s.cell, { width: `${100 / cols}%` }]}>
                     <Card title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions} foot={sec.foot}
-                      onPress={() => setRoute(sec.id)} style={s.cardGrid} accent={sec.accent} topRight={sec.topRight} disabledReason={sec.disabledReason} />
+                      onPress={() => navigate(sec.id)} style={s.cardGrid} accent={sec.accent} topRight={sec.topRight} disabledReason={sec.disabledReason} />
                   </View>
                 ))}
               </View>
@@ -2944,10 +2506,10 @@ export default function App() {
           {/* ===== a normal (scrolling) section page ===== */}
           {cur && !cur.fullHeight && (
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 400 }}>
-              <View style={s.page}>
+              <View style={[s.page, curIsParent && s.pageWide]}>
                 {cur.asCard
-                  ? <Card title={cur.title} value={cur.value} status={cur.status} subtitle={cur.subtitle} progress={cur.progress} actions={cur.actions} foot={cur.foot} accent={cur.accent} topRight={cur.topRight} onBack={() => setRoute(cur.parent || 'home')} />
-                  : <PageHeader title={cur.title} value={cur.value} status={cur.status} subtitle={cur.subtitle} progress={cur.progress} actions={cur.actions} onBack={() => setRoute(cur.parent || 'home')} accent={cur.accent} topRight={cur.topRight} />}
+                  ? <Card title={cur.title} value={cur.value} status={cur.status} subtitle={cur.subtitle} progress={cur.progress} actions={cur.actions} foot={cur.foot} accent={cur.accent} topRight={cur.topRight} onBack={() => navigate(cur.parent || 'home')} />
+                  : <PageHeader title={cur.title} value={cur.value} status={cur.status} subtitle={cur.subtitle} progress={cur.progress} actions={cur.actions} onBack={() => navigate(cur.parent || 'home')} accent={cur.accent} topRight={cur.topRight} />}
                 <View style={s.pageBody}>{cur.body}</View>
               </View>
             </ScrollView>
@@ -2957,163 +2519,14 @@ export default function App() {
                   selected folder AND the picker's scroll position persist across nav ===== */}
           {fullPages.map(sec => (
             <View key={sec.id} style={[s.page, { flex: 1 }, route !== sec.id && s.hidden]}>
-              <PageHeader title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions} onBack={() => setRoute(sec.parent || 'home')} accent={sec.accent} topRight={sec.topRight} />
+              <PageHeader title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions} onBack={() => navigate(sec.parent || 'home')} accent={sec.accent} topRight={sec.topRight} />
               <View style={[s.pageBody, { flex: 1 }]}>{sec.body}</View>
             </View>
           ))}
+          </View>
         </View>
       )}
     </View>
   );
 }
 
-const s = StyleSheet.create({
-  app: { flex: 1, backgroundColor: C.bg, paddingTop: Platform.OS === 'web' ? 12 : 52 },
-  header: { paddingHorizontal: 14, paddingVertical: 8, borderBottomWidth: 1, borderBottomColor: C.border, backgroundColor: C.bg },
-  brandRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  dot: { width: 11, height: 11, borderRadius: 6, backgroundColor: '#da3633' },
-  dotOn: { backgroundColor: C.accent },
-  brand: { color: C.text, fontWeight: '800', fontSize: 18, letterSpacing: 0.5 },
-  statline: { color: C.muted, fontSize: 12, marginTop: 3 },
-  // header beat lights (BeatStrip) — one dot per beat of the bar
-  beatStrip: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 6, height: 14 },
-  beatDot: { width: 12, height: 12, borderRadius: 6, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border },
-  beatDotDown: { borderColor: 'rgba(227,179,65,0.55)' },   // downbeat marked even when unlit
-  beatDotOn: { backgroundColor: C.accent, borderColor: C.accent, shadowColor: C.accent, shadowOpacity: 0.9, shadowRadius: 6, elevation: 4, transform: [{ scale: 1.18 }] },
-  beatDotDownOn: { backgroundColor: DOWNBEAT, borderColor: DOWNBEAT, shadowColor: DOWNBEAT, shadowOpacity: 0.9, shadowRadius: 6, elevation: 4, transform: [{ scale: 1.18 }] },
-  volRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
-  volLbl: { color: C.muted, fontSize: 11, width: 26 },
-  volVal: { color: C.text, fontSize: 13, width: 28, textAlign: 'right' },
-  // Master transport bar (metronome = the clock): Play / Stop / Mute on the left, BPM on the right.
-  transportRow: { flexDirection: 'row', alignItems: 'center', gap: 6, marginTop: 6 },
-  tBtn: { minWidth: 40, height: 34, paddingHorizontal: 10, borderRadius: 8, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
-  tBtnGhost: { backgroundColor: 'transparent' },
-  tBtnOn: { backgroundColor: '#238636', borderColor: '#238636' },   // transport running = lit green
-  tBtnText: { color: C.text, fontSize: 16, fontWeight: '700' },
-  tBtnOnText: { color: '#fff' },
-  tBpm: { color: C.text, fontSize: 18, fontWeight: '800', minWidth: 74, textAlign: 'center' },
-  tBpmUnit: { color: C.muted, fontSize: 11, fontWeight: '600' },
-  // homepage grid of cards; capped width so it reads well on a wide desktop window too
-  home: { flexDirection: 'row', flexWrap: 'wrap', padding: 5, maxWidth: 1040, width: '100%', alignSelf: 'center' },
-  cell: { padding: 5 },                                  // grid gutter (width % set inline per column count)
-  cardGrid: { marginHorizontal: 0, marginTop: 0, height: 176 },      // fixed → every card is the same size (tall enough for instrument + loaded song line)
-  submenu: { gap: 10 },                                  // submenu pages stack their cards full-width, one per row
-  card: { backgroundColor: C.card, borderWidth: 1, borderColor: C.border, borderRadius: 10, marginHorizontal: 10, marginTop: 8, overflow: 'hidden' },
-  cardOff: { opacity: 0.45 },                                   // built-but-unavailable feature (see @STATE unavail)
-  cardReason: { color: '#f7b955', fontSize: 13, marginTop: 2 }, // amber "⚠ PSRAM required" line on a greyed card
-  cardHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingHorizontal: 14, paddingTop: 12 },
-  cardActions: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingBottom: 12, marginTop: 'auto' },   // pinned to the card bottom
-  cardFoot: { paddingHorizontal: 14, paddingTop: 6, paddingBottom: 8, gap: 6 },   // inline controls on the tile (volume slider / reverb on+mix)
-  hidden: { display: 'none' },
-  drawerLeft: { flex: 1, gap: 2 },
-  drawerTitle: { color: C.text, fontWeight: '600', fontSize: 15 },
-  drawerValue: { color: C.accent, fontSize: 14, fontWeight: '600' },
-  pathLine: { color: C.muted, fontSize: 12, marginTop: 1 },
-  tag: { color: C.muted, fontSize: 12, backgroundColor: C.chip, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10, overflow: 'hidden', alignSelf: 'flex-start' },
-  progTrack: { height: 4, borderRadius: 2, backgroundColor: C.chip, marginTop: 6, overflow: 'hidden' },
-  progFill: { height: '100%', borderRadius: 2, backgroundColor: C.accent },
-  // Looper step grid (bars × beats). Bars are boxed groups; cells are one beat each.
-  stepGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
-  stepBar: { flexDirection: 'row', gap: 3, padding: 3, borderRadius: 6, backgroundColor: C.card2, borderWidth: 1, borderColor: C.border },
-  stepCell: { width: 15, height: 20, borderRadius: 3, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border },
-  stepCellDown: { borderColor: 'rgba(227,179,65,0.5)' },                    // downbeat (beat 1 of the bar)
-  stepCellPast: { backgroundColor: 'rgba(63,185,80,0.32)', borderColor: 'rgba(63,185,80,0.4)' },     // played (dim green)
-  stepCellOn: { backgroundColor: C.accent, borderColor: C.accent, shadowColor: C.accent, shadowOpacity: 0.9, shadowRadius: 6, elevation: 4 },
-  stepCellRecPast: { backgroundColor: 'rgba(248,81,73,0.32)', borderColor: 'rgba(248,81,73,0.4)' },  // captured (dim red)
-  stepCellRecOn: { backgroundColor: '#f85149', borderColor: '#f85149', shadowColor: '#f85149', shadowOpacity: 0.9, shadowRadius: 6, elevation: 4 },
-  // A tappable "open" button on each card: bordered chip with generous L/R padding so it's an
-  // easy target. The ❯ glyph reads as a modern chevron.
-  chevBtn: { marginLeft: 'auto', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 9, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
-  chev: { color: C.text, fontSize: 16, lineHeight: 18, fontWeight: '700' },
-  // Keyboard-ownership toggle in a bordered chip button (matches the ❯/❮ nav buttons).
-  kbdBtn: { height: HDR_H, paddingHorizontal: 12, borderRadius: 8, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
-  // section page
-  page: { maxWidth: 720, width: '100%', alignSelf: 'center' },
-  pageHead: { paddingHorizontal: 14, paddingTop: 12, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: C.border },
-  pageHeadRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
-  backBtn: { height: HDR_H, paddingHorizontal: 18, borderRadius: 8, borderWidth: 1, borderColor: C.border, backgroundColor: C.chip, alignItems: 'center', justifyContent: 'center' },
-  backTxt: { color: C.text, fontSize: 18, fontWeight: '700', lineHeight: 20 },
-  pageTitle: { color: C.text, fontWeight: '800', fontSize: 20 },
-  pageBody: { paddingHorizontal: 14, paddingTop: 14, gap: 8 },
-  // Synth/Voices: fill-height picker with a breadcrumb nav bar above it
-  synthWrap: { flex: 1, gap: 10 },
-  navBar: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  upBtn: { width: 38, height: 38, borderRadius: 8, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
-  upBtnOff: { opacity: 0.35 },
-  upTxt: { color: C.text, fontSize: 22, fontWeight: '700', lineHeight: 24 },
-  crumbs: { flex: 1 },
-  crumbsInner: { alignItems: 'center', paddingRight: 8 },
-  crumbItem: { flexDirection: 'row', alignItems: 'center' },
-  crumbSep: { color: C.muted, fontSize: 15, marginHorizontal: 4 },
-  crumbTxt: { color: C.accent, fontSize: 14, fontWeight: '600' },
-  crumbLast: { color: C.text, fontSize: 14, fontWeight: '700' },
-  picker: { flex: 1, borderWidth: 1, borderColor: C.border, borderRadius: 7 },
-  row: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
-  muted: { color: C.muted, fontSize: 13 },
-  sectionLbl: { color: C.text, fontSize: 13, fontWeight: '700', marginTop: 10, marginBottom: 2 },
-  text: { color: C.text, fontSize: 14 },
-  btn: { backgroundColor: '#238636', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 7, alignItems: 'center' },
-  btnWide: { marginTop: 4 },
-  // prominent "Connect App" call-to-action shown on the home screen when disconnected
-  connectHome: { marginTop: 56, paddingHorizontal: 24, alignItems: 'center' },
-  connectBig: { paddingVertical: 16, paddingHorizontal: 44, minWidth: 240 },
-  connectBigText: { color: C.text, fontSize: 17, fontWeight: '700' },
-  // Transport picker (connect screen): segmented USB/Bluetooth | Wi-Fi + optional host box.
-  segRow: { flexDirection: 'row', borderWidth: 1, borderColor: C.border, borderRadius: 8, overflow: 'hidden', marginBottom: 14 },
-  seg: { paddingVertical: 9, paddingHorizontal: 22, backgroundColor: C.card2, minWidth: 104, alignItems: 'center' },
-  segOn: { backgroundColor: C.sel },
-  segText: { color: C.muted, fontSize: 13, fontWeight: '600' },
-  segTextOn: { color: C.text },
-  hostInput: { width: 260, marginBottom: 6, textAlign: 'center' },
-  hostHint: { color: C.muted, fontSize: 11, textAlign: 'center', maxWidth: 300, marginBottom: 16 },
-  // Discovered-device list (mDNS)
-  devWrap: { width: 280, marginBottom: 12 },
-  devHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginBottom: 8 },
-  devRow: { backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 7, paddingVertical: 8, paddingHorizontal: 12, marginBottom: 6 },
-  devRowOn: { borderColor: C.accent, backgroundColor: C.sel },
-  devName: { color: C.text, fontSize: 14, fontWeight: '600' },
-  devAddr: { color: C.muted, fontSize: 11, marginTop: 2 },
-  // catalog loading screen (connected, not yet loaded)
-  loadWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, gap: 14 },
-  loadTitle: { color: C.text, fontSize: 17, fontWeight: '700' },
-  loadTrack: { width: '100%', maxWidth: 360, height: 8, borderRadius: 4, backgroundColor: C.chip, overflow: 'hidden' },
-  loadFill: { height: '100%', borderRadius: 4, backgroundColor: C.accent },
-  loadSub: { color: C.muted, fontSize: 13, textAlign: 'center' },
-  loadHint: { color: C.muted, fontSize: 11, textAlign: 'center', opacity: 0.8 },
-  grow1: { flex: 1 },
-  headActions: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0 },   // content-sized → buttons keep natural width on the page header
-  hdrActionsRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, paddingHorizontal: 14, paddingBottom: 12, marginTop: -2 },
-  hdrBtn: { backgroundColor: '#238636', height: HDR_H, paddingHorizontal: 7, borderRadius: 8, flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 34, alignItems: 'center', justifyContent: 'center' },
-  hdrBtnStop: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
-  hdrBtnIdle: { backgroundColor: C.chip },   // play ▶ when NOT playing: dark (green only while playing)
-  hdrBtnText: { color: C.text, fontSize: 13, fontWeight: '700' },
-  btnGhost: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
-  btnOn: { backgroundColor: '#238636', borderWidth: 2, borderColor: C.accent },   // PLAYING: green fill + bright border
-  btnIdle: { backgroundColor: C.chip },               // NOT playing: dark fill (overrides s.btn green) so the state reads at a glance
-  btnRecOn: { borderWidth: 2, borderColor: THEME.recorder.accent },   // armed / capturing (red)
-  btnText: { color: C.text, fontSize: 13, fontWeight: '600' },
-  input: { backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 7, color: C.text, paddingHorizontal: 10, paddingVertical: 8, fontSize: 14 },
-  list: { maxHeight: 300, borderWidth: 1, borderColor: C.border, borderRadius: 7 },
-  browseBox: { height: 340 },   // fixed height so <FolderBrowser>'s flex picker lays out inside a card body
-  listBtn: { paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.border },
-  listBtnSel: { backgroundColor: C.sel },
-  // Pattern picker: a wrapping GRID so every one of the 26 patterns is reachable at once
-  // (a horizontal strip hid the ones past the first row). Cells stretch to fill each row.
-  // Preset/Manual segmented tabs — one arp editor active at a time.
-  arpTabs: { flexDirection: 'row', backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 9, padding: 3, gap: 3, marginTop: 2 },
-  arpTab: { flex: 1, alignItems: 'center', paddingVertical: 9, borderRadius: 7 },
-  arpTabOn: { backgroundColor: C.sel, borderWidth: 1, borderColor: C.accent },
-  arpTabTxt: { color: C.muted, fontSize: 14, fontWeight: '700' },
-  arpTabTxtOn: { color: C.text },
-  patGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 2 },
-  patCell: { backgroundColor: C.chip, paddingHorizontal: 8, paddingVertical: 9, borderRadius: 8, minWidth: 74, flexGrow: 1, flexBasis: 74, alignItems: 'center' },
-  patCellOn: { backgroundColor: C.sel, borderWidth: 1, borderColor: C.accent },
-  patCellTxt: { color: C.text, fontSize: 13, fontWeight: '600' },
-  pill: { backgroundColor: C.chip, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14 },
-  pillOn: { backgroundColor: C.sel, borderWidth: 1, borderColor: C.accent },
-  statGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  stat: { backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 8, paddingVertical: 10, paddingHorizontal: 12, minWidth: 96, flexGrow: 1, alignItems: 'center' },
-  statN: { color: C.text, fontSize: 22, fontWeight: '800' },
-  statL: { color: C.muted, fontSize: 12, marginTop: 2 },
-  statSub: { color: C.accent, fontSize: 11, marginTop: 1 },
-});
