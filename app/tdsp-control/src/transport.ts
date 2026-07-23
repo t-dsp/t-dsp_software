@@ -77,6 +77,19 @@ export interface Transport {
   // line delivered through onLine(). RAM-only on the device (does not survive a reboot).
   saveAppState(state: unknown): void;
 
+  // Turn the device's live MPE input/chain trace on or off (@MPEMON=). While on, the
+  // firmware streams "@MPE=<dir>,<ev>,<ch>,<v1>,<v2>,<t>" lines — one per incoming
+  // controller MIDI event (dir=u/d/b/s) AND per post-arp event the synth receives
+  // (dir=o) — consumed by Settings > MPE Monitor. Off by default (zero cost when off).
+  mpeMonitor(on: boolean): void;                      // @MPEMON=<0|1>
+
+  // Global MPE / MIDI mode (@MIDIMODE=). ON = per-note expression: member-channel pitch-bend range
+  // widens to ±24 semis, ch10 becomes a melodic MPE member, song program-changes are ignored so the
+  // whole performance uses the selected instrument. OFF = normal MIDI (bend ±2, ch10 = GM drums).
+  // Needed for a LinnStrument (or any MPE controller): in normal mode a full slide only bends ~2
+  // semitones. The firmware boots OFF; there is no @STATE round-trip, so this is fire-and-forget.
+  midiMode(mpe: boolean): void;                        // @MIDIMODE=<0|1>
+
   // ---- actions (map to @-lines on web, to BLE opcodes on native) ----
   masterVolume(pct: number): void;                    // header master volume (@VOL=, 0..100) — the TAC5212 OUT1/OUT2 DAC level
   dacHpf(mode: number): void;                         // TAC5212 DAC high-pass filter (@HPF=): 0=off, 1=1Hz, 2=12Hz, 3=96Hz

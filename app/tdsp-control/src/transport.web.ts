@@ -228,6 +228,8 @@ export class WebSerialTransport implements Transport {
 
   requestState() { this.send('@STATE'); }
   saveAppState(state: unknown) { this.send('@APP=' + JSON.stringify(state)); }   // opaque app-owned blob; device stores + echoes
+  mpeMonitor(on: boolean) { this.send('@MPEMON=' + (on ? 1 : 0)); }   // live MPE input/chain trace (@MPE= lines) on/off
+  midiMode(mpe: boolean) { this.send('@MIDIMODE=' + (mpe ? 1 : 0)); }   // global MPE (bend ±24) vs normal MIDI (bend ±2)
 
   // ---- actions (@-lines) ----
   masterVolume(pct: number) { this.send('@VOL=' + Math.max(0, Math.min(100, Math.round(pct)))); }

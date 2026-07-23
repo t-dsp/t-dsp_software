@@ -21,10 +21,35 @@ import type { BrowseEntry } from './src/browse';
 import ArpStepGrid from './src/ui/ArpStepGrid';
 import PianoRoll from './src/ui/PianoRoll';
 import ArpPresetBrowser from './src/ui/ArpPresetBrowser';
+import MpeMonitor from './src/ui/MpeMonitor';
+import { mpeBus, parseMpeLine } from './src/ui/mpeBus';
 import { ARP_PATTERNS as ARP_PAT, ARP_RATES, rateIndexFromFw, PAT_USER_SEQUENCE, DEFAULT_SHAPE, SeqStep, encodeSequence, encodeArpParams } from './src/arpSeq';
 import { applyArpPreset, ArpPreset, ARP_LIBRARY } from './src/arpLibrary';
 
 const EMPTY_DIR: DirPage = { path: '', page: 0, npages: 1, folders: [], carts: [] };
+
+// One /dexed search hit (the device's @dxfind reply, one line per matching cart): `rel` is the
+// cart path relative to /dexed (keeps .syx, ready for @DXPICK/@DXVL), `name` the display label,
+// `voices` its 32 voice names. The app decides WHICH rows to show (which voices matched vs a
+// folder/cart-name-only match), so the firmware stays a dumb line filter.
+type DexHit = { rel: string; name: string; voices: string[] };
+function parseDexFind(text: string): DexHit[] {
+  const out: DexHit[] = [];
+  for (const l of text.split('\n')) {
+    if (!l) continue;
+    const t1 = l.indexOf('\t');
+    const t2 = t1 >= 0 ? l.indexOf('\t', t1 + 1) : -1;
+    if (t1 < 0 || t2 < 0) continue;
+    out.push({ rel: l.slice(0, t1), name: l.slice(t1 + 1, t2), voices: l.slice(t2 + 1).split('\x1f') });
+  }
+  return out;
+}
+// A rendered search row: a matched folder (tap navigates in), a matched bank/cart file (tap opens
+// its voice list), or a matched voice (tap loads it). All three kinds appear together in the list.
+type DexRow =
+  | { kind: 'folder'; path: string; name: string }
+  | { kind: 'cart'; rel: string; name: string }
+  | { kind: 'voice'; rel: string; name: string; voice: number; vn: string };
 
 // Persistent catalog cache (AsyncStorage → localStorage on web). loadCatalog() short-circuits
 // the whole NDJSON download when the device's index.ndjson is byte-identical to last time, so a
@@ -674,6 +699,10 @@ export default function App() {
   const [cartVoices, setCartVoices] = useState<string[]>([]); // open cart's 32 voice names (lazy @DXVL)
   const [libBusy, setLibBusy] = useState(false);          // a browse/voices fetch is in flight
   const [libErr, setLibErr] = useState('');               // last /dexed browse error (shown in-UI for diagnosis)
+  const [dexQuery, setDexQuery] = useState('');           // /dexed search box text (folders + cart + voice names, all subfolders)
+  const [dexResults, setDexResults] = useState<DexHit[] | null>(null);   // null = not searching; [] = searched, no matches
+  const [dexSearching, setDexSearching] = useState(false);
+  const [dexErr, setDexErr] = useState('');
   const [q, setQ] = useState({ voice: '', cart: '', groove: '' });
   const [busy, setBusy] = useState(false);
 
@@ -827,6 +856,10 @@ export default function App() {
   }
 
   useEffect(() => tp.onLine(line => {
+    // MPE trace (@MPE=…) is the highest-rate feed (a drag ~100/s). Match it FIRST and push
+    // straight to the module-scope bus — never into App state — so <MpeMonitor> repaints in
+    // isolation and the burst can't starve the Web Serial reader (same rule as the catalog bus).
+    if (line.startsWith('@MPE=')) { const ev = parseMpeLine(line); if (ev) mpeBus.emit(ev); return; }
     if (line.startsWith('@STATE=')) {
       try { hydrate(JSON.parse(line.slice(line.indexOf('=') + 1))); } catch {}
     } else if (line.startsWith('@APP=')) {
@@ -1047,6 +1080,23 @@ export default function App() {
     return () => { alive = false; };
   }, [cart]);
 
+  // /dexed full-library search: debounce the query, then ask the device to search folders + cart
+  // names + ALL voice names across every subfolder (@dxfind rides the @READ file transport, so it
+  // works on USB/BLE/WiFi). null result = search inactive → the normal folder browser shows.
+  useEffect(() => {
+    const query = dexQuery.trim();
+    if (!loaded || !cat.hasDexed || query.length < 2) { setDexResults(null); setDexErr(''); setDexSearching(false); return; }
+    let alive = true;
+    setDexSearching(true); setDexErr('');
+    const t = setTimeout(() => {
+      tp.readFile('@dxfind:' + query)
+        .then(text => { if (alive) setDexResults(parseDexFind(text)); })
+        .catch(e => { if (alive) { setDexResults([]); setDexErr(String((e as any)?.message || e || 'search failed')); } })
+        .finally(() => { if (alive) setDexSearching(false); });
+    }, 450);
+    return () => { alive = false; clearTimeout(t); };
+  }, [dexQuery, loaded, cat.hasDexed]);   // eslint-disable-line react-hooks/exhaustive-deps
+
   // The voices currently listed in Synth/Voices (a cart's voices, or the bundled set).
   const voiceRef = useRef<FlatList<VItem>>(null);
   const voiceRef2 = useRef<FlatList<VItem>>(null);         // Voices-2 page has its own list ref (both pages stay mounted)
@@ -1061,6 +1111,36 @@ export default function App() {
       : vpath === '@bundled' ? cat.instruments.map(v => ({ key: 'b' + v.i, label: v.name, i: v.i }))
         : [], [cart, cartVoices, vpath, cat.instruments]);
   const listId = voiceData.length ? (cart ? 'c' + cart.rel : '@bundled') : 'br:' + vpath;   // identity of the currently-shown picker list
+  // Search results → display rows. The query is split into space-separated terms; a field matches
+  // when it contains EVERY term (so "piano hang" finds the voice "PIANOHANG"). We surface three row
+  // kinds together: matching FOLDERS (any ancestor dir whose name matches → navigate in), matching
+  // BANK files (the .syx "songs" → open its voices), and matching VOICES (→ load). Grouped folders →
+  // banks → voices so the broadest containers sit on top and the exact patch is easy to spot.
+  const dexRows: DexRow[] = useMemo(() => {
+    if (!dexResults) return [];
+    const terms = dexQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
+    if (!terms.length) return [];
+    const matchAll = (h: string) => { const s = h.toLowerCase(); return terms.every(t => s.includes(t)); };
+    const exact = (h: string) => h.toLowerCase() === terms.join(' ') || h.toLowerCase() === terms.join('');
+    const folders: DexRow[] = [], banks: DexRow[] = [], voices: DexRow[] = [];
+    const seenFolder = new Set<string>();
+    for (const h of dexResults) {
+      // folder rows: walk each ancestor directory of the bank, match on the leaf segment name
+      const slash = h.rel.lastIndexOf('/');
+      if (slash > 0) {
+        let acc = '';
+        for (const seg of h.rel.slice(0, slash).split('/')) {
+          acc = acc ? acc + '/' + seg : seg;
+          if (matchAll(seg) && !seenFolder.has(acc)) { seenFolder.add(acc); folders.push({ kind: 'folder', path: acc, name: seg }); }
+        }
+      }
+      if (matchAll(h.name)) banks.push({ kind: 'cart', rel: h.rel, name: h.name });
+      h.voices.forEach((vn, i) => { if (matchAll(vn)) voices.push({ kind: 'voice', rel: h.rel, name: h.name, voice: i, vn }); });
+    }
+    // Exact voice-name hits float to the top of the voice group (the patch you typed, first).
+    voices.sort((a, b) => (exact((b as any).vn) ? 1 : 0) - (exact((a as any).vn) ? 1 : 0));
+    return [...folders, ...banks, ...voices].slice(0, 500);
+  }, [dexResults, dexQuery]);
   // A non-Dexed engine (OPLL, Plaits, any future engine) uses a FIXED patch list — its ‹/› step
   // @TRK<i>.INSTR and its browser shows @TRK<i>.INSTRS, never the Dexed /dexed cart library.
   const isPickerEngine = (eng?: string) => !!eng && eng !== 'dexed';
@@ -1093,6 +1173,19 @@ export default function App() {
     setSelVoice(it.key); setSelVoiceName(nm);
     if (isCart) { setSelVoicePath('/dexed/' + cart!.rel); tp.dxPick(cart!.rel, it.i); }
     else if (it.key[0] === 'b') { setSelVoicePath('Bundled'); tp.dxVoice(it.i); }
+  };
+  // Tap a search result: open its cart (so the breadcrumb + full voice list follow) and leave
+  // search mode. For a voice hit, also load that exact voice into the page's slot right away —
+  // mirrors pickVoice's cart branch for each target (1 = Synth A, 2 = Voices-2, ≥3 = extra voices).
+  const pickDexRow = (row: DexRow, target: number = 1) => {
+    setDexQuery(''); setDexResults(null);   // leave search mode
+    if (row.kind === 'folder') { setCart(null); setVpath(row.path); return; }   // navigate into the folder
+    setCart({ rel: row.rel, name: row.name });
+    if (row.kind !== 'voice') return;   // bank hit: just open it, the user picks a voice
+    const key = 'c' + row.rel + ':' + row.voice;
+    if (target >= 3) { const i = target - 1; setSelVoiceX(m => ({ ...m, [i]: key })); setTrkNames(m => ({ ...m, [i]: row.vn })); tp.trk(i, 'DXPICK=' + row.rel + '\t' + row.voice); }
+    else if (target === 2) { setSelVoice2(key); setVoice2(v => ({ ...v, name: row.vn, path: '/dexed/' + row.rel })); tp.dxPick2(row.rel, row.voice); }
+    else { setSelVoice(key); setSelVoiceName(row.vn); setSelVoicePath('/dexed/' + row.rel); tp.dxPick(row.rel, row.voice); }
   };
   const stepVoice = (dir: number, target: number = 1) => {
     // ANY non-Dexed engine (OPLL ROM voices, Plaits models, any future engine) has a FIXED patch list
@@ -1631,6 +1724,33 @@ export default function App() {
     const bref = target >= 3 ? refFor(browseRefX, target - 1) : target === 2 ? browseRef2 : browseRef;
     return (
       <>
+        {/* search box: matches folders, cart names, and voice names across ALL /dexed subfolders */}
+        <View style={s.navBar}>
+          <TextInput style={[s.input, { flex: 1 }]} value={dexQuery} onChangeText={setDexQuery}
+            placeholder="Search all voices & folders…" placeholderTextColor={C.muted}
+            autoCapitalize="none" autoCorrect={false} returnKeyType="search" />
+          {dexQuery.length > 0 && (
+            <Pressable style={s.upBtn} onPress={() => { setDexQuery(''); setDexResults(null); }}>
+              <Text style={s.upTxt}>✕</Text>
+            </Pressable>
+          )}
+        </View>
+        {dexResults !== null ? (
+          dexSearching && !dexRows.length ? (
+            <View style={{ padding: 20, alignItems: 'center' }}><ActivityIndicator color={C.accent} /><Text style={[s.muted, { marginTop: 8 }]}>Searching library…</Text></View>
+          ) : dexRows.length ? (
+            <FlatList data={dexRows} style={s.picker} nestedScrollEnabled keyExtractor={(_, i) => 'sr' + i}
+              renderItem={({ item }) => <ListBtn
+                label={item.kind === 'folder' ? '📁 ' + item.name
+                  : item.kind === 'cart' ? '🎛 ' + item.name
+                  : '🎹 ' + item.vn + '   ·   ' + item.name}
+                sel={item.kind === 'voice' && (target >= 3 ? (selVoiceX[target - 1] ?? '') : target === 2 ? selVoice2 : selVoice) === 'c' + item.rel + ':' + item.voice}
+                onPress={() => pickDexRow(item, target)} />} />
+          ) : (
+            <Text style={[s.muted, { padding: 12 }]}>{dexErr ? '⚠ ' + dexErr : 'No matches for “' + dexQuery.trim() + '”.'}</Text>
+          )
+        ) : (
+        <>
         {/* nav bar: up-one-level on the left, breadcrumb trail beside it */}
         <View style={s.navBar}>
           <Pressable style={[s.upBtn, atRoot && s.upBtnOff]} onPress={goUp} disabled={atRoot}>
@@ -1670,6 +1790,8 @@ export default function App() {
             {cat.hasDexed && !!libErr && <Text style={[s.muted, { padding: 12 }]}>⚠ SD library: {libErr} — restart the dev server with `expo start --web -c` and hard-reload.</Text>}
             {cat.hasDexed && !libErr && level.folders.length === 0 && level.carts.length === 0 && <Text style={s.muted}>{vpath === '' ? 'No SD library found (/dexed empty?)' : '(empty folder)'}</Text>}
           </ScrollView>
+        )}
+        </>
         )}
       </>
     );
@@ -2528,6 +2650,15 @@ export default function App() {
           <Text style={s.muted}>A sub-audio high-pass on the DAC output that blocks DC offset and rumble. Off = all-pass; higher cutoffs trim more low end.</Text>
         </>
       ),
+    },
+    // MPE MONITOR — live view of the firmware's @MPEMON trace: what an MPE controller
+    // (LinnStrument on the USB-host port) sends AND what the synth actually receives, so a
+    // stuck note / dead drag can be localized in the chain. A Settings sub-page.
+    {
+      id: 'mpemon', title: 'MPE Monitor', show: false, parent: 'settings',
+      accent: THEME.settings.accent, tint: THEME.settings.tint,
+      value: 'Live MIDI · notes · drags · pressure',
+      body: <MpeMonitor tp={tp} connected={connected} />,
     },
     // SETTINGS — a submenu grouping the system pages (Connection, TAC5212). Its page lists those
     // as cards; tapping one opens that child's own existing page (Back returns here, per parent).

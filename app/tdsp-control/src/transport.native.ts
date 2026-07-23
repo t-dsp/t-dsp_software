@@ -314,6 +314,8 @@ export class BleTransport implements Transport {
 
   requestState() { this.relay('@STATE'); }
   saveAppState(state: unknown) { this.relay('@APP=' + JSON.stringify(state)); }   // opaque app-owned blob; device stores + echoes
+  mpeMonitor(on: boolean) { this.relay('@MPEMON=' + (on ? 1 : 0)); }   // live MPE input/chain trace (@MPE= lines) on/off
+  midiMode(mpe: boolean) { this.relay('@MIDIMODE=' + (mpe ? 1 : 0)); }   // global MPE (bend ±24) vs normal MIDI (bend ±2)
 
   // ---- actions (identical @-lines to transport.web.ts, over the relay) --------
   masterVolume(pct: number) { this.byte(CMD.SET_VOLUME, Math.max(0, Math.min(100, Math.round(pct)))); }   // opcode: ESP32 caches for status
