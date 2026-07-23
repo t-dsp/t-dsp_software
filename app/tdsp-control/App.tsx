@@ -2344,6 +2344,14 @@ export default function App() {
           <View style={[s.dot, connected && s.dotOn]} />
           <Text style={s.brand}>T-DSP</Text>
           <View style={{ flex: 1 }} />
+          {/* Reload button (web only): app-window Chrome on the jay-mint touchscreen has no browser
+              toolbar, so this gives a tap target to pull the latest Metro bundle after a code change.
+              Always visible (any connection state) since a dev reload is wanted from anywhere. */}
+          {Platform.OS === 'web' && (
+            <Pressable style={s.refreshBtn} onPress={() => (globalThis as any).location?.reload?.()} accessibilityLabel="Reload the app">
+              <Text style={s.refreshTxt}>⟳</Text>
+            </Pressable>
+          )}
           <Pressable style={s.btn} onPress={() => (connected || connecting ? userDisconnect() : userConnect())}>
             <Text style={s.btnText}>{connected ? 'Disconnect App' : connecting ? 'Cancel' : 'Connect App'}</Text>
           </Pressable>

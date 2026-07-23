@@ -11,6 +11,9 @@ export const s = StyleSheet.create({
   dot: { width: 11, height: 11, borderRadius: 6, backgroundColor: '#da3633' },
   dotOn: { backgroundColor: C.accent },
   brand: { color: C.text, fontWeight: '800', fontSize: 18, letterSpacing: 0.5 },
+  // Reload button in the header (web only) — touch-sized, sits just left of Connect.
+  refreshBtn: { width: 40, height: 36, borderRadius: 8, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center', marginRight: 8 },
+  refreshTxt: { color: C.text, fontSize: 19, fontWeight: '700', lineHeight: 22 },
   statline: { color: C.muted, fontSize: 12, marginTop: 3 },
   // header beat lights (BeatStrip) — one dot per beat of the bar
   beatStrip: { flexDirection: 'row', alignItems: 'center', gap: 7, marginTop: 6, height: 14 },
