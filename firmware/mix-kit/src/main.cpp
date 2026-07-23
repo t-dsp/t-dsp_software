@@ -3025,6 +3025,16 @@ static void handleTrkCmd(const char* s, Stream& reply) {
         for (int k = 0; k < n; k++) { if (k) reply.write((uint8_t)0x1f); reply.print(e->instrumentName(k)); }
         reply.print("\n");
     }
+#if TDSP_HETERO_PLAITS
+    // Plaits timbre macros — the faceplate's HARMONICS/TIMBRE/MORPH + LPG decay/colour, arg 0..1000.
+    // Plaits-gated (like OPLL's DXVOICE below); these edit the shared Plaits pool for the one Plaits track.
+    // Each echoes the clamped value so the app confirms/rehydrates. @STATE also carries them (see tracks[]).
+    else if (voiceIsPlaits(i) && strncmp(cmd, "HARM=", 5) == 0)     { heteroPlaitsSetHarm(atoi(arg));   reply.printf("@TRK%d.HARM=%d\n", i, g_hpHarm); }
+    else if (voiceIsPlaits(i) && strncmp(cmd, "TIMBRE=", 7) == 0)   { heteroPlaitsSetTimbre(atoi(arg)); reply.printf("@TRK%d.TIMBRE=%d\n", i, g_hpTimbre); }
+    else if (voiceIsPlaits(i) && strncmp(cmd, "MORPH=", 6) == 0)    { heteroPlaitsSetMorph(atoi(arg));  reply.printf("@TRK%d.MORPH=%d\n", i, g_hpMorph); }
+    else if (voiceIsPlaits(i) && strncmp(cmd, "LPGDECAY=", 9) == 0) { heteroPlaitsSetDecay(atoi(arg));  reply.printf("@TRK%d.LPGDECAY=%d\n", i, g_hpDecay); }
+    else if (voiceIsPlaits(i) && strncmp(cmd, "LPGCOLOR=", 9) == 0) { heteroPlaitsSetColor(atoi(arg));  reply.printf("@TRK%d.LPGCOLOR=%d\n", i, g_hpColor); }
+#endif
     // Drum KIT select through the uniform track surface: @TRK<nSynth>.INSTR=<kit> -> the drum engine's
     // setInstrument (== setDrumKit), mirroring @DRUMKIT= but via the same @TRK<i> path the app uses for
     // synth voices — so a componentized per-track card drives the kit exactly like an instrument. Not
@@ -3721,6 +3731,13 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
             reply.printf(",\"ninstr\":%d", g_trackEngine[v]->numInstruments());
             reply.print(",\"name\":"); tdsp::catdb::jsonStr(reply, g_trackEngine[v]->currentName());
             reply.print(",\"song\":"); tdsp::catdb::jsonStr(reply, t.name);
+#if TDSP_HETERO_PLAITS
+            // Plaits timbre macros (0..1000) so the panel's knobs rehydrate on connect/reconnect — the
+            // model already rides eng/ninstr/name above. Only the Plaits track carries these.
+            if (voiceIsPlaits(v))
+                reply.printf(",\"harm\":%d,\"timbre\":%d,\"morph\":%d,\"lpgdecay\":%d,\"lpgcolor\":%d",
+                             g_hpHarm, g_hpTimbre, g_hpMorph, g_hpDecay, g_hpColor);
+#endif
 #if TDSP_FX_SEND
             reply.printf(",\"fxsend\":%d", g_fxSend[v]);
 #endif

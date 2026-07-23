@@ -96,6 +96,18 @@ static void heteroPlaitsSetInstrument(int idx) {
     Serial.printf("[hetero-plaits] engine -> %d \"%s\"\n", idx, AudioSynthPlaits::engineName(idx));
 }
 
+// Timbre-shaping macros — the Plaits faceplate's HARMONICS/TIMBRE/MORPH + the LPG (decay/colour).
+// Held as int permille (0..1000) so the wire + @STATE stay integer (matches the app's slider/knob
+// convention); the sink takes 0..1 floats. These edit the VOICE, not per-note MIDI — pitch still
+// comes from the played note. Seeded in heteroPlaitsBegin() to match the sink's boot defaults.
+static int g_hpHarm = 500, g_hpTimbre = 500, g_hpMorph = 500, g_hpDecay = 600, g_hpColor = 500;
+static int clampPermille(int v) { return v < 0 ? 0 : (v > 1000 ? 1000 : v); }
+static void heteroPlaitsSetHarm(int v)  { g_hpHarm  = clampPermille(v); g_hpPlaitsSink.setHarmonics(g_hpHarm  / 1000.0f); }
+static void heteroPlaitsSetTimbre(int v){ g_hpTimbre= clampPermille(v); g_hpPlaitsSink.setTimbre(g_hpTimbre / 1000.0f); }
+static void heteroPlaitsSetMorph(int v) { g_hpMorph = clampPermille(v); g_hpPlaitsSink.setMorph(g_hpMorph  / 1000.0f); }
+static void heteroPlaitsSetDecay(int v) { g_hpDecay = clampPermille(v); g_hpPlaitsSink.setDecay(g_hpDecay  / 1000.0f); }
+static void heteroPlaitsSetColor(int v) { g_hpColor = clampPermille(v); g_hpPlaitsSink.setLpgColour(g_hpColor / 1000.0f); }
+
 // Per-track user level (0..150 %) on the trim node — independent of the fixed slot make-up.
 static int  g_hpVolPct = 0;   // seeded to 100 in heteroPlaitsBegin()
 static void heteroPlaitsSetVol(int pct) {
@@ -108,11 +120,11 @@ static void heteroPlaitsSetVol(int pct) {
 // synthBegin() (mirrors heteroOpllBegin()). Returns true (Plaits needs no font -> always ok).
 static bool heteroPlaitsBegin() {
     g_hpPlaitsSink.setEngine(0);            // VA default
-    g_hpPlaitsSink.setHarmonics(0.5f);
-    g_hpPlaitsSink.setTimbre(0.5f);
-    g_hpPlaitsSink.setMorph(0.5f);
-    g_hpPlaitsSink.setDecay(0.6f);
-    g_hpPlaitsSink.setLpgColour(0.5f);
+    heteroPlaitsSetHarm(g_hpHarm);          // seed macros through the setters so cache == sink (0.5/0.5/0.5/0.6/0.5)
+    heteroPlaitsSetTimbre(g_hpTimbre);
+    heteroPlaitsSetMorph(g_hpMorph);
+    heteroPlaitsSetDecay(g_hpDecay);
+    heteroPlaitsSetColor(g_hpColor);
     g_hpPlaitsSink.setTimbreDepth(1.0f);
     g_hpPlaitsSink.setMasterChannel(0);     // plain poly (applyMidiMode may switch)
     const float g = 0.5f;                   // per-voice headroom (a hot engine can pass full-scale)
