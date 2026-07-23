@@ -223,6 +223,9 @@ static inline int tdspMuxAutoSelectCodec(uint8_t codecAddr) {
 #ifndef TDSP_DEFAULT_MPE
 #define TDSP_DEFAULT_MPE 0                // 0 = start in normal MIDI, 1 = start in MPE
 #endif
+#ifndef TDSP_MPE_BEND_RANGE
+#define TDSP_MPE_BEND_RANGE 24           // MPE member-channel pitch-bend range in semitones (per-note slide reach)
+#endif
 #ifndef TDSP_DEFAULT_ARP
 #define TDSP_DEFAULT_ARP 0               // arp bypassed at boot (not yet applied)
 #endif

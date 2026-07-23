@@ -212,19 +212,31 @@ void ArpFilter::onNoteOff(uint8_t channel, uint8_t note, uint8_t velocity) {
     }
 }
 
+// In ExprFollow the arp emits its notes on a single output channel, so the raw passthrough
+// (which stays on the SOURCE channel) never reaches the sounding arp voice. emitNoteOn seeds
+// each step's onset with the latest value; these helpers additionally steer the OUTPUT channel
+// LIVE, so a held arp note bends/swells continuously with the gesture instead of only per step.
+// No-op unless the arp is actually running in ExprFollow — bypass and the other MPE modes are
+// left exactly as they were.
 void ArpFilter::onPitchBend(uint8_t channel, float semitones) {
     if (channel >= 1 && channel <= 16) _lastPitchBendSemi[channel] = semitones;
     forwardPitchBend(channel, semitones);
+    if (_enabled && _mpeMode == MpeExprFollow && _outputChannel != channel)
+        for (int i = 0; i < _downstreamCount; ++i) _downstream[i]->onPitchBend(_outputChannel, semitones);
 }
 
 void ArpFilter::onTimbre(uint8_t channel, float value) {
     if (channel >= 1 && channel <= 16) _lastTimbre[channel] = value;
     forwardTimbre(channel, value);
+    if (_enabled && _mpeMode == MpeExprFollow && _outputChannel != channel)
+        for (int i = 0; i < _downstreamCount; ++i) _downstream[i]->onTimbre(_outputChannel, value);
 }
 
 void ArpFilter::onPressure(uint8_t channel, float value) {
     if (channel >= 1 && channel <= 16) _lastPressure[channel] = value;
     forwardPressure(channel, value);
+    if (_enabled && _mpeMode == MpeExprFollow && _outputChannel != channel)
+        for (int i = 0; i < _downstreamCount; ++i) _downstream[i]->onPressure(_outputChannel, value);
 }
 
 void ArpFilter::onModWheel(uint8_t channel, float value) {

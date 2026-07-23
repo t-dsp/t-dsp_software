@@ -31,8 +31,11 @@ try:
 except NameError:  # pragma: no cover — only when linted standalone
     env = None
 
-_OLD = "range = constrain(range, 0, 12);"
-_NEW = "range = constrain(range, 0, 24);"
+# Lift the cap to 48 semitones (a 4-octave slide) — the widest TDSP_MPE_BEND_RANGE we build with.
+# A build that uses a narrower range (e.g. 24) still works: the cap only sets the ceiling. Handles a
+# fresh checkout ("0, 12") AND a lib_dep already patched to 24 by an earlier build.
+_OLD_VARIANTS = ("range = constrain(range, 0, 12);", "range = constrain(range, 0, 24);")
+_NEW = "range = constrain(range, 0, 48);"
 
 
 def _patch():
@@ -48,14 +51,15 @@ def _patch():
         except OSError:
             continue
         if _NEW in txt:
-            print(f"[dexed_bend_range] already +-24: {path}")
+            print(f"[dexed_bend_range] already +-48: {path}")
             continue
-        if _OLD in txt:
+        old = next((o for o in _OLD_VARIANTS if o in txt), None)
+        if old:
             with open(path, "w", encoding="utf-8") as f:
-                f.write(txt.replace(_OLD, _NEW))
-            print(f"[dexed_bend_range] pitch-bend range cap 12 -> 24 in {path}")
+                f.write(txt.replace(old, _NEW))
+            print(f"[dexed_bend_range] pitch-bend range cap -> 48 in {path}")
         else:
-            print(f"[dexed_bend_range] WARNING: cap line not found in {path} — synth_dexed changed? cap stays 12")
+            print(f"[dexed_bend_range] WARNING: cap line not found in {path} — synth_dexed changed? cap unchanged")
 
 
 _patch()

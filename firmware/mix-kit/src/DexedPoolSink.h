@@ -44,12 +44,20 @@ public:
     void onNoteOn(uint8_t ch, uint8_t note, uint8_t vel) override {
         if (vel == 0) { onNoteOff(ch, note, 0); return; }
         uint8_t e = _mpe ? allocMpe(ch) : allocNormal();
+        // MPE: a recycled engine still holds the PREVIOUS note's latched pitch bend (controllers don't
+        // reliably recenter bend on a fresh finger-press), so a new note on that engine would sound
+        // pre-bent until the next bend message arrives — audible as "the note right after a drag lands
+        // on the wrong pitch, then corrects after a few presses." Recenter the engine at note-on.
+        // Skip it ONLY when stacking onto the same still-sounding MPE channel (its live bend applies to
+        // both notes); normal (broadcast-bend) mode is left alone so a new note inherits the wheel.
+        const bool recenter = _mpe && !(ch >= 1 && ch <= 16 && (int8_t)e == _chEng[ch] && _load[e] > 0);
         Voice *v = freeVoice();
         if (!v) { v = stealOldest(); release(v); }   // table full: reclaim the oldest slot
         v->on = true; v->ch = ch; v->note = note; v->eng = e; v->age = ++_seq;
         _load[e]++;
         if (_mpe && ch >= 1 && ch <= 16) _chEng[ch] = (int8_t)e;   // set AFTER any steal
         if (ch <= 16) { _chPress[ch] = 1.0f; _chTimbre[ch] = 1.0f; }  // fresh note = full until expression arrives
+        if (recenter) { _eng[e]->setPitchbendRange((uint8_t)kBendRange); _eng[e]->setPitchbend((int16_t)0); }  // drop the prior note's bend
         _eng[e]->setGain(kEngineGain);   // reset: don't inherit a prior note's expression gain
         _eng[e]->keydown(note, vel);
     }
@@ -71,7 +79,10 @@ public:
     // patch tools/dexed_bend_range.py rewrites that cap to 24 in the fetched lib_dep. Drop
     // that script and Dexed silently clamps back to +-12 (one octave). Verified on HW by the
     // @BOARDTEST self-test (BoardTest.inc.h / tools/board_bend_test.py).
-    static constexpr int kBendRange = 24;
+#ifndef TDSP_MPE_BEND_RANGE
+#define TDSP_MPE_BEND_RANGE 24
+#endif
+    static constexpr int kBendRange = TDSP_MPE_BEND_RANGE;   // must match applyMidiMode()'s router range; synth_dexed's cap is patched to >= this by tools/dexed_bend_range.py
     void onPitchBend(uint8_t ch, float semitones) override {
         const int16_t counts = clampCounts((int)(semitones / (float)kBendRange * 8192.0f));
         forEachTarget(ch, [&](AudioSynthDexed *e) { e->setPitchbendRange((uint8_t)kBendRange); e->setPitchbend(counts); });

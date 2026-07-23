@@ -2303,6 +2303,125 @@ static void streamFile(Print& out, const char* path) {
     out.printf("@FE=%u\x1f%lu\n", id, (unsigned long)seq);
 }
 
+#ifdef TDSP_CATDB_DEXED
+// --- /dexed full-library search (folders + cart names + ALL voice names) ------
+// Backs the voice browser's search box. Reached as a VIRTUAL @READ path
+// ("@READ=@dxfind:<query>") so it rides the existing file transport on every link
+// (USB/BLE/WiFi) with no new command or transport code — the app parses the streamed
+// result lines. A one-time index (/tdsp/.dxsearch) holds every cart's rel path + its 32
+// voice names; it is cached and keyed by a /dexed signature, so it rebuilds only when the
+// library changes (the first search after that pays the all-carts walk; the rest are
+// sub-second scans). Index line == result line, so a match streams back verbatim:
+//     <rel>\t<name>\t<v0>\x1f<v1>\x1f...\x1f<vN>\n
+// `rel` keeps its ".syx" (what @DXVL/@DXPICK expect); `name` is the display label.
+static const char *kDxIdxPath = "/tdsp/.dxsearch";
+static const char *kDxIdxSig  = "/tdsp/.dxsearch.sig";
+static const char *kDxResPath = "/tdsp/.dxfind";
+
+// Recursive walk that writes the index. Interleaves pumpTransport() so the long all-carts
+// read never freezes the master clock. Mirrors catdb::walkDexed's traversal + cart filter.
+static void dxIndexWalk(Print &out, const char *absDir, const char *relDir, int depth, uint32_t &nCarts, elapsedMicros &svc) {
+    if (depth > tdsp::catdb::kMaxDepth) return;
+    File d = SD.open(absDir);
+    if (!d || !d.isDirectory()) { if (d) d.close(); return; }
+    for (File f = d.openNextFile(); f; f = d.openNextFile()) {
+        char nm[64]; snprintf(nm, sizeof nm, "%s", f.name());
+        bool isDir = f.isDirectory();
+        uint32_t sz = (uint32_t)f.size();
+        f.close();                                          // close before recursing / reading the cart
+        char rel[192];
+        if (relDir[0]) snprintf(rel, sizeof rel, "%s/%s", relDir, nm);
+        else           snprintf(rel, sizeof rel, "%s", nm);
+        if (isDir) {
+            char sub[200]; snprintf(sub, sizeof sub, "%s/%s", absDir, nm);
+            dxIndexWalk(out, sub, rel, depth + 1, nCarts, svc);
+        } else if (tdsp::catdb::endsWithCI(nm, ".syx") && (sz == 4104 || sz == 4096)) {
+            static char names[tdsp::dexed::kVoicesPerBank][tdsp::dexed::kVoiceNameBufBytes];
+            int nv = tdsp::dexed::sdCartVoiceNames(rel, names);
+            if (nv <= 0) continue;
+            char base[64]; tdsp::catdb::stripExt(base, sizeof base, nm);
+            out.print(rel); out.write('\t'); out.print(base); out.write('\t');
+            for (int i = 0; i < nv; ++i) { if (i) out.write('\x1f'); out.print(names[i]); }
+            out.write('\n');
+            nCarts++;
+        }
+        if (svc >= 2000) { svc = 0; pumpTransport(); }       // ~2ms: keep clock/click/grooves alive
+    }
+    d.close();
+}
+
+// Rebuild the index if it's missing or /dexed changed (recursive count+bytes signature, no
+// content reads — same cheap probe catdb uses). Returns false only on an SD failure.
+static bool dxEnsureIndex() {
+    tdsp::catdb::ensureRoot();
+    tdsp::catdb::Sig cur{0, 0};
+    if (SD.exists("/dexed")) tdsp::catdb::sigOf("/dexed", ".syx", 0, cur);
+    uint32_t oc = 0, ob = 0; bool have = false;
+    { File s = SD.open(kDxIdxSig);
+      if (s) { char l[48]; int n = s.readBytesUntil('\n', l, sizeof l - 1); l[n] = 0; s.close();
+               unsigned long c = 0, b = 0; if (sscanf(l, "%lu %lu", &c, &b) == 2) { oc = (uint32_t)c; ob = (uint32_t)b; have = true; } } }
+    if (have && oc == cur.count && ob == cur.bytes && SD.exists(kDxIdxPath)) return true;   // fresh
+    SD.remove(kDxIdxPath);
+    File idx = SD.open(kDxIdxPath, FILE_WRITE);
+    if (!idx) return false;
+    uint32_t nCarts = 0; elapsedMicros svc = 0;
+    dxIndexWalk(idx, "/dexed", "", 0, nCarts, svc);
+    idx.close();
+    File s = SD.open(kDxIdxSig, FILE_WRITE);
+    if (s) { s.print(cur.count); s.write(' '); s.print(cur.bytes); s.write('\n'); s.close(); }
+    Serial.printf("[dxfind] index built: %lu carts\n", (unsigned long)nCarts);
+    return true;
+}
+
+// Case-insensitive substring test (`needle` is already lowercased by the caller).
+static bool dxCiContains(const char *hay, const char *needle) {
+    if (!*needle) return true;
+    for (; *hay; ++hay) {
+        const char *h = hay, *n = needle;
+        while (*h && *n && (char)tolower((unsigned char)*h) == *n) { ++h; ++n; }
+        if (!*n) return true;
+    }
+    return false;
+}
+
+// Scan the index, copy matching lines into the result file, then stream it back with the
+// SAME @FB/@FD/@FE framing @READ uses (so the app's readFile() reassembles it unchanged).
+// The query is lowercased and split on spaces into terms; a line matches only if it contains
+// EVERY term (order-independent) — so "piano hang" finds the voice "PIANOHANG", and multi-word
+// queries narrow instead of failing on the literal (space-containing) substring.
+static void streamDexedSearch(Print &out, const char *query) {
+    char q[80]; int qi = 0;                                  // lowercase + bound the query
+    for (const char *p = query; *p && qi < (int)sizeof(q) - 1; ++p) q[qi++] = (char)tolower((unsigned char)*p);
+    q[qi] = 0;
+    const char *terms[8]; int nterms = 0;                    // split on spaces, in place
+    for (char *p = q; *p && nterms < 8; ) {
+        while (*p == ' ') *p++ = 0;
+        if (!*p) break;
+        terms[nterms++] = p;
+        while (*p && *p != ' ') ++p;
+    }
+    if (nterms < 1) { const uint8_t id = ++g_xferId; out.printf("@FB=%u\x1f%s\x1f0\n@FE=%u\x1f0\n", id, kDxResPath, id); return; }
+    if (!dxEnsureIndex()) { out.printf("@FERR=%u\x1f%s\n", ++g_xferId, "index build failed"); return; }
+    File idx = SD.open(kDxIdxPath);
+    if (!idx) { out.printf("@FERR=%u\x1f%s\n", ++g_xferId, "no index"); return; }
+    SD.remove(kDxResPath);
+    File res = SD.open(kDxResPath, FILE_WRITE);
+    if (!res) { idx.close(); out.printf("@FERR=%u\x1f%s\n", ++g_xferId, "tmp open failed"); return; }
+    char line[1024]; int matches = 0; const int kCap = 500; elapsedMicros svc = 0;
+    while (idx.available() && matches < kCap) {
+        int n = idx.readBytesUntil('\n', line, sizeof line - 1); line[n] = 0;
+        if (n > 0) {
+            bool all = true;
+            for (int i = 0; i < nterms; ++i) if (!dxCiContains(line, terms[i])) { all = false; break; }
+            if (all) { res.print(line); res.write('\n'); matches++; }
+        }
+        if (svc >= 2000) { svc = 0; pumpTransport(); }
+    }
+    idx.close(); res.close();
+    streamFile(out, kDxResPath);
+}
+#endif // TDSP_CATDB_DEXED
+
 // --- Generic recursive SD directory list (@LS) -------------------------------
 // One small framed line per entry, modeled on streamFile's @FB/@FD/@FE. The CLIENT
 // drills folder-by-folder and sorts; the firmware only lists ONE level in filesystem
@@ -2476,6 +2595,69 @@ static inline bool voiceLive(int i) {
 #endif
 }
 
+// ============================ MPE input / chain monitor =============================
+// @MPEMON=1 turns on a parseable trace of live controller MIDI so the app's
+// Settings > MPE Monitor can show exactly what a LinnStrument (or any controller)
+// sends AND what actually reaches the synth — the two ends of the chain. OFF by
+// default: every emit is guarded by g_mpeMon so there is zero cost in normal play.
+//
+//   @MPE=<dir>,<ev>,<ch>,<v1>,<v2>,<t_ms>
+//     dir : u=USB-host  d=DIN  b=BT  s=serial-in   (any of these = INPUT from a device)
+//           o = OUTPUT, i.e. post router+arp, exactly what the synth sink receives.
+//     ev  : n=note-on  x=note-off  b=pitch-bend  p=pressure(Z)  c=control-change
+//     ch  : 1..16 MIDI channel  (MPE: 1=master, 2..16=per-note member channels)
+//     v1,v2 : INPUT  = raw MIDI (bend v1=-8192..8191; press/cc v=0..127; note v1 / vel v2)
+//             OUTPUT = normalized (bend v1=centi-semitones; press/timbre v1=0..1000 permille)
+//     t_ms  : firmware millis() at emit — for drag-rate and IN->OUT latency analysis.
+//
+// The two taps localize a fault: a note-off (or bend) that appears at the INPUT but
+// never at the OUTPUT is being eaten by the router/arp in between — e.g. an arp that
+// re-channels MPE member notes so the per-note synth can't match the release.
+static bool    g_mpeMon    = false;
+static Stream *g_mpeMonOut = nullptr;   // the transport that enabled it (USB CDC on jay-mint)
+
+// Continuous-controller throttle. A dragged note streams pitch-bend + CC74 at ~100/s each; with
+// the input AND output taps that is ~400 lines/s, which floods the USB-CDC link and the browser's
+// single JS thread — the on-screen note then trails the finger. Fix at the source: notes and
+// all-notes-off are ALWAYS emitted immediately (timing-critical, low rate); bend/pressure/CC are
+// (a) dropped when the value is unchanged — kills the stream of identical values a held note sends —
+// and (b) capped to ~1 per kMonContMs per axis/channel/direction. ~45/s is already finer than the
+// app's 30 fps repaint, so nothing visible is lost. Slots: [0=input,1=output][ch 0..16][0=b,1=p,2=c].
+static constexpr uint32_t kMonContMs = 22;   // ~45 updates/sec per axis (just above the 30 fps UI)
+static struct MonSlot { uint32_t ms; int v1; int v2; } s_monSlot[2][17][3];
+static inline void mpeMonEmit(char dir, char ev, uint8_t ch, int v1, int v2) {
+    if (!g_mpeMon || !g_mpeMonOut) return;
+    if ((ev == 'b' || ev == 'p' || ev == 'c') && ch <= 16) {
+        const int d = (dir == 'o') ? 1 : 0;
+        const int a = (ev == 'b') ? 0 : (ev == 'p') ? 1 : 2;
+        MonSlot &s = s_monSlot[d][ch][a];
+        const uint32_t now = millis();
+        if (s.v1 == v1 && s.v2 == v2) return;                // unchanged -> skip (kills held-note repeats)
+        if ((uint32_t)(now - s.ms) < kMonContMs) return;     // too soon on this axis -> skip
+        s.ms = now; s.v1 = v1; s.v2 = v2;
+    }
+    g_mpeMonOut->printf("@MPE=%c,%c,%u,%d,%d,%lu\n", dir, ev, ch, v1, v2, (unsigned long)millis());
+}
+static inline char mpeMonSrcChar(MidiSourceId s) {
+    switch (s) { case SrcUsbHost: return 'u'; case SrcDin: return 'd';
+                 case SrcBtMidi:  return 'b'; case SrcSerial: return 's'; default: return '?'; }
+}
+
+// Trace-only MidiSink. Registered as an extra DOWNSTREAM of each track's arp (see
+// trackWireSetup) so it observes precisely the post-arp stream the real synth gets —
+// the "output" end of the chain. It makes no sound and holds no state.
+class MpeMonitorSink : public tdsp::MidiSink {
+public:
+    void onNoteOn (uint8_t ch, uint8_t note, uint8_t vel) override { mpeMonEmit('o','n',ch,note,vel); }
+    void onNoteOff(uint8_t ch, uint8_t note, uint8_t vel) override { mpeMonEmit('o','x',ch,note,vel); }
+    void onPitchBend(uint8_t ch, float semis) override { mpeMonEmit('o','b',ch,(int)lroundf(semis*100.0f),0); }
+    void onPressure (uint8_t ch, float v)     override { mpeMonEmit('o','p',ch,(int)lroundf(v*1000.0f),0); }
+    void onTimbre   (uint8_t ch, float v)     override { mpeMonEmit('o','c',ch,74,(int)lroundf(v*1000.0f)); }
+    void onModWheel (uint8_t ch, float v)     override { mpeMonEmit('o','c',ch, 1,(int)lroundf(v*1000.0f)); }
+    void onAllNotesOff(uint8_t ch)            override { mpeMonEmit('o','x',ch,255,0); }
+};
+static MpeMonitorSink g_mpeMonSink;
+
 namespace midihub {
     // Held live notes, per source, so a subscription change can release cleanly (no hung note) on a
     // track that stops listening — the generalization of the old per-keyboard usbHeld flush. Sized
@@ -2508,23 +2690,28 @@ namespace midihub {
 
     // The five fan-out entries. O(tracks) enum/pointer compares + forward — no audio-graph work.
     static void noteOn(MidiSourceId s, uint8_t ch, uint8_t note, uint8_t vel) {
+        mpeMonEmit(mpeMonSrcChar(s), vel ? 'n' : 'x', ch, note, vel);   // INPUT tap (before any gating)
         maybeSynchroStart(vel);
         if (vel) heldAdd(s, ch, note); else heldRemove(s, ch, note);
         for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch) && voiceLive((int)(&t - g_tracks))) t.router->handleNoteOn(ch, note, vel);
         drumLive(s, ch, note, vel);   // live finger-drumming: a subscribed drum track plays the kit on ch10
     }
     static void noteOff(MidiSourceId s, uint8_t ch, uint8_t note, uint8_t vel) {
+        mpeMonEmit(mpeMonSrcChar(s), 'x', ch, note, vel);   // INPUT tap
         heldRemove(s, ch, note);
         for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handleNoteOff(ch, note, vel);
         drumLive(s, ch, note, 0);   // note-off -> ch10 (drum sink chokes open-hat, ignores the rest)
     }
     static void controlChange(MidiSourceId s, uint8_t ch, uint8_t cc, uint8_t val) {
+        mpeMonEmit(mpeMonSrcChar(s), 'c', ch, cc, val);   // INPUT tap
         for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handleControlChange(ch, cc, val);
     }
     static void pitchBend(MidiSourceId s, uint8_t ch, int bend) {
+        mpeMonEmit(mpeMonSrcChar(s), 'b', ch, bend, 0);   // INPUT tap (raw -8192..8191)
         for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handlePitchBend(ch, (int16_t)bend);
     }
     static void channelPressure(MidiSourceId s, uint8_t ch, uint8_t pressure) {
+        mpeMonEmit(mpeMonSrcChar(s), 'p', ch, pressure, 0);   // INPUT tap (0..127)
         for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handleChannelPressure(ch, pressure);
     }
 
@@ -2588,7 +2775,7 @@ static void usbHostPressure(byte ch, byte pressure)       { midihub::channelPres
 // +-24 semitones (2 octaves each way) — match it so a full-surface slide reproduces two
 // octaves, not the four that the old +-48 default produced. This also makes the Dexed pool
 // stop clamping (its kBendRange is 24), so every backend now agrees on the range.
-static constexpr float kMpeMemberBendRange = 24.0f;
+static constexpr float kMpeMemberBendRange = (float)TDSP_MPE_BEND_RANGE;   // build-configurable (default 24; e.g. 48 for a 4-octave slide)
 
 // Switch the device between normal MIDI and MPE (per-note expression). Sets the router's
 // per-channel bend range (+-2 normal vs the LinnStrument's +-24-semi MPE default) and lets
@@ -2606,6 +2793,11 @@ static void applyMidiMode(bool mpe) {
     // the hetero OPLL/Plaits tracks (fixes: hetero engines used to stay in poly mode because only the
     // primary backend's synthSetMpeMode() was called). A new engine gets MPE by overriding setMpeMode.
     trackEnginesSetMpe(mpe);
+    // In MPE the arps follow the gesture: ExprFollow re-emits each step on the output channel AND
+    // steers it live with the most-recent bend/pressure/timbre, so an arpeggiated line bends with the
+    // LinnStrument. Normal MIDI reverts to plain MpeMono (mono output, no expression steer).
+    for (tdsp::ArpFilter &a : g_arpFilterV)
+        a.setMpeMode(mpe ? tdsp::ArpFilter::MpeExprFollow : tdsp::ArpFilter::MpeMono);
     Serial.printf("[mode] %s\n", mpe ? "MPE (per-note bend/pressure)" : "normal MIDI");
 }
 
@@ -2692,7 +2884,7 @@ FLASHMEM static bool handleArpLine(const char* line, Print& reply, tdsp::ArpFilt
             else if (!strcmp(k, "vacc"))  A.setAccentVelocity((uint8_t)v);
             else if (!strcmp(k, "mask"))  A.setStepMask((uint32_t)v);
             else if (!strcmp(k, "len"))   A.setStepLength((uint8_t)v);
-            else if (!strcmp(k, "mpe"))   A.setMpeMode((AF::MpeMode)v);
+            else if (!strcmp(k, "mpe"))   A.setMpeMode(g_mpeMode ? AF::MpeExprFollow : (AF::MpeMode)v);   // MPE mode keeps ExprFollow so the arp follows the bend; app presets can't clobber it
             else if (!strcmp(k, "outch")) A.setOutputChannel((uint8_t)v);
             else if (!strcmp(k, "scb"))   A.setScatterBaseChannel((uint8_t)v);
             else if (!strcmp(k, "scc"))   A.setScatterCount((uint8_t)v);
@@ -2881,7 +3073,13 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
 #endif
     else if (strcmp(line, "@GETCAT") == 0)        refreshCatalog(reply);   // re-scan SD + send catalog
     else if (strcmp(line, "@REINDEX") == 0)       { tdsp::catdb::buildCatalog(engineCaps(), catdbWriteBundled, millis()); reply.println("@REINDEXED"); }  // rebuild /tdsp/*.ndjson DB (upsert)
-    else if (strncmp(line, "@READ=", 6) == 0)     streamFile(reply, line + 6);  // generic file fetch (catalog transport)
+    else if (strncmp(line, "@READ=", 6) == 0) {                                  // generic file fetch (catalog transport)
+#ifdef TDSP_CATDB_DEXED
+        if (strncmp(line + 6, "@dxfind:", 8) == 0) streamDexedSearch(reply, line + 6 + 8);  // virtual path: full-library voice/folder search
+        else
+#endif
+        streamFile(reply, line + 6);
+    }
     else if (strncmp(line, "@LS=", 4) == 0) {                                    // generic recursive dir list: @LS=<path>[\x1f<ext>]
         char buf[160]; strncpy(buf, line + 4, sizeof(buf) - 1); buf[sizeof(buf) - 1] = 0;
         const char* ext = "";
@@ -3208,6 +3406,12 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     else if (strncmp(line, "@PROOF=", 7) == 0)     runAxisProof(atoi(line + 7));   // capture 1 note w/ axis at full (0=press 1=timbre 2=bend 3=neutral)
 #endif
     else if (strncmp(line, "@MIDIMODE=", 10) == 0) applyMidiMode(atoi(line + 10) != 0);
+    else if (strncmp(line, "@MPEMON=", 8) == 0) {                    // live MPE input/chain trace on/off (app: Settings > MPE Monitor)
+        g_mpeMon    = (atoi(line + 8) != 0);
+        g_mpeMonOut = g_mpeMon ? &reply : nullptr;                   // emit on whichever transport turned it on
+        if (g_mpeMon) memset(s_monSlot, 0, sizeof(s_monSlot));       // fresh throttle state so the first events flow
+        reply.printf("@MPEMON=%d\n", g_mpeMon ? 1 : 0);
+    }
 #if TDSP_FX
     // FX master insert (reverb): @FX / @FX.<PARAM>=<v>. Distinct from @FXUP (FlasherX).
     else if (handleFxCmd(line, reply)) { /* handled + echoed inside */ }
@@ -3802,6 +4006,7 @@ FLASHMEM static void trackWireSetup(Track &t) {
     if (t.arp) {
         t.arp->setClock(&g_conductor.clock());
         t.arp->addDownstream(t.sink);
+        t.arp->addDownstream(&g_mpeMonSink);   // OUTPUT tap: trace the post-arp stream the synth receives
         t.router->addSink(t.arp);
     } else {
         t.router->addSink(t.sink);
