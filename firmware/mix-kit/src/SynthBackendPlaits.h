@@ -75,6 +75,19 @@ static void synthSetInstrument(int idx) {
                   idx, AudioSynthPlaits::engineName(idx), (double)plaitsVoiceTrim(idx));
 }
 
+// Timbre-shaping macros for the Plaits voice EDITOR panel (the same panel the hetero Plaits track
+// drives) — the PRIMARY-Plaits equivalent of HeteroPlaits' g_hp* cache + setters, so @TRK0.HARM=/
+// TIMBRE=/MORPH=/LPGDECAY=/LPGCOLOR= edit THIS solo build's voice too. Held as int permille (0..1000)
+// so the wire + @STATE stay integer (the app's slider/knob convention); the sink takes 0..1 floats.
+// Seeded in synthBegin() to match the sink's boot defaults (0.5/0.5/0.5/0.6/0.5).
+static int g_plHarm = 500, g_plTimbre = 500, g_plMorph = 500, g_plDecay = 600, g_plColor = 500;
+static int plClampPermille(int v) { return v < 0 ? 0 : (v > 1000 ? 1000 : v); }
+static void synthSetHarm(int v)   { g_plHarm   = plClampPermille(v); g_plaitsSink.setHarmonics(g_plHarm   / 1000.0f); }
+static void synthSetTimbre(int v) { g_plTimbre = plClampPermille(v); g_plaitsSink.setTimbre(g_plTimbre   / 1000.0f); }
+static void synthSetMorph(int v)  { g_plMorph  = plClampPermille(v); g_plaitsSink.setMorph(g_plMorph     / 1000.0f); }
+static void synthSetDecay(int v)  { g_plDecay  = plClampPermille(v); g_plaitsSink.setDecay(g_plDecay     / 1000.0f); }
+static void synthSetColor(int v)  { g_plColor  = plClampPermille(v); g_plaitsSink.setLpgColour(g_plColor / 1000.0f); }
+
 // --- ReplayGain hooks (Tier-1 only; single-timbre engine) --------------------
 #define TDSP_HAS_REPLAYGAIN 1
 static tdsp::ILoudnessMeter *synthLoudness()     { return &g_plProbe; }
@@ -83,13 +96,14 @@ static float                 synthVoiceTrim(int idx) { return plaitsVoiceTrim(id
 static const char           *synthTrimSymbol()   { return "kPlaitsVoiceTrim"; }
 
 static void synthBegin() {
-    // Pleasant default patch: VA engine, mid macros, a little sustain for keys.
+    // Pleasant default patch: VA engine, mid macros, a little sustain for keys. Seed the macros THROUGH
+    // the setters so the panel cache (g_pl*) matches the sink from boot (0.5/0.5/0.5/0.6/0.5).
     g_plaitsSink.setEngine(0);
-    g_plaitsSink.setHarmonics(0.5f);
-    g_plaitsSink.setTimbre(0.5f);
-    g_plaitsSink.setMorph(0.5f);
-    g_plaitsSink.setDecay(0.6f);        // longer LPG tail -> playable sustain
-    g_plaitsSink.setLpgColour(0.5f);
+    synthSetHarm(g_plHarm);
+    synthSetTimbre(g_plTimbre);
+    synthSetMorph(g_plMorph);
+    synthSetDecay(g_plDecay);
+    synthSetColor(g_plColor);
     g_plaitsSink.setTimbreDepth(1.0f);
     g_plaitsSink.setMasterChannel(0);   // start in plain poly (applyMidiMode may switch)
     g_plTrim.setGain(tdsp::auditionTrim(plaitsVoiceTrim(0)));

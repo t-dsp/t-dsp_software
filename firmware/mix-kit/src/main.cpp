@@ -953,6 +953,24 @@ static void setMix(float bt, float tone, float spdif) {
 // TDSP_METRONOME because applyMeter() references it unconditionally.
 static uint8_t g_metroBpb = 4;
 
+// ---- Control I/O: two USB CDC lanes (Dual Serial) --------------------------------------------------
+// USB_DUAL_SERIAL exposes TWO CDC ports so the app can hold ONE for control while a tool uses the OTHER
+// for flashing + diagnostics — no more fighting over a single COM port. `ctrl` BROADCASTS the periodic
+// pushes (@BEAT / @BPM / @RECP / player positions / alive) to BOTH ports, so EITHER port is a complete
+// control port; per-command REPLIES still go only to the port that issued the command (the Stream&
+// threaded through handleControlLine). On single-serial builds `ctrl` is simply Serial — unchanged.
+#if defined(USB_DUAL_SERIAL)
+struct CtrlBroadcast : public Print {
+    size_t write(uint8_t b) override { Serial.write(b); return SerialUSB1.write(b); }
+    size_t write(const uint8_t *buf, size_t n) override { Serial.write(buf, n); return SerialUSB1.write(buf, n); }
+    int    availableForWrite() override { int a = Serial.availableForWrite(), b = SerialUSB1.availableForWrite(); return a < b ? a : b; }
+};
+static CtrlBroadcast g_ctrlBroadcast;
+static Print &ctrl = g_ctrlBroadcast;
+#else
+static Print &ctrl = Serial;
+#endif
+
 // Emit "@BEAT=<i>/<n>" for the app's beat lights — but ONLY if the USB serial can
 // take it WITHOUT blocking loop(). Click/playback timing precision matters more than
 // a single light frame, and the app has a local-clock fallback, so if the TX buffer
@@ -960,7 +978,7 @@ static uint8_t g_metroBpb = 4;
 // would jitter the metronome click / the synced players). This is the fix for
 // "the beat-light feed hurting precision".
 static void emitBeat(uint8_t i, uint8_t n) {
-    if (Serial.availableForWrite() >= 16) Serial.printf("@BEAT=%u/%u\n", (unsigned)i, (unsigned)n);
+    if (ctrl.availableForWrite() >= 16) ctrl.printf("@BEAT=%u/%u\n", (unsigned)i, (unsigned)n);
 }
 
 // Metronome (opt-in: -D TDSP_METRONOME). The metronome is now the AUDIBLE FACE of the master
@@ -1338,7 +1356,7 @@ static void applyTempos() {
 // auto-follow snap, below). The app parses an incoming "@BPM=<n>" line into its BPM display; @BEAT/
 // @SONGP already prove firmware->app pushes relay over both USB and BLE. App-initiated @BPM= changes
 // don't need this echo (the app already knows the value it sent), so only the auto-follow path emits.
-static void emitMasterBpm() { Serial.printf("@BPM=%d\n", (int)(g_masterBpm + 0.5f)); }
+static void emitMasterBpm() { ctrl.printf("@BPM=%d\n", (int)(g_masterBpm + 0.5f)); }
 
 // Set the master bar length from the CONTENT's time signature so the downbeat
 // (beatInBar()==0 / barPhase()==0) and consumeBarEdge() land on real bar 1 for
@@ -1793,8 +1811,8 @@ static void trackLoopTick(Track &t) {
 // AFTER trackLoopTick() so a loop re-arm keeps us "playing" (no spurious -1 at the loop seam).
 static void emitTrackPos(Track &t, const char *cmd, elapsedMillis &clk, bool &prev) {
     const bool now = t.player->isPlaying();
-    if (now) { if (clk >= 400) { clk = 0; Serial.printf("%s=%u\n", cmd, t.player->positionPermille()); } }
-    else if (prev) { Serial.printf("%s=-1\n", cmd); }
+    if (now) { if (clk >= 400) { clk = 0; ctrl.printf("%s=%u\n", cmd, t.player->positionPermille()); } }
+    else if (prev) { ctrl.printf("%s=-1\n", cmd); }
     prev = now;
 }
 
@@ -2335,6 +2353,10 @@ static uint8_t g_xferId = 0;
 // USB-only (the ESP32/BLE relay is 115200 + can't carry a raw byte stream). See
 // lib/TDspSdXfer.
 static tdsp::SdWriteReceiver g_sdWrite(SD);
+// Which CDC lane an in-flight @WB transfer is streaming on, so its raw payload is pumped from — and
+// only from — the port that started it. On Dual Serial this lets an asset-sync tool run @WB on the
+// SECOND port while the app keeps talking control on the first (the whole point of two ports).
+static Stream *g_sdWriteSrc = &Serial;
 
 // Keep the master transport alive during a long, blocking SD stream. streamFile()/
 // streamDir()/streamClip() run a synchronous read/encode/write loop that monopolizes
@@ -3035,6 +3057,16 @@ static void handleTrkCmd(const char* s, Stream& reply) {
     else if (voiceIsPlaits(i) && strncmp(cmd, "LPGDECAY=", 9) == 0) { heteroPlaitsSetDecay(atoi(arg));  reply.printf("@TRK%d.LPGDECAY=%d\n", i, g_hpDecay); }
     else if (voiceIsPlaits(i) && strncmp(cmd, "LPGCOLOR=", 9) == 0) { heteroPlaitsSetColor(atoi(arg));  reply.printf("@TRK%d.LPGCOLOR=%d\n", i, g_hpColor); }
 #endif
+#if defined(TDSP_SYNTH_PLAITS)
+    // Solo (PRIMARY) Plaits: track 0 IS the Plaits voice, so the SAME editor panel drives it — the macros
+    // route to g_plaitsSink via the synthSet* setters instead of the hetero pool. This is what lets the
+    // Plaits-primary build use the hetero editor page (model matrix already rides eng="plaits"/INSTR).
+    else if (i == 0 && strncmp(cmd, "HARM=", 5) == 0)     { synthSetHarm(atoi(arg));   reply.printf("@TRK%d.HARM=%d\n", i, g_plHarm); }
+    else if (i == 0 && strncmp(cmd, "TIMBRE=", 7) == 0)   { synthSetTimbre(atoi(arg)); reply.printf("@TRK%d.TIMBRE=%d\n", i, g_plTimbre); }
+    else if (i == 0 && strncmp(cmd, "MORPH=", 6) == 0)    { synthSetMorph(atoi(arg));  reply.printf("@TRK%d.MORPH=%d\n", i, g_plMorph); }
+    else if (i == 0 && strncmp(cmd, "LPGDECAY=", 9) == 0) { synthSetDecay(atoi(arg));  reply.printf("@TRK%d.LPGDECAY=%d\n", i, g_plDecay); }
+    else if (i == 0 && strncmp(cmd, "LPGCOLOR=", 9) == 0) { synthSetColor(atoi(arg));  reply.printf("@TRK%d.LPGCOLOR=%d\n", i, g_plColor); }
+#endif
     // Drum KIT select through the uniform track surface: @TRK<nSynth>.INSTR=<kit> -> the drum engine's
     // setInstrument (== setDrumKit), mirroring @DRUMKIT= but via the same @TRK<i> path the app uses for
     // synth voices — so a componentized per-track card drives the kit exactly like an instrument. Not
@@ -3183,7 +3215,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     }
     else if (strncmp(line, "@WB=", 4) == 0) {                                    // host->SD file write; raw payload follows. USB CDC only.
         if (&reply != &Serial) reply.println("@WERR=0\x1fusb only");
-        else g_sdWrite.begin(line + 4, reply);
+        else { g_sdWrite.begin(line + 4, reply); g_sdWriteSrc = &reply; }
     }
     else if (strncmp(line, "@CRC=", 5) == 0) {                                   // checksum an SD file (round-trip verify for @WB)
         uint32_t crc = 0, bytes = 0;
@@ -3737,6 +3769,12 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
             if (voiceIsPlaits(v))
                 reply.printf(",\"harm\":%d,\"timbre\":%d,\"morph\":%d,\"lpgdecay\":%d,\"lpgcolor\":%d",
                              g_hpHarm, g_hpTimbre, g_hpMorph, g_hpDecay, g_hpColor);
+#endif
+#if defined(TDSP_SYNTH_PLAITS)
+            // Solo (primary) Plaits: track 0 carries the same macros (rehydrate the editor panel).
+            if (v == 0)
+                reply.printf(",\"harm\":%d,\"timbre\":%d,\"morph\":%d,\"lpgdecay\":%d,\"lpgcolor\":%d",
+                             g_plHarm, g_plTimbre, g_plMorph, g_plDecay, g_plColor);
 #endif
 #if TDSP_FX_SEND
             reply.printf(",\"fxsend\":%d", g_fxSend[v]);
@@ -4635,12 +4673,12 @@ void loop() {
             if (g_loopV[v].state() != tdsp::MidiLooper::Idle) { recNow = true; break; }
         if ((recNow && recPosClock >= 250) || (recNow != recPrev)) {
             recPosClock = 0;
-            Serial.print("@RECP=");
+            ctrl.print("@RECP=");
             for (int v = 0; v < kSynthVoices; v++) {
-                if (v) Serial.print(',');
-                Serial.printf("%d,%d", (int)g_loopV[v].state(), g_loopV[v].positionPermille());
+                if (v) ctrl.print(',');
+                ctrl.printf("%d,%d", (int)g_loopV[v].state(), g_loopV[v].positionPermille());
             }
-            Serial.print('\n');
+            ctrl.print('\n');
         }
         recPrev = recNow;
     }
@@ -4670,7 +4708,7 @@ void loop() {
     }
 #endif
 
-    g_sdWrite.tick(Serial, millis());   // abort a stalled @WB transfer (watchdog)
+    g_sdWrite.tick(*g_sdWriteSrc, millis());   // abort a stalled @WB transfer (watchdog), on its own lane
 
     // USB CDC input serves two roles: '@'-prefixed control LINES (the same protocol
     // the ESP32 relays from BLE — lets a Web Serial browser page drive the device with
@@ -4680,9 +4718,10 @@ void loop() {
     static size_t usbN = 0;
     static bool usbInCmd = false;
     while (Serial.available()) {
-        // While an @WB write is in flight, incoming bytes are the raw payload —
-        // route them straight to the SD before the line assembler sees them.
-        if (g_sdWrite.receiving()) { g_sdWrite.pump(Serial, Serial); if (g_sdWrite.receiving()) break; else continue; }
+        // While an @WB write is in flight ON THIS lane, incoming bytes are the raw payload — route them
+        // straight to the SD before the line assembler sees them. (An @WB on the OTHER lane doesn't gate
+        // this port, so the app keeps sending control on Serial during a second-port asset sync.)
+        if (g_sdWrite.receiving() && g_sdWriteSrc == &Serial) { g_sdWrite.pump(Serial, Serial); if (g_sdWrite.receiving()) break; else continue; }
         int c = Serial.read();
         if (usbInCmd) {
             if (c == '\n' || usbN >= sizeof(usbLine) - 1) {
@@ -4762,6 +4801,29 @@ void loop() {
         }
     }
 
+#if defined(USB_DUAL_SERIAL)
+    // Second CDC lane (Dual Serial): a clean control/diagnostics channel that accepts the same @-command
+    // lines and replies on THIS port — so a tool can drive the box (query @STATE, play a track, tweak the
+    // Plaits panel, watch the mirrored @BEAT/@RECP/alive pushes) WITHOUT fighting the primary port the app
+    // holds. Its own line buffer; @WB SD writes are owner-aware so an asset sync can run on THIS lane.
+    // Single-key kit debug commands (g/r/U/t/…) stay primary-only.
+    {
+        static char u1[288]; static size_t u1n = 0; static bool u1cmd = false;
+        while (SerialUSB1.available()) {
+            // An @WB started on THIS lane streams its raw payload here (owner-aware, mirrors Serial).
+            if (g_sdWrite.receiving() && g_sdWriteSrc == &SerialUSB1) { g_sdWrite.pump(SerialUSB1, SerialUSB1); if (g_sdWrite.receiving()) break; else continue; }
+            int c = SerialUSB1.read();
+            if (u1cmd) {
+                if (c == '\n' || u1n >= sizeof(u1) - 1) {
+                    u1[u1n] = 0;
+                    if (!handleControlLine(u1, SerialUSB1)) SerialUSB1.printf("? %s\n", u1);
+                    u1n = 0; u1cmd = false;
+                } else if (c != '\r') u1[u1n++] = (char)c;
+            } else if (c == '@') { u1cmd = true; u1n = 0; u1[u1n++] = '@'; }
+        }
+    }
+#endif
+
     // Mirror the ESP32's UART log to USB, line-buffered with an [esp] prefix.
     static char line[288];   // 288 fits a full 32-step @ARPSEQ line relayed from the BLE app
     static size_t n = 0;
@@ -4791,7 +4853,7 @@ void loop() {
 #endif
         float psp = peakSpdif.available() ? peakSpdif.read() : 0.0f;
         float po  = peakOut.available()   ? peakOut.read()   : 0.0f;
-        Serial.printf("alive up=%lus  bpm=%.0f(%s)  codec=%s(%s)  spdif=%s inFreq=%.0f  "
+        ctrl.printf("alive up=%lus  bpm=%.0f(%s)  codec=%s(%s)  spdif=%s inFreq=%.0f  "
                       "btPeak=%.3f spdifPeak=%.3f outPeak=%.3f  cpuMax=%.1f%% memMax=%u f32Max=%u\n",
                       (unsigned long)(millis() / 1000),
                       (double)g_masterBpm, g_conductor.running() ? "run" : "idle",
