@@ -373,7 +373,7 @@ export class BleTransport implements Transport {
   arp2Sequence(steps: SeqStep[]) { this.relay('@ARP2SEQ=' + encodeSequence(steps)); }
   arp2Preset(params: ArpWireParams) { this.relay('@ARP2PRESET=' + encodeArpParams(params)); }
   // ---- Loop recorder (identical @-lines over the relay) ----
-  recVoice(v: number) { this.relay('@RECV=' + (v === 2 ? 2 : 1)); }
+  recVoice(v: number) { this.relay('@RECV=' + (Math.max(1, v))); }
   recBars(n: number) { this.relay('@RECBARS=' + n); }
   recSig(bpb: number) { this.relay('@RECSIG=' + Math.max(1, Math.min(16, Math.round(bpb)))); }
   recArm(on: boolean) { this.relay('@REC=' + (on ? 1 : 0)); }
@@ -389,11 +389,11 @@ export class BleTransport implements Transport {
       this.filePending = p;
       this.fileAsm = { id: undefined, chunks: [] };
       this.armFileTimer(p);
-      this.relay('@RECDUMP=' + (v === 2 ? 2 : 1)).catch(e => { clearTimeout(p.timer); this.filePending = null; reject(e); });
+      this.relay('@RECDUMP=' + (Math.max(1, v))).catch(e => { clearTimeout(p.timer); this.filePending = null; reject(e); });
     });
   }
   async recLoad(v: number, bytes: Uint8Array): Promise<void> {
-    v = v === 2 ? 2 : 1;
+    v = Math.max(1, v);
     await this.awaitReply('@RECLOAD=' + v + '\x1f' + bytes.length, '@RECOK=' + v, '@RECERR=' + v);
     for (const fr of rdFrames(v, bytes)) { await this.relay(fr); await new Promise(r => setTimeout(r, 30)); }  // pace the BLE relay (bridge throttle)
     await this.awaitReply('@RECEND=' + v, '@RECE=' + v, '@RECERR=' + v);

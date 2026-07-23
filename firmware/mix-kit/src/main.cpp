@@ -321,13 +321,20 @@ static bool            g_mpeMode = false;    // false = normal MIDI (bend +-2, c
 // and plays the loop back into that voice's synth sink. begin() is wired in setup()
 // once the sinks exist. g_recVoice picks which voice the app's record controls hit.
 #if TDSP_RECORDER
-tdsp::MidiLooper       g_loop1;              // voice-1 loop recorder
+// ONE looper per synth voice (Synth A/B/C/D) — parallels g_playerV[]/g_arpFilterV[]. Each is bound
+// to its own Track (t.looper) and taps THAT track's arp downstream in setup(), so every synth records
+// itself. g_loop1/g_loop2 stay as aliases for the (many) voice-1/voice-2-specific call sites.
+tdsp::MidiLooper       g_loopV[kSynthVoices];
+tdsp::MidiLooper      &g_loop1 = g_loopV[0];         // alias: voice 0
 #if TDSP_VOICE2
-tdsp::MidiLooper       g_loop2;              // voice-2 loop recorder (pool split only)
+tdsp::MidiLooper      &g_loop2 = g_loopV[1];         // alias: voice 1
 #endif
-static uint8_t         g_recVoice = 1;       // 1 or 2: target of @REC/@RECDUB/@RECCLR
+static uint8_t         g_recVoice = 1;       // 1..kSynthVoices: which voice's looper @REC/@RECDUB/@RECCLR hit
 static bool            g_recClickAuto = false; // WE turned the count-in click on for a fresh
                                               // record; auto-stop it when the loop is captured
+static inline tdsp::MidiLooper* trackLooper(int i) { return (i >= 0 && i < kSynthVoices) ? &g_loopV[i] : nullptr; }
+#else
+static inline tdsp::MidiLooper* trackLooper(int)   { return nullptr; }
 #endif
 
 // The tracks: [0] = Voice 1, [1] = Voice 2 (VOICE2 builds). A thin binding view over the
@@ -1252,6 +1259,7 @@ static char g_appState[256] = "";
 static void applyMidiMode(bool mpe);   // defined below; test songs flip mode on start
 static void trackEnginesSetMpe(bool mpe);   // defined in TrackEngineImpl.inc.h; MPE toggle across ALL track engines
 static void drumApplyKit();            // defined below; the drum Track's prep applies the GM kit
+static void setDrumKit(int i);         // defined below; select a kit (used by the @DRUMFONT swap above it)
 static void muteSongDrums(bool mute);  // defined below; drum-track start/stop mutes the song's ch10
 static bool drumEngineOk();            // defined below; does the active engine render ch10 drums?
 static void trackLaunch(Track &t, const char *arg);   // defined below; launch-quantize-aware start (drum uses it)
@@ -1384,10 +1392,7 @@ static bool transportHasContent() {
     // A's loop is going looks "idle" and re-zeroes the clock — restarting A's loop. Each recorder
     // anchors to the bar of its own first note, so the two loops may sit out of phase with each
     // other; that's fine and intended. They still share the one bar grid.
-    any = any || loopHoldsGrid(g_loop1);
-#if TDSP_VOICE2
-    any = any || loopHoldsGrid(g_loop2);
-#endif
+    for (int v = 0; v < kSynthVoices; v++) if (loopHoldsGrid(g_loopV[v])) { any = true; break; }
 #endif
     return any;
 }
@@ -1400,24 +1405,26 @@ static void ensureTransportStarted() {
 }
 
 #if TDSP_RECORDER
-// The looper the app's record controls currently target (voice 1 or 2).
+// The looper the app's record controls currently target (g_recVoice = 1..kSynthVoices).
 static tdsp::MidiLooper *recSel() {
-#if TDSP_VOICE2
-    if (g_recVoice == 2) return &g_loop2;
-#endif
-    return &g_loop1;
+    int i = (int)g_recVoice - 1;
+    if (i < 0 || i >= kSynthVoices) i = 0;
+    return &g_loopV[i];
+}
+// The looper for an explicit 1-based voice arg (@LOOPF / @RECDUMP / @RECLOAD), clamped in range.
+static tdsp::MidiLooper *recLooperFor(int v) {
+    int i = v - 1;
+    if (i < 0 || i >= kSynthVoices) i = 0;
+    return &g_loopV[i];
 }
 // True while a looper is still arming/capturing a FRESH take (the count-in click should
 // run during this, then stop). Overdub plays the existing loop as its own reference.
 static bool recFreshCapturing() {
-    auto arming = [](tdsp::MidiLooper &l) {
-        return l.state() == tdsp::MidiLooper::Armed || l.state() == tdsp::MidiLooper::Recording;
-    };
-    bool a = arming(g_loop1);
-#if TDSP_VOICE2
-    a = a || arming(g_loop2);
-#endif
-    return a;
+    for (int v = 0; v < kSynthVoices; v++) {
+        const tdsp::MidiLooper::State st = g_loopV[v].state();
+        if (st == tdsp::MidiLooper::Armed || st == tdsp::MidiLooper::Recording) return true;
+    }
+    return false;
 }
 
 // Arming a recording needs a running beat grid to anchor to; when nothing else is playing,
@@ -1426,14 +1433,16 @@ static bool recFreshCapturing() {
 // is captured (recPollClick, below) so it never bleeds into playback. Overdub/resume pass
 // startClick=false — the already-looping clip is the reference. See project_midi_loop_recorder.
 static void recArmTransport(bool startClick) {
-    applyMeter();                 // bars-up the clock on the current (record) signature
-    ensureTransportStarted();     // define the downbeat if the transport is idle
-#ifdef TDSP_METRONOME
-    if (startClick && g_metroMuted && !g_player.isPlaying() && !g_drumPlayer.isPlaying()) {
-        metroSetMuted(false);     // count-in: temporarily un-mute the click (transport is now running)
-        g_recClickAuto = true;    // remember WE un-muted it, so we may re-mute after capture
+    // Arming a recording STARTS the beat grid (transport) if it's idle, so the take has a downbeat to
+    // ride — the metronome running is fine; the user just doesn't want it to start CLICKING. So we
+    // never un-mute the click here (the metronome keeps whatever audible/muted setting it had), and we
+    // never re-zero a transport that's already running (that made a running metronome jump on Record).
+    // The take itself doesn't begin until the first note lands on the running clock (see the Armed
+    // guard in MidiLooper::onNoteOn), so recording starts WITH the player and ends exactly `bars` later.
+    if (!g_conductor.running()) {
+        applyMeter();             // bars-up the (idle) clock on the current record signature
+        ensureTransportStarted(); // define the downbeat (muted transport is OK; we never un-mute)
     }
-#endif
     (void)startClick;
 }
 
@@ -1840,9 +1849,10 @@ static inline uint8_t     drumKitProg(int i) { return g_numRtKits > 0 ? g_rtKits
 // Populate g_rtKits from /sf2/drumkits.tsv (written by fetch_drumkits.py alongside the font).
 // Only called when the acoustic font actually loaded (g_drumFontIsKits), so the menu always
 // matches what will sound. Silent no-op if the manifest is absent/empty (keeps GM kits).
-static void loadDrumKitsTsv() {
-    File f = SD.open("/sf2/drumkits.tsv");
-    if (!f) { Serial.println("[drum] drumkits.sf2 loaded but /sf2/drumkits.tsv missing -> keeping GM kit names"); return; }
+static void loadDrumKitsTsvFrom(const char *tsvPath) {
+    g_numRtKits = 0;   // reset first so a runtime font-swap to a font without a .tsv cleanly falls back to GM names
+    File f = SD.open(tsvPath);
+    if (!f) { Serial.printf("[drum] %s missing -> keeping GM kit names\n", tsvPath); return; }
     int n = 0;
     while (f.available() && n < (int)(sizeof(g_rtKits) / sizeof(g_rtKits[0]))) {
         String line = f.readStringUntil('\n');
@@ -1862,9 +1872,83 @@ static void loadDrumKitsTsv() {
     }
     f.close();
     g_numRtKits = n;
-    Serial.printf("[drum] loaded %d acoustic kit(s) from /sf2/drumkits.tsv\n", n);
+    Serial.printf("[drum] loaded %d kit(s) from %s\n", n, tsvPath);
 }
+static void loadDrumKitsTsv() { loadDrumKitsTsvFrom("/sf2/drumkits.tsv"); }   // boot default (fetch_drumkits.py font)
 #endif
+
+#if defined(TDSP_DRUM_TSF)
+// ---- Runtime drum-font browser (@FONTS / @DRUMFONT) -------------------------------------------
+// The card can hold MANY drum SF2s (e.g. the per-machine "…From Mars" packs), cataloged in
+// /sf2/fonts.tsv (cols: path, display, kits, bytes). The app lists them (@FONTS), the user picks
+// one (@DRUMFONT=<path>) and the resident ch10 drum font is swapped live (drumTsfReload) + its
+// kit list reloaded from the font's sibling .tsv. Gated on TDSP_DRUM_TSF (only the sampled TSF
+// drum engine can swap fonts); the app shows the picker only when caps.drumfontsel + a font list.
+
+// Derive a font's kit-name tsv from its SF2 path: "/sf2/mars_808.sf2" -> "/sf2/mars_808.tsv".
+static void drumFontTsvPath(const char *sf2, char *out, int outLen) {
+    snprintf(out, outLen, "%s", sf2);
+    char *dot = strrchr(out, '.');
+    if (dot) strncpy(dot, ".tsv", 4); else snprintf(out, outLen, "%s.tsv", sf2);
+}
+// Look up a font's display label from /sf2/fonts.tsv; falls back to the bare filename.
+static void drumFontDisplayFor(const char *path, char *out, int outLen) {
+    out[0] = 0;
+    File f = SD.open("/sf2/fonts.tsv");
+    if (f) {
+        while (f.available()) {
+            String ln = f.readStringUntil('\n'); ln.trim();
+            if (!ln.length() || ln[0] == '#') continue;
+            int t1 = ln.indexOf('\t'); if (t1 < 0) continue;
+            if (ln.substring(0, t1) == path) {
+                int t2 = ln.indexOf('\t', t1 + 1);
+                String d = (t2 > t1) ? ln.substring(t1 + 1, t2) : ln.substring(t1 + 1);
+                d.trim(); snprintf(out, outLen, "%s", d.c_str()); break;
+            }
+        }
+        f.close();
+    }
+    if (!out[0]) {                                   // fallback: filename sans dir + ext
+        const char *b = strrchr(path, '/'); b = b ? b + 1 : path;
+        snprintf(out, outLen, "%s", b);
+        char *dot = strrchr(out, '.'); if (dot) *dot = 0;
+    }
+}
+// Stream /sf2/fonts.tsv as the app's "@FONTS=<path>\x1f<display>\x1f<kits>\x1f<current>|…" reply.
+static void streamFonts(Print &out) {
+    out.print("@FONTS=");
+    File f = SD.open("/sf2/fonts.tsv");
+    if (f) {
+        bool first = true;
+        while (f.available()) {
+            String ln = f.readStringUntil('\n'); ln.trim();
+            if (!ln.length() || ln[0] == '#') continue;
+            int t1 = ln.indexOf('\t'); if (t1 < 0) continue;
+            int t2 = ln.indexOf('\t', t1 + 1);
+            int t3 = (t2 > t1) ? ln.indexOf('\t', t2 + 1) : -1;
+            String path = ln.substring(0, t1);
+            String disp = (t2 > t1) ? ln.substring(t1 + 1, t2) : ln.substring(t1 + 1);
+            String kits = (t2 > t1) ? ((t3 > t2) ? ln.substring(t2 + 1, t3) : ln.substring(t2 + 1)) : String("0");
+            disp.trim(); kits.trim();
+            if (!first) out.print('|'); first = false;
+            out.print(path); out.write('\x1f'); out.print(disp); out.write('\x1f'); out.print(kits);
+            out.write('\x1f'); out.print(strcmp(path.c_str(), g_drumFontPath) == 0 ? '1' : '0');
+        }
+        f.close();
+    }
+    out.print('\n');
+}
+// Handle @DRUMFONT=<path>: swap the live drum font, reload its kit list, select kit 0, ack.
+static void drumFontSwap(const char *path, Print &reply) {
+    if (!drumTsfReload(path)) { reply.printf("@DRUMFONTERR=%s\n", path); return; }
+    drumFontDisplayFor(path, g_drumFontDisplay, sizeof(g_drumFontDisplay));
+    char tsv[80]; drumFontTsvPath(path, tsv, sizeof(tsv));
+    loadDrumKitsTsvFrom(tsv);          // the swapped font's kits become the drum menu
+    g_drumFontIsKits = true;
+    setDrumKit(0);                     // reset to first kit + apply it on ch10
+    reply.printf("@DRUMFONT=%s\n", path);   // ack -> app refreshes @TRK<drum>.INSTRS for the new kits
+}
+#endif // TDSP_DRUM_TSF
 
 // Catalog DB (CatalogDb.h) bundled-list hook: the engine's compile-time voice names +
 // the GM drum-kit table live here, so the indexer calls back into main.cpp to emit
@@ -3103,6 +3187,10 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     }
     else if (strncmp(line, "@DRUMF=", 7) == 0)    drumLaunchFile(line + 7); // @DRUMF=<filename> (browser, via catalog.tsv; bar-quantized if @QUANTIZE=1)
     else if (strncmp(line, "@DRUMKIT=", 9) == 0)   setDrumKit(atoi(line + 9));    // GM kit ("instrument")
+#if defined(TDSP_DRUM_TSF)
+    else if (strcmp(line, "@FONTS") == 0)          streamFonts(reply);           // list swappable drum SF2s from /sf2/fonts.tsv
+    else if (strncmp(line, "@DRUMFONT=", 10) == 0) drumFontSwap(line + 10, reply);// swap the resident ch10 drum font (runtime SF2 reload)
+#endif
     else if (strncmp(line, "@DRUMMAP=", 9) == 0) {   // ch10 note-map mode: 0=GmReduce (fold Roland 22/26->42/46), 1=Passthrough
         // Passthrough is ONLY correct on a font that has real regions at 22/26 (a V-Drums/TD-11
         // kit); on a plain GM font it re-drops the edge hi-hats silent. Default GmReduce; this
@@ -3185,8 +3273,8 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     // loop length + time signature; @REC arms (replace) / stops; @RECDUB overdubs;
     // @RECCLR wipes the clip; @RECPLAY resumes a stopped clip. Recording begins on the
     // first note press and locks to the bar downbeat (see project_midi_loop_recorder).
-    else if (strncmp(line, "@RECV=", 6) == 0) {                 // select target voice (1|2)
-        int v = atoi(line + 6); if (v != 2) v = 1;
+    else if (strncmp(line, "@RECV=", 6) == 0) {                 // select target voice (1..kSynthVoices)
+        int v = atoi(line + 6); if (v < 1 || v > kSynthVoices) v = 1;
         g_recVoice = (uint8_t)v;
         reply.printf("@RECV=%d\n", g_recVoice);
     }
@@ -3229,14 +3317,10 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         // /midi/loops catalog relpath (e.g. "cc0/Foo [bass].mid"). The loop plays at once,
         // bar-locked to the master clock, through voice v's own synth via its MidiLooper.
         const char *p   = line + 7;
-        int         v   = atoi(p); if (v != 2) v = 1;
+        int         v   = atoi(p); if (v < 1 || v > kSynthVoices) v = 1;
         const char *us  = strchr(p, '\x1f');
         const char *arg = us ? us + 1 : nullptr;
-        tdsp::MidiLooper *L =
-#if TDSP_VOICE2
-            (v == 2) ? &g_loop2 :
-#endif
-            &g_loop1;
+        tdsp::MidiLooper *L = recLooperFor(v);
         char full[160] = {0};
         if (arg && arg[0] == '/')  snprintf(full, sizeof full, "%s", arg);
         else if (arg)              snprintf(full, sizeof full, "/midi/loops/%s", arg);
@@ -3249,25 +3333,17 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     // clip back in. The load decodes straight into the clip (no staging buffer) and, on
     // commit, re-anchors playback to the retained grid phase.
     else if (strncmp(line, "@RECDUMP=", 9) == 0) {             // stream voice v's clip to the app
-        int v = atoi(line + 9); if (v != 2) v = 1;
-        tdsp::MidiLooper *L =
-#if TDSP_VOICE2
-            (v == 2) ? &g_loop2 :
-#endif
-            &g_loop1;
+        int v = atoi(line + 9); if (v < 1 || v > kSynthVoices) v = 1;
+        tdsp::MidiLooper *L = recLooperFor(v);
         char name[16]; snprintf(name, sizeof(name), "mem:/loop%d", v);
         streamClip(reply, name, L->clip());
     }
     else if (strncmp(line, "@RECLOAD=", 9) == 0) {             // begin load: <v>\x1f<bytes>[\x1f<crc>]
         const char *p = line + 9;
-        int  v  = atoi(p); if (v != 2) v = 1;
+        int  v  = atoi(p); if (v < 1 || v > kSynthVoices) v = 1;
         const char *us = strchr(p, '\x1f');
         long bytes = us ? atol(us + 1) : 0;
-        tdsp::MidiLooper *L =
-#if TDSP_VOICE2
-            (v == 2) ? &g_loop2 :
-#endif
-            &g_loop1;
+        tdsp::MidiLooper *L = recLooperFor(v);
         const tdsp::MidiLooper::State st = L->state();
         const long maxBytes = (long)(tdsp::kLoopClipHdrBytes + (uint32_t)L->maxEvents() * tdsp::kLoopEventBytes);
         if (st == tdsp::MidiLooper::Armed || st == tdsp::MidiLooper::Recording || st == tdsp::MidiLooper::Overdub) {
@@ -3296,7 +3372,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         // else: stray/duplicate frame from an aborted transfer — ignore silently.
     }
     else if (strncmp(line, "@RECEND=", 8) == 0) {              // commit the load
-        int v = atoi(line + 8); if (v != 2) v = 1;
+        int v = atoi(line + 8); if (v < 1 || v > kSynthVoices) v = 1;
         if (!g_recLoad.active || v != (int)g_recLoad.voice) {
             reply.printf("@RECERR=%d\x1fnoload\n", v);
         } else if (g_recLoad.err || !g_recLoad.hdrDone || g_recLoad.evFill != 0 ||
@@ -3550,14 +3626,16 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         // currently target (each player aims it at its own voice before acting).
         // n1/n2 = event count per clip, max = the per-clip cap, so the editor can show
         // headroom (n/max) and disable Add near the limit (DESIGN §2.5).
-        reply.printf("\"rec\":{\"v\":%d,\"bars1\":%d,\"st1\":%d,\"p1\":%d,\"n1\":%d,\"max\":%d",
-                     g_recVoice, g_loop1.bars(), (int)g_loop1.state(), g_loop1.positionPermille(),
-                     g_loop1.eventCount(), g_loop1.maxEvents());
-#if TDSP_VOICE2
-        reply.printf(",\"bars2\":%d,\"st2\":%d,\"p2\":%d,\"n2\":%d",
-                     g_loop2.bars(), (int)g_loop2.state(), g_loop2.positionPermille(), g_loop2.eventCount());
-#endif
-        reply.print("},");
+        // Per-voice: "loops"[i] = {bars,st,p,n} for synth voice i (Synth A/B/C/D). `v` = which one
+        // the @REC* commands currently target; `max` = the per-clip event cap (shared).
+        reply.printf("\"rec\":{\"v\":%d,\"max\":%d,\"loops\":[", g_recVoice, g_loop1.maxEvents());
+        for (int i = 0; i < kSynthVoices; i++) {
+            if (i) reply.print(',');
+            reply.printf("{\"bars\":%d,\"st\":%d,\"p\":%d,\"n\":%d}",
+                         g_loopV[i].bars(), (int)g_loopV[i].state(),
+                         g_loopV[i].positionPermille(), g_loopV[i].eventCount());
+        }
+        reply.print("]},");
 #endif
 #if TDSP_AUDIOLOOP
         // Audio loops: selected slot, how many actually allocated (n), the selected
@@ -3671,7 +3749,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         // compiled track count (2 synth voices + 1 drum, or 1+1 on a non-voice2 build).
         // caps.audioloop = the number of audio loops that ACTUALLY allocated (0 = the board
         // couldn't spare the RAM -> the app hides the card), not just the build flag.
-        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"tracks\":%d,\"audioloop\":%d,\"fx\":%d,\"usbaudio\":%d,\"drumkitsel\":%d}",
+        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"tracks\":%d,\"audioloop\":%d,\"fx\":%d,\"usbaudio\":%d,\"drumkitsel\":%d,\"drumfontsel\":%d}",
                      TDSP_VOICE2 ? 1 : 0, (TDSP_VOICE2 && TDSP_ARP2) ? 1 : 0, TDSP_RECORDER ? 1 : 0,
                      TDSP_RECORDER_EDIT ? 1 : 0, kSynthVoices + 1,   // N synth voices + the drum track
 #if TDSP_AUDIOLOOP
@@ -3682,9 +3760,19 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
                      , TDSP_FX ? 1 : 0   // caps.fx: the app shows the Reverb card only on FX builds
                      , TDSP_USB_AUDIO ? 1 : 0   // caps.usbaudio: the app shows the USB Audio card only on USB-audio builds
                      , kDrumKitSelectable ? 1 : 0   // caps.drumkitsel: 0 = fixed drum voice (OPLL) -> app hides the GM kit picker
+#if defined(TDSP_DRUM_TSF)
+                     , (::g_sdReady && SD.exists((char *)"/sf2/fonts.tsv")) ? 1 : 0   // caps.drumfontsel: runtime drum-font browser (many SF2s on the card)
+#else
+                     , 0
+#endif
                      );
         // PSRAM presence (top-level, MB): the app greys PSRAM-dependent cards with a reason when 0.
         reply.printf(",\"psram\":%u", (unsigned)external_psram_size);
+#if defined(TDSP_DRUM_TSF)
+        // Resident drum font (path + short label) so the app's @DRUMFONT picker highlights the current one.
+        reply.print(",\"drumfont\":{\"path\":"); tdsp::catdb::jsonStr(reply, g_drumFontPath);
+        reply.print(",\"display\":"); tdsp::catdb::jsonStr(reply, g_drumFontDisplay); reply.print("}");
+#endif
         // Reasons for features that were BUILT (compiled in) but are currently UNAVAILABLE, so the app
         // can GREY the card (not hide it) and show WHY. A feature appears here only when its code is
         // present yet it failed to come up — almost always a missing resource (PSRAM, an SD font). The
@@ -3914,7 +4002,7 @@ FLASHMEM static void tracksInit() {
     // Loopers are null initially (the MIDI recorder targets voices 0/1). liveSrcMask=0: idle until
     // the app assigns a device via @TRK2/3.SRC. Both are melodic (no drum/mode/meter ownership).
     { Track &t2 = g_tracks[2];
-      t2.player = &g_playerV[2]; t2.arp = &g_arpFilterV[2]; t2.router = &g_routerV[2]; t2.follow = &g_songFollow3; t2.looper = nullptr;
+      t2.player = &g_playerV[2]; t2.arp = &g_arpFilterV[2]; t2.router = &g_routerV[2]; t2.follow = &g_songFollow3; t2.looper = trackLooper(2);
       t2.sink = g_synthSink2; t2.buf = g_buf3; t2.bufCap = MAX_EVENTS3; t2.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
       t2.setLevel = synthSetVoice3Vol; t2.tag = "song3";
       t2.caps = { false, false, false, /*splitGuarded*/false,
@@ -3923,7 +4011,7 @@ FLASHMEM static void tracksInit() {
       t2.bpm = &g_song3Bpm; t2.bpb = &g_song3Bpb; t2.loopBeats = &g_song3LoopBeats; t2.launchPending = &g_song3LaunchPending;
       t2.liveSrcMask = 0; t2.srcChMask = 0; }
     { Track &t3 = g_tracks[3];
-      t3.player = &g_playerV[3]; t3.arp = &g_arpFilterV[3]; t3.router = &g_routerV[3]; t3.follow = &g_songFollow4; t3.looper = nullptr;
+      t3.player = &g_playerV[3]; t3.arp = &g_arpFilterV[3]; t3.router = &g_routerV[3]; t3.follow = &g_songFollow4; t3.looper = trackLooper(3);
       t3.sink = g_synthSink3; t3.buf = g_buf4; t3.bufCap = MAX_EVENTS3; t3.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
       t3.setLevel = synthSetVoice4Vol; t3.tag = "song4";
       t3.caps = { false, false, false, /*splitGuarded*/false,
@@ -3941,7 +4029,7 @@ FLASHMEM static void tracksInit() {
     // index-3 state (g_songFollow4/g_buf4/g_curSong4*).
 #if TDSP_OPLL_ENGINES >= 1
     { const int idx = kDexedVoices; Track &t2 = g_tracks[idx];
-      t2.player = &g_playerV[idx]; t2.arp = &g_arpFilterV[idx]; t2.router = &g_routerV[idx]; t2.looper = nullptr;
+      t2.player = &g_playerV[idx]; t2.arp = &g_arpFilterV[idx]; t2.router = &g_routerV[idx]; t2.looper = trackLooper(idx);
       t2.sink = g_hoOpllVoiceSink[0]; t2.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
       t2.setLevel = heteroOpllSetVol0; t2.tag = "song3";
       t2.caps = { false, false, false, /*splitGuarded*/false,
@@ -3951,7 +4039,7 @@ FLASHMEM static void tracksInit() {
 #endif
 #if TDSP_OPLL_ENGINES >= 2
     { const int idx = kDexedVoices + 1; Track &t3 = g_tracks[idx];
-      t3.player = &g_playerV[idx]; t3.arp = &g_arpFilterV[idx]; t3.router = &g_routerV[idx]; t3.looper = nullptr;
+      t3.player = &g_playerV[idx]; t3.arp = &g_arpFilterV[idx]; t3.router = &g_routerV[idx]; t3.looper = trackLooper(idx);
       t3.sink = g_hoOpllVoiceSink[1]; t3.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
       t3.setLevel = heteroOpllSetVol1; t3.tag = "song4";
       t3.caps = { false, false, false, /*splitGuarded*/false,
@@ -3969,7 +4057,7 @@ FLASHMEM static void tracksInit() {
     { const int pv = kDexedVoices + kOpllVoices;
       Track &tp = g_tracks[pv];
       tp.player = &g_playerV[pv]; tp.arp = &g_arpFilterV[pv]; tp.router = &g_routerV[pv];
-      tp.looper = nullptr; tp.sink = g_hpVoiceSink;
+      tp.looper = trackLooper(pv); tp.sink = g_hpVoiceSink;
       tp.chMask = tdsp::MidiFilePlayer::kMaskNoDrums; tp.setLevel = heteroPlaitsSetVol;
       tp.caps = { false, false, false, false, false, false, false, false, false, /*tempoSourceWhenIdle*/true };
       tp.tag = (pv == 2) ? "song3" : "song4";   // cosmetic log label (unchanged for current builds)
@@ -4310,6 +4398,57 @@ FLASHMEM void setup() {
 // song, another SD parse). Those stay loop()-only; a launch armed during a stream simply
 // fires on the next real loop() the moment the transfer completes. Prototyped up by the
 // streamers (they call it); defined here where every symbol it needs is already in scope.
+#if TDSP_RECORDER
+// Poll every voice's MIDI looper in TWO passes so a take that CLOSES this iteration can stop its
+// source player BEFORE the clip's beat-0 notes are dispatched. Pass 1: poll() closes the window
+// (arms the LoopPlayer but emits nothing yet). On the Recording->Playing edge the freshly-captured
+// loop REPLACES the source that fed it, so stop THAT voice's own MIDI player — otherwise a source
+// loop longer than the take (e.g. a 3-bar song under a 4-bar clip) keeps sounding past the window
+// and phases against the loop (the "recording continues past bar 4 / not synced to the grid" bug).
+// songStop's sink panic is safe here: it lands before pass 2's tick(), which re-asserts the clip's
+// opening notes on the shared sink. Guarded on isPlaying() so recording a LIVE keyboard (source
+// player idle) stops nothing — a backing track on another voice, and your held keys, are untouched.
+// Shared by loop() and pumpTransport() (the SD-stream subset) so the behaviour is identical whether
+// or not an SD transfer is in flight.
+static void pollLoopers() {
+    static tdsp::MidiLooper::State prevLoopState[kSynthVoices] = {};
+    static bool srcStopPending[kSynthVoices] = {};   // "stop this voice's source once its tail drains"
+    for (int v = 0; v < kSynthVoices; v++) {
+        const tdsp::MidiLooper::State was = prevLoopState[v];
+        g_loopV[v].poll();
+        const tdsp::MidiLooper::State now = g_loopV[v].state();
+        // Take just CLOSED (Recording->Playing): the fresh loop replaces the source that fed it, so the
+        // source must stop (else a source loop longer/shorter than the take keeps sounding and phases —
+        // the "past bar 4 / out of grid" bug). But cutting it dead here would strand any note still
+        // ringing across the seam (its note-on is captured, its real note-off never arrives -> the clip
+        // hangs that note forever). So instead we put the source into DRAIN mode: it stops starting NEW
+        // notes but keeps advancing, emitting the trailing note-offs at their real times — the note
+        // finishes when it's released, and the looper's tail captures that off. We FULLY stop the
+        // source once the tail has drained (nothing left ringing).
+        if (was == tdsp::MidiLooper::Recording && now == tdsp::MidiLooper::Playing &&
+            g_tracks[v].player->isPlaying()) {
+            g_tracks[v].player->setNoteOnMute(true);   // "overdub note-offs, not new note-ons"
+            srcStopPending[v] = true;
+        }
+        // Execute the deferred stop once the tail has drained — or immediately at close when nothing was
+        // held. songStop clears *wasPlaying (no loop re-arm) and its stop() clears drain mode. Abandon
+        // the pending stop if the loop left Playing/Overdub (cleared/stopped) so we never stop — or
+        // leave muted — a source the user just re-launched.
+        if (srcStopPending[v]) {
+            if (now != tdsp::MidiLooper::Playing && now != tdsp::MidiLooper::Overdub) {
+                g_tracks[v].player->setNoteOnMute(false);
+                srcStopPending[v] = false;
+            } else if (!g_loopV[v].tailPending()) {
+                songStop(g_tracks[v]);
+                srcStopPending[v] = false;
+            }
+        }
+        prevLoopState[v] = now;
+    }
+    for (int v = 0; v < kSynthVoices; v++) g_loopV[v].tick();
+}
+#endif
+
 static void pumpTransport() {
     g_conductor.update(micros());
 #ifdef TDSP_METRONOME
@@ -4327,10 +4466,7 @@ static void pumpTransport() {
     g_drumPlayer.tick();
     for (tdsp::ArpFilter &a : g_arpFilterV) a.tick(micros());
 #if TDSP_RECORDER
-    g_loop1.poll(); g_loop1.tick();
-#if TDSP_VOICE2
-    g_loop2.poll(); g_loop2.tick();
-#endif
+    pollLoopers();
     recPollClick();
 #endif
 #if TDSP_AUDIOLOOP
@@ -4412,10 +4548,7 @@ void loop() {
     }
     for (tdsp::ArpFilter &a : g_arpFilterV) a.tick(micros());   // drain each arp's gate-off queue (steps fire on onClock)
 #if TDSP_RECORDER
-    g_loop1.poll(); g_loop1.tick();   // close the record window on the beat + advance loop playback
-#if TDSP_VOICE2
-    g_loop2.poll(); g_loop2.tick();
-#endif
+    pollLoopers();    // close the record window on the beat + advance loop playback (+ stop the source a fresh take replaces)
     recPollClick();   // stop the count-in click the instant the loop is captured
 #endif
 #if TDSP_AUDIOLOOP
@@ -4459,35 +4592,38 @@ void loop() {
         g_maxLoopGapUs = 0;   // per-second worst-case window
     }
 
-    // Push each track's playback position to the app (drives the MIDI Player progress bars): @SONGP
-    // for voice 1, @SONG2P for voice 2. Block-static throttle/edge state per track.
-    { static elapsedMillis clk; static bool prev = false; emitTrackPos(g_tracks[0], "@SONGP", clk, prev); }
-#if TDSP_VOICE2
-    { static elapsedMillis clk; static bool prev = false; emitTrackPos(g_tracks[1], "@SONG2P", clk, prev); }
-#endif
-#if TDSP_SYNTH_VOICES >= 4
-    { static elapsedMillis clk; static bool prev = false; emitTrackPos(g_tracks[2], "@TRK2.P", clk, prev); }
-    { static elapsedMillis clk; static bool prev = false; emitTrackPos(g_tracks[3], "@TRK3.P", clk, prev); }
-#elif TDSP_HETERO
-    { static elapsedMillis clk; static bool prev = false; emitTrackPos(g_tracks[kDexedVoices], "@TRK2.P", clk, prev); }
-#endif
+    // Push each synth track's playback position to the app (drives the MIDI Player progress bars),
+    // UNIFORMLY as "@TRK<i>.P" for EVERY voice (0..kSynthVoices-1). The app renders all synth cards
+    // from the one component and reads this single feed per voice. (Voices 0/1 used to push @SONGP /
+    // @SONG2P — that split is gone.) Block-static throttle/edge state, one slot per voice.
+    {
+        static elapsedMillis posClk[kSynthVoices];
+        static bool          posPrev[kSynthVoices] = {};
+        for (int v = 0; v < kSynthVoices; v++) {
+            char cmd[16]; snprintf(cmd, sizeof cmd, "@TRK%d.P", v);
+            emitTrackPos(g_tracks[v], cmd, posClk[v], posPrev[v]);
+        }
+    }
 
 #if TDSP_RECORDER
-    // Live loop-recorder telemetry: "@RECP=<st1>,<p1>,<st2>,<p2>" (state 0=idle 1=armed
-    // 2=recording 3=overdub 4=playing; p = permille) ~4x/sec while any looper is active,
-    // plus one edge frame when it goes idle. Same USB-only push as @SONGP/@BEAT (the app
-    // reflects taps optimistically, so BLE stays responsive without an ESP32 relay case).
+    // Live loop-recorder telemetry: "@RECP=<st0>,<p0>[,<st1>,<p1>...]" — one state+permille pair
+    // per synth voice (state 0=idle 1=armed 2=recording 3=overdub 4=playing; p = permille) ~4x/sec
+    // while ANY looper is active, plus one edge frame when they all go idle. Same USB-only push as
+    // @SONGP/@ALP (the app reflects taps optimistically, so BLE stays responsive without a relay).
     {
         static elapsedMillis recPosClock;
         static bool          recPrev = false;
-        int st1 = (int)g_loop1.state(), p1 = g_loop1.positionPermille(), st2 = 0, p2 = 0;
-#if TDSP_VOICE2
-        st2 = (int)g_loop2.state(); p2 = g_loop2.positionPermille();
-#endif
-        const bool recNow = (st1 != (int)tdsp::MidiLooper::Idle) || (st2 != (int)tdsp::MidiLooper::Idle);
+        bool recNow = false;
+        for (int v = 0; v < kSynthVoices; v++)
+            if (g_loopV[v].state() != tdsp::MidiLooper::Idle) { recNow = true; break; }
         if ((recNow && recPosClock >= 250) || (recNow != recPrev)) {
             recPosClock = 0;
-            Serial.printf("@RECP=%d,%d,%d,%d\n", st1, p1, st2, p2);
+            Serial.print("@RECP=");
+            for (int v = 0; v < kSynthVoices; v++) {
+                if (v) Serial.print(',');
+                Serial.printf("%d,%d", (int)g_loopV[v].state(), g_loopV[v].positionPermille());
+            }
+            Serial.print('\n');
         }
         recPrev = recNow;
     }

@@ -42,7 +42,7 @@ type Meta = { loopTicks: number; beatsPerBar: number; bars: number };
 
 export type PianoRollProps = {
   tp: Transport;
-  voice: 1 | 2;
+  voice: number;   // 1-based synth voice
   maxEvents?: number;    // per-clip event cap from @STATE rec.max (default MAX_EVENTS)
   onClose?: () => void;
 };

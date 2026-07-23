@@ -133,6 +133,39 @@ const ProgressBar = ({ value }: { value: number }) => (
   <View style={s.progTrack}><View style={[s.progFill, { width: `${Math.max(0, Math.min(1, value)) * 100}%` }]} /></View>
 );
 
+// Loop-recorder step grid: `bars` groups of `sig` beat cells (the master meter). As a take records or
+// plays, cells fill left→right up to the live loop position (prog 0..1), the current step glows, and
+// each bar's downbeat is marked — so you can watch the take march to the end of the last bar and wrap.
+// recording=true tints it red (capturing), else green (playback). active=false shows the empty grid as
+// a preview of the chosen length. Driven by the device's loop-position feed (prog), so it's grid-accurate.
+const LoopStepGrid = ({ bars, sig, prog, active, recording }:
+  { bars: number; sig: number; prog: number; active: boolean; recording: boolean }) => {
+  const nBars = Math.max(1, bars | 0);
+  const nSig = Math.max(1, Math.min(16, sig | 0));
+  const total = nBars * nSig;
+  const p = Math.max(0, Math.min(0.99999, prog));
+  const cur = active ? Math.min(total - 1, Math.floor(p * total)) : -1;
+  return (
+    <View style={s.stepGrid}>
+      {Array.from({ length: nBars }).map((_, b) => (
+        <View key={b} style={s.stepBar}>
+          {Array.from({ length: nSig }).map((_, k) => {
+            const i = b * nSig + k;
+            const past = active && i < cur;
+            const on = active && i === cur;
+            return <View key={k} style={[
+              s.stepCell,
+              k === 0 && s.stepCellDown,
+              past && (recording ? s.stepCellRecPast : s.stepCellPast),
+              on && (recording ? s.stepCellRecOn : s.stepCellOn),
+            ]} />;
+          })}
+        </View>
+      ))}
+    </View>
+  );
+};
+
 // Header beat lights: one circle per beat of the bar, the current beat lit, beat 1 (the
 // downbeat / accent) in a distinct color. Two clock sources, preferring the device:
 //   • LIVE (`live`): the device's @BEAT feed — locked to the REAL master downbeat + meter.
@@ -685,13 +718,15 @@ export default function App() {
   const [arpPresetIdX, setArpPresetIdX] = useState<Record<number, string>>({});
   const [seqX, setSeqX] = useState<Record<number, SeqStep[]>>({});
   const manualStopRefX = useRef<Record<number, React.MutableRefObject<boolean>>>({});
-  // MIDI loop recorder (build-flag gated, caps.rec). Each synth's MIDI player owns its own
-  // recorder, so every setting is PER-VOICE: bars1/bars2 = that synth's loop length, st1/st2 =
-  // state (0 idle 1 armed 2 recording 3 overdub 4 playing), p1/p2 = record-fill / playback-phase.
-  // `v` is only which voice the firmware's @REC* commands currently target — each player aims it
-  // at its own voice before acting. Time signature is deliberately NOT here: it's the shared
-  // master meter (metro.sig, set on the Metronome card) that both synths lock to.
-  const [rec, setRec] = useState({ v: 1, bars1: 4, bars2: 4, st1: 0, st2: 0, p1: 0, p2: 0, max: 1024 });
+  // MIDI loop recorder (build-flag gated, caps.rec). EVERY synth voice owns its own recorder, so the
+  // state is a PER-VOICE array `loops[i]` = { bars (loop length), st (0 idle 1 armed 2 recording 3
+  // overdub 4 playing), p (record-fill / playback-phase permille/1000), n (event count) } for synth
+  // voice i (0-based: Synth A/B/C/D). `v` is only which voice the firmware's @REC* commands currently
+  // target — each player aims it at its own voice before acting. `max` = per-clip event cap. Time
+  // signature is NOT here: it's the shared master meter (metro.sig) that all synths lock to.
+  type LoopState = { bars: number; st: number; p: number; n: number };
+  const emptyLoop = (): LoopState => ({ bars: 4, st: 0, p: 0, n: 0 });
+  const [rec, setRec] = useState<{ v: number; max: number; loops: LoopState[] }>({ v: 1, max: 1024, loops: [] });
   // Audio loop recorder (shown on caps.audioloop > 0): sel = selected loop, bars/mono/follow
   // = the selected loop's config, st[]/p[] = per-loop state (same 0..4 codes as `rec`) and
   // 0..1 progress, capS = the selected loop's capacity in seconds (bars that don't fit are
@@ -742,6 +777,18 @@ export default function App() {
     if (j.arp) setArp({ on: !!j.arp.on, pat: clampIdx(j.arp.pat, ARP_PAT.length), rate: rateIndexFromFw(j.arp.rate | 0), oct: Math.max(1, Math.min(4, j.arp.oct | 0)) || 1, latch: !!j.arp.latch });
     if (j.song) setPlayer(p => ({ ...p, playing: !!j.song.playing, song: j.song.name ? songArgByName(j.song.name) : p.song, name: j.song.name || p.name, prog: j.song.p != null ? j.song.p / 1000 : (j.song.playing ? -1 : 0) }));
     if (j.song?.vol != null) setSongVol(Math.max(0, Math.min(150, j.song.vol | 0)));
+    // Mirror voices 0/1's @STATE (arp / song player / level) into the INDEXED state, so Synth A/B render
+    // through the SAME makeTrackCard component as C/D. The app is now uniform — there is no bespoke
+    // Synth A/B path; every voice reads playerX/arpX/trkVolX and drives @TRK<v>.* .
+    {
+      const hydV = (idx: number, arp: any, songObj: any, vol: any) => {
+        if (arp) setArpX(m => ({ ...m, [idx]: { on: !!arp.on, pat: clampIdx(arp.pat, ARP_PAT.length), rate: rateIndexFromFw(arp.rate | 0), oct: Math.max(1, Math.min(4, arp.oct | 0)) || 1, latch: !!arp.latch } }));
+        if (songObj) setPlayerX(m => { const cur = m[idx] ?? { song: '', playing: false, name: '', prog: 0 }; return { ...m, [idx]: { ...cur, playing: !!songObj.playing, name: songObj.name || cur.name, prog: songObj.p != null ? songObj.p / 1000 : (songObj.playing ? -1 : 0) } }; });
+        if (vol != null) setTrkVolX(m => ({ ...m, [idx]: Math.max(0, Math.min(150, vol | 0)) }));
+      };
+      hydV(0, j.arp, j.song, j.song?.vol);
+      hydV(1, j.arp2, j.song2, j.voice2?.vol);
+    }
     if (j.drums) setDrums(d => ({ ...d, kit: j.drums.kit | 0, playing: j.drums.playing ? d.playing : null }));
     if (j.drums?.vol != null) setDrumVol(Math.max(0, Math.min(150, j.drums.vol | 0)));
     // Resident drum font (runtime swap builds only emit j.drumfont): path + short display label.
@@ -798,14 +845,16 @@ export default function App() {
       p: a.p.map((v, i) => (i === (j.aloop.sel | 0) ? (j.aloop.p | 0) / 1000 : v)),
     }));
     if (j.rec) setRec(r => ({
-      v: j.rec.v === 2 ? 2 : 1,
-      bars1: [1, 2, 4, 8].includes(j.rec.bars1 | 0) ? (j.rec.bars1 | 0) : r.bars1,
-      bars2: [1, 2, 4, 8].includes(j.rec.bars2 | 0) ? (j.rec.bars2 | 0) : r.bars2,
-      st1: Math.max(0, Math.min(4, j.rec.st1 | 0)),
-      st2: Math.max(0, Math.min(4, j.rec.st2 | 0)),
-      p1: (j.rec.p1 | 0) / 1000,
-      p2: (j.rec.p2 | 0) / 1000,
+      v: (j.rec.v | 0) >= 1 ? (j.rec.v | 0) : 1,
       max: (j.rec.max | 0) || r.max,
+      loops: Array.isArray(j.rec.loops)
+        ? j.rec.loops.map((L: any) => ({
+            bars: [1, 2, 4, 8].includes(L.bars | 0) ? (L.bars | 0) : 4,
+            st: Math.max(0, Math.min(4, L.st | 0)),
+            p: (L.p | 0) / 1000,
+            n: L.n | 0,
+          }))
+        : r.loops,
     }));
     if (j.voice2) setVoice2(v => ({
       on: !!j.voice2.on,
@@ -951,10 +1000,16 @@ export default function App() {
         }));
       }
     } else if (line.startsWith('@RECP=')) {
-      // Live loop-recorder telemetry: "@RECP=<st1>,<p1>,<st2>,<p2>" (state + permille per voice).
-      const p = line.slice(6).split(',').map(x => parseInt(x, 10));
-      if (p.length >= 4 && p.every(x => !isNaN(x))) {
-        setRec(r => ({ ...r, st1: Math.max(0, Math.min(4, p[0])), p1: p[1] / 1000, st2: Math.max(0, Math.min(4, p[2])), p2: p[3] / 1000 }));
+      // Live loop-recorder telemetry: "@RECP=<st0>,<p0>[,<st1>,<p1>...]" — one state+permille pair
+      // per synth voice. Merge into loops[i].st / loops[i].p (leave bars/n from the last @STATE).
+      const n = line.slice(6).split(',').map(x => parseInt(x, 10));
+      if (n.length >= 2 && n.every(x => !isNaN(x))) {
+        setRec(r => ({
+          ...r,
+          loops: r.loops.map((L, i) => (n[i * 2] != null
+            ? { ...L, st: Math.max(0, Math.min(4, n[i * 2])), p: (n[i * 2 + 1] | 0) / 1000 }
+            : L)),
+        }));
       }
     } else if (line.startsWith('@BEAT=')) {
       // Live beat position from the master clock: "@BEAT=<beatInBar>/<beatsPerBar>".
@@ -1479,7 +1534,7 @@ export default function App() {
   type SongWire = { play: (arg: string) => void; restart: (arg: string) => void; stop: () => void; loop: (on: boolean) => void };
   type InjFolder = { name: string; leaves: { name: string; arg: string }[] };
   type SongDeckT = {
-    v: 1 | 2;
+    v: number;   // 1-based synth voice (Synth A=1, B=2, C=3, ...); drives recorder/@RECV + note editor
     player: PlayerT; endMode: EndMode;
     vol: number; onVol: (n: number) => void; commitVol: (n: number) => void; volNote?: string;
     setSong: (name: string) => void;
@@ -1496,7 +1551,7 @@ export default function App() {
     browseRoot?: string; injectFolders?: InjFolder[]; noEndMode?: boolean; filesFirst?: boolean;
   };
   const makeSongDeck = (cfg: {
-    v: 1 | 2;
+    v: number;   // 1-based synth voice (Synth A=1, B=2, C=3, ...); drives recorder/@RECV + note editor
     player: PlayerT; setPlayer: React.Dispatch<React.SetStateAction<PlayerT>>;
     endMode: EndMode; setEndMode: (m: EndMode) => void; persistKey: 'end' | 'end2';
     manualStopRef: React.MutableRefObject<boolean>;
@@ -1862,18 +1917,24 @@ export default function App() {
   // its own voice first, then acts — that way the two players' record controls never collide.
   type RecDeckT = { st: number; prog: number; bars: number; setBars: (n: number) => void;
                     record: () => void; overdub: () => void; stop: () => void; clear: () => void };
-  const recDeck = (v: 1 | 2): RecDeckT => {
-    const st = v === 2 ? rec.st2 : rec.st1;
-    const prog = v === 2 ? rec.p2 : rec.p1;
-    const bars = v === 2 ? rec.bars2 : rec.bars1;
-    // Optimistic local state; the device's @RECP push corrects it.
-    const setSt = (s: number) => setRec(r => (v === 2 ? { ...r, v, st2: s } : { ...r, v, st1: s }));
+  const recDeck = (v: number): RecDeckT => {
+    const L = rec.loops[v - 1] ?? emptyLoop();
+    const st = L.st, prog = L.p, bars = L.bars;
+    // Optimistic local patch of THIS voice's loop slot (the device's @RECP push corrects it). Extends
+    // the loops array if the @STATE snapshot hasn't arrived yet, so a tap never targets the wrong voice.
+    const setLoop = (patch: Partial<LoopState>) => setRec(r => {
+      const loops = r.loops.slice();
+      while (loops.length < v) loops.push(emptyLoop());
+      loops[v - 1] = { ...loops[v - 1], ...patch };
+      return { ...r, v, loops };
+    });
+    const setSt = (s: number) => setLoop({ st: s });
     const aim = () => tp.recVoice(v);   // always send @RECV (idempotent, cheap) — never trust stale rec.v
     return {
       st, prog, bars,
       // Loop length is per-synth (@RECBARS targets the selected voice), so A can loop a 2-bar
       // riff under B's 8-bar pad. Takes effect on that synth's next fresh recording.
-      setBars: (n: number) => { aim(); tp.recBars(n); setRec(r => (v === 2 ? { ...r, v, bars2: n } : { ...r, v, bars1: n })); },
+      setBars: (n: number) => { aim(); tp.recBars(n); setLoop({ bars: n }); },
       record:  () => { aim(); tp.recArm(true);     setSt(1); },
       overdub: () => { aim(); tp.recOverdub(true); setSt(3); },
       stop:    () => { aim(); tp.recArm(false);    setSt(st === 2 || st === 3 ? 4 : 0); },
@@ -1881,7 +1942,7 @@ export default function App() {
     };
   };
   // The record row shown inside a MIDI player's page: Record / Overdub / Stop / Clear + live state.
-  const recRow = (v: 1 | 2) => {
+  const recRow = (v: number) => {
     const d = recDeck(v);
     const armed = d.st === 1, capturing = d.st === 2 || d.st === 3;
     return (
@@ -1904,7 +1965,8 @@ export default function App() {
           {REC_STATES[d.st]}{d.st === 0 ? ' — captures this synth’s song + your live keys, then loops it.' : ''}
           {' '}Length is this synth’s own; the time signature is the shared master meter (set it on Metronome).
         </Text>
-        {d.st > 0 && <ProgressBar value={d.prog} />}
+        <LoopStepGrid bars={d.bars} sig={metro.sig} prog={d.prog}
+          active={d.st > 0} recording={d.st === 2 || d.st === 3} />
       </>
     );
   };
@@ -2323,15 +2385,18 @@ export default function App() {
   };
   const extraSynthCards: Section[] = [];
   const extraChildCards: Section[] = [];
-  for (let v = 2; v < synthCount; v++) {
-    const theme = v === 2 ? THEME.synthC : THEME.synthD;
-    const letter = String.fromCharCode(65 + v);   // C, D, …
-    const parentId = 'synthX' + v;
+  for (let v = 0; v < synthCount; v++) {
+    // ONE component for EVERY synth voice (A/B/C/D…). Voices 0/1 keep the stable card ids
+    // 'synthesizer'/'synthesizerB' (so routing, the reverb SEND parent, and section ordering are
+    // unchanged); 2+ get 'synthX<v>'. Everything drives the uniform @TRK<v>.* interface + indexed state.
+    const theme = v === 0 ? THEME.synthA : v === 1 ? THEME.synthB : v === 2 ? THEME.synthC : THEME.synthD;
+    const letter = String.fromCharCode(65 + v);   // A, B, C, D, …
+    const parentId = v === 0 ? 'synthesizer' : v === 1 ? 'synthesizerB' : 'synthX' + v;
     const arpState = arpX[v] ?? DEF_ARP;
     const mstop = (manualStopRefX.current[v] ??= { current: false });
     // MIDI-player deck for this voice — the drumDeck pattern (a view over playerX[v]) wired to @TRK<i>.
     const deck = makeSongDeck({
-      v: 1, persistKey: 'end', manualStopRef: mstop, deckKey: 'x' + v,
+      v: v + 1, persistKey: 'end', manualStopRef: mstop, deckKey: 'x' + v,   // 1-based voice (track index + 1): the recorder/@RECV + note editor target THIS synth
       player: playerX[v] ?? { song: '', playing: false, name: '', prog: 0 },
       setPlayer: upd => setPlayerX(m => { const cur = m[v] ?? { song: '', playing: false, name: '', prog: 0 }; return { ...m, [v]: typeof upd === 'function' ? (upd as any)(cur) : upd }; }),
       endMode: endModeX[v] ?? 'stop', setEndMode: em => setEndModeX(m => ({ ...m, [v]: em })),
@@ -2552,47 +2617,9 @@ export default function App() {
       ),
       body: reverbBody,
     },
-    // SYNTH / VOICES — folder browser over bundled voices + the whole /dexed library
-    {
-      id: 'synth', title: 'Synth / Voices', show: false, parent: 'synthesizer', accent: THEME.synthA.accent, tint: THEME.synthA.tint, value: synthValue, subtitle: synthSubtitle, fullHeight: true,   // Synthesizer A sub-page
-      topRight: usbKbd(0),
-      actions: synthActions,
-      body: synthBody,
-    },
-    // SYNTH / VOICES 2 — build-flag gated (caps.voice2). A full clone of the Synth/Voices
-    // page (same folder browser) plus an on/off split toggle: engines 0-3 keep voice 1
-    // (song/arp/drums), engines 4-7 are this voice, played live by a USB-host keyboard.
-    {
-      id: 'synth2', title: 'Synth / Voices 2', show: false, parent: 'synthesizerB', fullHeight: true, accent: THEME.synthB.accent, tint: THEME.synthB.tint,   // Synthesizer B sub-page
-      topRight: usbKbd(1),
-      value: (voice2.name ? engName(voice2.name) : 'None'),
-      subtitle: synthCardSub(1, voice2.name, voice2.path, player2.name),
-      actions: synth2Actions,
-      body: synth2Body,
-    },
-    // SYNTHESIZER A — a submenu grouping the main voice-1 side: MIDI Player, Synth/Voices, and
-    // Arpeggiator. Its page lists them as the original cards (keeping their quick-action shortcuts);
-    // tapping one opens that child's own existing page (Back returns here).
-    {
-      id: 'synthesizer', title: 'Synthesizer A', show: true, value: synthValue, subtitle: synthCardSub(0, selVoiceName, selVoicePath, player.name), asCard: true,
-      accent: THEME.synthA.accent, tint: THEME.synthA.tint,
-      topRight: usbKbd(0),   // keyboard-ownership icon: tap to route the USB MIDI controller to this (voice-0) synth
-      actions: synthQuick(1, songDeck1, arp.on, () => { const on = !arp.on; setArp(a => ({ ...a, on })); tp.arpOn(on); }),
-      foot: <VolSlider label="Vol" value={songVol} onChange={setSongVol} onCommit={v => tp.songVol(v)} disabled={!connected} />,
-      body: <SubMenu getItems={() => sections.filter(x => x.parent === 'synthesizer').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.synthA.accent} tint={THEME.synthA.tint} />,
-    },
-    // SYNTHESIZER B — the keyboard-split voice-2 side as a submenu: Synth/Voices 2 and Arpeggiator 2.
-    // No MIDI (single song player). Card shows on caps.voice2; the Arpeggiator 2 child only joins the
-    // submenu when caps.arp2 is compiled in (its parent is set conditionally below).
-    {
-      id: 'synthesizerB', title: 'Synthesizer B', show: caps.voice2, asCard: true, accent: THEME.synthB.accent, tint: THEME.synthB.tint,
-      topRight: usbKbd(1),
-      value: (voice2.name ? engName(voice2.name) : 'None'),
-      subtitle: synthCardSub(1, voice2.name, voice2.path, player2.name),
-      actions: synthQuick(2, songDeck2, arp2.on, caps.arp2 ? () => { const on = !arp2.on; setArp2(x => ({ ...x, on })); tp.arp2On(on); } : undefined),
-      foot: <VolSlider label="Vol" value={voice2.vol} onChange={v => setVoice2(x => ({ ...x, vol: v }))} onCommit={v => tp.voice2Vol(v)} disabled={!connected} />,
-      body: <SubMenu getItems={() => sections.filter(x => x.parent === 'synthesizerB').sort((a, b) => ord(a.id) - ord(b.id))} onOpen={setRoute} accent={THEME.synthB.accent} tint={THEME.synthB.tint} />,
-    },
+    // Synth A/B (voices 0/1) are now generated by makeTrackCard in the loop above (parentIds
+    // 'synthesizer'/'synthesizerB'), exactly like C/D — the bespoke A/B parent + Synth/Voices sections
+    // that used to live here are gone. The uniform component owns every synth voice.
     // VOICE POOL — runtime engine allocation (4-voice pool builds only; @STATE.pool). Redistribute the
     // 8 Dexed engines among the 4 voices live, trading voice count for per-voice polyphony. No reflash.
     {
@@ -2686,34 +2713,8 @@ export default function App() {
         </>
       ),
     },
-    // MIDI PLAYER — select a song; Play/Stop in the header. A Synthesizer A sub-page.
-    {
-      id: 'player', title: 'MIDI Player', show: false, parent: 'synthesizer',
-      value: playerValue(songDeck1), progress: playerProgress(songDeck1),
-      actions: playerActions(songDeck1),
-      body: playerBody(songDeck1),
-    },
-    // ARPEGGIATOR — a Synthesizer A sub-page.
-    {
-      id: 'arp', title: 'Arpeggiator', show: false, parent: 'synthesizer',
-      value: arpValue(arpSlot1), actions: arpActions(arpSlot1),
-      body: arpBody(arpSlot1),
-    },
-    // MIDI PLAYER 2 — the voice-2 song player (@SONG2*), so two songs play at once. A Synthesizer
-    // B sub-page; caps.voice2 gates the parent card, so this only appears on voice-2 builds.
-    {
-      id: 'player2', title: 'MIDI Player 2', show: false, parent: caps.voice2 ? 'synthesizerB' : undefined, accent: C.accent2,
-      value: playerValue(songDeck2), progress: playerProgress(songDeck2),
-      actions: playerActions(songDeck2),
-      body: playerBody(songDeck2),
-    },
-    // ARPEGGIATOR 2 — build-flag gated (caps.arp2). A full clone of the arp, on the Voices-2
-    // keyboard voice only (@ARP2*); the main arp is untouched.
-    {
-      id: 'arp2', title: 'Arpeggiator 2', show: false, parent: caps.arp2 ? 'synthesizerB' : undefined, accent: C.accent2,   // Synthesizer B sub-page
-      value: arpValue(arpSlot2), actions: arpActions(arpSlot2),
-      body: arpBody(arpSlot2),
-    },
+    // (Synth A/B's MIDI Player + Arpeggiator sub-pages are now generated by makeTrackCard in the loop
+    // above — ids 'synthesizer'p/'a' and 'synthesizerB'p/'a' — same as C/D. No bespoke child sections.)
     // DRUMS — a TOP-LEVEL Track card built through the SAME makeTrackCard factory as the synth voices
     // (its Drum Loops + Kit children come from drumCard.children, spread above). The header ▶ ■ transport
     // plays/stops the selected groove; shown on drum-capable builds (cat.hasDrums).
@@ -2980,6 +2981,15 @@ const s = StyleSheet.create({
   tag: { color: C.muted, fontSize: 12, backgroundColor: C.chip, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10, overflow: 'hidden', alignSelf: 'flex-start' },
   progTrack: { height: 4, borderRadius: 2, backgroundColor: C.chip, marginTop: 6, overflow: 'hidden' },
   progFill: { height: '100%', borderRadius: 2, backgroundColor: C.accent },
+  // Looper step grid (bars × beats). Bars are boxed groups; cells are one beat each.
+  stepGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 8 },
+  stepBar: { flexDirection: 'row', gap: 3, padding: 3, borderRadius: 6, backgroundColor: C.card2, borderWidth: 1, borderColor: C.border },
+  stepCell: { width: 15, height: 20, borderRadius: 3, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border },
+  stepCellDown: { borderColor: 'rgba(227,179,65,0.5)' },                    // downbeat (beat 1 of the bar)
+  stepCellPast: { backgroundColor: 'rgba(63,185,80,0.32)', borderColor: 'rgba(63,185,80,0.4)' },     // played (dim green)
+  stepCellOn: { backgroundColor: C.accent, borderColor: C.accent, shadowColor: C.accent, shadowOpacity: 0.9, shadowRadius: 6, elevation: 4 },
+  stepCellRecPast: { backgroundColor: 'rgba(248,81,73,0.32)', borderColor: 'rgba(248,81,73,0.4)' },  // captured (dim red)
+  stepCellRecOn: { backgroundColor: '#f85149', borderColor: '#f85149', shadowColor: '#f85149', shadowOpacity: 0.9, shadowRadius: 6, elevation: 4 },
   // A tappable "open" button on each card: bordered chip with generous L/R padding so it's an
   // easy target. The ❯ glyph reads as a modern chevron.
   chevBtn: { marginLeft: 'auto', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 9, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },

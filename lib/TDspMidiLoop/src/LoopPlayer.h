@@ -28,10 +28,15 @@ public:
     void play(const LoopClip *clip, double origin) {
         clip_ = clip; origin_ = origin;
         cursor_ = 0; lastRel_ = -1.0; playing_ = (clip && clip->hasData());
+        clearHeld();   // fresh take: no notes owed
     }
 
+    // Stop playback. CRITICAL: the loop's output sink is SHARED with the synth's live playing (and
+    // with other loops), so we must NOT panic the whole sink (onAllNotesOff) — that would cut the
+    // player's own live notes. Instead we note-off ONLY the notes THIS loop currently holds, so
+    // arming/stopping a loop never silences what you're playing on that synth (bad on a 1-voice OPLL).
     void stop() {
-        if (playing_ && out_) out_->onAllNotesOff(0);   // panic all
+        if (playing_) releaseHeld();
         playing_ = false;
     }
 
@@ -81,11 +86,32 @@ public:
     }
 
 private:
+    // Track which notes THIS loop currently has sounding, so stop() releases exactly those (never a
+    // global panic on the shared sink). Bitmap: held_[channel][note>>3], bit (note&7).
+    uint8_t held_[16][16] = {};
+    void markHeld(uint8_t ch, uint8_t note, bool on) {
+        if (ch > 15 || note > 127) return;
+        if (on) held_[ch][note >> 3] |=  (uint8_t)(1u << (note & 7));
+        else    held_[ch][note >> 3] &= (uint8_t)~(1u << (note & 7));
+    }
+    void clearHeld() { for (auto &row : held_) for (auto &b : row) b = 0; }
+    void releaseHeld() {
+        for (uint8_t ch = 0; ch < 16; ch++)
+            for (uint8_t g = 0; g < 16; g++) {
+                uint8_t bits = held_[ch][g];
+                held_[ch][g] = 0;
+                while (bits) {
+                    uint8_t i = (uint8_t)__builtin_ctz(bits);
+                    if (out_) out_->onNoteOff(ch, (uint8_t)((g << 3) | i), 0);
+                    bits &= (uint8_t)(bits - 1);
+                }
+            }
+    }
     void emit(const LoopEvent &e) {
         switch (e.type) {
-            case LNoteOn:    out_->onNoteOn (e.channel, e.d1, e.d2); break;
-            case LNoteOff:   out_->onNoteOff(e.channel, e.d1, e.d2); break;
-            case LAllOff:    out_->onAllNotesOff(e.channel);         break;
+            case LNoteOn:    out_->onNoteOn (e.channel, e.d1, e.d2); markHeld(e.channel, e.d1, e.d2 != 0); break;
+            case LNoteOff:   out_->onNoteOff(e.channel, e.d1, e.d2); markHeld(e.channel, e.d1, false);     break;
+            case LAllOff:    out_->onAllNotesOff(e.channel);         clearHeld();                          break;
             case LPitchBend: out_->onPitchBend(e.channel, (float)e.bend / 256.0f); break;
             case LTimbre:    out_->onTimbre  (e.channel, e.d2 / 255.0f); break;
             case LPressure:  out_->onPressure(e.channel, e.d2 / 255.0f); break;

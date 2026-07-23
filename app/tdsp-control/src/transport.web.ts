@@ -287,7 +287,7 @@ export class WebSerialTransport implements Transport {
   arp2Sequence(steps: SeqStep[]) { this.send('@ARP2SEQ=' + encodeSequence(steps)); }
   arp2Preset(params: ArpWireParams) { this.send('@ARP2PRESET=' + encodeArpParams(params)); }
   // ---- Loop recorder ----
-  recVoice(v: number) { this.send('@RECV=' + (v === 2 ? 2 : 1)); }
+  recVoice(v: number) { this.send('@RECV=' + (Math.max(1, v))); }
   recBars(n: number) { this.send('@RECBARS=' + n); }
   recSig(bpb: number) { this.send('@RECSIG=' + Math.max(1, Math.min(16, Math.round(bpb)))); }
   recArm(on: boolean) { this.send('@REC=' + (on ? 1 : 0)); }
@@ -300,11 +300,11 @@ export class WebSerialTransport implements Transport {
       if (this.file) { reject('a file read is in progress'); return; }
       this.file = { path: 'mem:/loop' + v, parts: {}, resolve, reject, timer: null, total: 0, received: 0, bytes: true };
       this.armFileTimer(this.file);
-      this.send('@RECDUMP=' + (v === 2 ? 2 : 1));
+      this.send('@RECDUMP=' + (Math.max(1, v)));
     });
   }
   async recLoad(v: number, bytes: Uint8Array): Promise<void> {
-    v = v === 2 ? 2 : 1;
+    v = Math.max(1, v);
     await this.awaitReply('@RECLOAD=' + v + '\x1f' + bytes.length, '@RECOK=' + v, '@RECERR=' + v);
     for (const fr of rdFrames(v, bytes)) this.send(fr);   // USB CDC is flow-controlled — no pacing needed
     await this.awaitReply('@RECEND=' + v, '@RECE=' + v, '@RECERR=' + v);

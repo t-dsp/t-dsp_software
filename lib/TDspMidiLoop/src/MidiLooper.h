@@ -48,6 +48,13 @@ public:
         if (b == 1 || b == 2 || b == 4 || b == 8) bars_ = b;
     }
     uint8_t  bars()        const { return bars_; }
+    // True while the just-closed take is still holding a note that was sustained across the loop end
+    // and hasn't received its real note-off yet (the "play it all the way out" tail). A caller that
+    // wants to stop the SOURCE which fed the take must WAIT for this to clear, so the source keeps
+    // playing until it emits those note-offs (the note finishes when the key/source releases it) and
+    // the tail captures them — cutting the source sooner strands a note-on with no note-off and it
+    // hangs on every loop. Clears the instant the last held note releases (or the tail cap fires).
+    bool     tailPending() const { return tailOpen_; }
     // Meter comes from the master Clock (the authoritative grid), NOT a private
     // copy — so the loop's downbeats line up with drums/song/metronome even when
     // one of those owns the time signature. Set the signature via the clock
@@ -173,7 +180,14 @@ public:
     // ---- MidiSink capture (downstream of the arp) ----
     void onNoteOn(uint8_t ch, uint8_t note, uint8_t vel) override {
         if (vel == 0) { onNoteOff(ch, note, 0); return; }
-        if (state_ == Armed) latchAnchor();        // first press: lock the loop grid
+        // First note locks the loop grid — but ONLY once the transport is actually running. Arming with
+        // the transport idle (the "Record doesn't start the metronome" behavior) means the take must
+        // wait for the player/metronome to start; latching against a STOPPED clock would anchor to a
+        // stale position, and when the player then (re-)zeroes the transport the take would run many
+        // bars long. Deferring the anchor to a running clock makes recording begin WITH the player and
+        // end exactly `bars` later. Notes struck before the transport starts still sound live (they
+        // just aren't captured yet).
+        if (state_ == Armed) { if (clk_ && clk_->running()) latchAnchor(); else return; }
         // A "one" struck a hair LATE lands after the window closed — grace catches it and puts
         // it at the loop top rather than dropping it (the mirror of latchAnchor's early bias).
         const bool grace = !capturing() && graceOpen_;

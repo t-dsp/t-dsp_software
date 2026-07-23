@@ -191,10 +191,19 @@ public:
     // players leave this OFF so a pad genuinely held across the seam still releases.
     void setOneShotTail(bool en) { oneShotTail_ = en; }
 
+    // "Drain" mode: keep advancing the stream (so note-offs, CC, bend still fire at their scheduled
+    // times) but SUPPRESS new note-ONs. Used when a loop take has closed and the recorder wants the
+    // source it captured to stop STARTING notes yet let notes already sounding finish on their own
+    // real note-off (musically "let go of the key"). The caller fully stop()s the player once those
+    // trailing releases are done. Auto-clears on stop()/play() so a normal launch is never muted.
+    void setNoteOnMute(bool on) { muteNoteOn_ = on; }
+    bool noteOnMuted() const { return muteNoteOn_; }
+
     // Stop and release every held note (sink panic). Safe to call when idle.
     void stop() {
         bool was = playing_;
         playing_ = false;
+        muteNoteOn_ = false;          // a stop always clears drain mode
         ev_ = nullptr; count_ = 0; idx_ = 0;
         totalMs_ = 0; elapsedMs_ = 0;
         nPendOff_ = 0;                // drop any carried loop-tail releases
@@ -362,6 +371,7 @@ private:
         const uint8_t ch = (uint8_t)(e.channel + 1);            // MidiSink is 1-based
         switch (e.kind) {
             case kNoteOn: {
+                if (muteNoteOn_) break;                // drain mode: no new notes, offs still flow
                 uint8_t vel = e.data2;
                 if (velScale_ != 1.0f) {               // per-player level trim
                     int s = (int)((float)vel * velScale_ + 0.5f);
@@ -421,6 +431,7 @@ private:
     bool                 playing_   = false;
     bool                 pcEnabled_ = true;
     bool                 oneShotTail_ = false;           // drums: drop seam note-offs, let last hit ring (setOneShotTail)
+    bool                 muteNoteOn_ = false;            // drain mode: suppress new note-ons, keep note-offs (setNoteOnMute)
     bool                 jitterProbe_ = false;           // opt-in dispatch-lateness telemetry (setJitterProbe)
     uint32_t             jitCount_    = 0;                // # note-ONs measured
     double               jitSumBeats_ = 0.0;             // sum of lateness (beats) — for mean

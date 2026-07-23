@@ -40,6 +40,11 @@ TsfSink         g_drumTsfSink(&g_drumTsfHandle);        // groove player's ch10 
 bool g_drumFontIsKits = false;
 #define DRUM_KITS_FONT_PATH "/sf2/drumkits.sf2"        // acoustic multi-kit font (fetch_drumkits.py)
 
+// Resident drum-font identity (for @STATE.drumfont + the app's @DRUMFONT picker). Set by
+// drumTsfBegin() at boot and drumTsfReload() on a runtime swap.
+char g_drumFontPath[72]    = "";
+char g_drumFontDisplay[40] = "";
+
 // Load the drum font, set channel 10 as GM drums, and open mix slot 2. Returns true if
 // the font loaded (samples resident in PSRAM). Call from setup() after the melodic
 // synthBegin() ran and g_sdReady is known.
@@ -75,7 +80,36 @@ static bool drumTsfBegin() {
     g_drumTsf.begin(g_drumTsfHandle);
     g_drumTsf.setGain(1.0f);
     outL.gain(2, 0.62f); outR.gain(2, 0.62f);           // drum bus make-up (mirrors the synth slot); setMix leaves slot 2 alone under TDSP_DRUM_TSF
+    strncpy(g_drumFontPath, fontPath, sizeof(g_drumFontPath) - 1); g_drumFontPath[sizeof(g_drumFontPath) - 1] = 0;
+    strncpy(g_drumFontDisplay, g_drumFontIsKits ? "Drum Kits" : "GM Drums", sizeof(g_drumFontDisplay) - 1);
     Serial.printf("[drumtsf] ready: %d presets, ch10 GM drums -> mix slot 2\n",
                   tsf_get_presetcount(g_drumTsfHandle));
+    return true;
+}
+
+// Runtime drum-font swap (@DRUMFONT): make a DIFFERENT SF2 the resident ch10 drum font. Loads
+// the NEW font BEFORE freeing the old one (peak PSRAM = old+new; the Mars packs are small enough
+// to overlap on 8 MB), configures it identically to drumTsfBegin(), then swaps the renderer + the
+// groove player's sink atomically under AudioNoInterrupts() so the audio ISR never renders a
+// half-updated or freed handle. Returns true on success (old font freed); false leaves the current
+// font running untouched. The CALLER reloads the kit list + updates g_drumFontDisplay.
+static bool drumTsfReload(const char *path) {
+    if (!g_sdReady || !path || !path[0]) return false;
+    tsf *nf = tsfLoadFromSD(path);
+    if (!nf) { Serial.printf("[drumtsf] swap FAILED to load %s (missing or too big for PSRAM) -> keeping current\n", path); return false; }
+    tsf_set_output(nf, TSF_STEREO_UNWEAVED, (int)AUDIO_SAMPLE_RATE_EXACT, (float)TDSP_DRUM_TSF_DB);
+    tsf_set_max_voices(nf, 24);
+    for (int ch = 0; ch < 16; ch++) {
+        tsf_channel_set_presetnumber(nf, ch, 0, ch == 9 ? 1 : 0);
+        tsf_channel_set_pitchrange(nf, ch, 48.0f);
+    }
+    tsf *old = g_drumTsfHandle;
+    AudioNoInterrupts();
+    g_drumTsfHandle = nf;          // g_drumTsfSink sends notes via &g_drumTsfHandle
+    g_drumTsf.begin(nf);           // renderer now pulls from the new font
+    AudioInterrupts();
+    if (old && old != nf) tsf_close(old);
+    strncpy(g_drumFontPath, path, sizeof(g_drumFontPath) - 1); g_drumFontPath[sizeof(g_drumFontPath) - 1] = 0;
+    Serial.printf("[drumtsf] swapped -> %s (%d presets)\n", path, tsf_get_presetcount(nf));
     return true;
 }
