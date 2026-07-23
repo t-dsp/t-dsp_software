@@ -14,7 +14,7 @@ import Slider from '@react-native-community/slider';
 import { createTransport } from './src/transportFactory';
 import { createDiscovery } from './src/discoveryFactory';
 import type { TdspDevice } from './src/discovery';
-import { Catalog, CatalogCache, EMPTY_CATALOG, loadCatalog, LoadProgress, Song, songArg } from './src/catalog';
+import { Catalog, CatalogCache, DrumFont, EMPTY_CATALOG, loadCatalog, LoadProgress, parseFonts, Song, songArg } from './src/catalog';
 import type { Transport, DirPage, TransportKind } from './src/transport';
 import { sortEntries } from './src/browse';
 import type { BrowseEntry } from './src/browse';
@@ -607,7 +607,13 @@ export default function App() {
   // selection + volume + arp state; the folder browser is shared (pickVoice takes a target).
   // caps.audioloop is a COUNT (how many audio loops the device actually allocated —
   // RAM/PSRAM dependent), not a bool: 0 hides the Audio Loop card entirely.
-  const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, recedit: false, audioloop: 0, fx: false, usbaudio: false, drumkitsel: true });
+  const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, recedit: false, audioloop: 0, fx: false, usbaudio: false, drumkitsel: true, drumfontsel: false });
+  // Runtime drum-font swap (build-flag gated, caps.drumfontsel → the sampled-drum TSF build with >1 SF2
+  // on the card). `fonts` = the swappable list from the device's "@FONTS=" line; `drumFont` = the
+  // resident font (path + display) from @STATE.drumfont. Selecting one sends @DRUMFONT= (a picker, not
+  // a layer); the device acks with a "@DRUMFONT=" line, which triggers a catalog reload for the new kits.
+  const [fonts, setFonts] = useState<DrumFont[]>([]);
+  const [drumFont, setDrumFont] = useState<{ path: string; display: string }>({ path: '', display: '' });
   // USB Audio interface (build-flag gated, caps.usbaudio → TDSP_USB_AUDIO). The device is a
   // 24-bit/48k USB sound card: host audio in → mix bus, the mix out → host. `active` = the host
   // has the audio stream open (playing/recording); `gain` = the USB-in return level (0..150 %,
@@ -657,6 +663,10 @@ export default function App() {
   // all from @STATE tracks[]. Voices 0/1 keep their bespoke cards (Synth A/B); voices 2+ get a
   // generated card driven by @TRK<i>.* (selVoiceX = the browser selection per extra voice index).
   const [synthCount, setSynthCount] = useState(1);
+  // Drum track index (= synthCount) as a ref, so the onLine() handler reads it fresh without being
+  // re-subscribed on every synthCount change — used to route the drum track's @TRK.INSTRS reply.
+  const drumIdxRef = useRef(1);
+  useEffect(() => { drumIdxRef.current = synthCount; }, [synthCount]);
   const [trkNames, setTrkNames] = useState<Record<number, string>>({});
   const [trkEng, setTrkEng] = useState<Record<number, string>>({});   // per-track engine tag from @STATE tracks[].eng (e.g. 'opll'); Dexed tracks carry none
   const [opllIdx, setOpllIdx] = useState<Record<number, number>>({});   // per-track CURRENT instrument index for NON-Dexed engines (synced from the @TRK<i>.INSTR= echo); they step @TRK<i>.INSTR=, not the /dexed catalog
@@ -734,6 +744,8 @@ export default function App() {
     if (j.song?.vol != null) setSongVol(Math.max(0, Math.min(150, j.song.vol | 0)));
     if (j.drums) setDrums(d => ({ ...d, kit: j.drums.kit | 0, playing: j.drums.playing ? d.playing : null }));
     if (j.drums?.vol != null) setDrumVol(Math.max(0, Math.min(150, j.drums.vol | 0)));
+    // Resident drum font (runtime swap builds only emit j.drumfont): path + short display label.
+    if (j.drumfont) setDrumFont({ path: j.drumfont.path || '', display: j.drumfont.display || '' });
     if (j.voice) {
       if (j.voice.cart) {
         const rel = j.voice.cart;
@@ -752,7 +764,9 @@ export default function App() {
                           recedit: !!j.caps.recedit, audioloop: Math.max(0, j.caps.audioloop | 0), fx: !!j.caps.fx,
                           usbaudio: !!j.caps.usbaudio,
                           // absent (older firmware) -> assume selectable; explicit 0 = a fixed drum voice (OPLL) with no GM kits
-                          drumkitsel: j.caps.drumkitsel !== 0 });
+                          drumkitsel: j.caps.drumkitsel !== 0,
+                          // runtime drum-font swap: only the sampled-drum TSF build with >1 SF2 on the card sets this
+                          drumfontsel: !!j.caps.drumfontsel });
     // USB Audio interface status (usbaudio builds only emit j.usb): host-stream active flag,
     // USB-in return level, and the over/underrun counters used to spot host↔codec clock drift.
     if (j.usb) setUsbAudio(u => ({
@@ -862,6 +876,21 @@ export default function App() {
     if (line.startsWith('@MPE=')) { const ev = parseMpeLine(line); if (ev) mpeBus.emit(ev); return; }
     if (line.startsWith('@STATE=')) {
       try { hydrate(JSON.parse(line.slice(line.indexOf('=') + 1))); } catch {}
+    } else if (line.startsWith('@FONTS=')) {
+      // The swappable drum-font list (runtime @DRUMFONT swap). Parse into the picker's state; the
+      // current-flag / @STATE.drumfont drive which one is highlighted.
+      setFonts(parseFonts(line.slice(7)));
+    } else if (line.startsWith('@DRUMFONT=')) {
+      // Swap-complete ack. The kit SET changed, but the device already holds the new list in RAM — pull
+      // the drum track's live @TRK.INSTRS (an instant reply, handled above to refresh cat.drumkits) and
+      // re-hydrate state. NO catalog reload / SD re-read: reading /tdsp/drumkits.ndjson on every swap
+      // was the source of the "reload catalog" errors + laggy, unreliable kit changes.
+      tp.trk(drumIdxRef.current, 'INSTRS');
+      tp.requestState();
+    } else if (line.startsWith('@DRUMFONTERR=')) {
+      // The swap failed (missing/too-big font); the device kept the previous font. Refresh the picker
+      // so its highlight snaps back to what's actually resident.
+      tp.requestFonts();
     } else if (line.startsWith('@APP=')) {
       // The device's opaque app-owned state blob (emitted with @STATE and echoed on save).
       // Restore the settings the firmware can't derive; ignore anything unrecognized.
@@ -870,7 +899,16 @@ export default function App() {
       // The engine's PATCH LIST (@TRK<i>.INSTRS=<name0>\x1f<name1>…) — the non-Dexed engines' own voice
       // picker. Matched before .INSTR= so "@TRK2.INSTRS=" doesn't get eaten by the .INSTR= regex.
       const ml = line.match(/^@TRK(\d+)\.INSTRS=(.*)$/);
-      if (ml) { setTrkEngInstrs(mp => ({ ...mp, [+ml[1]]: ml[2] === '' ? [] : ml[2].split('\x1f') })); return; }
+      if (ml) {
+        const idx = +ml[1];
+        const names = ml[2] === '' ? [] : ml[2].split('\x1f');
+        setTrkEngInstrs(mp => ({ ...mp, [idx]: names }));
+        // The DRUM track's patch list IS its kit list. Mirror it straight into cat.drumkits (selection
+        // is by index; prog is unused app-side) so a drum-font swap refreshes the picker from this
+        // instant RAM reply — NOT by re-reading /tdsp/drumkits.ndjson off the SD.
+        if (idx === drumIdxRef.current) setCat(c => ({ ...c, drumkits: names.map((name, i) => ({ name, prog: i })) }));
+        return;
+      }
       // Sync the local instrument index from the device confirmation (@TRK<i>.INSTR=<idx>) so
       // Next/Prev step from the true current instrument, not a stale 0.
       const m = line.match(/^@TRK(\d+)\.INSTR=(\d+)/);
@@ -960,6 +998,7 @@ export default function App() {
       await load();
       if (userDiscRef.current) { await disconnect(); return; }   // cancelled during the catalog load
       tp.requestState();   // pull the device's real current settings → hydrate every card (see @STATE handler)
+      tp.requestFonts();   // pull the swappable drum-font list (runtime @DRUMFONT builds) → the Drum Font picker
     }
     // A user cancel can surface as a connect rejection (port/scan aborted) — don't toast that.
     // The "one page owns the port" hint is Web-Serial-specific — over WiFi nothing owns a
@@ -1011,15 +1050,33 @@ export default function App() {
   }, [tp]);
   // (elapsed-seconds ticker now lives inside <LoadScreen>, which mounts exactly while the
   // catalog is loading — so it no longer re-renders App every second.)
-  async function load() {
-    try { const c = await loadCatalog(tp, progBus.emit, catalogCache); setCat(c); setLoaded(true); progBus.emit(null); }
-    catch (e: any) {
-      progBus.emit(null);
-      const yes = Platform.OS === 'web'
-        ? (globalThis as any).confirm?.('Catalog load failed: ' + (e?.message || e) + '\n\nRebuild it now (@REINDEX)?')
-        : true;
-      if (yes) await reindex();
-    }
+  // Serialize catalog loads. The transport services ONE @READ at a time, so a drum-font swap firing
+  // load(true) while the connect-time load is still running — or two rapid swaps/kit changes — would
+  // collide ("a file read is in progress"), throw, and pop the "Catalog load failed / rebuild?" dialog
+  // while leaving the kit list STALE (so the change looks like it "did nothing"). Coalesce instead: if
+  // a load is already in flight, remember the request and run ONE more pass when it finishes, so the
+  // catalog always ends on the latest swap. bypassCache sticks once any coalesced request asks for it
+  // (a swap must skip the differential cache — the device rewrote drumkits.ndjson but NOT index.ndjson).
+  const loadingRef = useRef(false);
+  const reloadPendingRef = useRef<boolean | null>(null);
+  async function load(bypassCache = false) {
+    if (loadingRef.current) { reloadPendingRef.current = (reloadPendingRef.current ?? false) || bypassCache; return; }
+    loadingRef.current = true;
+    try {
+      for (;;) {
+        reloadPendingRef.current = null;
+        try { const c = await loadCatalog(tp, progBus.emit, bypassCache ? undefined : catalogCache); setCat(c); setLoaded(true); progBus.emit(null); }
+        catch (e: any) {
+          progBus.emit(null);
+          const yes = Platform.OS === 'web'
+            ? (globalThis as any).confirm?.('Catalog load failed: ' + (e?.message || e) + '\n\nRebuild it now (@REINDEX)?')
+            : true;
+          if (yes) await reindex();
+        }
+        if (reloadPendingRef.current === null) break;   // nobody asked for another pass while we ran
+        bypassCache = reloadPendingRef.current;          // a swap/change arrived mid-load — reload once more
+      }
+    } finally { loadingRef.current = false; }
   }
   async function reindex() { setBusy(true); try { await tp.reindex(); await load(); } finally { setBusy(false); } }
 
@@ -2126,7 +2183,22 @@ export default function App() {
   const drumEngineLabel = cat.drumEngine ? cat.drumEngine + ' drum engine'
     : cat.hasDrums ? (cat.engine ? cat.engine.split(/[\s(]/)[0] : 'GM') + ' drums'
     : 'Drums';
-  const drumKitName = cat.drumkits[drums.kit]?.name || '';
+  // SD-sampler kits are /drums folder names ("808_clean"); prettify to "808 Clean". Names without an
+  // underscore (GM/acoustic kit display names) are already human-readable, so leave them untouched.
+  const prettyKit = (s: string) => s && s.includes('_') ? s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase()) : s;
+  const drumKitName = prettyKit(cat.drumkits[drums.kit]?.name || '');
+  // ‹ Prev / Next › through the kit list (wraps). Same @DRUMKIT the picker sends; the instrument
+  // sub-card's `actions` render these on BOTH the Kit card and its detail page.
+  const cycleKit = (dir: number) => {
+    const n = cat.drumkits.length;
+    if (!n) return;
+    const k = (((drums.kit || 0) + dir) % n + n) % n;
+    setDrums(d => ({ ...d, kit: k }));
+    tp.drumKit(k);
+  };
+  const kitNav = caps.drumkitsel && cat.drumkits.length > 1
+    ? <><HdrBtn label="‹ Prev" stop onPress={() => cycleKit(-1)} /><HdrBtn label="Next ›" stop onPress={() => cycleKit(1)} /></>
+    : undefined;
   // A fixed-voice engine (OPLL rhythm, caps.drumkitsel === false) has no GM kits — say so instead of
   // showing a kit name the engine ignores. GM/sampled engines append the loaded kit.
   const drumDetail = !caps.drumkitsel ? drumEngineLabel + '  ·  fixed rhythm voice'
@@ -2136,12 +2208,36 @@ export default function App() {
   const drumKitBody = (
     <>
       <VolSlider label="Volume" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />
+      {caps.drumfontsel && fonts.length > 0 && (
+        // Drum Font picker (runtime @DRUMFONT swap): switch which SF2 is resident. A picker, not a
+        // layer — one font is loaded at a time. Highlight the resident one (@STATE.drumfont.path,
+        // falling back to the list's current-flag). Selecting one swaps live; the kit list below
+        // repopulates once the device acks (@DRUMFONT= → catalog reload).
+        <>
+          <Text style={[s.muted, { marginTop: 8 }]}>Drum Font: {drumFont.display || fonts.find(f => f.current)?.display || '—'}</Text>
+          {/* Vertical scrollable font list — mirrors the kit list below (commit 014a26c). The Mars
+              per-pack library is ~45 fonts, and a horizontal pill row hid the tail exactly like the
+              kit list did. Fixed ROW_H rows, bounded height so it scrolls in-card. */}
+          <View style={{ height: Math.min(Math.max(fonts.length, 1), 7) * ROW_H, borderWidth: 1, borderColor: C.border, borderRadius: 7, marginTop: 4 }}>
+            <FlatList data={fonts} nestedScrollEnabled keyExtractor={(_, i) => 'df' + i}
+              getItemLayout={(_, index) => ({ length: ROW_H, offset: ROW_H * index, index })}
+              renderItem={({ item }) => {
+                const on = drumFont.path ? item.path === drumFont.path : item.current;
+                return <ListBtn label={item.display} sel={on} onPress={() => { setDrumFont({ path: item.path, display: item.display }); tp.drumFont(item.path); }} />;
+              }} />
+          </View>
+        </>
+      )}
       {caps.drumkitsel ? (
         <>
-          <Text style={[s.muted, { marginTop: 8 }]}>Kit: {cat.drumkits[drums.kit]?.name || '—'}</Text>
-          <Row><ScrollView horizontal showsHorizontalScrollIndicator={false}>
-              {cat.drumkits.map((k, i) => <Pressable key={i} style={[s.pill, drums.kit === i && s.pillOn]} onPress={() => { setDrums(d => ({ ...d, kit: i })); tp.drumKit(i); }}><Text style={s.text}>{k.name}</Text></Pressable>)}
-          </ScrollView></Row>
+          <Text style={[s.muted, { marginTop: 8 }]}>Kit: {drumKitName || '—'}</Text>
+          {/* Vertical scrollable kit list (the Mars library is ~90 kits — a horizontal pill row hid the
+              tail). Mirrors the Voices FlatList: fixed ROW_H rows, bounded height so it scrolls in-card. */}
+          <View style={{ height: Math.min(Math.max(cat.drumkits.length, 1), 7) * ROW_H, borderWidth: 1, borderColor: C.border, borderRadius: 7, marginTop: 4 }}>
+            <FlatList data={cat.drumkits} nestedScrollEnabled keyExtractor={(_, i) => 'dk' + i}
+              getItemLayout={(_, index) => ({ length: ROW_H, offset: ROW_H * index, index })}
+              renderItem={({ item, index }) => <ListBtn label={prettyKit(item.name)} sel={drums.kit === index} onPress={() => { setDrums(d => ({ ...d, kit: index })); tp.drumKit(index); }} />} />
+          </View>
         </>
       ) : (
         // Fixed-voice drum engine (OPLL rhythm): no GM kits to pick — say what it actually is so the
@@ -2363,13 +2459,12 @@ export default function App() {
       subtitle: drumEngineLabel,   // show WHICH drum engine (OPLL/TSF/GM) plays these grooves, like the synth cards name their engine
       topRight: drumSrcIdx != null ? usbKbd(drumSrcIdx) : undefined,   // finger-drum the kit from the USB keyboard
       foot: <VolSlider label="Vol" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />,
-      // Drum level right on the landing page (mirrors the per-synth Volume), not only inside Kit/Loops.
-      bodyPrefix: <VolSlider label="Volume" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />,
     },
     player: { title: 'Drum Loops', fullHeight: true, body: playerSongBody(drumDeck) },
     instrument: {
       title: caps.drumkitsel ? 'Kit' : 'Drum Voice', subtitle: drumDetail,
       value: caps.drumkitsel ? (cat.drumkits[drums.kit]?.name || '—') : (cat.drumEngine || 'OPLL') + ' rhythm',
+      actions: kitNav,   // ‹ Prev / Next › kit — renders on both the Kit card and its detail page
       body: drumKitBody,
     },
   });

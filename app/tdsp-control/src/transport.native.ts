@@ -327,6 +327,8 @@ export class BleTransport implements Transport {
   playGrooveFile(name: string) { this.relay('@DRUMF=' + name); }
   stopDrums() { this.relay('@DRUM=stop'); }   // unconditional stop (NOT 'D' — that toggles: a double-tap/state-mismatch would restart drums)
   drumVol(pct: number) { this.relay('@DRUMVOL=' + Math.max(0, Math.min(150, Math.round(pct)))); }
+  requestFonts() { this.relay('@FONTS'); }
+  drumFont(path: string) { this.relay('@DRUMFONT=' + path); }
   songPlay(arg: string) { this.relay('@SONGF=' + arg); }
   songRestart(arg: string) { this.relay('@SONGRESTART=' + arg); }
   stopSong() { this.relay('@SONG=stop'); }
