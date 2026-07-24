@@ -1635,7 +1635,12 @@ static void songApplySync(Track &t, double parsedLoopBeats) {
 static void songPrep(Track &t) {
     if (t.caps.appliesKit) {                    // drum track: own patch = the GM kit; NO note panic
         drumApplyKit();                         // (an all-notes-off here would cut the melodic voice on a shared sink)
-        t.player->setVelocityScale(g_drumVolPct / 100.0f);   // per-note drum level (shared-sink lever)
+#if !defined(TDSP_DRUM_VOICE) && !defined(TDSP_DRUM_TSF) && !defined(TDSP_DRUM_PLAITS)
+        // Shared-sink drums (GM ch10): per-note velocity is the ONLY level lever, so seed it here.
+        // A dedicated drum voice (OPLL / TSF / Plaits) is volumed by setDrumVol's output trim
+        // instead — seeding velocity too would double-attenuate the groove on start.
+        t.player->setVelocityScale(g_drumVolPct / 100.0f);
+#endif
         return;
     }
     if (t.caps.prepSpecial && g_drumPlayer.isPlaying()) {
@@ -2219,13 +2224,20 @@ static void setDrumVol(int pct) {
     if (pct < 0) pct = 0;
     if (pct > 150) pct = 150;
     g_drumVolPct = pct;
-#if defined(TDSP_DRUM_VOICE) || defined(TDSP_DRUM_TSF)
-    // The parallel drum voice owns mix slot 2, so scale THAT bus — a clean output
-    // attenuation where signal + noise fall together. Velocity scaling made the OPLL
-    // rhythm noisy at low levels: its hats/cymbals are noise generators whose level barely
-    // tracks velocity, so lowering velocity dropped the tonal drums but not the noise floor.
-    const float g = TDSP_DEFAULT_SYNTH_MAKEUP * (pct / 100.0f);   // 100 % == the 0.62 make-up
-    outL.gain(2, g); outR.gain(2, g);
+#if defined(TDSP_DRUM_VOICE)
+    // Scale the OPLL rhythm voice at its OUTPUT trim (m_gain), NOT the mix-bus slot. The
+    // voice fans out to TWO taps — the dry mix slot AND the reverb SEND (fxIn2, TDSP_FX_SEND) —
+    // so a bus-slot gain left the send at full level: once a groove was playing the fader moved
+    // the dry drums but the reverb wash held, so live volume looked stuck. An output trim upstream
+    // of the split attenuates dry + send together and is slot-independent (builds put the drum bus
+    // on slot 1 or 2). Output gain (not velocity) keeps the hats/cymbal noise generators tracking
+    // level — velocity scaling dropped the tonal drums but not the noise floor. 100 % == the 5.5
+    // base trim the voice boots at (drumVoiceBegin); the slot make-up stays fixed.
+    g_drumOpll.setGain(5.5f * (pct / 100.0f));
+#elif defined(TDSP_DRUM_TSF)
+    // Same reasoning as the OPLL voice above: scale the TSF drum font at its output trim so both
+    // the dry slot-2 tap and the reverb SEND track the fader together. 100 % == the 1.0 boot trim.
+    g_drumTsf.setGain(pct / 100.0f);
 #else
     // Drums share the main synth (GM channel 10) — no separate bus, so per-note velocity
     // is the only per-source lever available here.
