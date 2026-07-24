@@ -21,6 +21,9 @@ static constexpr uint8_t kCcAllNotesOff    = 123;
 static constexpr uint8_t kRpnPitchBendMsb  = 0;
 static constexpr uint8_t kRpnPitchBendLsb  = 0;
 
+// Static fan-out hook (guard 2). Null until an owner installs one.
+MidiRouter::BendRangeHook MidiRouter::_rpnBendRangeHook = nullptr;
+
 MidiRouter::MidiRouter() {
     // ChannelState defaults are set by in-class initializers; nothing
     // else to do here. The array is stack-allocated inside the router
@@ -230,7 +233,17 @@ void MidiRouter::applyDataEntry(int chIdx, uint8_t value) {
         // fractional-semi bend ranges (LinnStrument supports it) we'll
         // revisit.
         if (value > 127) value = 127;
-        cs.pitchBendRange = (float)value;
+        // Guard (1): a firmware that owns the bend range (TDSP_MPE_BEND_RANGE /
+        // applyMidiMode) turns honoring OFF so the controller's RPN can't
+        // override — and can't desync this router from its peers.
+        if (_honorRpnBendRange) {
+            cs.pitchBendRange = (float)value;
+            // Guard (2): mirror this honored write onto every peer router so
+            // all tracks share one range even though the RPN reached only the
+            // subscribed router. Fans the SAME channel (per-channel semantics).
+            if (_rpnBendRangeHook)
+                _rpnBendRangeHook((uint8_t)(chIdx + 1), (float)value);
+        }
     }
     // Unknown RPN: ignore. Do NOT clear the RPN selection here — a
     // standards-compliant controller sends a null-RPN (0x7F,0x7F)

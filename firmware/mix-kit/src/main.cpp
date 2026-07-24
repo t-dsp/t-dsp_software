@@ -1287,6 +1287,10 @@ static int  g_drumSel      = 0;     // selected / currently-playing groove index
 static int  g_drumKit      = 0;     // index into kDrumKits ("instrument")
 static int  g_drumVolPct   = 100;   // drum level 0..150 (% of file velocity)
 static int  g_songVolPct   = 100;   // MIDI-player level 0..150 (% of file velocity), independent of @VOL master
+// Per-track level echo (0..150 %) so @STATE can report EVERY voice's volume on reload — the Track
+// setLevel hook is write-only (esp. pool/hetero voices store no percent). The @TRK<i>.VOL= handler is
+// the single writer; voices 0/1 stay in step because the app's per-track slider always drives @TRK<i>.VOL=.
+static int  g_trkLevel[kSynthVoices];
 static bool g_drumSynchro  = false; // SYNCHRO START (PSS-140 style): groove starts on your first note
 static bool g_engineHasDrums = false;// engine renders ch10 (captured once at setup; not the live mask)
 
@@ -2895,6 +2899,26 @@ static void usbHostPressure(byte ch, byte pressure)       { midihub::channelPres
 // stop clamping (its kBendRange is 24), so every backend now agrees on the range.
 static constexpr float kMpeMemberBendRange = (float)TDSP_MPE_BEND_RANGE;   // build-configurable (default 24; e.g. 48 for a 4-octave slide)
 
+// Bend-range authority (fixes: Plaits bent far less than Dexed under MPE). Each synth track has its
+// OWN router (g_routerV[voice]), each with its own per-channel bend range. A controller's RPN 0,0
+// (pitch-bend sensitivity) is delivered only to the SUBSCRIBED track's router, so honoring it
+// per-router let two tracks drift to different ranges (Dexed's onPitchBend also CLAMPS to ±kBendRange,
+// hiding its own drift — so Dexed looked fine while Plaits, unclamped, honestly reported the wrong
+// small range). Two guards, wired once in setup():
+//   (1) setHonorRpnBendRange(false) on every router -> the firmware's TDSP_MPE_BEND_RANGE /
+//       applyMidiMode() value is authoritative; the controller can no longer override or desync it.
+//   (2) a fan-out hook so that IF a build re-enables honoring, an RPN write mirrors onto ALL routers.
+// Fan the given channel's range to every voice router (guard 2).
+static void fanBendRangeToAllRouters(uint8_t ch, float semitones) {
+    for (tdsp::MidiRouter &r : g_routerV) r.setPitchBendRange(ch, semitones);
+}
+// Install both guards on every live-MIDI router. Called once from setup(), before the first
+// applyMidiMode(). Idempotent — safe to call again.
+static void installBendRangeAuthority() {
+    for (tdsp::MidiRouter &r : g_routerV) r.setHonorRpnBendRange(false);   // (1) firmware authoritative
+    tdsp::MidiRouter::setRpnBendRangeHook(&fanBendRangeToAllRouters);      // (2) uniform fan-out fallback
+}
+
 // Switch the device between normal MIDI and MPE (per-note expression). Sets the router's
 // per-channel bend range (+-2 normal vs the LinnStrument's +-24-semi MPE default) and lets
 // the backend reconfigure (TSF frees ch10 from drums so it's an MPE member channel).
@@ -3048,7 +3072,7 @@ static void handleTrkCmd(const char* s, Stream& reply) {
     if      (strncmp(cmd, "PLAY=", 5) == 0 || strncmp(cmd, "SONGF=", 6) == 0) { const char* a = eq + 1; if (isDrum) drumStartFile(a); else trackLaunch(*t, a); }
     else if (strncmp(cmd, "RESTART=", 8) == 0) { if (isDrum) drumStartFile(arg); else trackRestart(*t, arg); }
     else if (strncmp(cmd, "STOP", 4) == 0)     { if (isDrum) drumStop(); else songStop(*t); }
-    else if (strncmp(cmd, "VOL=", 4) == 0)     { if (t->setLevel) t->setLevel(atoi(arg)); }
+    else if (strncmp(cmd, "VOL=", 4) == 0)     { if (t->setLevel) t->setLevel(atoi(arg)); if (!isDrum && i >= 0 && i < (int)kSynthVoices) g_trkLevel[i] = atoi(arg); }
     // List THIS track's engine instruments (index-ordered, \x1f-separated) so the app renders the
     // engine's OWN patch picker (OPLL ROM voices / Plaits models / any future engine) instead of the
     // Dexed cart library. Engine-agnostic via the ITrackEngine vtable — a new engine needs no new code.
@@ -3668,7 +3692,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         { Track &t = g_tracks[0];
           reply.printf("\"song\":{\"playing\":%d,\"p\":%d,\"sync\":%d,\"vol\":%d,\"name\":", t.player->isPlaying() ? 1 : 0, t.player->positionPermille(), t.player->isSynced() ? 1 : 0, g_songVolPct);
           tdsp::catdb::jsonStr(reply, t.name); reply.print("},"); }
-        reply.printf("\"drums\":{\"kit\":%d,\"playing\":%d,\"sync\":%d,\"vol\":%d,\"map\":%d},", g_drumKit, g_drumPlayer.isPlaying() ? 1 : 0, g_drumPlayer.isSynced() ? 1 : 0, g_drumVolPct, (int)g_drumNoteMapper.mode());
+        reply.printf("\"drums\":{\"kit\":%d,\"playing\":%d,\"p\":%d,\"sync\":%d,\"vol\":%d,\"map\":%d},", g_drumKit, g_drumPlayer.isPlaying() ? 1 : 0, g_drumPlayer.positionPermille(), g_drumPlayer.isSynced() ? 1 : 0, g_drumVolPct, (int)g_drumNoteMapper.mode());
 #ifdef TDSP_METRONOME
         reply.printf("\"metro\":%d,\"metromuted\":%d,\"metrosig\":%d,\"metrovol\":%d,", g_conductor.running() ? 1 : 0, g_metroMuted ? 1 : 0, g_metroBpb, g_metroVolPct);   // transport running + click mute + time sig + click level
 #endif
@@ -3781,6 +3805,22 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
             reply.printf(",\"ninstr\":%d", g_trackEngine[v]->numInstruments());
             reply.print(",\"name\":"); tdsp::catdb::jsonStr(reply, g_trackEngine[v]->currentName());
             reply.print(",\"song\":"); tdsp::catdb::jsonStr(reply, t.name);
+            reply.printf(",\"loop\":%d", *t.loop ? 1 : 0);   // this track's song-loop flag → the app's ↻ / nav Loop toggle (voices C/D+ have no top-level loop field)
+            // Per-voice player position + track volume + arp state — so EVERY voice (not just A/B via the
+            // top-level song/arp/vol keys) rehydrates its play/progress, Vol slider, and Arp toggle on
+            // reload from tracks[] alone. playing is already above; p mirrors song.p, vol mirrors song.vol.
+            reply.printf(",\"p\":%d,\"vol\":%d", t.player->positionPermille(), g_trkLevel[v]);
+            reply.printf(",\"arpst\":{\"on\":%d,\"pat\":%d,\"rate\":%d,\"oct\":%d,\"latch\":%d}",
+                         g_arpFilterV[v].enabled() ? 1 : 0, (int)g_arpFilterV[v].pattern(), (int)g_arpFilterV[v].rate(),
+                         g_arpFilterV[v].octaveRange(), g_arpFilterV[v].latch() ? 1 : 0);
+            // cart/cv — the loaded /dexed cart path + 0-based voice index for THIS track (Dexed engines
+            // only; absent otherwise), so the app can list/step every synth voice's library position, not
+            // just voice 0/1 (which also ride the top-level voice/voice2 objects above).
+            { const char *cr = nullptr; int ccv = 0;
+              if (g_trackEngine[v]->currentCart(&cr, &ccv)) {
+                  reply.print(",\"cart\":"); tdsp::catdb::jsonStr(reply, cr);
+                  reply.printf(",\"cv\":%d", ccv);
+              } }
 #if TDSP_HETERO_PLAITS
             // Plaits timbre macros (0..1000) so the panel's knobs rehydrate on connect/reconnect — the
             // model already rides eng/ninstr/name above. Only the Plaits track carries these.
@@ -3841,6 +3881,12 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
                      );
         // PSRAM presence (top-level, MB): the app greys PSRAM-dependent cards with a reason when 0.
         reply.printf(",\"psram\":%u", (unsigned)external_psram_size);
+        // Which board file (PlatformIO env) is flashed + when it was built — shown on the app's Settings
+        // page so the running firmware is identifiable at a glance. TDSP_ENV is baked in from ${PIOENV}.
+#ifdef TDSP_ENV
+        reply.print(",\"env\":"); tdsp::catdb::jsonStr(reply, TDSP_ENV);
+        reply.print(",\"built\":"); tdsp::catdb::jsonStr(reply, __DATE__ " " __TIME__);
+#endif
 #if defined(TDSP_DRUM_TSF)
         // Resident drum font (path + short label) so the app's @DRUMFONT picker highlights the current one.
         reply.print(",\"drumfont\":{\"path\":"); tdsp::catdb::jsonStr(reply, g_drumFontPath);
@@ -4152,6 +4198,7 @@ FLASHMEM static void tracksInit() {
     td.name = g_curDrumName; td.arg = g_curDrumArg; td.loop = &g_drumLoop; td.wasPlaying = &g_drumWasPlaying;
     td.bpm = &g_drumFileBpm; td.bpb = &g_drumBpb; td.loopBeats = &g_drumLoopBeats; td.launchPending = &g_drumLaunchPending;
     td.liveSrcMask = 0; td.srcChMask = 0;   // a groove has no live input (router is null)
+    for (int k = 0; k < (int)kSynthVoices; ++k) g_trkLevel[k] = 100;   // per-track volume echo defaults (see g_trkLevel)
 }
 
 // Wire one track's MIDI graph (unified — replaces the parallel voice-1/voice-2 hookup blocks in
@@ -4414,6 +4461,7 @@ FLASHMEM void setup() {
         g_engineHasDrums = true;
     }
 #endif
+    installBendRangeAuthority();            // firmware owns the MPE bend range (controller RPN can't desync tracks)
     applyMidiMode(TDSP_DEFAULT_MPE != 0);   // start mode (board-configurable; default normal MIDI, after synthBegin)
 
 #if TDSP_HAS_SDCARD
@@ -4676,6 +4724,13 @@ void loop() {
             char cmd[16]; snprintf(cmd, sizeof cmd, "@TRK%d.P", v);
             emitTrackPos(g_tracks[v], cmd, posClk[v], posPrev[v]);
         }
+    }
+    // Same feed for the drum groove — as "@DRUMP" (the drum player isn't in g_tracks[]). g_drumTrack.player
+    // is &g_drumPlayer, so this reuses the synth voices' exact position/edge logic. Drives the Drums card.
+    {
+        static elapsedMillis drumPosClk;
+        static bool          drumPosPrev = false;
+        emitTrackPos(g_drumTrack, "@DRUMP", drumPosClk, drumPosPrev);
     }
 
 #if TDSP_RECORDER

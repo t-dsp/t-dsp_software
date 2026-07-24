@@ -45,12 +45,32 @@ struct DexedVoiceEngineAdapter : ITrackEngine {
     // Display name = a picked cart voice (4-way pool) if any, else the bundled instrument — matches
     // the exact expressions the @STATE tracks[] loop used per config.
     const char* currentName() override {
+        // Prefer the loaded /dexed cart voice name (a @DXPICK pick) over the bundled instrument name, so
+        // @STATE tracks[].name matches currentCart() and the top-level voice/voice2 objects. Without this
+        // a cart pick reports a stale bundled name, and the card title never tracks Prev/Next or reconnect.
 #if TDSP_SYNTH_VOICES >= 4 && !TDSP_HETERO
         return g_curCartNameV[v][0] ? g_curCartNameV[v] : synthInstrumentName(g_synthInstrumentV[v]);
 #elif TDSP_VOICE2
-        return synthInstrumentName((v == 1) ? g_synthInstrument2 : g_synthInstrument);
+        { const char *cn = (v == 1) ? g_curCart2Name : g_curCartName;
+          return cn[0] ? cn : synthInstrumentName((v == 1) ? g_synthInstrument2 : g_synthInstrument); }
 #else
-        return synthInstrumentName(g_synthInstrument);
+        return g_curCartName[0] ? g_curCartName : synthInstrumentName(g_synthInstrument);
+#endif
+    }
+    // Loaded /dexed cart+voice for THIS pool voice (@STATE tracks[].cart/cv). Reads the per-voice arrays
+    // when the 4-voice pool has them (correct for every v, incl. Synth C/D), else the 2-way/single cart
+    // singletons — mirroring the storage that setInstrument/pickCartVoice writes. Empty rel = not a cart.
+    bool currentCart(const char** rel, int* cv) override {
+#if TDSP_POOL_VOICES >= 4
+        if (!g_curCartRelV[v][0]) return false;
+        *rel = g_curCartRelV[v]; *cv = g_curCartVoiceV[v]; return true;
+#elif TDSP_VOICE2
+        char *r = (v == 1) ? g_curCart2Rel : g_curCartRel;
+        if (!r[0]) return false;
+        *rel = r; *cv = (v == 1) ? g_curCart2Voice : g_curCartVoice; return true;
+#else
+        if (!g_curCartRel[0]) return false;
+        *rel = g_curCartRel; *cv = g_curCartVoice; return true;
 #endif
     }
     void setVol(int pct) override   { if (g_tracks[v].setLevel) g_tracks[v].setLevel(pct); }

@@ -206,6 +206,9 @@ public:
         muteNoteOn_ = false;          // a stop always clears drain mode
         ev_ = nullptr; count_ = 0; idx_ = 0;
         totalMs_ = 0; elapsedMs_ = 0;
+        synced_ = false; loopBeats_ = 0.0;   // drop the sync anchor: a stopped player syncs to nothing
+                                             // (play()->setSyncedMode() re-establishes it). Keeps
+                                             // positionPermille()/isSynced() honest after a stop.
         nPendOff_ = 0;                // drop any carried loop-tail releases
         if (was && sink_) {
             if (panicMask_ == 0xFFFF) sink_->onAllNotesOff(0);   // 0 = panic all channels
@@ -233,6 +236,11 @@ public:
     // Playback position 0..1000 (permille) by ELAPSED SONG TIME (not event index —
     // events aren't evenly spaced). Drives the app's MIDI Player progress bar.
     uint16_t positionPermille() const {
+        if (!playing_) return 0;                           // stopped: no position (bar clears). stop()
+                                                           // leaves synced_/loopBeats_/lastMasterBeat_
+                                                           // stale, so without this a stopped-but-once-
+                                                           // synced player reports a frozen phase off the
+                                                           // free-running master clock.
         if (synced_ && loopBeats_ > 0.0) {                 // phase within the loop
             double into = lastMasterBeat_ - loopBaseBeat_;  // beats into this iteration
             if (into < 0.0) into = 0.0;

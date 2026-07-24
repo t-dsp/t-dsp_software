@@ -15,6 +15,7 @@ import { View, Text, Pressable, Platform, useWindowDimensions } from 'react-nati
 import { s } from './styles';
 import { BeatStrip } from './elements/BeatStrip';
 import { ThrottledSlider } from './primitives';
+import { SideNav, NavSection } from './SideNav';
 
 type BeatFeed = { i: number; n: number } | null;
 
@@ -22,7 +23,7 @@ export function Header({
   connected, connecting, onConnectToggle,
   sig, bpm, beatActive, beatFeed,
   vol, onVolChange, onVolCommit,
-  status, brandInSidebar,
+  status, brandInSidebar, nav,
   metroOn, metroMuted, metroLocked,
   onPlay, onStop, onToggleMute, onStepBpm, onToggleLock,
 }: {
@@ -30,6 +31,8 @@ export function Header({
   sig: number; bpm: number; beatActive: boolean; beatFeed: BeatFeed;
   vol: number; onVolChange: (v: number) => void; onVolCommit: (v: number) => void;
   status: string; brandInSidebar?: boolean;   // desktop w/ sidebar shows the T-DSP logo there → hide it here
+  // Section navigation data (same list the desktop rail shows) — rendered inside the mobile ☰ menu.
+  nav?: { sections: NavSection[]; route: string; activeRootId?: string; navigate: (id: string) => void; usbOwner: (i: number) => boolean; claimUsb: (i: number) => void };
   metroOn: boolean; metroMuted: boolean; metroLocked: boolean;
   onPlay: () => void; onStop: () => void; onToggleMute: () => void; onStepBpm: (d: number) => void; onToggleLock: () => void;
 }) {
@@ -45,13 +48,35 @@ export function Header({
     </View>
   );
   const beat = <BeatStrip sig={sig} bpm={bpm} active={beatActive} live={beatFeed} />;
-  // NB: the master transport (▶ ■ 🔊 −/＋BPM 🔒) moved OUT of the header into the nav/menu bar
-  // (App.tsx, s.menuTransport). The metro* / onPlay / onStop / onStepBpm / onToggle* props are still
-  // accepted for compatibility but no longer rendered here.
+  // Master transport, split into two rows: play/stop/mute on top, the BPM stepper + tempo lock beneath.
+  // Rendered in the header's top-left on desktop, and stacked in the ☰ menu on mobile.
+  const transportPlay = (
+    <View style={s.hdrTransportRow}>
+      <Pressable style={[s.tBtn, metroOn && s.tBtnOn]} onPress={onPlay} disabled={!connected}
+        accessibilityLabel={metroOn ? 'Transport running — restart the downbeat' : 'Start the transport'}>
+        <Text style={[s.tBtnText, metroOn && s.tBtnOnText]}>▶</Text></Pressable>
+      <Pressable style={[s.tBtn, s.tBtnGhost]} onPress={onStop} disabled={!connected} accessibilityLabel="Stop everything">
+        <Text style={s.tBtnText}>■</Text></Pressable>
+      <Pressable style={[s.tBtn, s.tBtnGhost, !metroMuted && s.tBtnOn]} disabled={!connected} onPress={onToggleMute}
+        accessibilityLabel={metroMuted ? 'Click muted — tap to hear it' : 'Click audible — tap to mute'}>
+        <Text style={[s.tBtnText, !metroMuted && s.tBtnOnText]}>{metroMuted ? '🔇' : '🔊'}</Text></Pressable>
+    </View>
+  );
+  const transportBpm = (
+    <View style={s.hdrTransportRow}>
+      <Pressable style={s.tBtn} onPress={() => onStepBpm(-1)} disabled={!connected}><Text style={s.tBtnText}>−</Text></Pressable>
+      <Text style={s.tBpm}>{Math.round(bpm)}<Text style={s.tBpmUnit}> BPM</Text></Text>
+      <Pressable style={s.tBtn} onPress={() => onStepBpm(1)} disabled={!connected}><Text style={s.tBtnText}>＋</Text></Pressable>
+      <Pressable style={[s.tBtn, s.tBtnGhost, metroLocked && s.tBtnOn]} disabled={!connected} onPress={onToggleLock}
+        accessibilityLabel={metroLocked ? 'Tempo locked — tap to let content set the BPM' : 'Tempo follows content — tap to lock'}>
+        <Text style={[s.tBtnText, metroLocked && s.tBtnOnText]}>{metroLocked ? '🔒' : '🔓'}</Text></Pressable>
+    </View>
+  );
   const volBar = (
     <View style={s.volRowHdr}>
       <Text style={s.volLbl}>VOL</Text>
-      <ThrottledSlider max={100} value={vol} onChange={onVolChange} onCommit={onVolCommit} disabled={!connected} />
+      {/* Taller drag zone (48px) than the default 34 — the master VOL is a touchscreen target. */}
+      <ThrottledSlider max={100} value={vol} onChange={onVolChange} onCommit={onVolCommit} disabled={!connected} style={{ flex: 1, height: 48 }} />
       <Text style={s.volVal}>{Math.round(vol)}</Text>
     </View>
   );
@@ -85,6 +110,16 @@ export function Header({
         </View>
         {open && (
           <View style={s.mobileMenu}>
+            {/* master transport (two rows: play/stop/mute, then BPM), under the logo/beat/✕ top bar */}
+            {transportPlay}
+            {transportBpm}
+            {/* the left-hand section navigation (same list as the desktop rail); tapping also closes the menu */}
+            {nav && (
+              <View style={s.mobileNav}>
+                <SideNav sections={nav.sections} route={nav.route} activeRootId={nav.activeRootId}
+                  onNavigate={id => { nav.navigate(id); setOpen(false); }} usbOwner={nav.usbOwner} onClaimKbd={nav.claimUsb} />
+              </View>
+            )}
             {volBar}
             <View style={s.mobileConnectRow}>{connectCtrls}</View>
             {!!status && <Text style={s.statline}>{status}</Text>}
@@ -98,10 +133,12 @@ export function Header({
   return (
     <View style={s.header}>
       <View style={s.brandRow}>
-        {/* On desktop-with-sidebar the T-DSP logo lives in the sidebar's top-left; here brandSide is
-            just a left spacer so beat/VOL stay centered. Elsewhere (disconnected/loading) show the logo. */}
+        {/* Top-left: the master transport — play/stop/mute on top, BPM stepper + lock beneath. (The
+            T-DSP logo lives in the sidebar's top-left on desktop; shown here only when there's no sidebar.) */}
         <View style={s.brandSide}>
           {!brandInSidebar && logo}
+          {transportPlay}
+          {transportBpm}
         </View>
         {/* Center column: tempo dots on top, master VOL directly beneath them. */}
         <View style={s.brandCenter}>
@@ -109,10 +146,11 @@ export function Header({
           {volBar}
         </View>
         <View style={s.brandSideRight}>
-          {connectCtrls}
+          <View style={s.brandConnectRow}>{connectCtrls}</View>
+          {/* status line sits directly under the reload/connect buttons (was a full-width line below). */}
+          {!!status && <Text style={s.statlineRight} numberOfLines={2}>{status}</Text>}
         </View>
       </View>
-      <Text style={s.statline}>{status}</Text>
     </View>
   );
 }

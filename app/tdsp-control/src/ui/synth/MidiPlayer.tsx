@@ -11,7 +11,8 @@
 import React from 'react';
 import { View, Text, Pressable } from 'react-native';
 import { s } from '../styles';
-import { HdrBtn, Row, VolSlider, FolderBrowser, BodyTabs } from '../primitives';
+import { HdrBtn, Row, VolSlider, BodyTabs } from '../primitives';
+import { MediaBrowser } from '../browser/MediaBrowser';
 import PianoRoll from '../PianoRoll';
 import { END_MODES, InjectFolder } from '../constants';
 import type { Transport } from '../../transport';
@@ -33,12 +34,14 @@ export type PlayerCtx = {
 export type RecToggle = { active: boolean; onToggle: () => void };
 
 export const playerActions = (D: SongDeck, rec?: RecToggle) => (<>
-  <HdrBtn label="‹" stop onPress={() => D.step(-1)} style={s.hdrBtnCap} />
-  <HdrBtn label="›" stop onPress={() => D.step(1)} style={s.hdrBtnCap} />
-  <HdrBtn label="▶" onPress={D.play} active={D.player.playing} style={s.hdrBtnCap} />
-  <HdrBtn label="■" stop onPress={D.stop} style={s.hdrBtnCap} />
-  {rec && <HdrBtn label="●" stop={!rec.active} onPress={rec.onToggle} style={[s.hdrBtnCap, rec.active && s.hdrBtnRec]} />}
-  {!D.noEndMode && <HdrBtn label={(END_MODES.find(m => m.key === D.endMode) || END_MODES[3]).icon} stop onPress={D.cycleEnd} style={s.hdrBtnCap} />}
+  {/* leading spacer right-justifies the (50px-capped) transport controls on the card */}
+  <View style={{ flex: 1 }} />
+  <HdrBtn label="‹" stop onPress={() => D.step(-1)} cap />
+  <HdrBtn label="›" stop onPress={() => D.step(1)} cap />
+  <HdrBtn label="▶" onPress={D.play} active={D.player.playing} cap />
+  <HdrBtn label="■" stop onPress={D.stop} cap />
+  {rec && <HdrBtn label="●" stop={!rec.active} onPress={rec.onToggle} cap style={rec.active && s.hdrBtnRec} />}
+  {!D.noEndMode && <HdrBtn label={(END_MODES.find(m => m.key === D.endMode) || END_MODES[3]).icon} stop onPress={D.cycleEnd} cap />}
 </>);
 
 // The song half: pick a song via the recursive folder browser, set the player's level, choose
@@ -47,11 +50,12 @@ export const playerSongBody = (D: SongDeck, ctx: PlayerCtx) => (
   <>
     <VolSlider label="Volume" value={D.vol} onChange={D.onVol} onCommit={D.commitVol} disabled={!ctx.connected} />
     {!!D.volNote && <Text style={s.muted}>{D.volNote}</Text>}
-    <View style={s.browseBox}>
-      <FolderBrowser tp={ctx.tp} root={D.browseRoot ?? '/midi'} ext="mid" enabled={ctx.connected && ctx.loaded}
+    <View style={s.browseBoxTall}>
+      <MediaBrowser tp={ctx.tp} root={D.browseRoot ?? '/midi'} ext="mid" enabled={ctx.connected && ctx.loaded}
+        scope="songs"
         selected={D.player.song} playing={D.player.playing ? D.player.song : undefined}
         onSelectFile={(full, disp) => D.playFile(full, disp)} injectFolders={D.injectFolders ?? ctx.songInjectFolders}
-        onFolderList={D.onFolderList} filesFirst={D.filesFirst} />
+        onFolderList={D.onFolderList} />
     </View>
     {!D.noEndMode && <Row><Text style={[s.muted, { flex: 1 }]}>When finished</Text>
       {END_MODES.map(m => (

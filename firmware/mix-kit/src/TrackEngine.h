@@ -43,6 +43,12 @@ struct ITrackEngine {
     // Lowercase protocol tag for @STATE tracks[].eng ("opll"/"plaits"/…). "" = the app's inferred
     // default (kept empty for Dexed so the existing wire format is byte-identical during migration).
     virtual const char* engTag() { return ""; }
+    // The loaded /dexed CART for THIS track (a @DXPICK pick), so @STATE tracks[] can surface each
+    // track's cart+voice — not just voice 0/1 via the top-level voice/voice2 objects — letting the app
+    // list/step every synth voice's library position (esp. Synth C/D). Sets *rel to the cart path and
+    // *cv to the 0-based voice index and returns true; false for engines with no cart concept
+    // (OPLL/Plaits/…) or when a bundled/ROM voice is current (not a cart pick). Default: no cart.
+    virtual bool currentCart(const char** rel, int* cv) { (void)rel; (void)cv; return false; }
 
     // --- level --------------------------------------------------------------
     virtual void setVol(int pct) = 0;            // 0..150 %

@@ -69,21 +69,37 @@ export const LoopStepGrid = ({ bars, sig, prog, active, recording }:
 // `kicker` is a small uppercase eyebrow above the title (the track's identity — SYNTH A / DRUMS —
 // when the title itself is repurposed as a big "hero" line for the loaded preset/loop). With a kicker
 // the title renders plain (the kicker carries the accent) and one size larger, song-title style.
-export function Card({ title, value, status, subtitle, actions, foot, progress, onPress, onBack, style, accent, tint, topRight, disabledReason, kicker, leading }:
-  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; foot?: React.ReactNode; progress?: number; onPress?: () => void; onBack?: () => void; style?: any; accent?: string; tint?: string; topRight?: React.ReactNode; disabledReason?: string; kicker?: string; leading?: React.ReactNode }) {
+export function Card({ title, value, status, subtitle, actions, foot, progress, onPress, onBack, style, accent, tint, topRight, disabledReason, kicker, leading, titleStyle, stackTop }:
+  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; foot?: React.ReactNode; progress?: number; onPress?: () => void; onBack?: () => void; style?: any; accent?: string; tint?: string; topRight?: React.ReactNode; disabledReason?: string; kicker?: string; leading?: React.ReactNode; titleStyle?: any; stackTop?: boolean }) {
   // A feature the firmware compiled in but that can't run right now (e.g. a PSRAM-only synth/looper/fx
   // on a board without PSRAM, or a missing SD asset): grey the whole card, swap the subtitle for the
   // reason, and make it inert (no chevron, no header actions) — the box is visible so the user knows
   // it exists, with the reason shown, but it can't be opened or driven. See @STATE "unavail".
   const off = !!disabledReason;
+  const { width } = useWindowDimensions();
+  const wide = width >= 640;   // chevrons match the play controls: 50px mobile → 75px (1.5×) desktop
+  // The right-side "open" chevron: only when there's an onPress and it isn't a back-arrow card.
+  const openChevron = !onBack && !!onPress
+    ? <Pressable onPress={off ? undefined : onPress} disabled={off} hitSlop={10} style={[s.chevBtn, wide && s.chevBtnBig]}><Text style={[s.chev, wide && s.chevBig, off && { opacity: 0 }]}>❯</Text></Pressable>
+    : null;
   return (
     <View style={[s.card, style, tint && { backgroundColor: tint }, accent && { borderLeftColor: accent, borderLeftWidth: 3 }, off && s.cardOff]}>
-      <View style={s.cardHead}>
-        {onBack && <Pressable onPress={onBack} hitSlop={10} style={s.chevBtn}><Text style={s.chev}>‹</Text></Pressable>}
+      {/* stackTop: a header bar rides the top of the card — the section eyebrow on the left, the keyboard
+          glyph + open chevron on the right — so the hero title below gets the card's full width instead of
+          sharing its line with the controls. Accent-tinted: a faint wash of the track accent + a full-accent
+          bottom rule color-codes each synth's header (falls back to neutral card2/border when no accent). */}
+      {stackTop && !off && (!!topRight || !!openChevron || !!kicker) && (
+        <View style={[s.cardTopBar, accent && { backgroundColor: accent + '2b', borderBottomColor: accent }]}>
+          {!!kicker && <Text style={[s.cardKicker, s.cardTopBarKicker, accent && { color: accent }]} numberOfLines={1}>{kicker}</Text>}
+          <View style={s.cardTopBarRight}>{topRight}{openChevron}</View>
+        </View>
+      )}
+      <View style={[s.cardHead, stackTop && s.cardHeadStacked]}>
+        {onBack && <Pressable onPress={onBack} hitSlop={10} style={[s.chevBtn, wide && s.chevBtnBig]}><Text style={[s.chev, wide && s.chevBig]}>‹</Text></Pressable>}
         {!off && leading}
         <View style={s.drawerLeft}>
-          {!!kicker && <Text style={[s.cardKicker, accent && { color: accent }]} numberOfLines={1}>{kicker}</Text>}
-          <Text style={[s.drawerTitle, kicker ? s.drawerTitleHero : (accent && { color: accent })]} numberOfLines={1}>{title}</Text>
+          {!!kicker && !stackTop && <Text style={[s.cardKicker, accent && { color: accent }]} numberOfLines={1}>{kicker}</Text>}
+          <Text style={[s.drawerTitle, kicker ? s.drawerTitleHero : (accent && { color: accent }), titleStyle]} numberOfLines={1}>{title}</Text>
           {off ? <Text style={s.cardReason} numberOfLines={1}>⚠  {disabledReason}</Text>
             : subtitle != null
               // A plain-string subtitle must be wrapped in styled <Text> — a bare string lands unstyled
@@ -92,10 +108,10 @@ export function Card({ title, value, status, subtitle, actions, foot, progress, 
               : <Subtitle value={value} status={status} />}
           {!off && progress != null && <ProgressBar value={progress} />}
         </View>
-        {!off && topRight}
-        {/* right-side "open" chevron only when there's actually an onPress to open — a card with neither
-            onPress nor onBack (e.g. the Drums lead tile, which navigates via the menu bar) shows no chevron */}
-        {!onBack && !!onPress && <Pressable onPress={off ? undefined : onPress} disabled={off} hitSlop={10} style={s.chevBtn}><Text style={[s.chev, off && { opacity: 0 }]}>❯</Text></Pressable>}
+        {/* Inline (non-stackTop) top-right controls: keyboard glyph + open chevron. A card with neither
+            onPress nor onBack (e.g. the Drums lead tile, which navigates via the menu bar) shows no chevron. */}
+        {!stackTop && !off && topRight}
+        {!stackTop && openChevron}
       </View>
       {!off && !!foot && <View style={s.cardFoot}>{foot}</View>}
       {!off && !!actions && <View style={s.cardActions}>{actions}</View>}
@@ -192,25 +208,40 @@ export function LoadScreen({ bus, tpLabel }: { bus: ProgressBus; tpLabel: string
 // All header buttons share one uniform width (s.hdrBtn.minWidth).
 // `active` (play buttons only): true = playing (green), false = idle (dark). Omit on non-play
 // buttons (nav/stop/±) so they keep their normal look.
-export const HdrBtn = ({ label, onPress, stop, active, style }: { label: string; onPress: () => void; stop?: boolean; active?: boolean; style?: any }) => (
-  <Pressable onPress={onPress} style={[s.hdrBtn, stop && s.hdrBtnStop, active === false && s.hdrBtnIdle, style]}><Text style={s.hdrBtnText} numberOfLines={1}>{label}</Text></Pressable>
-);
+// `cap` marks a PLAY-CONTROL button: capped square (50px), and 1.5× (75px + bigger glyph) on desktop.
+// The responsiveness is baked in here (HdrBtn reads the window width itself) so every play control
+// across the app — synth cards, MIDI player, arpeggiator, drums, FX sends — scales consistently.
+export const HdrBtn = ({ label, onPress, stop, active, style, cap }: { label: string; onPress: () => void; stop?: boolean; active?: boolean; style?: any; cap?: boolean }) => {
+  const { width } = useWindowDimensions();
+  const wide = !!cap && width >= 640;   // desktop → 1.5×
+  return (
+    <Pressable onPress={onPress} style={[s.hdrBtn, stop && s.hdrBtnStop, active === false && s.hdrBtnIdle, cap && (wide ? s.hdrBtnCapBig : s.hdrBtnCap), style]}>
+      <Text style={[s.hdrBtnText, wide && s.hdrBtnTextBig]} numberOfLines={1}>{label}</Text>
+    </Pressable>
+  );
+};
 // A small keyboard glyph drawn with Views so it can be tinted (an emoji can't): a bordered
 // body with five keys. WHITE = this synth owns the USB keyboard; GREY = another synth does.
-export function KbdGlyph({ color }: { color: string }) {
+export function KbdGlyph({ color, big }: { color: string; big?: boolean }) {
+  const w = big ? 40 : 26, h = big ? 26 : 17, pad = big ? 4 : 2.5, kw = big ? 3.5 : 2.5, kh = big ? 11 : 7;
   return (
-    <View style={{ width: 26, height: 17, borderWidth: 1.5, borderColor: color, borderRadius: 3, paddingHorizontal: 2.5, paddingBottom: 2.5, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
-      {[0, 1, 2, 3, 4].map(i => <View key={i} style={{ width: 2.5, height: 7, backgroundColor: color, borderRadius: 1 }} />)}
+    <View style={{ width: w, height: h, borderWidth: 1.5, borderColor: color, borderRadius: 3, paddingHorizontal: pad, paddingBottom: pad, flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between' }}>
+      {[0, 1, 2, 3, 4].map(i => <View key={i} style={{ width: kw, height: kh, backgroundColor: color, borderRadius: 1 }} />)}
     </View>
   );
 }
-// Keyboard-ownership control: tap a GREY keyboard to route the USB keyboard to this synth.
-export const KbdBtn = ({ owned, onPress }: { owned: boolean; onPress: () => void }) => (
-  <Pressable onPress={onPress} hitSlop={10} style={s.kbdBtn}
-    accessibilityLabel={owned ? 'USB keyboard plays this synth' : 'Tap to play this synth with the USB keyboard'}>
-    <KbdGlyph color={owned ? C.text : C.muted} />
-  </Pressable>
-);
+// Keyboard-ownership control: tap a GREY keyboard to route the USB keyboard to this synth. Styled as a
+// PLAY-CONTROL square (50px on mobile, 75px / 1.5× on desktop) to match the transport buttons.
+export const KbdBtn = ({ owned, onPress }: { owned: boolean; onPress: () => void }) => {
+  const { width } = useWindowDimensions();
+  const wide = width >= 640;
+  return (
+    <Pressable onPress={onPress} hitSlop={10} style={[s.kbdBtn, wide && s.kbdBtnBig]}
+      accessibilityLabel={owned ? 'USB keyboard plays this synth' : 'Tap to play this synth with the USB keyboard'}>
+      <KbdGlyph color={owned ? C.text : C.muted} big={wide} />
+    </Pressable>
+  );
+}
 export const Row = ({ children }: any) => <View style={s.row}>{children}</View>;
 // Live-drag command rate. Sliders now send WHILE dragging (not just on release) so the change is
 // heard as you move — throttled to ~1 msg / SLIDER_TX_MS to stay inside the serial/BLE budget (the
@@ -295,8 +326,13 @@ export function SubMenu({ getItems, onOpen, accent, tint, cols: colsFixed, lead 
   // `lead`, when given, is rendered as the FIRST grid cell (same width as the child tiles) — the Drums
   // page uses it to fold its own parent card into the grid instead of a separate full-width header.
   const [w, setW] = useState(0);
+  const { width: winWidth } = useWindowDimensions();
   const cols = colsFixed ? (w > 0 && w < 520 ? 1 : colsFixed) : (w >= 900 ? 3 : w >= 560 ? 2 : 1);
   const cellW = `${100 / cols}%` as `${number}%`;   // typed as DimensionValue so the inline width style typechecks
+  // Hero tiles (kicker set) get the enlarged album-cover title, stepped down on mobile — matching the
+  // Synthesizer card. Keyed to the WINDOW width (device size), not the container, so it tracks "mobile".
+  const narrow = winWidth < 640;
+  const heroTitleStyle = narrow ? s.synthHeroTitleSm : s.synthHeroTitle;
   return (
     <View style={s.submenu} onLayout={e => setW(e.nativeEvent.layout.width)}>
       {lead && <View style={[s.submenuCell, { width: cellW }]}>{lead}</View>}
@@ -306,7 +342,7 @@ export function SubMenu({ getItems, onOpen, accent, tint, cols: colsFixed, lead 
               value the big hero "track title", with a square media box (sec.leading) on the left. Plain
               cards (no kicker) render the title/value normally. */}
           <Card title={sec.kicker != null ? (sec.hero ?? sec.title) : sec.title}
-            kicker={sec.kicker} leading={sec.leading}
+            kicker={sec.kicker} leading={sec.leading} titleStyle={sec.kicker != null ? heroTitleStyle : undefined}
             value={sec.kicker != null ? undefined : sec.value} status={sec.status} subtitle={sec.subtitle} actions={sec.actions} foot={sec.foot}
             onPress={() => onOpen(sec.id)} style={s.cardGrid} accent={accent ?? sec.accent} tint={tint ?? sec.tint} topRight={sec.topRight} disabledReason={sec.disabledReason} />
         </View>

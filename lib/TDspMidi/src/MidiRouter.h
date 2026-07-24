@@ -69,6 +69,29 @@ public:
     void  setPitchBendRange(uint8_t channel, float semitones);
     float pitchBendRange   (uint8_t channel) const;
 
+    // --- Bend-range authority (MPE per-track desync fix) -----------------
+    // A controller (e.g. LinnStrument) announces its per-note bend range
+    // via RPN 0,0. That RPN is delivered only to the router of whichever
+    // track is currently subscribed, so honoring it per-router lets two
+    // tracks' routers drift to DIFFERENT ranges (the "Plaits bends far
+    // less than Dexed" bug). Two independent guards:
+    //   (1) setHonorRpnBendRange(false): the router ignores the controller's
+    //       RPN 0,0 write, so the explicit setPitchBendRange() value —
+    //       driven by the firmware's TDSP_MPE_BEND_RANGE / applyMidiMode()
+    //       — stands. The firmware becomes the sole authority.
+    //   (2) an optional static fan-out hook: whenever an *honored* RPN 0,0
+    //       write lands, the router calls the hook so the owner can mirror
+    //       the new range onto every peer router. So even a build that DOES
+    //       honor RPN keeps all tracks in lock-step (no drift).
+    void setHonorRpnBendRange(bool honor) { _honorRpnBendRange = honor; }
+    bool honorRpnBendRange() const { return _honorRpnBendRange; }
+
+    // Fan-out hook: invoked (channel, semitones) when an honored RPN 0,0
+    // bend-range write lands. Static — one owner fans to all routers.
+    // Null (default) = no fan-out. Guard (2) above.
+    using BendRangeHook = void (*)(uint8_t channel, float semitones);
+    static void setRpnBendRangeHook(BendRangeHook hook) { _rpnBendRangeHook = hook; }
+
     // Cached current values. Useful for a sink that registers after
     // the router has been receiving events — it can pull current state
     // on register instead of waiting for the next change. All returns
@@ -115,6 +138,10 @@ private:
     MidiSink    *_sinks[kMaxSinks] = {};
     int          _sinkCount        = 0;
     ChannelState _channels[kNumChannels];
+
+    // Bend-range authority guards (see setHonorRpnBendRange / setRpnBendRangeHook).
+    bool                _honorRpnBendRange = true;      // (1) false = firmware authoritative
+    static BendRangeHook _rpnBendRangeHook;             // (2) fan an honored RPN to peer routers
 
     // Bounds-check and return 0-based channel index, or -1 if invalid.
     static int channelIndex(uint8_t channel) {

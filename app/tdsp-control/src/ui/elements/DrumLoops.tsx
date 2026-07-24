@@ -7,7 +7,9 @@
 // Purely presentational: App owns the deck state + wiring; this just renders it.
 import React from 'react';
 import { View, Text } from 'react-native';
-import { HdrBtn, VolSlider, FolderBrowser } from '../primitives';
+import { HdrBtn, VolSlider } from '../primitives';
+import { MediaBrowser } from '../browser/MediaBrowser';
+import { THEME } from '../theme';
 import { s } from '../styles';
 import type { Transport } from '../../transport';
 
@@ -31,27 +33,28 @@ export function DrumLoopsActions({ deck }: { deck: DrumDeck }) {
   return (
     <>
       <View style={{ flex: 1 }} />{/* spacer: push the capped controls to the right edge of the row */}
-      <HdrBtn label="‹" stop onPress={() => deck.step(-1)} style={s.hdrBtnCap} />
-      <HdrBtn label="›" stop onPress={() => deck.step(1)} style={s.hdrBtnCap} />
-      <HdrBtn label="▶" onPress={deck.play} active={deck.player.playing} style={s.hdrBtnCap} />
-      <HdrBtn label="■" stop onPress={deck.stop} style={s.hdrBtnCap} />
+      <HdrBtn label="‹" stop onPress={() => deck.step(-1)} cap />
+      <HdrBtn label="›" stop onPress={() => deck.step(1)} cap />
+      <HdrBtn label="▶" onPress={deck.play} active={deck.player.playing} cap />
+      <HdrBtn label="■" stop onPress={deck.stop} cap />
     </>
   );
 }
 
-// The Drum Loops detail page: groove Volume, then the recursive /midi/drums folder browser (with the
-// injected ★ Featured shortcut). A tap plays the groove immediately (restart on a fresh downbeat).
+// The Drum Loops detail page: groove Volume, then the two-pane /midi/drums browser (folders on the
+// left, grooves on the right) with the injected ★ Featured shelf plus per-scope Favorites/Recents.
+// A tap plays the groove immediately (restart on a fresh downbeat). The browser fills the remaining
+// page height (this page is full-height), so more grooves are visible on the touchscreen.
 export function DrumLoopsBody({ deck, tp, connected, loaded }: { deck: DrumDeck; tp: Transport; connected: boolean; loaded: boolean }) {
   return (
-    <>
+    <View style={{ flex: 1, gap: 8 }}>
       <VolSlider label="Volume" value={deck.vol} onChange={deck.onVol} onCommit={deck.commitVol} disabled={!connected} />
       {!!deck.volNote && <Text style={s.muted}>{deck.volNote}</Text>}
-      <View style={s.browseBox}>
-        <FolderBrowser tp={tp} root={deck.browseRoot ?? '/midi/drums'} ext="mid" enabled={connected && loaded}
-          selected={deck.player.song} playing={deck.player.playing ? deck.player.song : undefined}
-          onSelectFile={(full, disp) => deck.playFile(full, disp)} injectFolders={deck.injectFolders}
-          onFolderList={deck.onFolderList} filesFirst={deck.filesFirst} />
-      </View>
-    </>
+      <MediaBrowser tp={tp} root={deck.browseRoot ?? '/midi/drums'} ext="mid" enabled={connected && loaded}
+        scope="drums" accent={THEME.drums.accent}
+        selected={deck.player.song} playing={deck.player.playing ? deck.player.song : undefined}
+        onSelectFile={(full, disp) => deck.playFile(full, disp)} injectFolders={deck.injectFolders}
+        onFolderList={deck.onFolderList} />
+    </View>
   );
 }

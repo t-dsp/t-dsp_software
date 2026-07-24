@@ -20,10 +20,12 @@ export const arpValue = (A: ArpSlot) => (A.arp.on ? '' : '(off)  ') + (A.mode ==
   : ARP_PAT[A.arp.pat] + '  ·  ' + ARP_RATES[A.arp.rate].label);
 
 export const arpActions = (A: ArpSlot) => (<>
-  <HdrBtn label="‹" stop onPress={() => A.stepNav(-1)} style={s.hdrBtnCap} />
-  <HdrBtn label="›" stop onPress={() => A.stepNav(1)} style={s.hdrBtnCap} />
-  <HdrBtn label="▶" onPress={A.play} active={A.arp.on} style={s.hdrBtnCap} />
-  <HdrBtn label="■" stop onPress={A.stop} style={s.hdrBtnCap} />
+  {/* leading spacer right-justifies the (50px-capped) transport controls on the card */}
+  <View style={{ flex: 1 }} />
+  <HdrBtn label="‹" stop onPress={() => A.stepNav(-1)} cap />
+  <HdrBtn label="›" stop onPress={() => A.stepNav(1)} cap />
+  <HdrBtn label="▶" onPress={A.play} active={A.arp.on} cap />
+  <HdrBtn label="■" stop onPress={A.stop} cap />
 </>);
 
 export const arpBody = (A: ArpSlot) => (

@@ -11,7 +11,9 @@ export const s = StyleSheet.create({
   brandSide: { flex: 1, flexDirection: 'column', alignItems: 'flex-start', gap: 8 },                    // left column: logo on top, transport beneath
   brandLogoRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },                                 // connection dot + brand
   brandCenter: { flex: 1.3, flexDirection: 'column', alignItems: 'center', gap: 6 },                   // center column: tempo dots + VOL beneath
-  brandSideRight: { flex: 1, flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-end', gap: 8 },  // right column: reload + connect
+  brandSideRight: { flex: 1, flexDirection: 'column', alignItems: 'flex-end', gap: 4 },   // right column: reload+connect on top, status line beneath
+  brandConnectRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },                // the reload + connect buttons
+  statlineRight: { color: C.muted, fontSize: 12, textAlign: 'right' },                    // status line under the connect buttons
   dot: { width: 11, height: 11, borderRadius: 6, backgroundColor: '#da3633' },
   dotOn: { backgroundColor: C.accent },
   brand: { color: C.text, fontWeight: '800', fontSize: 18, letterSpacing: 0.5 },
@@ -25,6 +27,7 @@ export const s = StyleSheet.create({
   menuToggleTxt: { color: C.text, fontSize: 20, fontWeight: '700', lineHeight: 22 },
   mobileMenu: { gap: 10, marginTop: 10, paddingTop: 10, borderTopWidth: 1, borderTopColor: C.border },
   mobileConnectRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
+  mobileNav: { borderBottomWidth: 1, borderBottomColor: C.border, paddingBottom: 6, marginBottom: 2 },   // section nav inside the ☰ menu, divided from the VOL/connect below
   // header beat lights (BeatStrip) — one dot per beat of the bar; centered in the header, 2X size
   beatStrip: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 14, height: 28 },
   beatDot: { width: 24, height: 24, borderRadius: 12, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border },
@@ -32,6 +35,29 @@ export const s = StyleSheet.create({
   beatDotOn: { backgroundColor: C.accent, borderColor: C.accent, shadowColor: C.accent, shadowOpacity: 0.9, shadowRadius: 6, elevation: 4, transform: [{ scale: 1.18 }] },
   beatDotDownOn: { backgroundColor: DOWNBEAT, borderColor: DOWNBEAT, shadowColor: DOWNBEAT, shadowOpacity: 0.9, shadowRadius: 6, elevation: 4, transform: [{ scale: 1.18 }] },
   volRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 2 },
+  synthFlagRow: { marginTop: 0, flexShrink: 1 },   // synth-card flag chips relocated to the bottom-left (actions row): no top margin, shrinks before the play controls
+  synthFlagWrap: { flex: 1 },   // holds the flag chips at the bottom-left and takes the slack, pushing the play controls right
+  synthActionsStack: { flex: 1, gap: 8 },   // mobile: flags row stacked ON TOP of the play-controls row
+  synthControlsRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'flex-end', gap: 6 },   // play controls right-justified (flags row above is left-justified)
+  // Synthesizer card at 2× scale (desktop/wide): a bigger album-cover box (128²) + doubled voice/media
+  // text. RN has no "em" unit — sizes are unitless dp — so the mobile step-down is a second style set
+  // (…Sm) picked via useWindowDimensions rather than a relative unit.
+  synthMedia: { width: 128, height: 128, borderRadius: 12, backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+  synthMediaEmoji: { fontSize: 40, lineHeight: 44, textAlign: 'center' },
+  synthMediaLetter: { color: C.text, fontSize: 48, fontWeight: '800', lineHeight: 52, textAlign: 'center' },
+  synthHeroTitle: { fontSize: 36, lineHeight: 40 },   // the current voice/preset (hero title), 2×
+  synthHeroSub: { fontSize: 27, lineHeight: 31 },      // the currently-playing media line (♪ …), 2×
+  // Mobile / narrow: ~1.4× instead of 2× so the cover + text don't dominate the tile (and the media
+  // line stops truncating).
+  synthMediaSm: { width: 88, height: 88, borderRadius: 10, backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
+  synthMediaEmojiSm: { fontSize: 28, lineHeight: 30, textAlign: 'center' },
+  synthMediaLetterSm: { color: C.text, fontSize: 34, fontWeight: '800', lineHeight: 36, textAlign: 'center' },
+  synthHeroTitleSm: { fontSize: 25, lineHeight: 29 },
+  synthHeroSubSm: { fontSize: 18, lineHeight: 22 },
+  // The synth-page CHILD cards (Media / Synth·Voices / Arp / FX) reuse the synthMedia box (128² / 88²)
+  // with a single centered glyph — sized to fill it (no letter underneath, unlike the Synthesizer card).
+  cardMediaIconBig: { fontSize: 60, lineHeight: 66, textAlign: 'center' },
+  cardMediaIconBigSm: { fontSize: 42, lineHeight: 46, textAlign: 'center' },
   // Synth-card foot: a mute button to the left of the volume slider (toggles the track to 0%).
   volMuteRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
   muteBtn: { width: 40, height: 34, borderRadius: 8, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
@@ -49,6 +75,7 @@ export const s = StyleSheet.create({
   menuHere: { color: C.muted, fontSize: 13, fontWeight: '600', marginLeft: 4, flexShrink: 1 },
   // Master transport bar (metronome = the clock): Play / Stop / Mute on the left, BPM on the right.
   transportRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6, width: '100%' },   // under the logo; wraps to a 2nd line in a narrow column
+  hdrTransportRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },   // one row of the header top-left transport (play/stop/mute, or BPM/lock)
   tBtn: { minWidth: 40, height: 34, paddingHorizontal: 10, borderRadius: 8, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
   tBtnGhost: { backgroundColor: 'transparent' },
   tBtnOn: { backgroundColor: '#238636', borderColor: '#238636' },   // transport running = lit green
@@ -57,14 +84,18 @@ export const s = StyleSheet.create({
   tBpm: { color: C.text, fontSize: 18, fontWeight: '800', minWidth: 74, textAlign: 'center' },
   tBpmUnit: { color: C.muted, fontSize: 11, fontWeight: '600' },
   // desktop-only left nav rail: fixed-width column of direct links into each root section
-  sideBar: { width: 208, flexGrow: 0, flexShrink: 0, borderRightWidth: 1, borderRightColor: C.border, backgroundColor: C.card2 },
+  sideBar: { width: 340, flexGrow: 0, flexShrink: 0, borderRightWidth: 1, borderRightColor: C.border, backgroundColor: C.card2 },
   // T-DSP brand block filling the sidebar's top-left, sized (height 48 + 1px border) to sit level with
   // the menu bar to its right; C.card bg matches the menu bar so the two read as one top strip.
   sideBrand: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 14, height: 48, backgroundColor: C.card, borderBottomWidth: 1, borderBottomColor: C.border },
   content: { flex: 1 },   // main content column beside the rail
-  sideItem: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 13, paddingVertical: 11, borderLeftWidth: 3, borderLeftColor: 'transparent' },
+  sideItem: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 11, paddingVertical: 11, borderLeftWidth: 3, borderLeftColor: 'transparent' },
   sideItemMain: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },   // the navigating part of a rail row (dot + label)
   sideKbd: { paddingHorizontal: 4, paddingVertical: 2 },   // compact tap target for the USB-keyboard glyph on track rows
+  navPlayBtn: { width: 32, height: 32, borderRadius: 7, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },   // per-track Play/Stop/Loop/Arp in the nav rail
+  navPlayBtnOn: { backgroundColor: '#238636', borderColor: '#238636' },   // active → green (■ Stop / looping / arp on)
+  navPlayTxt: { color: C.text, fontSize: 15, fontWeight: '700' },
+  navArpTxt: { color: C.text, fontSize: 11, fontWeight: '700' },   // "Arp" label fits the compact nav button
   sideItemOn: { backgroundColor: C.sel },
   sideDot: { width: 9, height: 9, borderRadius: 5 },
   sideLabel: { color: C.muted, fontSize: 14, fontWeight: '600', flexShrink: 1 },
@@ -85,6 +116,15 @@ export const s = StyleSheet.create({
   cardOff: { opacity: 0.45 },                                   // built-but-unavailable feature (see @STATE unavail)
   cardReason: { color: '#f7b955', fontSize: 13, marginTop: 2 }, // amber "⚠ PSRAM required" line on a greyed card
   cardHead: { flexDirection: 'row', alignItems: 'flex-start', gap: 8, paddingHorizontal: 14, paddingTop: 12 },
+  // stackTop: a full-width HEADER BAR riding above the media/title — the section eyebrow on the left,
+  // the top-right controls (keyboard glyph + open chevron) on the right. A darker fill + bottom divider
+  // set it off as a titlebar, and (card overflow:hidden) it bleeds to the card's rounded top corners.
+  cardTopBar: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: 8, paddingHorizontal: 14, paddingVertical: 8, backgroundColor: C.card2, borderBottomWidth: 1, borderBottomColor: C.border },
+  // The eyebrow on the left of the header bar: larger + bolder + wider-tracked than the in-body kicker,
+  // so it anchors the titlebar (color comes from the track accent, applied inline). Truncates before the controls.
+  cardTopBarKicker: { flexShrink: 1, fontSize: 14, fontWeight: '800', letterSpacing: 1.1 },
+  cardTopBarRight: { flexDirection: 'row', alignItems: 'center', gap: 8 },   // controls cluster on the right of the header bar
+  cardHeadStacked: { paddingTop: 12 },   // full breathing room below the header-bar divider
   // Square media/icon box at the left of a card head (e.g. the Drums card's drum thumbnail).
   cardMedia: { width: 64, height: 64, borderRadius: 8, backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center', overflow: 'hidden' },
   cardMediaIcon: { fontSize: 34, lineHeight: 40, textAlign: 'center' },   // emoji/glyph drum icon inside cardMedia (swap for an <Image> later)
@@ -99,6 +139,7 @@ export const s = StyleSheet.create({
   cardKicker: { color: C.muted, fontSize: 11, fontWeight: '700', letterSpacing: 0.6, textTransform: 'uppercase' },   // small eyebrow above the hero title (the track's identity: SYNTH A / DRUMS)
   drawerValue: { color: C.accent, fontSize: 14, fontWeight: '600' },
   heroSub: { color: C.accent, fontSize: 13.5, fontWeight: '600', marginTop: 1 },   // the second hero line (drum Kit/Voice under the loop title)
+  synthPathLine: { color: C.muted, fontSize: 14, marginTop: 2 },   // the small /dexed folder breadcrumb under the Synthesizer card's voice title
   // Flag chips: a small label+value badge row under the hero (Engine / FX / Arp / Player state at a glance).
   flagRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 6 },
   flag: { flexDirection: 'row', alignItems: 'baseline', gap: 5, backgroundColor: C.chip, borderRadius: 6, borderWidth: 1, borderColor: C.border, paddingHorizontal: 8, paddingVertical: 3, maxWidth: '100%' },
@@ -120,10 +161,13 @@ export const s = StyleSheet.create({
   stepCellRecOn: { backgroundColor: '#f85149', borderColor: '#f85149', shadowColor: '#f85149', shadowOpacity: 0.9, shadowRadius: 6, elevation: 4 },
   // A tappable "open" button on each card: bordered chip with generous L/R padding so it's an
   // easy target. The ❯ glyph reads as a modern chevron.
-  chevBtn: { marginLeft: 'auto', paddingHorizontal: 16, paddingVertical: 8, borderRadius: 9, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
+  chevBtn: { marginLeft: 'auto', width: 50, height: 50, borderRadius: 8, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },   // play-control-style square (50 mobile)
+  chevBtnBig: { width: 75, height: 75 },   // desktop 1.5×, matching the play controls
   chev: { color: C.text, fontSize: 16, lineHeight: 18, fontWeight: '700' },
+  chevBig: { fontSize: 24, lineHeight: 28 },   // bigger ❯ on desktop
   // Keyboard-ownership toggle in a bordered chip button (matches the ❯/❮ nav buttons).
-  kbdBtn: { height: HDR_H, paddingHorizontal: 12, borderRadius: 8, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },
+  kbdBtn: { width: 50, height: 50, borderRadius: 8, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border, alignItems: 'center', justifyContent: 'center' },   // play-control-style square (50 mobile)
+  kbdBtnBig: { width: 75, height: 75 },   // desktop 1.5×, matching the play controls
   // section page
   page: { maxWidth: 720, width: '100%', alignSelf: 'center' },
   pageWide: { maxWidth: '100%' },   // submenu-parent pages span the full window so their card grid can use every column
@@ -145,6 +189,10 @@ export const s = StyleSheet.create({
   crumbSep: { color: C.muted, fontSize: 15, marginHorizontal: 4 },
   crumbTxt: { color: C.accent, fontSize: 14, fontWeight: '600' },
   crumbLast: { color: C.text, fontSize: 14, fontWeight: '700' },
+  // Breadcrumb rendered as buttons (MediaBrowser): each segment is a tappable chip; the current
+  // (last) segment reads as the "active" filled chip.
+  crumbBtn: { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 7, backgroundColor: C.chip, borderWidth: 1, borderColor: C.border },
+  crumbBtnLast: { backgroundColor: C.sel, borderColor: C.accent },
   picker: { flex: 1, borderWidth: 1, borderColor: C.border, borderRadius: 7 },
   row: { flexDirection: 'row', alignItems: 'center', gap: 6, flexWrap: 'wrap' },
   muted: { color: C.muted, fontSize: 13 },
@@ -186,10 +234,13 @@ export const s = StyleSheet.create({
   // capped width so the row stays compact, and a 50px-tall touch target. hdrBtnTall = the same 50px
   // height without the width cap, for wider text buttons (Synth/Voices' ‹ Prev / Next ›).
   hdrBtnCap: { maxWidth: 50, height: 50 },
+  hdrBtnCapBig: { maxWidth: 75, height: 75 },     // desktop 1.5×: bigger play-control buttons on the synth cards
+  hdrBtnTextBig: { fontSize: 20, lineHeight: 24 },  // desktop 1.5× play-control glyph/label
   hdrBtnTall: { height: 50 },
   hdrBtnRec: { backgroundColor: '#da3633', borderWidth: 0 },   // loop-record transport button while armed/capturing (red)
 
   hdrBtnStop: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
+  hdrBtnChip: { backgroundColor: C.chip, borderWidth: 1, borderColor: C.border, flexGrow: 0, flexShrink: 0 },   // filled play-control square (matches the KbdBtn box); flex pinned so it stays square, not stretched by the row
   hdrBtnIdle: { backgroundColor: C.chip },   // play ▶ when NOT playing: dark (green only while playing)
   hdrBtnText: { color: C.text, fontSize: 13, fontWeight: '700' },
   btnGhost: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
@@ -200,8 +251,27 @@ export const s = StyleSheet.create({
   input: { backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 7, color: C.text, paddingHorizontal: 10, paddingVertical: 8, fontSize: 14 },
   list: { maxHeight: 300, borderWidth: 1, borderColor: C.border, borderRadius: 7 },
   browseBox: { height: 340 },   // fixed height so <FolderBrowser>'s flex picker lays out inside a card body
+  browseBoxTall: { height: 460 },   // taller box for the two-pane <MediaBrowser> inside a scroll page (MIDI song selector)
   listBtn: { paddingHorizontal: 12, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.border },
   listBtnSel: { backgroundColor: C.sel },
+  // ---- <MediaBrowser> : the two-pane (folders | items) SD browser (see src/ui/browser) ----------
+  brWrap: { flex: 1 },                                        // fills the remaining page height (responsive)
+  brPanes: { flex: 1, flexDirection: 'row', gap: 10 },        // wide layout: rail + item pane side by side
+  brPane: { borderWidth: 1, borderColor: C.border, borderRadius: 8, overflow: 'hidden', backgroundColor: C.card2 },
+  brLeft: { flex: 1 },                                        // folder rail: even 50% split with the item pane
+  brRight: { flex: 1 },                                       // item pane: even 50% split with the folder rail
+  brPaneHead: { padding: 8, borderBottomWidth: 1, borderBottomColor: C.border, backgroundColor: C.card },   // fixed header (search / breadcrumb)
+  brScroll: { flex: 1 },
+  brLoad: { padding: 20, alignItems: 'center' },
+  brSection: { color: C.muted, fontSize: 11, fontWeight: '700', letterSpacing: 0.5, paddingHorizontal: 12, paddingTop: 12, paddingBottom: 4 },
+  brRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: C.border },
+  brRowSel: { backgroundColor: C.sel },                       // the currently-selected item
+  brRowActive: { backgroundColor: C.chip },                   // the active virtual shelf / folder
+  brRowIcon: { width: 20, textAlign: 'center', color: C.muted, fontSize: 14 },
+  brRowName: { flex: 1, color: C.text, fontSize: 15 },
+  brChevron: { color: C.muted, fontSize: 16, fontWeight: '700' },
+  brStar: { paddingHorizontal: 4, paddingVertical: 2 },
+  brStarTxt: { color: C.muted, fontSize: 18, lineHeight: 20 },
   // Pattern picker: a wrapping GRID so every one of the 26 patterns is reachable at once
   // (a horizontal strip hid the ones past the first row). Cells stretch to fill each row.
   // Preset/Manual segmented tabs — one arp editor active at a time.

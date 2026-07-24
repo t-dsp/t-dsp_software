@@ -21,6 +21,7 @@ import { s } from './src/ui/styles';
 import { EMPTY_DIR, parseDexFind, DexHit, DexRow, catalogCache, grooveDisp, TP_LABEL, DEFAULT_TP_LABEL, HPF_MODES, volDb, EndMode, END_MODES, REC_STATES, AppState, isEndMode, notify, ROW_H, VItem, InjectFolder, saveLastConn, clearLastConn, loadLastConn } from './src/ui/constants';
 import { Subtitle, LoopStepGrid, Card, Flag, PageHeader, ProgressBus, LoadScreen, HdrBtn, KbdBtn, KbdGlyph, Row, ThrottledSlider, VolSlider, Stat, ListBtn, BodyTabs, SubMenu, FolderBrowser } from './src/ui/primitives';
 import { Header } from './src/ui/Header';
+import { SideNav } from './src/ui/SideNav';
 import { DrumLoopsActions, DrumLoopsBody } from './src/ui/elements/DrumLoops';
 import { SynthCard } from './src/ui/synth/SynthCard';
 import { arpValue, arpActions, arpBody } from './src/ui/synth/Arpeggiator';
@@ -74,7 +75,7 @@ export default function App() {
   const [found, setFound] = useState<TdspDevice[]>([]);
   const [scanning, setScanning] = useState(false);
   const { width } = useWindowDimensions();
-  const cols = width < 560 ? 1 : 2;   // homepage grid: two columns (single column on very narrow phones)
+  const cols = width < 700 ? 1 : 2;   // homepage grid: single column in mobile layout (matches Header's width<700 breakpoint), two columns on wider screens
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [userDisc, setUserDisc] = useState(false);      // user tapped Disconnect App → suppress auto-reconnect
@@ -138,7 +139,7 @@ export default function App() {
   const [seq, setSeq] = useState<SeqStep[]>(() => DEFAULT_SHAPE.steps.map(s => ({ ...s })));   // User Sequence step table (device doesn't echo it, so the app owns it)
   const [arpPresetId, setArpPresetId] = useState<string>('');   // which library preset is applied (for browser highlight)
   const [arpMode, setArpMode] = useState<'preset' | 'manual'>('preset');   // which editor drives the arp — one at a time so they never collide
-  const [drums, setDrums] = useState<{ kit: number; sel: string | null; playing: string | null }>({ kit: 0, sel: null, playing: null });
+  const [drums, setDrums] = useState<{ kit: number; sel: string | null; playing: string | null; prog: number }>({ kit: 0, sel: null, playing: null, prog: 0 });
   const [drumVol, setDrumVol] = useState(100);        // drum-player level 0..150 %, independent of the master @VOL
   // `song` = the selected song's NAME (its stable identity now that there's no index). name = currently-playing title.
   const [player, setPlayer] = useState<{ song: string; playing: boolean; name: string; prog: number }>({ song: '', playing: false, name: '', prog: 0 });
@@ -200,6 +201,9 @@ export default function App() {
   // reason instead of hiding. psram = MB of soldered PSRAM (0 on the no-PSRAM boards).
   const [unavail, setUnavail] = useState<Record<string, string>>({});
   const [psram, setPsram] = useState(0);
+  // Which board file (PlatformIO env) the connected firmware was built from + its build timestamp
+  // (@STATE.env / @STATE.built). Shown on the Settings › Firmware page so the running build is identifiable.
+  const [fw, setFw] = useState<{ env: string; built: string }>({ env: '', built: '' });
   const [voice2, setVoice2] = useState({ on: false, vol: 100, name: '', path: '' });
   // Runtime pool partition (4-voice pool builds, @STATE.pool): the 8 Dexed engines redistributed among
   // the 4 fixed voices. `preset` 0=4voices 1=2voices 2=1voice 3=4+2+2; `engines[v]` = engines that voice
@@ -323,7 +327,11 @@ export default function App() {
       hydV(0, j.arp, j.song, j.song?.vol);
       hydV(1, j.arp2, j.song2, j.voice2?.vol);
     }
-    if (j.drums) setDrums(d => ({ ...d, kit: j.drums.kit | 0, playing: j.drums.playing ? d.playing : null }));
+    // Reflect the device's ACTUAL drum-playing state (the groove loops across an app reload). The device
+    // reports only a boolean, not which groove — so name it from the selected groove (self-heals as `sel`
+    // resolves via @APP), preferring an already-known play name; falls to '—' so the Play/Stop button and
+    // nav row track truth even before the name is known.
+    if (j.drums) setDrums(d => ({ ...d, kit: j.drums.kit | 0, playing: j.drums.playing ? (grooveDisp(d.sel) || d.playing || '—') : null, prog: j.drums.playing ? (j.drums.p != null ? j.drums.p / 1000 : (d.prog >= 0 ? d.prog : -1)) : 0 }));
     if (j.drums?.vol != null) setDrumVol(Math.max(0, Math.min(150, j.drums.vol | 0)));
     // Resident drum font (runtime swap builds only emit j.drumfont): path + short display label.
     if (j.drumfont) setDrumFont({ path: j.drumfont.path || '', display: j.drumfont.display || '' });
@@ -331,12 +339,10 @@ export default function App() {
       if (j.voice.cart) {
         const rel = j.voice.cart;
         setSelVoice('c' + rel + ':' + (j.voice.cv | 0)); setSelVoiceName(j.voice.name || ''); setSelVoicePath('/dexed/' + rel);
-        // Preload the folder browser onto the current cart so Next/Prev step through its voices
-        // immediately at startup — otherwise voiceData is empty and stepVoice() bails on cart voices
-        // until the user manually dives into the folder/cart.
-        const slash = rel.lastIndexOf('/');
-        setVpath(slash >= 0 ? rel.slice(0, slash) : '');
-        setCart({ rel, name: (slash >= 0 ? rel.slice(slash + 1) : rel).replace(/\.syx$/i, '') });
+        // The shared folder browser is pointed at a track's cart when that track's Voices PAGE opens (see
+        // the route-driven sync effect below), NOT here: a blanket preload on every @STATE yanks the
+        // browser back to voice 0's cart while you're browsing another track. stepVoice() no longer needs
+        // it either — it steps a cart voice straight from the sel key.
       }
       else if (j.voice.i != null && j.voice.i < 320) { setSelVoice('b' + (j.voice.i | 0)); setSelVoiceName(j.voice.name || ''); setSelVoicePath('Bundled'); }
     }
@@ -361,6 +367,7 @@ export default function App() {
     // Grey-out reasons for built-but-unavailable features + PSRAM presence (both @STATE top-level).
     if (j.unavail !== undefined) setUnavail(j.unavail || {});
     if (j.psram !== undefined) setPsram(j.psram | 0);
+    if (typeof j.env === 'string') setFw({ env: j.env, built: typeof j.built === 'string' ? j.built : '' });
     // Runtime pool partition (only 4-voice pool builds emit j.pool).
     if (j.pool) setPool({
       has: true,
@@ -396,6 +403,12 @@ export default function App() {
       name: j.voice2.name || v.name,
       path: j.voice2.cart ? '/dexed/' + j.voice2.cart : (j.voice2.i != null ? 'Bundled' : v.path),
     }));
+    // Hydrate Voice-2's browser SELECTION key too (voice 0 does this above via j.voice) so Synth B's
+    // Voices page lists/highlights its loaded voice and Prev/Next steps from it, not from voice 0's cart.
+    if (j.voice2) {
+      if (j.voice2.cart) setSelVoice2('c' + j.voice2.cart + ':' + (j.voice2.cv | 0));
+      else if (j.voice2.i != null) setSelVoice2('b' + (j.voice2.i | 0));
+    }
     if (j.arp2) setArp2({ on: !!j.arp2.on, pat: clampIdx(j.arp2.pat, ARP_PAT.length), rate: rateIndexFromFw(j.arp2.rate | 0), oct: Math.max(1, Math.min(4, j.arp2.oct | 0)) || 1, latch: !!j.arp2.latch });
     // MIDI Player 2 (voice-2 song player): restore what's playing + its loop flag → end-mode guess.
     if (j.song2) setPlayer2(p => ({ ...p, playing: !!j.song2.playing, song: j.song2.name ? songArgByName(j.song2.name) : p.song, name: j.song2.name || p.name, prog: j.song2.p != null ? j.song2.p / 1000 : (j.song2.playing ? -1 : 0) }));
@@ -408,8 +421,13 @@ export default function App() {
       const engs: Record<number, string> = {};
       const songs: Record<number, string> = {};
       const sends: Record<number, number> = {};   // per-track reverb SEND level (send-matrix builds)
+      const loops: Record<number, boolean> = {};   // per-track song-loop flag (drives the ↻ / nav Loop toggle for voices C/D+)
+      const plays: Record<number, { playing: boolean; p: number | null }> = {};   // per-track player play/position snapshot (C/D have no top-level song key)
+      const vols: Record<number, number> = {};   // per-track volume 0..150 (C/D have no top-level song.vol/voice2.vol)
+      const arps: Record<number, { on: boolean; pat: number; rate: number; oct: number; latch: boolean }> = {};   // per-track arp state (C/D have no top-level arp/arp2)
       const ninstrs: Record<number, number> = {};   // per-track engine instrument count (for ‹/› wrap)
       const macros: Record<number, { harm: number; timbre: number; morph: number; decay: number; color: number }> = {};   // Plaits timbre macros (0..1000)
+      const selX: Record<number, string> = {};   // per-track /dexed browser sel key from tracks[].cart/cv (voices C/D+)
       let nSynth = 0; let dIdx: number | null = null; let dLive = false;
       for (const t of j.tracks) if (t && t.i != null) {
         if (typeof t.fxsend === 'number') sends[t.i | 0] = Math.max(0, Math.min(100, t.fxsend | 0));   // reverb send (synths + drums)
@@ -419,6 +437,14 @@ export default function App() {
           if (typeof t.name === 'string') names[t.i | 0] = t.name;
           if (typeof t.eng === 'string') engs[t.i | 0] = t.eng;   // 'opll' etc; absent = Dexed
           if (typeof t.song === 'string') songs[t.i | 0] = t.song;   // loaded MIDI song (hydrates all cards, incl. C/D)
+          if (typeof t.loop === 'number') loops[t.i | 0] = !!t.loop;   // device's song-loop flag → end-mode (repeat) for this track
+          if (typeof t.playing === 'number') plays[t.i | 0] = { playing: !!t.playing, p: typeof t.p === 'number' ? t.p : null };   // player play/position snapshot
+          if (typeof t.vol === 'number') vols[t.i | 0] = Math.max(0, Math.min(150, t.vol | 0));   // per-track volume
+          if (t.arpst) arps[t.i | 0] = { on: !!t.arpst.on, pat: clampIdx(t.arpst.pat, ARP_PAT.length), rate: rateIndexFromFw(t.arpst.rate | 0), oct: Math.max(1, Math.min(4, t.arpst.oct | 0)) || 1, latch: !!t.arpst.latch };   // per-track arp
+
+          // Loaded /dexed cart voice → the browser sel key, so voices 2+ (Synth C/D) list + step from
+          // their real library position (voices 0/1 ride the top-level voice/voice2 objects instead).
+          if ((t.i | 0) >= 2 && typeof t.cart === 'string' && t.cart) selX[t.i | 0] = 'c' + t.cart + ':' + (t.cv | 0);
           if (typeof t.harm === 'number')   // Plaits track: hydrate the panel's knobs
             macros[t.i | 0] = { harm: t.harm | 0, timbre: t.timbre | 0, morph: t.morph | 0, decay: t.lpgdecay | 0, color: t.lpgcolor | 0 };
           nSynth++;
@@ -437,6 +463,29 @@ export default function App() {
       setTrkSend(sends);
       setTrkNinstr(ninstrs);
       setPlaitsMacros(macros);
+      setSelVoiceX(m => ({ ...m, ...selX }));   // merge (don't clobber a just-picked selection) so C/D pre-list their cart voice
+      // Sync each track's end-mode from the device loop flag (mirrors the top-level `loop` handling for
+      // A/B): loop on ⇒ Repeat; loop off ⇒ leave the mode unless it was Repeat (then Stop), so a
+      // shuffle/continue choice survives. This is what makes the ↻ / nav Loop toggle accurate on reload
+      // for voices C/D (which have no top-level loop field of their own). Older firmware omits t.loop,
+      // leaving `loops` empty → no change.
+      if (Object.keys(loops).length) setEndModeX(m => {
+        const n = { ...m };
+        for (const k in loops) { const i = +k; n[i] = loops[i] ? 'repeat' : (n[i] === 'repeat' ? 'stop' : (n[i] ?? 'stop')); }
+        return n;
+      });
+      // Per-voice player / volume / arp snapshot — the SAME state hydV() sets for voices 0/1 from the
+      // top-level song/arp/vol keys, now applied UNIFORMLY to every voice straight from tracks[]. This is
+      // what closes the A/B-vs-C/D gap: C/D restore their play/progress, Vol slider, and Arp toggle on
+      // reload exactly like A/B. Runs after hydV (same @STATE) with identical values, so 0/1 are unchanged.
+      if (Object.keys(plays).length) setPlayerX(m => {
+        const n = { ...m };
+        for (const k in plays) { const i = +k; const cur = n[i] ?? { song: '', playing: false, name: '', prog: 0 }; const pl = plays[i];
+          n[i] = { ...cur, playing: pl.playing, name: songs[i] ?? cur.name, prog: pl.p != null ? pl.p / 1000 : (pl.playing ? -1 : 0) }; }
+        return n;
+      });
+      if (Object.keys(vols).length) setTrkVolX(m => ({ ...m, ...vols }));
+      if (Object.keys(arps).length) setArpX(m => ({ ...m, ...arps }));
       setDrumSrcIdx(dIdx);
       setDrumLive(dLive);
       if (nSynth > 0) setSynthCount(nSynth);   // how many synth cards to render (data-driven)
@@ -482,7 +531,11 @@ export default function App() {
       // The device's opaque app-owned state blob (emitted with @STATE and echoed on save).
       // Restore the settings the firmware can't derive; ignore anything unrecognized.
       try { hydrateApp(JSON.parse(line.slice(5))); } catch {}
-    } else if (line.startsWith('@TRK')) {
+    } else if (line.startsWith('@TRK') && !/^@TRK\d+\.P=/.test(line)) {
+      // Engine replies (patch list / instrument / Plaits macros). EXCLUDE the live position feed
+      // @TRK<i>.P= — this broad @TRK branch has no .P handler and doesn't return, so without the guard
+      // it would SWALLOW every .P line, leaving the dedicated handler below unreachable and freezing
+      // every synth card's progress bar during playback (only a @STATE snapshot would move it).
       // The engine's PATCH LIST (@TRK<i>.INSTRS=<name0>\x1f<name1>…) — the non-Dexed engines' own voice
       // picker. Matched before .INSTR= so "@TRK2.INSTRS=" doesn't get eaten by the .INSTR= regex.
       const ml = line.match(/^@TRK(\d+)\.INSTRS=(.*)$/);
@@ -538,6 +591,12 @@ export default function App() {
           return { ...mp, [i]: pv < 0 ? { ...cur, playing: false, prog: 0 } : { ...cur, playing: true, prog: Math.max(0, Math.min(1, pv / 1000)) } }; });
         if (pv < 0) { const r = manualStopRefX.current[i]; if (r) r.current = false; }   // clear manual-stop flag; no auto-advance for extra voices yet
       }
+    } else if (line.startsWith('@DRUMP=')) {
+      // Live drum-groove position (permille); -1 = stopped. Same feed shape as @TRK<i>.P but the drum
+      // player isn't in g_tracks[], so it rides its own scalar. Drives the Drums card's progress bar.
+      const v = parseInt(line.slice(7), 10);
+      if (v < 0) setDrums(d => ({ ...d, playing: null, prog: 0 }));
+      else setDrums(d => ({ ...d, playing: d.playing || grooveDisp(d.sel) || '—', prog: Math.max(0, Math.min(1, v / 1000)) }));
     } else if (line.startsWith('@ALP=')) {
       // Live audio-loop telemetry: "@ALP=<st0>,<p0>[,<st1>,<p1>...]" — one state+permille pair per loop.
       const n = line.slice(5).split(',').map(x => parseInt(x, 10));
@@ -804,6 +863,8 @@ export default function App() {
   const refFor = (m: React.MutableRefObject<Record<number, any>>, i: number) => (m.current[i] ??= React.createRef());
   const browseRef = useRef<ScrollView>(null);              // the folder-browse list
   const browseRef2 = useRef<ScrollView>(null);
+  const drumKitRef = useRef<FlatList<any>>(null);          // Kit page list — scroll the loaded kit into view
+  const drumFontRef = useRef<FlatList<any>>(null);         // Drum Font list — scroll the resident font into view
   const pickerY = useRef<Record<string, number>>({});      // saved scroll offset per list, so we can restore on return
   const voiceData: VItem[] = useMemo(() =>
     cart ? cartVoices.map((vn, i) => ({ key: 'c' + cart.rel + ':' + i, label: (i + 1) + '. ' + vn, i }))
@@ -856,20 +917,23 @@ export default function App() {
     const nm = it.label.replace(/^\d+\.\s*/, '');
     const isCart = it.key[0] === 'c' && !!cart;
     const path = isCart ? '/dexed/' + cart!.rel : 'Bundled';
+    // Card-title name: the firmware reports a cart voice as "Cart: Voice" (@STATE tracks[].name), so mirror
+    // that here for trkNames — otherwise the title would drop its cart prefix the moment you step a voice.
+    const disp = isCart ? cart!.name + ': ' + nm : nm;
     if (target >= 3) {   // voices 2+ (0-based i = target-1) drive the uniform @TRK<i>.DX* interface
       const i = target - 1;
       setSelVoiceX(m => ({ ...m, [i]: it.key }));
-      setTrkNames(m => ({ ...m, [i]: nm }));
+      setTrkNames(m => ({ ...m, [i]: disp }));
       if (isCart) tp.trk(i, 'DXPICK=' + cart!.rel + '\t' + it.i); else if (it.key[0] === 'b') tp.trk(i, 'DXVOICE=' + it.i);
       return;
     }
     if (target === 2) {
-      setSelVoice2(it.key);
+      setSelVoice2(it.key); setTrkNames(m => ({ ...m, 1: disp }));   // trkNames[1] drives Synth B's card title
       setVoice2(v => ({ ...v, name: nm, path }));
       if (isCart) tp.dxPick2(cart!.rel, it.i); else if (it.key[0] === 'b') tp.dxVoice2(it.i);
       return;
     }
-    setSelVoice(it.key); setSelVoiceName(nm);
+    setSelVoice(it.key); setSelVoiceName(nm); setTrkNames(m => ({ ...m, 0: disp }));   // trkNames[0] drives Synth A's card title
     if (isCart) { setSelVoicePath('/dexed/' + cart!.rel); tp.dxPick(cart!.rel, it.i); }
     else if (it.key[0] === 'b') { setSelVoicePath('Bundled'); tp.dxVoice(it.i); }
   };
@@ -882,9 +946,10 @@ export default function App() {
     setCart({ rel: row.rel, name: row.name });
     if (row.kind !== 'voice') return;   // bank hit: just open it, the user picks a voice
     const key = 'c' + row.rel + ':' + row.voice;
-    if (target >= 3) { const i = target - 1; setSelVoiceX(m => ({ ...m, [i]: key })); setTrkNames(m => ({ ...m, [i]: row.vn })); tp.trk(i, 'DXPICK=' + row.rel + '\t' + row.voice); }
-    else if (target === 2) { setSelVoice2(key); setVoice2(v => ({ ...v, name: row.vn, path: '/dexed/' + row.rel })); tp.dxPick2(row.rel, row.voice); }
-    else { setSelVoice(key); setSelVoiceName(row.vn); setSelVoicePath('/dexed/' + row.rel); tp.dxPick(row.rel, row.voice); }
+    const disp = row.name + ': ' + row.vn;   // "Cart: Voice" — matches the firmware's @STATE name (see pickVoice)
+    if (target >= 3) { const i = target - 1; setSelVoiceX(m => ({ ...m, [i]: key })); setTrkNames(m => ({ ...m, [i]: disp })); tp.trk(i, 'DXPICK=' + row.rel + '\t' + row.voice); }
+    else if (target === 2) { setSelVoice2(key); setTrkNames(m => ({ ...m, 1: disp })); setVoice2(v => ({ ...v, name: row.vn, path: '/dexed/' + row.rel })); tp.dxPick2(row.rel, row.voice); }
+    else { setSelVoice(key); setTrkNames(m => ({ ...m, 0: disp })); setSelVoiceName(row.vn); setSelVoicePath('/dexed/' + row.rel); tp.dxPick(row.rel, row.voice); }
   };
   const stepVoice = (dir: number, target: number = 1) => {
     // ANY non-Dexed engine (OPLL ROM voices, Plaits models, any future engine) has a FIXED patch list
@@ -901,19 +966,37 @@ export default function App() {
       tp.requestState();
       return;
     }
-    const sel = target >= 3 ? (selVoiceX[target - 1] ?? '') : target === 2 ? selVoice2 : selVoice;
-    // In a visible list (a cart's voices or the bundled set), step within it so the
-    // selection stays scrolled into view.
+    const sel = target >= 3 ? (selVoiceX[oi] ?? '') : target === 2 ? selVoice2 : selVoice;
+    // Dexed CART voice: step the 0..N-1 voice index INSIDE the cart straight from the sel key, so
+    // Prev/Next always steps THIS track's loaded voice — regardless of where the shared folder browser
+    // is parked (it may be on another track's cart, or at the root; the old code stepped whatever list
+    // happened to be open, or bailed entirely). Cart size = the open cart's real voice count when we're
+    // sitting on it, else 32 (a DX7 SysEx bank). Wrap at the ends.
+    if (sel[0] === 'c') {
+      const ci = sel.lastIndexOf(':');
+      const rel = sel.slice(1, ci);
+      const onCart = !!cart && cart.rel === rel && cartVoices.length > 0;
+      const n = onCart ? cartVoices.length : 32;
+      const ni = (((parseInt(sel.slice(ci + 1), 10) || 0) + dir) % n + n) % n;
+      const nm = onCart ? cartVoices[ni] : '';   // new voice's name is known only when we're on the cart
+      const disp = onCart ? cart!.name + ': ' + nm : '';   // "Cart: Voice" title, mirroring @STATE (see pickVoice)
+      const key = 'c' + rel + ':' + ni;
+      if (target >= 3) { setSelVoiceX(m => ({ ...m, [oi]: key })); if (disp) setTrkNames(m => ({ ...m, [oi]: disp })); tp.trk(oi, 'DXPICK=' + rel + '\t' + ni); }
+      else if (target === 2) { setSelVoice2(key); if (disp) { setTrkNames(m => ({ ...m, 1: disp })); setVoice2(v => ({ ...v, name: nm })); } tp.dxPick2(rel, ni); }
+      else { setSelVoice(key); if (disp) { setTrkNames(m => ({ ...m, 0: disp })); setSelVoiceName(nm); } tp.dxPick(rel, ni); }
+      if (!disp) tp.requestState();   // stepped off-page (cart not loaded) → pull the new voice's name from @STATE
+      return;
+    }
+    // No cart voice loaded yet: if the shared browser is showing a list (a cart's voices or the bundled
+    // set), step within it so a first Prev/Next picks a neighbour of where you're browsing.
     if (voiceData.length) {
       const idx = voiceData.findIndex(d => d.key === sel);
       const ni = Math.max(0, Math.min(voiceData.length - 1, (idx < 0 ? 0 : idx) + dir));
       if (voiceData[ni]) pickVoice(voiceData[ni], target);
       return;
     }
-    // No list open (browsing folders): step within the bundled set. Crossing /dexed cart
-    // boundaries isn't possible now that the library is browsed lazily (not held in RAM),
-    // so to step through SD voices, open a cart first.
-    if (sel[0] !== 'c' && cat.instruments.length) {
+    // Nothing open: step within the bundled set (crossing /dexed carts needs a cart opened first).
+    if (cat.instruments.length) {
       const idx = cat.instruments.findIndex(v => 'b' + v.i === sel);
       const ni = Math.max(0, Math.min(cat.instruments.length - 1, (idx < 0 ? 0 : idx) + dir));
       const v = cat.instruments[ni]; if (v) pickVoice({ key: 'b' + v.i, label: v.name, i: v.i }, target);
@@ -927,6 +1010,42 @@ export default function App() {
     const idx = voiceData.findIndex(d => d.key === selVoice);
     if (idx >= 0) { const t = setTimeout(() => { try { voiceRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.5 }); } catch {} }, 60); return () => clearTimeout(t); }
   }, [selVoice, voiceData]);
+  useEffect(() => {   // Kit page: scroll the loaded GM kit into view (the Mars library is ~90 kits deep)
+    if (drums.kit == null || !cat.drumkits.length) return;
+    const t = setTimeout(() => { try { drumKitRef.current?.scrollToIndex({ index: drums.kit, animated: true, viewPosition: 0.5 }); } catch {} }, 60);
+    return () => clearTimeout(t);
+  }, [drums.kit, cat.drumkits, route]);
+  useEffect(() => {   // Drum Font list: scroll the resident SF2 into view (~45 fonts)
+    const idx = fonts.findIndex(f => drumFont.path ? f.path === drumFont.path : f.current);
+    if (idx < 0) return;
+    const t = setTimeout(() => { try { drumFontRef.current?.scrollToIndex({ index: idx, animated: true, viewPosition: 0.5 }); } catch {} }, 60);
+    return () => clearTimeout(t);
+  }, [drumFont, fonts, route]);
+  useEffect(() => {   // opening a track's Voices page → point the shared folder browser at THAT track's
+    // loaded cart, so its voice is listed + highlighted (there's one browser for every synth voice, and
+    // it's no longer preloaded on connect). Fires only on page ENTER (deps: route) so it never clobbers
+    // in-page browsing. Per-track cart is known for voice 0 (selVoice) / voice 1 (selVoice2, hydrated from
+    // @STATE.voice2) and for voices 2+ once picked this session (the firmware doesn't report their cart).
+    if (!loaded) return;
+    let v: number | null = null;
+    if (route === 'synthesizerv') v = 0;
+    else if (route === 'synthesizerBv') v = 1;
+    else { const m = route.match(/^synthX(\d+)v$/); if (m) v = parseInt(m[1], 10); }
+    if (v === null) return;
+    const sel = v === 0 ? selVoice : v === 1 ? selVoice2 : (selVoiceX[v] ?? '');
+    if (sel[0] === 'c') {
+      const ci = sel.lastIndexOf(':');
+      const rel = sel.slice(1, ci);
+      if (!cart || cart.rel !== rel) {   // not already on this cart → open it
+        const slash = rel.lastIndexOf('/');
+        setVpath(slash >= 0 ? rel.slice(0, slash) : '');
+        setCart({ rel, name: (slash >= 0 ? rel.slice(slash + 1) : rel).replace(/\.syx$/i, '') });
+      }
+    } else if (sel[0] === 'b') {   // bundled voice → show the bundled list
+      if (cart || vpath !== '@bundled') { setCart(null); setVpath('@bundled'); }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [route, loaded]);
   useEffect(() => {   // on returning to the Synth page, restore the picker's scroll offset
     if (route !== 'synth') return;
     const y = pickerY.current[listId] || 0;
@@ -1110,29 +1229,40 @@ export default function App() {
     // fullPath. Auto-advance / ‹ › still step through the whole flat catalog (cat.songs); the
     // browser's per-folder view is a separate, richer picker (see note in playerSongBody).
     const pickNext = (dir: number): Song | null => {
-      // Prefer the FOLDER the user is browsing (its FolderBrowser publishes an ordered file list): ‹/›
-      // and auto-advance step within THAT folder — matching what's on screen. Fall back to the flat
-      // catalog only when no folder list exists (a baked song, or the browser was never opened).
       const folder = cfg.stepCatalogOnly ? undefined : folderFilesRef.current[cfg.deckKey];
+      // 1) The loaded item IS in the folder on screen → step within THAT folder (matches what you see).
       if (folder && folder.length) {
         const fi = folder.findIndex(f => f.arg === P.song);
-        if (em === 'shuffle' && folder.length > 1) {
-          let r = fi; while (r === fi) r = Math.floor(Math.random() * folder.length);
-          return { name: folder[r].name, file: folder[r].arg };
+        if (fi >= 0) {
+          if (em === 'shuffle' && folder.length > 1) {
+            let r = fi; while (r === fi) r = Math.floor(Math.random() * folder.length);
+            return { name: folder[r].name, file: folder[r].arg };
+          }
+          const f = folder[((fi + dir) % folder.length + folder.length) % folder.length];
+          return { name: f.name, file: f.arg };
         }
-        const b = fi < 0 ? (dir > 0 ? -1 : 0) : fi;
+      }
+      // 2) Otherwise step the flat catalog FROM the loaded item, so ‹/› always moves the LOADED item's
+      // neighbour — even after you've browsed to another folder (parity with the voice/kit steppers).
+      // Previously an off-folder loaded item jumped to the browsed folder's first/last instead.
+      const songs = catalog;
+      const idx = songs.length ? songs.findIndex(sg => songArg(sg) === P.song) : -1;
+      if (songs.length && (idx >= 0 || !(folder && folder.length))) {
+        if (em === 'shuffle' && songs.length > 1) {
+          let r = idx; while (r === idx) r = Math.floor(Math.random() * songs.length);   // never repeat the current song
+          return songs[r];
+        }
+        const base = idx < 0 ? (dir > 0 ? -1 : 0) : idx;
+        return songs[((base + dir) % songs.length + songs.length) % songs.length];       // wrap both ways
+      }
+      // 3) Loaded item in neither the viewed folder nor the flat catalog (an SD file in a subfolder not
+      // in the catalog) → step the browsed folder from its ends so ‹/› still does something on screen.
+      if (folder && folder.length) {
+        const b = dir > 0 ? -1 : 0;
         const f = folder[((b + dir) % folder.length + folder.length) % folder.length];
         return { name: f.name, file: f.arg };
       }
-      const songs = catalog;
-      if (!songs.length) return null;
-      const idx = songs.findIndex(sg => songArg(sg) === P.song);
-      if (em === 'shuffle' && songs.length > 1) {
-        let r = idx; while (r === idx) r = Math.floor(Math.random() * songs.length);   // never repeat the current song
-        return songs[r];
-      }
-      const base = idx < 0 ? (dir > 0 ? -1 : 0) : idx;
-      return songs[((base + dir) % songs.length + songs.length) % songs.length];       // wrap both ways
+      return null;
     };
     const playOf = (sg: Song) => { wire.play(songArg(sg)); persistSel(songArg(sg)); setP(p => ({ ...p, song: songArg(sg), playing: true, name: sg.name, prog: -1 })); };
     // End-of-song mode. Only 'repeat' arms the firmware's seamless loop; the rest let the song end
@@ -1182,16 +1312,16 @@ export default function App() {
   // Kept fresh in refs so the one-time position listeners never see a stale mode/song/catalog.
   onSongEndRef.current = songDeck1.onNaturalEnd;
   onSong2EndRef.current = songDeck2.onNaturalEnd;
-  const stopDrums = () => { tp.stopDrums(); setDrums(d => ({ ...d, playing: null })); };
+  const stopDrums = () => { tp.stopDrums(); setDrums(d => ({ ...d, playing: null, prog: 0 })); };
   // ---- DRUM DECK — the groove player as the SAME reusable deck the synths use, so Drums is a
   // Track peer: it browses /midi (all folders), plays via @DRUMF, always loops. A thin PlayerT VIEW over the
   // drums {sel,playing} state gives the shared deck API without a parallel state store. This is the
   // whole point — a drum track is just another synth with props (root, catalog, always-loop).
-  const drumPlayerView: PlayerT = { song: drums.sel ?? '', playing: !!drums.playing, name: drums.playing || grooveDisp(drums.sel) || '—', prog: -1 };
+  const drumPlayerView: PlayerT = { song: drums.sel ?? '', playing: !!drums.playing, name: drums.playing || grooveDisp(drums.sel) || '—', prog: drums.prog };
   const setDrumPlayerView: React.Dispatch<React.SetStateAction<PlayerT>> = upd => setDrums(d => {
-    const cur: PlayerT = { song: d.sel ?? '', playing: !!d.playing, name: d.playing || grooveDisp(d.sel) || '—', prog: -1 };
+    const cur: PlayerT = { song: d.sel ?? '', playing: !!d.playing, name: d.playing || grooveDisp(d.sel) || '—', prog: d.prog };
     const nx = typeof upd === 'function' ? (upd as (p: PlayerT) => PlayerT)(cur) : upd;
-    return { ...d, sel: nx.song || null, playing: nx.playing ? (nx.name || grooveDisp(nx.song)) : null };
+    return { ...d, sel: nx.song || null, playing: nx.playing ? (nx.name || grooveDisp(nx.song)) : null, prog: nx.prog };
   });
   // The card keeps drums in TWO places: the big genre library at /midi/drums (browsed live) and a small
   // curated starter set at /drums (NOT in the firmware's /midi/drums scan, so it never reaches the
@@ -1232,7 +1362,7 @@ export default function App() {
     setMetro(m => ({ ...m, on: false }));
     setPlayer(p => ({ ...p, playing: false, prog: 0 }));
     setPlayer2(p => ({ ...p, playing: false, prog: 0 }));
-    setDrums(d => ({ ...d, playing: null }));
+    setDrums(d => ({ ...d, playing: null, prog: 0 }));
     tp.metronome(false);
   };
 
@@ -1243,7 +1373,7 @@ export default function App() {
   // `value`/`status` = the subtitle; `actions` = the header controls; `body` = the page.
   // `parent` (a section id) makes this a SUB-page reached from that parent's submenu instead of a
   // home card — its Back button returns to the parent, not home (see the render's onBack).
-  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; foot?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; accent?: string; tint?: string; topRight?: React.ReactNode; parent?: string; disabledReason?: string; asCard?: boolean; kbd?: number; hideHeader?: boolean; leading?: React.ReactNode; kicker?: string; hero?: string; renderCard?: (ctx: { onPress?: () => void; onBack?: () => void; gridLead?: boolean }) => React.ReactNode };   // kbd = USB-keyboard track index (rail claim glyph). hideHeader = a parent page that folds its own card into the body grid (Drums), so the render skips the separate page header. leading/kicker/hero = album-cover tile face: a square media box + uppercase eyebrow + big hero title (the child card shows its live value as a "track title"). renderCard = a section's own card component (e.g. <SynthCard>), used by the grid/page render sites instead of the generic <Card>. gridLead ctx flag = render at fixed cardGrid size (folded self-tile).
+  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; foot?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; wide?: boolean; accent?: string; tint?: string; topRight?: React.ReactNode; parent?: string; disabledReason?: string; asCard?: boolean; kbd?: number; play?: { playing: boolean; onToggle: () => void }; loop?: { on: boolean; onToggle: () => void }; arp?: { on: boolean; onToggle: () => void }; hideHeader?: boolean; hideTile?: boolean; leading?: React.ReactNode; kicker?: string; hero?: string; renderCard?: (ctx: { onPress?: () => void; onBack?: () => void; gridLead?: boolean }) => React.ReactNode };   // kbd = USB-keyboard track index (rail claim glyph). hideHeader = a parent page that folds its own card into the body grid (Drums), so the render skips the separate page header. leading/kicker/hero = album-cover tile face: a square media box + uppercase eyebrow + big hero title (the child card shows its live value as a "track title"). renderCard = a section's own card component (e.g. <SynthCard>), used by the grid/page render sites instead of the generic <Card>. gridLead ctx flag = render at fixed cardGrid size (folded self-tile).
 
   // "Dexed: <name>" on the Dexed synth cards — mirrors the firmware's own prefixes on the other
   // engines ("OPLL: X" HeteroOpll.h, "Plaits: X" HeteroPlaits.h, …) so a hetero build reads
@@ -1315,6 +1445,16 @@ export default function App() {
       arp: arpDesc,
       fx: caps.fx ? (fx.type === 'spring' ? 'Spring' : 'Plate') + ' ' + fxPct + '%' : undefined,
     };
+  };
+  // Breadcrumb path to a track's loaded voice, shown small under the Synthesizer card's title. Derived
+  // from the selection KEY: 'c<rel>:<i>' → the /dexed folder trail (drop the .syx cart extension), 'b<i>'
+  // → the bundled set. Empty for picker engines (OPLL/Plaits/… have no folder library) so no line shows.
+  const voicePathLabel = (vIdx: number): string => {
+    if (isPickerEngine(trkEng[vIdx])) return '';   // OPLL/Plaits/… have no /dexed library → no path line
+    const key = vIdx === 0 ? selVoice : vIdx === 1 ? selVoice2 : (selVoiceX[vIdx] ?? '');
+    if (key[0] === 'c') return ['Voices', ...key.slice(1, key.lastIndexOf(':')).replace(/\.syx$/i, '').split('/')].join(' › ');
+    if (key[0] === 'b') return 'Voices › Bundled';
+    return '';
   };
 
   // Synth/Voices navigation: breadcrumb trail + an up-one-level control. `cart` selected
@@ -1664,8 +1804,9 @@ export default function App() {
               per-pack library is ~45 fonts, and a horizontal pill row hid the tail exactly like the
               kit list did. Fixed ROW_H rows, bounded height so it scrolls in-card. */}
           <View style={{ height: Math.min(Math.max(fonts.length, 1), 7) * ROW_H, borderWidth: 1, borderColor: C.border, borderRadius: 7, marginTop: 4 }}>
-            <FlatList data={fonts} nestedScrollEnabled keyExtractor={(_, i) => 'df' + i}
+            <FlatList ref={drumFontRef} data={fonts} nestedScrollEnabled keyExtractor={(_, i) => 'df' + i}
               getItemLayout={(_, index) => ({ length: ROW_H, offset: ROW_H * index, index })}
+              onScrollToIndexFailed={() => {}}
               renderItem={({ item }) => {
                 const on = drumFont.path ? item.path === drumFont.path : item.current;
                 return <ListBtn label={item.display} sel={on} onPress={() => { setDrumFont({ path: item.path, display: item.display }); tp.drumFont(item.path); }} />;
@@ -1679,8 +1820,9 @@ export default function App() {
           {/* Vertical scrollable kit list (the Mars library is ~90 kits — a horizontal pill row hid the
               tail). Mirrors the Voices FlatList: fixed ROW_H rows, bounded height so it scrolls in-card. */}
           <View style={{ height: Math.min(Math.max(cat.drumkits.length, 1), 7) * ROW_H, borderWidth: 1, borderColor: C.border, borderRadius: 7, marginTop: 4 }}>
-            <FlatList data={cat.drumkits} nestedScrollEnabled keyExtractor={(_, i) => 'dk' + i}
+            <FlatList ref={drumKitRef} data={cat.drumkits} nestedScrollEnabled keyExtractor={(_, i) => 'dk' + i}
               getItemLayout={(_, index) => ({ length: ROW_H, offset: ROW_H * index, index })}
+              onScrollToIndexFailed={() => {}}
               renderItem={({ item, index }) => <ListBtn label={prettyKit(item.name)} sel={drums.kit === index} onPress={() => { setDrums(d => ({ ...d, kit: index })); tp.drumKit(index); }} />} />
           </View>
         </>
@@ -1730,7 +1872,10 @@ export default function App() {
   // cards (the Synth-B split toggle / shared voice-2 bus that don't apply to the fixed N-way pool).
   const DEF_ARP = { on: false, pat: 0, rate: 0, oct: 1, latch: false };
   // A square album-cover media box holding one emoji/glyph — the left tile of a hero-style child card.
-  const mediaBox = (icon: string) => <View style={s.cardMedia}><Text style={s.cardMediaIcon}>{icon}</Text></View>;
+  const mediaBox = (icon: string) => {
+    const nb = width < 640;   // mobile: the smaller cover (matches the Synthesizer card's step-down)
+    return <View style={nb ? s.synthMediaSm : s.synthMedia}><Text style={nb ? s.cardMediaIconBigSm : s.cardMediaIconBig}>{icon}</Text></View>;
+  };
   // ── makeTrackCard: the ONE per-track card+detail component ────────────────────────────────────
   // A track (a synth voice OR the drum track) renders as a parent submenu card + its child pages.
   // This factory owns that STRUCTURE — the stable child ids (parentId+'p'/'v'/'a'), the parent↔child
@@ -1744,9 +1889,9 @@ export default function App() {
     show: boolean; disabledReason?: string; deck: SongDeckT;
     landing: { value: string; subtitle?: React.ReactNode; topRight?: React.ReactNode; actions?: React.ReactNode;
                progress?: number; foot?: React.ReactNode; bodyPrefix?: React.ReactNode };
-    player: { title: string; fullHeight?: boolean; body: React.ReactNode; rec?: RecToggle; icon?: string };   // rec = the transport row's ● loop-record toggle (synth voices only); icon = album-cover glyph
+    player: { title: string; fullHeight?: boolean; wide?: boolean; body: React.ReactNode; rec?: RecToggle; icon?: string };   // rec = the transport row's ● loop-record toggle (synth voices only); icon = album-cover glyph. wide = span the full window width on desktop (the two-pane groove browser)
     instrument: { title: string; value: string; subtitle?: React.ReactNode; topRight?: React.ReactNode;
-                  actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; icon?: string };
+                  actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; wide?: boolean; hideTile?: boolean; icon?: string };
     arp?: ArpSlotT; arpIcon?: string;   // icon → render the Arpeggiator child as a hero album-cover card
     kbd?: number;   // USB-keyboard track index for this track (undefined = no live keyboard target)
     submenuCols?: number;   // pin the child-card grid to a fixed column count (Drums wants a 2-up grid); default = responsive
@@ -1759,6 +1904,12 @@ export default function App() {
       disabledReason: c.disabledReason, value: c.landing.value, subtitle: c.landing.subtitle,
       topRight: c.landing.topRight, actions: c.landing.actions, progress: c.landing.progress, foot: c.landing.foot,
       kbd: c.kbd,
+      // Play/Stop toggle for the left-nav row: plays this track's loaded song/groove, becomes Stop while playing.
+      play: { playing: deck.player.playing, onToggle: () => (deck.player.playing ? deck.stop() : deck.play()) },
+      // Loop toggle (↻): mirror the card's repeat button — drum grooves always loop (noEndMode) so they skip it.
+      loop: deck.noEndMode ? undefined : { on: deck.endMode === 'repeat', onToggle: () => deck.applyEnd(deck.endMode === 'repeat' ? 'stop' : 'repeat') },
+      // Arp toggle: synths only (drums have no arp slot) — flips this track's @TRK<i>.ARPON.
+      arp: c.arp ? { on: c.arp.arp.on, onToggle: () => (c.arp!.arp.on ? c.arp!.stop() : c.arp!.play()) } : undefined,
       body: null,   // set below — the submenu's self-tile reads `parent` (incl. its later-assigned renderCard), so build it after
     };
     // When gridInParent is set, the parent landing renders as the FIRST tile of the child grid (with a
@@ -1774,15 +1925,15 @@ export default function App() {
           actions={c.landing.actions} foot={c.landing.foot} accent={theme.accent} tint={theme.tint}
           topRight={c.landing.topRight} onBack={() => navigate('home')} style={[s.cardGrid, { height: 'auto', minHeight: 176 }]} />} />
     ) : undefined;
-    const submenu = <SubMenu getItems={() => sections.filter(x => x.parent === parentId).sort((a, b) => ord(a.id) - ord(b.id))} onOpen={navigate} accent={theme.accent} tint={theme.tint} cols={c.submenuCols} lead={selfTile} />;
+    const submenu = <SubMenu getItems={() => sections.filter(x => x.parent === parentId && !x.hideTile).sort((a, b) => ord(a.id) - ord(b.id))} onOpen={navigate} accent={theme.accent} tint={theme.tint} cols={c.submenuCols} lead={selfTile} />;
     parent.body = c.landing.bodyPrefix ? <View style={{ gap: 10 }}>{c.landing.bodyPrefix}{submenu}</View> : submenu;
     // When an `icon` is supplied, the child renders as a hero album-cover tile: the section name becomes
     // the kicker, its live value the hero "track title", with the icon media box on the left (see SubMenu).
     const children: Section[] = [
-      { id: parentId + 'p', title: c.player.title, show: false, parent: parentId, fullHeight: c.player.fullHeight, accent: theme.accent, tint: theme.tint,
+      { id: parentId + 'p', title: c.player.title, show: false, parent: parentId, fullHeight: c.player.fullHeight, wide: c.player.wide, accent: theme.accent, tint: theme.tint,
         value: playerValue(deck), progress: playerProgress(deck), actions: playerActions(deck, c.player.rec), body: c.player.body,
         ...(c.player.icon ? { leading: mediaBox(c.player.icon), kicker: c.player.title, hero: playerValue(deck) } : {}) },
-      { id: parentId + 'v', title: c.instrument.title, show: false, parent: parentId, fullHeight: c.instrument.fullHeight, accent: theme.accent, tint: theme.tint,
+      { id: parentId + 'v', title: c.instrument.title, show: false, parent: parentId, fullHeight: c.instrument.fullHeight, wide: c.instrument.wide, hideTile: c.instrument.hideTile, accent: theme.accent, tint: theme.tint,
         value: c.instrument.value, subtitle: c.instrument.subtitle, topRight: c.instrument.topRight, actions: c.instrument.actions, body: c.instrument.body,
         ...(c.instrument.icon ? { leading: mediaBox(c.instrument.icon), kicker: c.instrument.title, hero: c.instrument.value } : {}) },
     ];
@@ -1833,7 +1984,10 @@ export default function App() {
     // A generated synth voice = one makeTrackCard: MIDI Player + Synth/Voices + Arpeggiator children,
     // same structure the drum track uses. Bespoke bits (voice browser, USB-kbd claim, arp) are passed in.
     const synthTrackVol = <VolSlider label="Volume" value={trkVolX[v] ?? 100} disabled={!connected} onChange={n => setTrkVolX(m => ({ ...m, [v]: n }))} onCommit={n => tp.trk(v, 'VOL=' + n)} />;
-    const engLabel = trkNames[v] ? engName(trkNames[v], trkEng[v]) : 'None';
+    // The Synth/Voices card shows the loaded voice NAME only — no "Dexed:"/"OPLL:" engine prefix (the
+    // engine already reads on the ENGINE flag). Use synthFace().preset (the same prefix-stripped name the
+    // parent Synthesizer card shows), so the landing card and the Synth/Voices child never disagree.
+    const engLabel = synthFace(v).preset;
     // The MIDI Player transport's ● loop-record toggle (recorder builds only): arm a fresh recording of
     // THIS synth (song + live keys) when idle, stop/close the loop when armed or capturing. The full
     // Record/Overdub/Clear + loop-length controls stay in the player page's MIDI LOOPER tab (recRow).
@@ -1857,8 +2011,10 @@ export default function App() {
       },
       player: { title: 'Media', body: playerBody(deck), rec: recToggle, icon: '🎵' },
       instrument: {
-        title: 'Synth / Voices', fullHeight: true, value: engLabel, topRight: usbKbd(v), icon: '👂',
-        actions: <><HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1, v + 1)} style={s.hdrBtnTall} /><HdrBtn label="Next ›" stop onPress={() => stepVoice(1, v + 1)} style={s.hdrBtnTall} /></>,
+        title: 'Synth / Voices', fullHeight: true, wide: true, hideTile: true, value: engLabel, topRight: usbKbd(v), icon: '👂',
+        // Prev/Next voice in the compact player-control style (matches the ‹ › on the Media/Arp cards),
+        // right-justified via a leading spacer.
+        actions: <><View style={{ flex: 1 }} /><HdrBtn label="‹" stop onPress={() => stepVoice(-1, v + 1)} cap /><HdrBtn label="›" stop onPress={() => stepVoice(1, v + 1)} cap /></>,
         body: <View style={s.synthWrap}>{synthTrackVol}{voiceBrowserBody(v + 1)}{midiInputBody(v)}</View>,
       },
       arp: arpSlot, arpIcon: '🔁',
@@ -1870,8 +2026,8 @@ export default function App() {
     const face = synthFace(v);
     parent.renderCard = (rc) => (
       <SynthCard accent={theme.accent} tint={theme.tint} letter={letter}
-        preset={face.preset} media={face.media} engine={face.engine} arp={face.arp} fx={face.fx} connected={connected}
-        kbdOwned={usbOwner(v)} onClaimKbd={() => claimUsb(v)}
+        preset={face.preset} path={voicePathLabel(v)} media={face.media} engine={face.engine} arp={face.arp} fx={face.fx} connected={connected}
+        kbdOwned={usbOwner(v)} onClaimKbd={() => claimUsb(v)} onOpenVoices={() => navigate(parentId + 'v')}
         vol={trkVolX[v] ?? 100} onVol={n => setTrkVolX(m => ({ ...m, [v]: n }))} onVolCommit={n => tp.trk(v, 'VOL=' + n)}
         onToggleMute={() => { const cur = trkVolX[v] ?? 100; const nv = cur > 0 ? 0 : (muteVolRef.current[v] || 100); if (cur > 0) muteVolRef.current[v] = cur; setTrkVolX(m => ({ ...m, [v]: nv })); tp.trk(v, 'VOL=' + nv); }}
         progress={playProg}
@@ -1925,16 +2081,23 @@ export default function App() {
       subtitle: revName,
       // Album-cover tile face: "FX" kicker + the send state as the hero "track title" + a ✨ media box.
       leading: mediaBox('✨'), kicker: 'FX', hero: snd > 0 ? 'Send ' + snd + '%' : 'Dry',
-      // Inline on the tile: the reverb SEND for this track, so you can dial it without opening the
-      // sub-page (matches the Reverb card's own quick-slider foot). The full effect detail is inside.
-      foot: <VolSlider label="Send" value={snd} max={100}
-        onChange={n => setTrkSend(m => ({ ...m, [trkIdx]: n }))}
-        onCommit={n => tp.trk(trkIdx, 'FXSEND=' + n)} disabled={!connected || !fx.on} />,
+      // Inline on the tile: an On/Off toggle for the shared reverb bus (so you can enable it without
+      // opening the sub-page — the Send slider stays greyed until it's on) + the reverb SEND for this
+      // track (matches the Reverb card's own quick foot). The full effect detail is inside.
+      foot: (<>
+        <Row><Text style={[s.text, { flex: 1 }]}>{fx.on ? 'On' : 'Off'}</Text>
+          <Switch value={fx.on} onValueChange={on => { setFx(f => ({ ...f, on })); tp.fx('ON=' + (on ? 1 : 0)); }} /></Row>
+        <VolSlider label="Send" value={snd} max={100}
+          onChange={n => setTrkSend(m => ({ ...m, [trkIdx]: n }))}
+          onCommit={n => tp.trk(trkIdx, 'FXSEND=' + n)} disabled={!connected || !fx.on} />
+      </>),
       // Player-control-style − / + buttons that step this track's reverb send in 10% increments (0..100),
-      // matching the transport rows on the sibling cards. No-op while disconnected or the bus is off.
+      // matching the transport rows on the sibling cards. Right-justified via a leading spacer. No-op
+      // while disconnected or the bus is off.
       actions: (<>
-        <HdrBtn label="−" stop style={s.hdrBtnCap} onPress={() => { if (!connected || !fx.on) return; const nv = Math.max(0, snd - 10); setTrkSend(m => ({ ...m, [trkIdx]: nv })); tp.trk(trkIdx, 'FXSEND=' + nv); }} />
-        <HdrBtn label="+" stop style={s.hdrBtnCap} onPress={() => { if (!connected || !fx.on) return; const nv = Math.min(100, snd + 10); setTrkSend(m => ({ ...m, [trkIdx]: nv })); tp.trk(trkIdx, 'FXSEND=' + nv); }} />
+        <View style={{ flex: 1 }} />
+        <HdrBtn label="−" stop cap onPress={() => { if (!connected || !fx.on) return; const nv = Math.max(0, snd - 10); setTrkSend(m => ({ ...m, [trkIdx]: nv })); tp.trk(trkIdx, 'FXSEND=' + nv); }} />
+        <HdrBtn label="+" stop cap onPress={() => { if (!connected || !fx.on) return; const nv = Math.min(100, snd + 10); setTrkSend(m => ({ ...m, [trkIdx]: nv })); tp.trk(trkIdx, 'FXSEND=' + nv); }} />
       </>),
       body: (
         <View style={s.synthWrap}>
@@ -1977,7 +2140,7 @@ export default function App() {
     // icon → these children render as hero album-cover tiles (leading media box + kicker + hero value),
     // matching the synth track's Media / Synth-Voices cards. Loops = 🔁 (the groove player), the drum
     // instrument = 🎛️ (the drum engine/kit). The FX child sets its own ✨ box in makeFxCard.
-    player: { title: 'Drum Loops', fullHeight: true, icon: '🔁', body: <DrumLoopsBody deck={drumDeck} tp={tp} connected={connected} loaded={loaded} /> },
+    player: { title: 'Drum Loops', fullHeight: true, wide: true, icon: '🔁', body: <DrumLoopsBody deck={drumDeck} tp={tp} connected={connected} loaded={loaded} /> },
     instrument: {
       title: caps.drumkitsel ? 'Kit' : 'Drum Voice', subtitle: drumDetail, icon: '🎛️',
       value: caps.drumkitsel ? (cat.drumkits[drums.kit]?.name || '—') : (cat.drumEngine || 'OPLL') + ' rhythm',
@@ -1993,19 +2156,14 @@ export default function App() {
     // Playback bar for the running groove (0-100%), rendered in the foot above the Vol slider — the
     // same "Playing …%" row the synth cards use (not Card's thin progress line), so the cards match.
     const drumPct = Math.round(Math.max(0, Math.min(1, playerProgress(drumDeck) ?? 0)) * 100);
+    // Match the synth landing cards exactly: the large 128²/88² album-cover media box, the 2× hero
+    // title (the groove name), and the 2× second hero line (the kit/voice) — stepped down on mobile.
+    const narrow = width < 640;
     return (
     <Card accent={THEME.drums.accent} tint={THEME.drums.tint}
-      leading={<View style={s.cardMedia}><Text style={s.cardMediaIcon}>🥁</Text></View>}
-      kicker="Drums" title={drumDeck.player.name || 'No loop'}
-      subtitle={(
-        <>
-          <Text style={s.heroSub} numberOfLines={1}>{drumVoiceLabel}</Text>
-          <View style={s.flagRow}>
-            <Flag label="Engine" value={drumEngineName} />
-            {drumHasFx && <Flag label="FX" value={drumFxFlag} />}
-          </View>
-        </>
-      )}
+      leading={<View style={narrow ? s.synthMediaSm : s.synthMedia}><Text style={narrow ? s.cardMediaIconBigSm : s.cardMediaIconBig}>🥁</Text></View>}
+      kicker="Drums" title={drumDeck.player.name || 'No loop'} titleStyle={narrow ? s.synthHeroTitleSm : s.synthHeroTitle}
+      subtitle={<Text style={[s.heroSub, narrow ? s.synthHeroSubSm : s.synthHeroSub]} numberOfLines={1}>{drumVoiceLabel}</Text>}
       topRight={drumSrcIdx != null ? usbKbd(drumSrcIdx) : undefined}
       foot={(
         <>
@@ -2017,8 +2175,16 @@ export default function App() {
           <VolSlider label="Vol" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />
         </>
       )}
-      actions={<DrumLoopsActions deck={drumDeck} />}
-      onPress={rc.onPress}   /* no onBack: the Drums card shows no back button — navigate via the menu bar / rail */
+      actions={(   /* match the synth cards: flags on their OWN row above, transport right-justified on the row below */
+        <View style={s.synthActionsStack}>
+          <View style={[s.flagRow, s.synthFlagRow]}>
+            <Flag label="Engine" value={drumEngineName} />
+            {drumHasFx && <Flag label="FX" value={drumFxFlag} />}
+          </View>
+          <View style={s.synthControlsRow}><DrumLoopsActions deck={drumDeck} /></View>
+        </View>
+      )}
+      onPress={rc.onPress} stackTop   /* stackTop: same accent header bar as the synth cards; no onBack (navigate via the menu bar / rail) */
       style={rc.onPress || rc.gridLead ? s.cardGridAuto : undefined} />
     );
   };
@@ -2047,6 +2213,26 @@ export default function App() {
           <Pressable style={[s.btn, s.btnWide]} onPress={reindex} disabled={!connected || busy}>
             {busy ? <ActivityIndicator color={C.text} /> : <Text style={s.btnText}>Rebuild catalog (@REINDEX)</Text>}
           </Pressable>
+        </>
+      ),
+    },
+    // FIRMWARE — which board file (PlatformIO env) is flashed on the connected Teensy, its build time,
+    // and the build's capabilities. Lets you confirm at a glance exactly which firmware is running.
+    {
+      id: 'firmware', title: 'Firmware', show: false, parent: 'settings', status: connected ? (fw.env || '—') : 'offline',
+      body: (
+        <>
+          {!connected && <Text style={s.muted}>Connect to read the running firmware.</Text>}
+          {connected && (
+            <View style={{ gap: 8 }}>
+              <Text style={s.muted}>Board file (env):   <Text style={s.text}>{fw.env || '—'}</Text></Text>
+              <Text style={s.muted}>Built:   <Text style={s.text}>{fw.built || '—'}</Text></Text>
+              <Text style={s.muted}>Engine:   <Text style={s.text}>{cat.engine || '—'}</Text>{cat.drumEngine ? '   ·   ' + cat.drumEngine + ' drums' : ''}</Text>
+              <Text style={s.muted}>Transport:   <Text style={s.text}>{TP_LABEL[tp.name]}</Text></Text>
+              <Text style={s.muted}>Synth voices:   <Text style={s.text}>{synthCount}</Text>   ·   PSRAM:   <Text style={s.text}>{psram ? psram + ' MB' : 'none'}</Text></Text>
+              <Text style={s.muted}>Features:   <Text style={s.text}>{[caps.fx && 'Reverb', caps.usbaudio && 'USB Audio', caps.rec && 'Looper', caps.voice2 && 'Voice 2', caps.arp2 && 'Arp 2', caps.audioloop > 0 && 'Audio Loop', caps.drumfontsel && 'Drum fonts'].filter(Boolean).join(', ') || '—'}</Text></Text>
+            </View>
+          )}
         </>
       ),
     },
@@ -2250,7 +2436,7 @@ export default function App() {
   // Unlisted ids fall to the end in their definition order (stable sort).
   // Order for the home grid AND for each submenu's children (SubMenu sorts by this too).
   const SECTION_ORDER = ['synthesizer', 'synthesizerB', 'synthX2', 'synthX3', 'drumtrack', 'reverb', 'audioloop', 'usbaudio', 'tempo', 'bt', 'settings',
-    'player', 'synth', 'arp', 'player2', 'synth2', 'arp2', 'bpm', 'metro', 'conn', 'codec'];   // all synths: MIDI Player, Synth/Voices, Arp
+    'player', 'synth', 'arp', 'player2', 'synth2', 'arp2', 'bpm', 'metro', 'conn', 'firmware', 'codec'];   // all synths: MIDI Player, Synth/Voices, Arp
   // NB: the drum children (drumtrackp/drumtrackv) and generated-synth children (synthXNp/v/a) are NOT
   // listed here — like all makeTrackCard children they fall to ord()=999 and keep their push order.
   const ord = (id: string) => { const i = SECTION_ORDER.indexOf(id); return i < 0 ? 999 : i; };
@@ -2287,6 +2473,7 @@ export default function App() {
         beatActive={connected && (metro.on || player.playing || !!drums.playing)} beatFeed={beatFeed}
         vol={vol} onVolChange={setVol} onVolCommit={v => tp.masterVolume(v)}
         status={headerStatus} brandInSidebar={connected && loaded && desktop}
+        nav={{ sections: visible, route, activeRootId, navigate, usbOwner, claimUsb }}
         metroOn={metro.on} metroMuted={metro.muted} metroLocked={metro.locked}
         onPlay={playMetro} onStop={stopMetro} onStepBpm={stepBpm}
         onToggleMute={() => { const muted = !metro.muted; setMetro(m => ({ ...m, muted })); tp.metronomeMute(muted); }}
@@ -2374,35 +2561,9 @@ export default function App() {
                 <Text style={s.brand}>T-DSP</Text>
               </View>
               <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 40 }}>
-              <Pressable style={[s.sideItem, route === 'home' && s.sideItemOn]} onPress={() => navigate('home')}>
-                <View style={[s.sideDot, { backgroundColor: C.muted }]} />
-                <Text style={[s.sideLabel, route === 'home' && s.sideLabelOn]} numberOfLines={1}>Home</Text>
-              </Pressable>
-              {visible.map(sec => {
-                const on = activeRootId === sec.id;
-                const ac = sec.accent || C.accent;
-                const off = !!sec.disabledReason;
-                const kbd = sec.kbd;   // track index for USB-keyboard claim (synths + drum), else undefined
-                return (
-                  <View key={sec.id} style={[s.sideItem, on && s.sideItemOn, on && { borderLeftColor: ac }]}>
-                    {/* label area navigates; the keyboard glyph is a separate tap target so it never
-                        triggers a stray navigation */}
-                    <Pressable style={s.sideItemMain} onPress={() => navigate(sec.id)} disabled={off}>
-                      <View style={[s.sideDot, { backgroundColor: ac }, off && { opacity: 0.4 }]} />
-                      <Text style={[s.sideLabel, on && s.sideLabelOn, off && s.sideLabelOff]} numberOfLines={1}>{sec.title}</Text>
-                    </Pressable>
-                    {/* Keyboard glyph on synth/drum tracks: white = this track hears the USB keyboard,
-                        grey = it doesn't; tap to route the USB keyboard here (same as the card button). */}
-                    {kbd != null && !off && (
-                      <Pressable onPress={() => claimUsb(kbd)} hitSlop={6} style={s.sideKbd}
-                        accessibilityLabel={usbOwner(kbd) ? 'USB keyboard plays this track' : 'Route the USB keyboard to this track'}>
-                        <KbdGlyph color={usbOwner(kbd) ? C.text : C.muted} />
-                      </Pressable>
-                    )}
-                  </View>
-                );
-              })}
-            </ScrollView>
+                <SideNav sections={visible} route={route} activeRootId={activeRootId}
+                  onNavigate={navigate} usbOwner={usbOwner} onClaimKbd={claimUsb} />
+              </ScrollView>
             </View>
           )}
           {/* ===== main content column ===== */}
@@ -2419,27 +2580,7 @@ export default function App() {
                 <Text style={s.menuBtnText}>⌂</Text></Pressable>
             )}
             <Text style={s.menuHere} numberOfLines={1}>{cur ? cur.title : 'Home'}</Text>
-            {/* master transport (moved here from the header): the metronome is the app-wide clock —
-                Play defines the downbeat, Stop clears the stage, 🔊 toggles the audible click, −/＋ set
-                the BPM, 🔒 holds it. marginLeft:auto pushes the whole group to the right of the nav bar. */}
-            <View style={s.menuTransport}>
-              <Pressable style={[s.tBtn, metro.on && s.tBtnOn]} onPress={playMetro} disabled={!connected}
-                accessibilityLabel={metro.on ? 'Transport running — restart the downbeat' : 'Start the transport'}>
-                <Text style={[s.tBtnText, metro.on && s.tBtnOnText]}>▶</Text></Pressable>
-              <Pressable style={[s.tBtn, s.tBtnGhost]} onPress={stopMetro} disabled={!connected} accessibilityLabel="Stop everything">
-                <Text style={s.tBtnText}>■</Text></Pressable>
-              <Pressable style={[s.tBtn, s.tBtnGhost, !metro.muted && s.tBtnOn]} disabled={!connected}
-                onPress={() => { const muted = !metro.muted; setMetro(m => ({ ...m, muted })); tp.metronomeMute(muted); }}
-                accessibilityLabel={metro.muted ? 'Click muted — tap to hear it' : 'Click audible — tap to mute'}>
-                <Text style={[s.tBtnText, !metro.muted && s.tBtnOnText]}>{metro.muted ? '🔇' : '🔊'}</Text></Pressable>
-              <Pressable style={s.tBtn} onPress={() => stepBpm(-1)} disabled={!connected}><Text style={s.tBtnText}>−</Text></Pressable>
-              <Text style={s.tBpm}>{Math.round(bpm)}<Text style={s.tBpmUnit}> BPM</Text></Text>
-              <Pressable style={s.tBtn} onPress={() => stepBpm(1)} disabled={!connected}><Text style={s.tBtnText}>＋</Text></Pressable>
-              <Pressable style={[s.tBtn, s.tBtnGhost, metro.locked && s.tBtnOn]} disabled={!connected}
-                onPress={() => { const locked = !metro.locked; setMetro(m => ({ ...m, locked })); tp.metronomeLock(locked); }}
-                accessibilityLabel={metro.locked ? 'Tempo locked — tap to let content set the BPM' : 'Tempo follows content — tap to lock'}>
-                <Text style={[s.tBtnText, metro.locked && s.tBtnOnText]}>{metro.locked ? '🔒' : '🔓'}</Text></Pressable>
-            </View>
+            {/* master transport moved to the header's top-left (Header.tsx: play/stop/mute + BPM/lock). */}
           </View>
           {/* ===== HOMEPAGE: a responsive grid of section cards ===== */}
           {!cur && (
@@ -2476,7 +2617,7 @@ export default function App() {
           {/* ===== full-height pages: stay MOUNTED (just hidden when inactive) so the
                   selected folder AND the picker's scroll position persist across nav ===== */}
           {fullPages.map(sec => (
-            <View key={sec.id} style={[s.page, { flex: 1 }, route !== sec.id && s.hidden]}>
+            <View key={sec.id} style={[s.page, { flex: 1 }, sec.wide && s.pageWide, route !== sec.id && s.hidden]}>
               <PageHeader title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions} onBack={() => navigate(sec.parent || 'home')} accent={sec.accent} topRight={sec.topRight} />
               <View style={[s.pageBody, { flex: 1 }]}>{sec.body}</View>
             </View>
