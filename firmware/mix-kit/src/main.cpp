@@ -312,6 +312,9 @@ tdsp::PlayerFollower   g_songFollow3{g_playerV[2]};   // voice index 2 (4-voice 
 #if TDSP_SYNTH_VOICES >= 4
 tdsp::PlayerFollower   g_songFollow4{g_playerV[3]};
 #endif
+#if TDSP_SYNTH_VOICES >= 5
+tdsp::PlayerFollower   g_songFollow5{g_playerV[4]};   // voice index 4 (Synth E, 2nd melodic Plaits)
+#endif
 tdsp::ClockSink        g_clockSink{&g_conductor.clock()};
 tdsp::ArpFilter       &g_arpFilter = g_arpFilterV[0];        // alias: voice 0 arp (live MIDI -> arp -> synth, bypass by default)
 static bool            g_mpeMode = false;    // false = normal MIDI (bend +-2, ch10 drums), true = MPE
@@ -1112,6 +1115,9 @@ DMAMEM static tdsp::MidiFileEvent g_buf3[MAX_EVENTS3];
 #if TDSP_SYNTH_VOICES >= 4
 DMAMEM static tdsp::MidiFileEvent g_buf4[MAX_EVENTS3];
 #endif
+#if TDSP_SYNTH_VOICES >= 5
+DMAMEM static tdsp::MidiFileEvent g_buf5[MAX_EVENTS3];   // Synth E (2nd Plaits) song buffer
+#endif
 #endif
 
 static bool endsWithMid(const char *s) {
@@ -1248,6 +1254,17 @@ static float  g_song4Bpm = 120.0f;
 static uint8_t g_song4Bpb = 4;
 static double g_song4LoopBeats = 0.0;
 static bool   g_song4LaunchPending = false;
+#endif
+#if TDSP_SYNTH_VOICES >= 5
+// Voice index 4 (Synth E — the 2nd melodic Plaits track).
+static char   g_curSong5Name[64] = "";
+static char   g_curSong5Arg[100] = "";
+static bool   g_song5Loop = false;
+static bool   g_song5WasPlaying = false;
+static float  g_song5Bpm = 120.0f;
+static uint8_t g_song5Bpb = 4;
+static double g_song5LoopBeats = 0.0;
+static bool   g_song5LaunchPending = false;
 #endif
 static bool          g_syncProbe = false;   // @SYNCPROBE: 1 Hz drift probe (PLAN §9)
 static elapsedMillis g_syncProbeClock;      // throttle for the probe print
@@ -3087,11 +3104,11 @@ static void handleTrkCmd(const char* s, Stream& reply) {
     // Plaits timbre macros — the faceplate's HARMONICS/TIMBRE/MORPH + LPG decay/colour, arg 0..1000.
     // Plaits-gated (like OPLL's DXVOICE below); these edit the shared Plaits pool for the one Plaits track.
     // Each echoes the clamped value so the app confirms/rehydrates. @STATE also carries them (see tracks[]).
-    else if (voiceIsPlaits(i) && strncmp(cmd, "HARM=", 5) == 0)     { heteroPlaitsSetHarm(atoi(arg));   reply.printf("@TRK%d.HARM=%d\n", i, g_hpHarm); }
-    else if (voiceIsPlaits(i) && strncmp(cmd, "TIMBRE=", 7) == 0)   { heteroPlaitsSetTimbre(atoi(arg)); reply.printf("@TRK%d.TIMBRE=%d\n", i, g_hpTimbre); }
-    else if (voiceIsPlaits(i) && strncmp(cmd, "MORPH=", 6) == 0)    { heteroPlaitsSetMorph(atoi(arg));  reply.printf("@TRK%d.MORPH=%d\n", i, g_hpMorph); }
-    else if (voiceIsPlaits(i) && strncmp(cmd, "LPGDECAY=", 9) == 0) { heteroPlaitsSetDecay(atoi(arg));  reply.printf("@TRK%d.LPGDECAY=%d\n", i, g_hpDecay); }
-    else if (voiceIsPlaits(i) && strncmp(cmd, "LPGCOLOR=", 9) == 0) { heteroPlaitsSetColor(atoi(arg));  reply.printf("@TRK%d.LPGCOLOR=%d\n", i, g_hpColor); }
+    else if (voiceIsPlaits(i) && strncmp(cmd, "HARM=", 5) == 0)     { const int k = i - (kDexedVoices + kOpllVoices); heteroPlaitsSetHarm(k, atoi(arg));   reply.printf("@TRK%d.HARM=%d\n", i, g_hpHarm[k]); }
+    else if (voiceIsPlaits(i) && strncmp(cmd, "TIMBRE=", 7) == 0)   { const int k = i - (kDexedVoices + kOpllVoices); heteroPlaitsSetTimbre(k, atoi(arg)); reply.printf("@TRK%d.TIMBRE=%d\n", i, g_hpTimbre[k]); }
+    else if (voiceIsPlaits(i) && strncmp(cmd, "MORPH=", 6) == 0)    { const int k = i - (kDexedVoices + kOpllVoices); heteroPlaitsSetMorph(k, atoi(arg));  reply.printf("@TRK%d.MORPH=%d\n", i, g_hpMorph[k]); }
+    else if (voiceIsPlaits(i) && strncmp(cmd, "LPGDECAY=", 9) == 0) { const int k = i - (kDexedVoices + kOpllVoices); heteroPlaitsSetDecay(k, atoi(arg));  reply.printf("@TRK%d.LPGDECAY=%d\n", i, g_hpDecay[k]); }
+    else if (voiceIsPlaits(i) && strncmp(cmd, "LPGCOLOR=", 9) == 0) { const int k = i - (kDexedVoices + kOpllVoices); heteroPlaitsSetColor(k, atoi(arg));  reply.printf("@TRK%d.LPGCOLOR=%d\n", i, g_hpColor[k]); }
 #endif
 #if defined(TDSP_SYNTH_PLAITS)
     // Solo (PRIMARY) Plaits: track 0 IS the Plaits voice, so the SAME editor panel drives it — the macros
@@ -3824,9 +3841,11 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
 #if TDSP_HETERO_PLAITS
             // Plaits timbre macros (0..1000) so the panel's knobs rehydrate on connect/reconnect — the
             // model already rides eng/ninstr/name above. Only the Plaits track carries these.
-            if (voiceIsPlaits(v))
+            if (voiceIsPlaits(v)) {
+                const int k = v - (kDexedVoices + kOpllVoices);
                 reply.printf(",\"harm\":%d,\"timbre\":%d,\"morph\":%d,\"lpgdecay\":%d,\"lpgcolor\":%d",
-                             g_hpHarm, g_hpTimbre, g_hpMorph, g_hpDecay, g_hpColor);
+                             g_hpHarm[k], g_hpTimbre[k], g_hpMorph[k], g_hpDecay[k], g_hpColor[k]);
+            }
 #endif
 #if defined(TDSP_SYNTH_PLAITS)
             // Solo (primary) Plaits: track 0 carries the same macros (rehydrate the editor panel).
@@ -3956,6 +3975,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #if TDSP_SYNTH_VOICES >= 4
         &g_songFollow4,
 #endif
+#if TDSP_SYNTH_VOICES >= 5
+        &g_songFollow5,
+#endif
     };
     tdsp::MidiFileEvent* const bufTbl[kSynthVoices] = { g_buf,
 #if TDSP_VOICE2
@@ -3967,6 +3989,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #if TDSP_SYNTH_VOICES >= 4
         g_buf4,
 #endif
+#if TDSP_SYNTH_VOICES >= 5
+        g_buf5,
+#endif
     };
     const int bufCapTbl[kSynthVoices] = { MAX_EVENTS,
 #if TDSP_VOICE2
@@ -3976,6 +4001,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
         MAX_EVENTS3,
 #endif
 #if TDSP_SYNTH_VOICES >= 4
+        MAX_EVENTS3,
+#endif
+#if TDSP_SYNTH_VOICES >= 5
         MAX_EVENTS3,
 #endif
     };
@@ -3989,6 +4017,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #if TDSP_SYNTH_VOICES >= 4
         g_curSong4Name,
 #endif
+#if TDSP_SYNTH_VOICES >= 5
+        g_curSong5Name,
+#endif
     };
     char* const argTbl[kSynthVoices] = { g_curSongArg,
 #if TDSP_VOICE2
@@ -3999,6 +4030,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #endif
 #if TDSP_SYNTH_VOICES >= 4
         g_curSong4Arg,
+#endif
+#if TDSP_SYNTH_VOICES >= 5
+        g_curSong5Arg,
 #endif
     };
     bool* const loopTbl[kSynthVoices] = { &g_loop,
@@ -4011,6 +4045,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #if TDSP_SYNTH_VOICES >= 4
         &g_song4Loop,
 #endif
+#if TDSP_SYNTH_VOICES >= 5
+        &g_song5Loop,
+#endif
     };
     bool* const wasTbl[kSynthVoices] = { &g_songWasPlaying,
 #if TDSP_VOICE2
@@ -4021,6 +4058,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #endif
 #if TDSP_SYNTH_VOICES >= 4
         &g_song4WasPlaying,
+#endif
+#if TDSP_SYNTH_VOICES >= 5
+        &g_song5WasPlaying,
 #endif
     };
     float* const bpmTbl[kSynthVoices] = { &g_songBpm,
@@ -4033,6 +4073,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #if TDSP_SYNTH_VOICES >= 4
         &g_song4Bpm,
 #endif
+#if TDSP_SYNTH_VOICES >= 5
+        &g_song5Bpm,
+#endif
     };
     uint8_t* const bpbTbl[kSynthVoices] = { &g_songBpb,
 #if TDSP_VOICE2
@@ -4043,6 +4086,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #endif
 #if TDSP_SYNTH_VOICES >= 4
         &g_song4Bpb,
+#endif
+#if TDSP_SYNTH_VOICES >= 5
+        &g_song5Bpb,
 #endif
     };
     double* const loopBeatsTbl[kSynthVoices] = { &g_songLoopBeats,
@@ -4055,6 +4101,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #if TDSP_SYNTH_VOICES >= 4
         &g_song4LoopBeats,
 #endif
+#if TDSP_SYNTH_VOICES >= 5
+        &g_song5LoopBeats,
+#endif
     };
     bool* const launchTbl[kSynthVoices] = { &g_songLaunchPending,
 #if TDSP_VOICE2
@@ -4065,6 +4114,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #endif
 #if TDSP_SYNTH_VOICES >= 4
         &g_song4LaunchPending,
+#endif
+#if TDSP_SYNTH_VOICES >= 5
+        &g_song5LaunchPending,
 #endif
     };
     t.follow = followTbl[i]; t.buf = bufTbl[i]; t.bufCap = bufCapTbl[i];
@@ -4173,15 +4225,22 @@ FLASHMEM static void tracksInit() {
     // ANY index, including index 0/1 in a 0-Dexed inventory. Guard: pv must be a real synth-voice index.
     static_assert((kDexedVoices + kOpllVoices) < kSynthVoices,
                   "HeteroPlaits track index (DEXED+OPLL) must be < kSynthVoices");
-    { const int pv = kDexedVoices + kOpllVoices;
+    for (int k = 0; k < TDSP_PLAITS_ENGINES; k++) {
+      const int pv = kDexedVoices + kOpllVoices + k;   // Synth D (k=0) and Synth E (k=1)
       Track &tp = g_tracks[pv];
       tp.player = &g_playerV[pv]; tp.arp = &g_arpFilterV[pv]; tp.router = &g_routerV[pv];
-      tp.looper = trackLooper(pv); tp.sink = g_hpVoiceSink;
-      tp.chMask = tdsp::MidiFilePlayer::kMaskNoDrums; tp.setLevel = heteroPlaitsSetVol;
+      tp.looper = trackLooper(pv); tp.sink = g_hpVoiceSink[k];
+      tp.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
+#if TDSP_PLAITS_ENGINES >= 2
+      tp.setLevel = (k == 0) ? heteroPlaitsSetVol0 : heteroPlaitsSetVol1;
+#else
+      tp.setLevel = heteroPlaitsSetVol0;
+#endif
       tp.caps = { false, false, false, false, false, false, false, false, false, /*tempoSourceWhenIdle*/true };
-      tp.tag = (pv == 2) ? "song3" : "song4";   // cosmetic log label (unchanged for current builds)
-      bindTrackSongState(tp, pv);   // follow/buf/name/loop/tempo BY INDEX (was the pv==2/3 *3/*4 special-case)
-      tp.liveSrcMask = 0; tp.srcChMask = 0; }
+      tp.tag = (pv <= 2) ? "song3" : "song4";   // cosmetic log label
+      bindTrackSongState(tp, pv);   // follow/buf/name/loop/tempo BY INDEX
+      tp.liveSrcMask = 0; tp.srcChMask = 0;
+    }
 #endif
 #endif
 
@@ -4390,6 +4449,9 @@ FLASHMEM void setup() {
 #if TDSP_SYNTH_VOICES >= 4
     trackWireSetup(g_tracks[2]);   // voices 3/4 of the 4-way pool (own router/arp/sink)
     trackWireSetup(g_tracks[3]);
+#if TDSP_SYNTH_VOICES >= 5
+    trackWireSetup(g_tracks[4]);   // Synth E (2nd Plaits)
+#endif
 #elif TDSP_HETERO
     trackWireSetup(g_tracks[kDexedVoices]);   // the melodic OPLL voice (own router/arp -> OPLL sink)
 #endif
@@ -4421,7 +4483,7 @@ FLASHMEM void setup() {
     heteroOpllBegin();   // skipped when the hetero inventory has no hetero-OPLL voices (e.g. 0-Dexed OPLL-primary + Plaits)
 #endif
 #if TDSP_HETERO_PLAITS
-    heteroPlaitsBegin();   // bring up the melodic Plaits track + open its mix slot
+    for (int k = 0; k < TDSP_PLAITS_ENGINES; k++) heteroPlaitsBegin(k);   // bring up each Plaits track (D, E) + open its mix slot
 #endif
 #if TDSP_VOICE2
     g_voice2On = true;
@@ -4662,6 +4724,9 @@ void loop() {
 #if TDSP_SYNTH_VOICES >= 4
         if (*g_tracks[2].launchPending) { *g_tracks[2].launchPending = false; trackFire(g_tracks[2], /*anchorNow=*/true); }
         if (*g_tracks[3].launchPending) { *g_tracks[3].launchPending = false; trackFire(g_tracks[3], /*anchorNow=*/true); }
+#if TDSP_SYNTH_VOICES >= 5
+        if (*g_tracks[4].launchPending) { *g_tracks[4].launchPending = false; trackFire(g_tracks[4], /*anchorNow=*/true); }
+#endif
 #endif
         g_syncAnchorNow = false;   // defensive: a not-found launch never leaves it armed
         for (Track &t : g_tracks) t.player->tick();   // a just-launched player hits its downbeat now (already-running ones no-op)
@@ -4683,6 +4748,9 @@ void loop() {
 #endif
 #if TDSP_SYNTH_VOICES >= 4
     trackLoopTick(g_tracks[2]); trackLoopTick(g_tracks[3]);   // voices 3/4 loop re-arm
+#if TDSP_SYNTH_VOICES >= 5
+    trackLoopTick(g_tracks[4]);   // Synth E loop re-arm
+#endif
 #endif
 
     // @SYNCPROBE: once/second, print the master beat next to each synced player's

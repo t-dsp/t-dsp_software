@@ -137,19 +137,20 @@ static OpllVoiceEngineAdapter g_opllVoiceEngine[TDSP_OPLL_ENGINES];
 // --- Melodic Plaits hetero track (HeteroPlaits.h) ----------------------------------------------
 #if TDSP_HETERO_PLAITS
 struct PlaitsVoiceEngineAdapter : ITrackEngine {
-    tdsp::MidiSink*      sink() override           { return g_hpVoiceSink; }
-    AudioEffectGain_F32* trim() override           { return &g_hpTrim; }
+    int                 k = 0;                     // which Plaits track (0..TDSP_PLAITS_ENGINES-1)
+    tdsp::MidiSink*      sink() override           { return g_hpVoiceSink[k]; }
+    AudioEffectGain_F32* trim() override           { return &hpTrimNode(k); }
     const char*         name() override            { return "Plaits"; }
     int                 numInstruments() override  { return heteroPlaitsNumInstruments(); }
     const char*         instrumentName(int i) override { return heteroPlaitsInstrumentName(i); }
-    int                 instrument() override      { return heteroPlaitsInstrument(); }
-    void                setInstrument(int i) override  { heteroPlaitsSetInstrument(i); }
-    void                setVol(int pct) override   { heteroPlaitsSetVol(pct); }
+    int                 instrument() override      { return heteroPlaitsInstrument(k); }
+    void                setInstrument(int i) override  { heteroPlaitsSetInstrument(k, i); }
+    void                setVol(int pct) override   { heteroPlaitsSetVol(k, pct); }
     const char*         engTag() override          { return "plaits"; }
     // MPE: master ch 1 = per-note member channels 2..16 (one Plaits voice per note); 0 = plain poly.
-    void                setMpeMode(bool mpe) override { g_hpPlaitsSink.setMasterChannel(mpe ? 1 : 0); }
+    void                setMpeMode(bool mpe) override { hpSink(k).setMasterChannel(mpe ? 1 : 0); }
 };
-static PlaitsVoiceEngineAdapter g_plaitsVoiceEngine;   // one Plaits track (a pool behind one sink)
+static PlaitsVoiceEngineAdapter g_plaitsVoiceEngine[TDSP_PLAITS_ENGINES];   // one adapter per Plaits track
 #endif
 
 // --- Drum track: a track whose engine plays ch10 (kit = its "instrument") ----------------------
@@ -175,7 +176,12 @@ static ITrackEngine *g_drumTrackEngine = &g_drumTrackEngineImpl;
 static void trackEnginesInit() {
     for (int v = 0; v < kNumTracks; v++) {
 #if TDSP_HETERO_PLAITS
-        if (voiceIsPlaits(v)) { g_trackEngine[v] = &g_plaitsVoiceEngine; continue; }
+        if (voiceIsPlaits(v)) {
+            const int k = v - (kDexedVoices + kOpllVoices);   // 0..TDSP_PLAITS_ENGINES-1
+            g_plaitsVoiceEngine[k].k = k;
+            g_trackEngine[v] = &g_plaitsVoiceEngine[k];
+            continue;
+        }
 #endif
 #if TDSP_OPLL_ENGINES >= 1
         if (voiceIsOpll(v)) {
