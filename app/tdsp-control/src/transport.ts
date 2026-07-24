@@ -42,6 +42,12 @@ export interface Transport {
 
   connect(): Promise<void>;
   disconnect(): Promise<void>;
+  // Optional GESTURE-FREE reconnect to a previously-granted resource, so a page refresh can restore
+  // the link with no click and no port picker. Web Serial implements it (reopens a port from
+  // navigator.serial.getPorts()); returns true if it reconnected, false if nothing was ever granted
+  // (the caller then falls back to the normal Connect button). WiFi just reconnects via connect();
+  // native BLE has its own foreground reconnect, so neither implements this.
+  reconnect?(): Promise<boolean>;
 
   // Subscribe to raw device lines (BT status, etc.). Returns an unsubscribe fn.
   onLine(cb: LineHandler): () => void;

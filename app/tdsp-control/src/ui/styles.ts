@@ -42,7 +42,9 @@ export const s = StyleSheet.create({
   // desktop-only left nav rail: fixed-width column of direct links into each root section
   sideBar: { width: 208, flexGrow: 0, flexShrink: 0, borderRightWidth: 1, borderRightColor: C.border, backgroundColor: C.card2 },
   content: { flex: 1 },   // main content column beside the rail
-  sideItem: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 13, paddingVertical: 11, borderLeftWidth: 3, borderLeftColor: 'transparent' },
+  sideItem: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 13, paddingVertical: 11, borderLeftWidth: 3, borderLeftColor: 'transparent' },
+  sideItemMain: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: 10 },   // the navigating part of a rail row (dot + label)
+  sideKbd: { paddingHorizontal: 4, paddingVertical: 2 },   // compact tap target for the USB-keyboard glyph on track rows
   sideItemOn: { backgroundColor: C.sel },
   sideDot: { width: 9, height: 9, borderRadius: 5 },
   sideLabel: { color: C.muted, fontSize: 14, fontWeight: '600', flexShrink: 1 },
@@ -141,6 +143,8 @@ export const s = StyleSheet.create({
   headActions: { flexDirection: 'row', alignItems: 'center', gap: 6, flexShrink: 0 },   // content-sized → buttons keep natural width on the page header
   hdrActionsRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8, paddingHorizontal: 14, paddingBottom: 12, marginTop: -2 },
   hdrBtn: { backgroundColor: '#238636', height: HDR_H, paddingHorizontal: 7, borderRadius: 8, flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 34, alignItems: 'center', justifyContent: 'center' },
+  hdrBtnCap: { maxWidth: 50 },   // synth landing play controls: cap each button so the row stays compact
+
   hdrBtnStop: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
   hdrBtnIdle: { backgroundColor: C.chip },   // play ▶ when NOT playing: dark (green only while playing)
   hdrBtnText: { color: C.text, fontSize: 13, fontWeight: '700' },

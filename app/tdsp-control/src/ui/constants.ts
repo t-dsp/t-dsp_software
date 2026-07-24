@@ -41,6 +41,17 @@ export const catalogCache: CatalogCache = {
   get: () => AsyncStorage.getItem(CATALOG_KEY),
   set: (v: string) => AsyncStorage.setItem(CATALOG_KEY, v),
 };
+// Last successful connection (persisted so a page refresh can auto-reconnect without the user
+// picking a transport/port again). `kind` = which transport; `host` = the Wi-Fi host (blank for
+// serial/BLE). Written on connect, cleared on an explicit Disconnect. See App's boot effect.
+const LASTCONN_KEY = 'tdsp.lastconn.v1';
+export type LastConn = { kind: 'default' | 'wifi'; host: string };
+export const saveLastConn = (c: LastConn) => { AsyncStorage.setItem(LASTCONN_KEY, JSON.stringify(c)).catch(() => {}); };
+export const clearLastConn = () => { AsyncStorage.removeItem(LASTCONN_KEY).catch(() => {}); };
+export const loadLastConn = async (): Promise<LastConn | null> => {
+  try { const sv = await AsyncStorage.getItem(LASTCONN_KEY); return sv ? JSON.parse(sv) as LastConn : null; } catch { return null; }
+};
+
 // Display name for a groove SD path (basename minus .mid) — the drum-track card's "value".
 export const grooveDisp = (p: string | null | undefined) => (p ? (p.split('/').pop() || '').replace(/\.mid$/i, '') : '');
 export const kb = (n: number) => (n / 1024).toFixed(1);   // bytes -> "12.3" KB, for the load progress readout

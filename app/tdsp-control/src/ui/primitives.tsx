@@ -145,7 +145,11 @@ export function PageHeader({ title, value, status, subtitle, actions, progress, 
       <View style={s.pageHeadRow}>
         <View style={s.drawerLeft}>
           <Text style={[s.pageTitle, accent && { color: accent }]}>{title}</Text>
-          {subtitle ?? <Subtitle value={value} status={status} />}
+          {/* A plain-string subtitle must be wrapped in <Text> — a bare string as a View child throws on
+              react-native-web ("text node cannot be a child of a View"). JSX subtitles pass through. */}
+          {subtitle != null
+            ? (typeof subtitle === 'string' ? <Text style={s.drawerValue} numberOfLines={1}>{subtitle}</Text> : subtitle)
+            : <Subtitle value={value} status={status} />}
           {progress != null && <ProgressBar value={progress} />}
         </View>
         {topRight}
@@ -208,8 +212,8 @@ export function LoadScreen({ bus, tpLabel }: { bus: ProgressBus; tpLabel: string
 // All header buttons share one uniform width (s.hdrBtn.minWidth).
 // `active` (play buttons only): true = playing (green), false = idle (dark). Omit on non-play
 // buttons (nav/stop/±) so they keep their normal look.
-export const HdrBtn = ({ label, onPress, stop, active }: { label: string; onPress: () => void; stop?: boolean; active?: boolean }) => (
-  <Pressable onPress={onPress} style={[s.hdrBtn, stop && s.hdrBtnStop, active === false && s.hdrBtnIdle]}><Text style={s.hdrBtnText} numberOfLines={1}>{label}</Text></Pressable>
+export const HdrBtn = ({ label, onPress, stop, active, style }: { label: string; onPress: () => void; stop?: boolean; active?: boolean; style?: any }) => (
+  <Pressable onPress={onPress} style={[s.hdrBtn, stop && s.hdrBtnStop, active === false && s.hdrBtnIdle, style]}><Text style={s.hdrBtnText} numberOfLines={1}>{label}</Text></Pressable>
 );
 // A small keyboard glyph drawn with Views so it can be tinted (an emoji can't): a bordered
 // body with five keys. WHITE = this synth owns the USB keyboard; GREY = another synth does.

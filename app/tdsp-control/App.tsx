@@ -18,8 +18,8 @@ import type { Transport, DirPage, TransportKind } from './src/transport';
 // now live in ./src/ui/*. App composes them; see src/ui/{theme,styles,constants,primitives}.
 import { C, THEME } from './src/ui/theme';
 import { s } from './src/ui/styles';
-import { EMPTY_DIR, parseDexFind, DexHit, DexRow, catalogCache, grooveDisp, TP_LABEL, DEFAULT_TP_LABEL, HPF_MODES, volDb, EndMode, END_MODES, REC_STATES, AppState, isEndMode, notify, ROW_H, VItem, InjectFolder } from './src/ui/constants';
-import { Subtitle, LoopStepGrid, BeatStrip, Card, PageHeader, ProgressBus, LoadScreen, HdrBtn, KbdBtn, Row, ThrottledSlider, VolSlider, Stat, ListBtn, BodyTabs, SubMenu, FolderBrowser } from './src/ui/primitives';
+import { EMPTY_DIR, parseDexFind, DexHit, DexRow, catalogCache, grooveDisp, TP_LABEL, DEFAULT_TP_LABEL, HPF_MODES, volDb, EndMode, END_MODES, REC_STATES, AppState, isEndMode, notify, ROW_H, VItem, InjectFolder, saveLastConn, clearLastConn, loadLastConn } from './src/ui/constants';
+import { Subtitle, LoopStepGrid, BeatStrip, Card, PageHeader, ProgressBus, LoadScreen, HdrBtn, KbdBtn, KbdGlyph, Row, ThrottledSlider, VolSlider, Stat, ListBtn, BodyTabs, SubMenu, FolderBrowser } from './src/ui/primitives';
 import ArpStepGrid from './src/ui/ArpStepGrid';
 import PianoRoll from './src/ui/PianoRoll';
 import PlaitsPanel from './src/ui/PlaitsPanel';
@@ -570,11 +570,19 @@ export default function App() {
     // (an []-dep here would leave the subscription stranded on the dead transport).
   }), [tp]);
 
-  async function connect(auto = false) {
+  // reconnectOnly: attempt a GESTURE-FREE reconnect (tp.reconnect() — Web Serial getPorts) instead of
+  // tp.connect() (which prompts). Used by the boot auto-reconnect after a page refresh; if there's
+  // nothing granted to reconnect to, it bails quietly and the normal Connect screen stays up.
+  async function connect(auto = false, reconnectOnly = false) {
     if (connectingRef.current || tp.isConnected()) return;   // live check (state may be stale) — no double-connect
     connectingRef.current = true; setConnecting(true);
     try {
-      await tp.connect();
+      if (reconnectOnly) {
+        const ok = await tp.reconnect?.();
+        if (!ok) return;   // no previously-granted port → stay on the Connect screen
+      } else {
+        await tp.connect();
+      }
       // The user may have tapped Disconnect while the link was being established — honor it
       // and bail before we show any UI or pull the catalog (userDiscRef is the synchronous truth).
       if (userDiscRef.current) { await tp.disconnect().catch(() => {}); return; }
@@ -583,6 +591,7 @@ export default function App() {
       if (userDiscRef.current) { await disconnect(); return; }   // cancelled during the catalog load
       tp.requestState();   // pull the device's real current settings → hydrate every card (see @STATE handler)
       tp.requestFonts();   // pull the swappable drum-font list (runtime @DRUMFONT builds) → the Drum Font picker
+      saveLastConn({ kind: tkind, host: wifiHost.trim() });   // remember the server so a refresh auto-reconnects
     }
     // A user cancel can surface as a connect rejection (port/scan aborted) — don't toast that.
     // The "one page owns the port" hint is Web-Serial-specific — over WiFi nothing owns a
@@ -596,7 +605,36 @@ export default function App() {
   // userDiscRef is set synchronously (before the async setState lands) so connect() sees a
   // mid-connect cancel right away. A user disconnect works from the connecting state too.
   const userConnect = () => { userDiscRef.current = false; setUserDisc(false); connect(); };
-  const userDisconnect = () => { userDiscRef.current = true; setUserDisc(true); disconnect(); };
+  // An explicit Disconnect also forgets the remembered server, so the next page refresh does NOT
+  // auto-reconnect (it comes up on the Connect screen). A dropped link keeps it, so a refresh recovers.
+  const userDisconnect = () => { userDiscRef.current = true; setUserDisc(true); clearLastConn(); disconnect(); };
+
+  // ── Boot auto-reconnect (web): after a page refresh, silently re-establish the last server ──────
+  // Web has no OS-suspend, so a refresh is the only time we'd need this; native uses the foreground
+  // reconnect below. Serial reconnects gesture-free via getPorts() (no port picker); Wi-Fi restores
+  // the transport then connects. If nothing is remembered (or the port was never granted), we stay
+  // on the Connect screen. `autoWifiRef` gates the follow-up so only a RESTORE auto-connects — a user
+  // manually picking Wi-Fi still types a host and taps Connect.
+  const bootRef = useRef(false);
+  const autoWifiRef = useRef(false);
+  useEffect(() => {
+    if (bootRef.current || Platform.OS !== 'web') return;
+    bootRef.current = true;
+    (async () => {
+      const last = await loadLastConn();
+      if (!last || userDiscRef.current) return;
+      if (last.kind === 'wifi') { autoWifiRef.current = true; setWifiHost(last.host || ''); setTkind('wifi'); }
+      else connect(true, true);   // serial: gesture-free reconnect to the already-granted port
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  // Wi-Fi restore lands here once `tp` has rebuilt as the Wi-Fi transport (state set above).
+  useEffect(() => {
+    if (!autoWifiRef.current || tp.name !== 'WIFI') return;
+    autoWifiRef.current = false;
+    connect(true);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tp]);
 
   // Connecting is EXPLICIT: no auto-connect and no auto-reconnect. This poll only reflects
   // a DROPPED link into the UI (flip to "Not connected") — it never opens a connection. You
@@ -1243,7 +1281,7 @@ export default function App() {
   // `value`/`status` = the subtitle; `actions` = the header controls; `body` = the page.
   // `parent` (a section id) makes this a SUB-page reached from that parent's submenu instead of a
   // home card — its Back button returns to the parent, not home (see the render's onBack).
-  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; foot?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; accent?: string; tint?: string; topRight?: React.ReactNode; parent?: string; disabledReason?: string; asCard?: boolean };
+  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; foot?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; accent?: string; tint?: string; topRight?: React.ReactNode; parent?: string; disabledReason?: string; asCard?: boolean; kbd?: number };   // kbd = USB-keyboard track index (synth voices + drum), so the left-nav rail can show a claim glyph
 
   // "Dexed: <name>" on the Dexed synth cards — mirrors the firmware's own prefixes on the other
   // engines ("OPLL: X" HeteroOpll.h, "Plaits: X" HeteroPlaits.h, …) so a hetero build reads
@@ -1610,14 +1648,16 @@ export default function App() {
   // track's MIDI player, so the common controls work without opening the card. `voiceTarget` is the
   // stepVoice slot (1 = Synth A, 2 = Synth B, v+1 for the extra voices); the deck is the same one the
   // MIDI Player page drives (so Play uses the folder-aware "play the selected track" logic).
+  // Synth landing play controls. Each button is capped at 50px wide (s.hdrBtnCap) so the row stays
+  // compact instead of stretching each control across the whole card.
   const synthQuick = (voiceTarget: number, deck: SongDeckT, arpOn?: boolean, toggleArp?: () => void) => (
     <>
-      <HdrBtn label="‹ Ins" stop onPress={() => stepVoice(-1, voiceTarget)} />
-      <HdrBtn label="Ins ›" stop onPress={() => stepVoice(1, voiceTarget)} />
-      <HdrBtn label="▶" onPress={deck.play} active={deck.player.playing} />
-      <HdrBtn label="■" stop onPress={deck.stop} />
-      {toggleArp && <HdrBtn label="Arp" onPress={toggleArp} active={!!arpOn} />}
-      <HdrBtn label="↻" active={deck.endMode === 'repeat'} onPress={() => deck.applyEnd(deck.endMode === 'repeat' ? 'stop' : 'repeat')} />
+      <HdrBtn label="‹ Ins" stop onPress={() => stepVoice(-1, voiceTarget)} style={s.hdrBtnCap} />
+      <HdrBtn label="Ins ›" stop onPress={() => stepVoice(1, voiceTarget)} style={s.hdrBtnCap} />
+      <HdrBtn label="▶" onPress={deck.play} active={deck.player.playing} style={s.hdrBtnCap} />
+      <HdrBtn label="■" stop onPress={deck.stop} style={s.hdrBtnCap} />
+      {toggleArp && <HdrBtn label="Arp" onPress={toggleArp} active={!!arpOn} style={s.hdrBtnCap} />}
+      <HdrBtn label="↻" active={deck.endMode === 'repeat'} onPress={() => deck.applyEnd(deck.endMode === 'repeat' ? 'stop' : 'repeat')} style={s.hdrBtnCap} />
     </>
   );
   const synthBody = (
@@ -1903,6 +1943,7 @@ export default function App() {
     instrument: { title: string; value: string; subtitle?: React.ReactNode; topRight?: React.ReactNode;
                   actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean };
     arp?: ArpSlotT;
+    kbd?: number;   // USB-keyboard track index for this track (undefined = no live keyboard target)
   };
   const makeTrackCard = (c: TrackCardCfg): { parent: Section; children: Section[] } => {
     const { parentId, theme, deck } = c;
@@ -1911,6 +1952,7 @@ export default function App() {
       id: parentId, title: c.title, show: c.show, asCard: true, accent: theme.accent, tint: theme.tint,
       disabledReason: c.disabledReason, value: c.landing.value, subtitle: c.landing.subtitle,
       topRight: c.landing.topRight, actions: c.landing.actions, progress: c.landing.progress, foot: c.landing.foot,
+      kbd: c.kbd,
       body: c.landing.bodyPrefix ? <View style={{ gap: 10 }}>{c.landing.bodyPrefix}{submenu}</View> : submenu,
     };
     const children: Section[] = [
@@ -1967,7 +2009,7 @@ export default function App() {
     const synthTrackVol = <VolSlider label="Volume" value={trkVolX[v] ?? 100} disabled={!connected} onChange={n => setTrkVolX(m => ({ ...m, [v]: n }))} onCommit={n => tp.trk(v, 'VOL=' + n)} />;
     const engLabel = trkNames[v] ? engName(trkNames[v], trkEng[v]) : 'None';
     const { parent, children } = makeTrackCard({
-      parentId, title: 'Synthesizer ' + letter, theme, show: synthCount > v, deck,
+      parentId, title: 'Synthesizer ' + letter, theme, show: synthCount > v, deck, kbd: v,
       landing: {
         value: engLabel,
         topRight: usbKbd(v),   // per-track USB-keyboard claim (white = this synth hears the USB MIDI keyboard)
@@ -2057,7 +2099,7 @@ export default function App() {
   // and the "instrument" child is the GM Kit picker (drumKitBody) instead of a voice browser; it also
   // has no Arpeggiator child. The landing shows the groove transport (tap ▶ plays a groove) + Volume.
   const drumCard = makeTrackCard({
-    parentId: 'drumtrack', title: 'Drums', theme: THEME.drums,
+    parentId: 'drumtrack', title: 'Drums', theme: THEME.drums, kbd: drumSrcIdx ?? undefined,
     show: cat.hasDrums || drumLive || !!unavail.drums, disabledReason: unavail.drums, deck: drumDeck,
     landing: {
       value: playerValue(drumDeck), progress: playerProgress(drumDeck), actions: playerActions(drumDeck),
@@ -2485,12 +2527,25 @@ export default function App() {
               {visible.map(sec => {
                 const on = activeRootId === sec.id;
                 const ac = sec.accent || C.accent;
+                const off = !!sec.disabledReason;
+                const kbd = sec.kbd;   // track index for USB-keyboard claim (synths + drum), else undefined
                 return (
-                  <Pressable key={sec.id} style={[s.sideItem, on && s.sideItemOn, on && { borderLeftColor: ac }]}
-                    onPress={() => navigate(sec.id)} disabled={!!sec.disabledReason}>
-                    <View style={[s.sideDot, { backgroundColor: ac }, !!sec.disabledReason && { opacity: 0.4 }]} />
-                    <Text style={[s.sideLabel, on && s.sideLabelOn, !!sec.disabledReason && s.sideLabelOff]} numberOfLines={1}>{sec.title}</Text>
-                  </Pressable>
+                  <View key={sec.id} style={[s.sideItem, on && s.sideItemOn, on && { borderLeftColor: ac }]}>
+                    {/* label area navigates; the keyboard glyph is a separate tap target so it never
+                        triggers a stray navigation */}
+                    <Pressable style={s.sideItemMain} onPress={() => navigate(sec.id)} disabled={off}>
+                      <View style={[s.sideDot, { backgroundColor: ac }, off && { opacity: 0.4 }]} />
+                      <Text style={[s.sideLabel, on && s.sideLabelOn, off && s.sideLabelOff]} numberOfLines={1}>{sec.title}</Text>
+                    </Pressable>
+                    {/* Keyboard glyph on synth/drum tracks: white = this track hears the USB keyboard,
+                        grey = it doesn't; tap to route the USB keyboard here (same as the card button). */}
+                    {kbd != null && !off && (
+                      <Pressable onPress={() => claimUsb(kbd)} hitSlop={6} style={s.sideKbd}
+                        accessibilityLabel={usbOwner(kbd) ? 'USB keyboard plays this track' : 'Route the USB keyboard to this track'}>
+                        <KbdGlyph color={usbOwner(kbd) ? C.text : C.muted} />
+                      </Pressable>
+                    )}
+                  </View>
                 );
               })}
             </ScrollView>

@@ -38,7 +38,25 @@ export class WebSerialTransport implements Transport {
   async connect(): Promise<void> {
     const nav: any = navigator;
     if (!nav.serial) throw new Error('Web Serial not supported (use Chrome/Edge on desktop).');
-    this.port = await nav.serial.requestPort();
+    await this.openPort(await nav.serial.requestPort());   // requestPort() needs a user gesture
+  }
+
+  // Gesture-free reconnect to an already-granted port (survives a page refresh). getPorts() never
+  // prompts, and opening a persisted-permission port needs no user gesture — so this restores the
+  // link automatically on reload. Returns false if no port was ever granted for this origin (the
+  // caller then falls back to the normal Connect button, which does prompt via requestPort()).
+  async reconnect(): Promise<boolean> {
+    const nav: any = navigator;
+    if (!nav.serial?.getPorts) return false;
+    const ports = await nav.serial.getPorts();
+    if (!ports.length) return false;
+    try { await this.openPort(ports[0]); return true; }
+    catch { try { await this.port?.close(); } catch {} this.port = this.writer = this.reader = null; return false; }
+  }
+
+  // Open a chosen port + start the read loop. Shared by connect() (picker) and reconnect() (granted).
+  private async openPort(port: any): Promise<void> {
+    this.port = port;
     try { await this.port.open({ baudRate: 115200 }); }
     catch (e: any) {
       if (e?.name !== 'InvalidStateError') throw e;
