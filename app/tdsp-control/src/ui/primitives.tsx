@@ -57,45 +57,7 @@ export const LoopStepGrid = ({ bars, sig, prog, active, recording }:
   );
 };
 
-// Header beat lights: one circle per beat of the bar, the current beat lit, beat 1 (the
-// downbeat / accent) in a distinct color. Two clock sources, preferring the device:
-//   • LIVE (`live`): the device's @BEAT feed — locked to the REAL master downbeat + meter.
-//   • LOCAL fallback: a self-correcting clock at the master BPM, for firmware that doesn't
-//     emit @BEAT. Matches the tempo but re-anchors its downbeat to "now" on tempo/meter change.
-// Only this component re-renders each beat (its own state), not the whole app.
-export function BeatStrip({ sig, bpm, active, live }: { sig: number; bpm: number; active: boolean; live: { i: number; n: number } | null }) {
-  const [beat, setBeat] = useState(-1);
-  const anchor = useRef(0);
-  const useLive = active && !!live;
-  const beats = useLive ? live!.n : sig;   // device meter when live, else the @METROSIG setting
-  useEffect(() => {
-    if (useLive || !active || beats < 1 || bpm <= 0) { setBeat(-1); return; }   // live feed drives it directly — no local timer
-    const period = 60000 / bpm;   // ms per quarter-note beat
-    const now = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
-    anchor.current = now();
-    let timer: any;
-    // Self-correcting: each tick schedules the NEXT beat boundary off the fixed anchor,
-    // so setTimeout jitter never accumulates into drift.
-    const tick = () => {
-      const t = now();
-      const i = Math.floor((t - anchor.current) / period);
-      setBeat(((i % beats) + beats) % beats);
-      timer = setTimeout(tick, Math.max(0, anchor.current + (i + 1) * period - t));
-    };
-    tick();
-    return () => clearTimeout(timer);
-  }, [beats, bpm, active, useLive]);
-  if (!active || beats < 1) return null;
-  const lit = useLive ? live!.i : beat;
-  return (
-    <View style={s.beatStrip}>
-      {Array.from({ length: beats }, (_, i) => {
-        const on = i === lit, down = i === 0;
-        return <View key={i} style={[s.beatDot, down && s.beatDotDown, on && (down ? s.beatDotDownOn : s.beatDotOn)]} />;
-      })}
-    </View>
-  );
-}
+// BeatStrip (the header's tempo dots) now lives in ./elements/BeatStrip.
 
 // Homepage card: the section's title, live value, and header controls. Fixed size so
 // every card matches. Title/value sit on top; controls always sit on their own row at
@@ -104,8 +66,11 @@ export function BeatStrip({ sig, bpm, active, live }: { sig: number; bpm: number
 // header controls (nested Pressables) never risk a stray navigation.
 // The SAME Card is used on the home grid AND as a section-page header (pass `onBack`): identical
 // content (title/subtitle/foot/actions), just a left back-arrow instead of the right open-chevron.
-export function Card({ title, value, status, subtitle, actions, foot, progress, onPress, onBack, style, accent, tint, topRight, disabledReason }:
-  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; foot?: React.ReactNode; progress?: number; onPress?: () => void; onBack?: () => void; style?: any; accent?: string; tint?: string; topRight?: React.ReactNode; disabledReason?: string }) {
+// `kicker` is a small uppercase eyebrow above the title (the track's identity — SYNTH A / DRUMS —
+// when the title itself is repurposed as a big "hero" line for the loaded preset/loop). With a kicker
+// the title renders plain (the kicker carries the accent) and one size larger, song-title style.
+export function Card({ title, value, status, subtitle, actions, foot, progress, onPress, onBack, style, accent, tint, topRight, disabledReason, kicker, leading }:
+  { title: string; value?: string; status?: string; subtitle?: React.ReactNode; actions?: React.ReactNode; foot?: React.ReactNode; progress?: number; onPress?: () => void; onBack?: () => void; style?: any; accent?: string; tint?: string; topRight?: React.ReactNode; disabledReason?: string; kicker?: string; leading?: React.ReactNode }) {
   // A feature the firmware compiled in but that can't run right now (e.g. a PSRAM-only synth/looper/fx
   // on a board without PSRAM, or a missing SD asset): grey the whole card, swap the subtitle for the
   // reason, and make it inert (no chevron, no header actions) — the box is visible so the user knows
@@ -115,8 +80,10 @@ export function Card({ title, value, status, subtitle, actions, foot, progress, 
     <View style={[s.card, style, tint && { backgroundColor: tint }, accent && { borderLeftColor: accent, borderLeftWidth: 3 }, off && s.cardOff]}>
       <View style={s.cardHead}>
         {onBack && <Pressable onPress={onBack} hitSlop={10} style={s.chevBtn}><Text style={s.chev}>‹</Text></Pressable>}
+        {!off && leading}
         <View style={s.drawerLeft}>
-          <Text style={[s.drawerTitle, accent && { color: accent }]} numberOfLines={1}>{title}</Text>
+          {!!kicker && <Text style={[s.cardKicker, accent && { color: accent }]} numberOfLines={1}>{kicker}</Text>}
+          <Text style={[s.drawerTitle, kicker ? s.drawerTitleHero : (accent && { color: accent })]} numberOfLines={1}>{title}</Text>
           {off ? <Text style={s.cardReason} numberOfLines={1}>⚠  {disabledReason}</Text>
             : subtitle != null
               // A plain-string subtitle must be wrapped in styled <Text> — a bare string lands unstyled
@@ -126,10 +93,23 @@ export function Card({ title, value, status, subtitle, actions, foot, progress, 
           {!off && progress != null && <ProgressBar value={progress} />}
         </View>
         {!off && topRight}
-        {!onBack && <Pressable onPress={off ? undefined : onPress} disabled={off} hitSlop={10} style={s.chevBtn}><Text style={[s.chev, off && { opacity: 0 }]}>❯</Text></Pressable>}
+        {/* right-side "open" chevron only when there's actually an onPress to open — a card with neither
+            onPress nor onBack (e.g. the Drums lead tile, which navigates via the menu bar) shows no chevron */}
+        {!onBack && !!onPress && <Pressable onPress={off ? undefined : onPress} disabled={off} hitSlop={10} style={s.chevBtn}><Text style={[s.chev, off && { opacity: 0 }]}>❯</Text></Pressable>}
       </View>
       {!off && !!foot && <View style={s.cardFoot}>{foot}</View>}
       {!off && !!actions && <View style={s.cardActions}>{actions}</View>}
+    </View>
+  );
+}
+
+// A flag chip: a small label+value badge (Engine / FX / Arp / Player …) shown in a row under a track
+// card's hero title. `label` is the muted uppercase key; `value` the state. Wrap several in <View style={s.flagRow}>.
+export function Flag({ label, value }: { label: string; value: string }) {
+  return (
+    <View style={s.flag}>
+      <Text style={s.flagLabel}>{label}</Text>
+      <Text style={s.flagVal} numberOfLines={1}>{value}</Text>
     </View>
   );
 }
@@ -305,18 +285,29 @@ export function BodyTabs({ tabs }: { tabs: { key: string; label: string; body: R
 // body is built).
 // `accent`/`tint`, when given, override each child's own colors so ALL sub-cards match the parent
 // tile — a quick visual cue for which section (e.g. which synthesizer) you're inside.
-export function SubMenu({ getItems, onOpen, accent, tint }: { getItems: () => any[]; onOpen: (id: string) => void; accent?: string; tint?: string }) {
+export function SubMenu({ getItems, onOpen, accent, tint, cols: colsFixed, lead }: { getItems: () => any[]; onOpen: (id: string) => void; accent?: string; tint?: string; cols?: number; lead?: React.ReactNode }) {
   // Tile the children into a responsive grid rather than a stacked column. Columns come from the
   // CONTAINER width (a section page is capped well below the window, so useWindowDimensions would
   // over-count) — measured via onLayout, same 1/2/3-column feel as the home grid. Each card keeps its
   // fixed cardGrid size so the grid reads as uniform tiles.
+  // `cols`, when given, pins the column count (e.g. the Drums page wants a fixed 2-up grid of
+  // equal-width cards) — still collapsing to a single column when the container is too narrow for it.
+  // `lead`, when given, is rendered as the FIRST grid cell (same width as the child tiles) — the Drums
+  // page uses it to fold its own parent card into the grid instead of a separate full-width header.
   const [w, setW] = useState(0);
-  const cols = w >= 900 ? 3 : w >= 560 ? 2 : 1;
+  const cols = colsFixed ? (w > 0 && w < 520 ? 1 : colsFixed) : (w >= 900 ? 3 : w >= 560 ? 2 : 1);
+  const cellW = `${100 / cols}%` as `${number}%`;   // typed as DimensionValue so the inline width style typechecks
   return (
     <View style={s.submenu} onLayout={e => setW(e.nativeEvent.layout.width)}>
+      {lead && <View style={[s.submenuCell, { width: cellW }]}>{lead}</View>}
       {getItems().map(sec => (
-        <View key={sec.id} style={[s.submenuCell, { width: `${100 / cols}%` }]}>
-          <Card title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} actions={sec.actions} foot={sec.foot}
+        <View key={sec.id} style={[s.submenuCell, { width: cellW }]}>
+          {/* Album-cover tile (sec.kicker set): the section name becomes an uppercase eyebrow, its live
+              value the big hero "track title", with a square media box (sec.leading) on the left. Plain
+              cards (no kicker) render the title/value normally. */}
+          <Card title={sec.kicker != null ? (sec.hero ?? sec.title) : sec.title}
+            kicker={sec.kicker} leading={sec.leading}
+            value={sec.kicker != null ? undefined : sec.value} status={sec.status} subtitle={sec.subtitle} actions={sec.actions} foot={sec.foot}
             onPress={() => onOpen(sec.id)} style={s.cardGrid} accent={accent ?? sec.accent} tint={tint ?? sec.tint} topRight={sec.topRight} disabledReason={sec.disabledReason} />
         </View>
       ))}

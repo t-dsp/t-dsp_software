@@ -19,7 +19,14 @@ import type { Transport, DirPage, TransportKind } from './src/transport';
 import { C, THEME } from './src/ui/theme';
 import { s } from './src/ui/styles';
 import { EMPTY_DIR, parseDexFind, DexHit, DexRow, catalogCache, grooveDisp, TP_LABEL, DEFAULT_TP_LABEL, HPF_MODES, volDb, EndMode, END_MODES, REC_STATES, AppState, isEndMode, notify, ROW_H, VItem, InjectFolder, saveLastConn, clearLastConn, loadLastConn } from './src/ui/constants';
-import { Subtitle, LoopStepGrid, BeatStrip, Card, PageHeader, ProgressBus, LoadScreen, HdrBtn, KbdBtn, KbdGlyph, Row, ThrottledSlider, VolSlider, Stat, ListBtn, BodyTabs, SubMenu, FolderBrowser } from './src/ui/primitives';
+import { Subtitle, LoopStepGrid, Card, Flag, PageHeader, ProgressBus, LoadScreen, HdrBtn, KbdBtn, KbdGlyph, Row, ThrottledSlider, VolSlider, Stat, ListBtn, BodyTabs, SubMenu, FolderBrowser } from './src/ui/primitives';
+import { Header } from './src/ui/Header';
+import { DrumLoopsActions, DrumLoopsBody } from './src/ui/elements/DrumLoops';
+import { SynthCard } from './src/ui/synth/SynthCard';
+import { arpValue, arpActions, arpBody } from './src/ui/synth/Arpeggiator';
+import { playerActions, playerValue, playerProgress, playerBody as _playerBody, playerSongBody as _playerSongBody, RecToggle } from './src/ui/synth/MidiPlayer';
+import { voiceBrowserBody as _voiceBrowserBody, voicesActions } from './src/ui/synth/Voices';
+import { reverbBody as _reverbBody, reverbFoot, reverbValue, reverbSubtitle } from './src/ui/synth/Fx';
 import ArpStepGrid from './src/ui/ArpStepGrid';
 import PianoRoll from './src/ui/PianoRoll';
 import PlaitsPanel from './src/ui/PlaitsPanel';
@@ -28,6 +35,18 @@ import MpeMonitor from './src/ui/MpeMonitor';
 import { mpeBus, parseMpeLine } from './src/ui/mpeBus';
 import { ARP_PATTERNS as ARP_PAT, ARP_RATES, rateIndexFromFw, PAT_USER_SEQUENCE, DEFAULT_SHAPE, SeqStep, encodeSequence, encodeArpParams } from './src/arpSeq';
 import { applyArpPreset, ArpPreset, ARP_LIBRARY } from './src/arpLibrary';
+
+// The folded landing tile (gridInParent): renders a track's own card as the first cell of its child
+// grid. Prefers the section's renderCard (e.g. <SynthCard>) — assigned onto `parent` AFTER makeTrackCard
+// returns, so this component reads it lazily at render time (by which point it's set) — with the generic
+// <Card> `fallback` for tracks that have none (Drums). Module-scope so its identity is stable (a
+// component defined inside App would remount its subtree every render).
+function SelfTile({ parent, fallback, onBack }: {
+  parent: { renderCard?: (ctx: { onBack?: () => void; gridLead?: boolean }) => React.ReactNode };
+  fallback: React.ReactNode; onBack: () => void;
+}) {
+  return <>{parent.renderCard ? parent.renderCard({ onBack, gridLead: true }) : fallback}</>;
+}
 
 export default function App() {
   // Transport selection (session-only — the app has no local persistence, so this resets
@@ -55,7 +74,7 @@ export default function App() {
   const [found, setFound] = useState<TdspDevice[]>([]);
   const [scanning, setScanning] = useState(false);
   const { width } = useWindowDimensions();
-  const cols = width < 560 ? 1 : width < 900 ? 2 : 3;   // responsive homepage grid columns
+  const cols = width < 560 ? 1 : 2;   // homepage grid: two columns (single column on very narrow phones)
   const [connected, setConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
   const [userDisc, setUserDisc] = useState(false);      // user tapped Disconnect App → suppress auto-reconnect
@@ -222,6 +241,7 @@ export default function App() {
   const [trkSong, setTrkSong] = useState<Record<number, string>>({});   // per-track LOADED MIDI song from @STATE tracks[].song — hydrates on connect (esp. C/D, whose live playerX isn't in @STATE)
   const [selVoiceX, setSelVoiceX] = useState<Record<number, string>>({});   // browser sel key, keyed by 0-based voice index (>=2)
   const [trkVolX, setTrkVolX] = useState<Record<number, number>>({});       // per-extra-voice level (@TRK<i>.VOL), local echo
+  const muteVolRef = useRef<Record<number, number>>({});                     // per-voice pre-mute level, so the synth-card mute button can restore it (0% ⇄ prior)
   // Per-extra-voice (index >=2) MIDI-player + arp state, so Synth C/D get the SAME submenu as A/B
   // (Synth/Voices + MIDI Player + Arpeggiator). Map-keyed by 0-based voice index; the deck/arp
   // slots are built from these in a loop and wired to @TRK<i>.{PLAY,RESTART,STOP,LOOP,ARP*}.
@@ -1022,65 +1042,7 @@ export default function App() {
     setOct: n => { setArp2(a => ({ ...a, oct: n })); tp.arp2Octaves(n); setArp2PresetId(''); },
     setLatch: v => { setArp2(a => ({ ...a, latch: v })); tp.arp2Latch(v); setArp2PresetId(''); },
   };
-  const arpValue = (A: ArpSlotT) => (A.arp.on ? '' : '(off)  ') + (A.mode === 'preset'
-    ? (A.activeName || 'Preset — none picked')
-    : ARP_PAT[A.arp.pat] + '  ·  ' + ARP_RATES[A.arp.rate].label);
-  const arpActions = (A: ArpSlotT) => (<>
-    <HdrBtn label="‹" stop onPress={() => A.stepNav(-1)} />
-    <HdrBtn label="›" stop onPress={() => A.stepNav(1)} />
-    <HdrBtn label="▶" onPress={A.play} active={A.arp.on} />
-    <HdrBtn label="■" stop onPress={A.stop} />
-  </>);
-  const arpBody = (A: ArpSlotT) => (
-    <>
-      {/* Play and Stop are independent (not a toggle): Play re-triggers a running arp,
-          Stop bypasses it. The active state is shown by which button is highlighted. */}
-      <Row>
-        <Pressable style={[s.btn, s.grow1, A.arp.on ? s.btnOn : s.btnIdle]} onPress={A.play}>
-          <Text style={s.btnText}>▶  {A.arp.on ? 'Restart' : 'Play'}</Text>
-        </Pressable>
-        <Pressable style={[s.btn, s.btnGhost, s.grow1]} onPress={A.stop}>
-          <Text style={s.btnText}>■  Stop</Text>
-        </Pressable>
-      </Row>
-      {/* Latch is always visible (both Preset and Manual modes) so it's clear whether the
-          arp keeps running after the keys release — and can always be turned back off. */}
-      <Row><View style={{ flex: 1 }}>
-          <Text style={s.text}>Latch</Text>
-          <Text style={s.muted}>Keep arpeggiating after you release the keys.</Text>
-        </View>
-        <Switch value={A.arp.latch} onValueChange={A.setLatch} /></Row>
-      <View style={s.arpTabs}>
-        <Pressable style={[s.arpTab, A.mode === 'preset' && s.arpTabOn]} onPress={() => A.setMode('preset')}>
-          <Text style={[s.arpTabTxt, A.mode === 'preset' && s.arpTabTxtOn]}>Presets</Text>
-        </Pressable>
-        <Pressable style={[s.arpTab, A.mode === 'manual' && s.arpTabOn]} onPress={A.enterManual}>
-          <Text style={[s.arpTabTxt, A.mode === 'manual' && s.arpTabTxtOn]}>Manual</Text>
-        </Pressable>
-      </View>
-      {A.mode === 'preset' ? (
-        <>
-          <Text style={s.muted}>{A.activeName ? 'Active preset: ' + A.activeName : 'Pick a preset — it sets everything (pattern, rate, feel, scale…). Switch to Manual to tweak.'}</Text>
-          <ArpPresetBrowser onApply={A.applyPreset} activeId={A.presetId} />
-        </>
-      ) : (
-        <>
-          <Text style={s.muted}>Pattern</Text>
-          <View style={s.patGrid}>
-            {ARP_PAT.map((p, i) => <Pressable key={i} style={[s.patCell, A.arp.pat === i && s.patCellOn]} onPress={() => A.selectPattern(i)}><Text style={s.patCellTxt} numberOfLines={1}>{p}</Text></Pressable>)}
-          </View>
-          {A.arp.pat === PAT_USER_SEQUENCE && <ArpStepGrid steps={A.seq} onChange={A.applySeq} />}
-          <Row><Text style={[s.muted, { flex: 1 }]}>Rate</Text>
-            {ARP_RATES.map((r, i) => <Pressable key={i} style={[s.pill, A.arp.rate === i && s.pillOn]} onPress={() => A.setRate(i)}><Text style={s.text}>{r.label}</Text></Pressable>)}</Row>
-          <Row><Text style={[s.muted, { flex: 1 }]}>Octaves {A.arp.oct}</Text>
-            {[1, 2, 3, 4].map(n => <Pressable key={n} style={[s.pill, A.arp.oct === n && s.pillOn]} onPress={() => A.setOct(n)}><Text style={s.text}>{n}</Text></Pressable>)}</Row>
-          <Pressable style={[s.btn, s.btnGhost, s.btnWide]} onPress={A.resetManual}>
-            <Text style={s.btnText}>Reset to plain arp</Text>
-          </Pressable>
-        </>
-      )}
-    </>
-  );
+  // arpValue / arpActions / arpBody live in src/ui/synth/Arpeggiator.tsx (imported above).
   // Merge a patch into the persisted app-state and push the whole blob to the device (@APP=)
   // so it survives an app reload/reconnect. The device stores it opaquely; the app owns it.
   const persistApp = (patch: Partial<AppState>) => { appStateRef.current = { ...appStateRef.current, ...patch }; tp.saveAppState(appStateRef.current); };
@@ -1281,7 +1243,7 @@ export default function App() {
   // `value`/`status` = the subtitle; `actions` = the header controls; `body` = the page.
   // `parent` (a section id) makes this a SUB-page reached from that parent's submenu instead of a
   // home card — its Back button returns to the parent, not home (see the render's onBack).
-  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; foot?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; accent?: string; tint?: string; topRight?: React.ReactNode; parent?: string; disabledReason?: string; asCard?: boolean; kbd?: number };   // kbd = USB-keyboard track index (synth voices + drum), so the left-nav rail can show a claim glyph
+  type Section = { id: string; title: string; show: boolean; value?: string; status?: string; subtitle?: React.ReactNode; progress?: number; actions?: React.ReactNode; foot?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; accent?: string; tint?: string; topRight?: React.ReactNode; parent?: string; disabledReason?: string; asCard?: boolean; kbd?: number; hideHeader?: boolean; leading?: React.ReactNode; kicker?: string; hero?: string; renderCard?: (ctx: { onPress?: () => void; onBack?: () => void; gridLead?: boolean }) => React.ReactNode };   // kbd = USB-keyboard track index (rail claim glyph). hideHeader = a parent page that folds its own card into the body grid (Drums), so the render skips the separate page header. leading/kicker/hero = album-cover tile face: a square media box + uppercase eyebrow + big hero title (the child card shows its live value as a "track title"). renderCard = a section's own card component (e.g. <SynthCard>), used by the grid/page render sites instead of the generic <Card>. gridLead ctx flag = render at fixed cardGrid size (folded self-tile).
 
   // "Dexed: <name>" on the Dexed synth cards — mirrors the firmware's own prefixes on the other
   // engines ("OPLL: X" HeteroOpll.h, "Plaits: X" HeteroPlaits.h, …) so a hetero build reads
@@ -1330,6 +1292,29 @@ export default function App() {
         <Text style={s.pathLine} numberOfLines={1}>{extra}</Text>
       </>
     );
+  };
+  // The Synthesizer (A-D) landing card's face values, drum-card style: the loaded PRESET (hero title),
+  // the MEDIA/song (second hero line), and Engine / Arp / FX as flag chips. Reads the same per-voice
+  // state the child cards do, so the card mirrors them at a glance. <SynthCard> renders these.
+  const synthFace = (vIdx: number): { preset: string; media: string; engine: string; arp: string; fx?: string } => {
+    const hasVoice = !!trkNames[vIdx];
+    const engFam = trkEng[vIdx] ? (ENGINE_LABELS[trkEng[vIdx]] || trkEng[vIdx].toUpperCase()) : (cat.hasDexed ? 'Dexed' : 'Synth');
+    // Strip any bank/engine prefix so Preset shows just the voice (Dexed names carry none → kept as-is).
+    let preset = trkNames[vIdx] || '';
+    for (const p of ['ROM', 'PSS-140', 'GM', engFam]) if (preset.startsWith(p + ':')) { preset = preset.slice(p.length + 1).trim(); break; }
+    const song = playerX[vIdx]?.name || trkSong[vIdx] || '';
+    const a = arpX[vIdx] ?? { on: false, pat: 0, rate: 0, oct: 1, latch: false };
+    const arpPreset = ARP_LIBRARY.find(p => p.id === (arpPresetIdX[vIdx] ?? ''))?.name;
+    const arpDesc = !a.on ? 'Off'
+      : (((arpModeX[vIdx] ?? 'preset') === 'preset' && arpPreset) ? arpPreset : ARP_PAT[a.pat]) + ' · ' + ARP_RATES[a.rate].label;
+    const fxPct = fx.route === 'send' ? (trkSend[vIdx] ?? 0) : fx.mix;
+    return {
+      preset: hasVoice ? (preset || '—') : 'No preset',
+      media: song ? '♪ ' + song : 'No song',
+      engine: hasVoice ? engFam : 'None',
+      arp: arpDesc,
+      fx: caps.fx ? (fx.type === 'spring' ? 'Spring' : 'Plate') + ' ' + fxPct + '%' : undefined,
+    };
   };
 
   // Synth/Voices navigation: breadcrumb trail + an up-one-level control. `cart` selected
@@ -1383,109 +1368,13 @@ export default function App() {
   // The folder browser (nav bar + picker), shared by the Synth and Synth/Voices 2 pages.
   // Both share the browse position (cart/folder) but keep their own selection + list ref, and
   // pick into their own voice slot. `target` routes taps to voice 1 or voice 2.
-  const voiceBrowserBody = (target: number) => {
-    // NON-DEXED engine (OPLL / Plaits / any future engine): show the ENGINE'S OWN fixed patch list
-    // (from @TRK<i>.INSTRS), not the Dexed /dexed cart browser. Tapping a row selects that patch;
-    // the current one is highlighted. Row labels strip the firmware's "OPLL: "/"Plaits: " prefix.
-    const oi = target - 1;
-    // PLAITS: a full voice EDITOR (model LED matrix + HARMONICS/TIMBRE/MORPH macros + LPG drawer) in
-    // place of the flat patch list — the models still ride the same @TRK<i>.INSTR= path, the macros add
-    // @TRK<i>.HARM=/TIMBRE=/… on top. Shows once the engine's model list has arrived (@TRK<i>.INSTRS).
-    if (trkEng[oi] === 'plaits') {
-      const list = trkEngInstrs[oi] ?? [];
-      return !list.length
-        ? <View style={{ padding: 20, alignItems: 'center' }}><ActivityIndicator color={C.accent} /><Text style={[s.muted, { marginTop: 8 }]}>Loading Plaits models…</Text></View>
-        : <PlaitsPanel models={list} ninstr={trkNinstr[oi] || list.length} curModel={opllIdx[oi] ?? 0} macros={plaitsMacros[oi]}
-            onSelectModel={idx => { setOpllIdx(m => ({ ...m, [oi]: idx })); tp.trk(oi, 'INSTR=' + idx); tp.requestState(); }}
-            onMacro={(field, permille) => tp.trk(oi, field + '=' + permille)} />;
-    }
-    if (isPickerEngine(trkEng[oi])) {
-      const list = trkEngInstrs[oi] ?? [];
-      const cur = opllIdx[oi] ?? 0;
-      return !list.length
-        ? <View style={{ padding: 20, alignItems: 'center' }}><ActivityIndicator color={C.accent} /><Text style={[s.muted, { marginTop: 8 }]}>Loading {String(trkEng[oi]).toUpperCase()} voices…</Text></View>
-        : <FlatList data={list} style={s.picker} nestedScrollEnabled keyExtractor={(_, i) => 'e' + i}
-            getItemLayout={(_, index) => ({ length: ROW_H, offset: ROW_H * index, index })} onScrollToIndexFailed={() => {}}
-            renderItem={({ item, index }) => <ListBtn label={item.includes(': ') ? item.slice(item.indexOf(': ') + 2) : item} sel={index === cur}
-              onPress={() => { setOpllIdx(m => ({ ...m, [oi]: index })); tp.trk(oi, 'INSTR=' + index); tp.requestState(); }} />} />;
-    }
-    const sel = target >= 3 ? (selVoiceX[target - 1] ?? '') : target === 2 ? selVoice2 : selVoice;
-    const lref = target >= 3 ? refFor(voiceRefX, target - 1) : target === 2 ? voiceRef2 : voiceRef;
-    const bref = target >= 3 ? refFor(browseRefX, target - 1) : target === 2 ? browseRef2 : browseRef;
-    return (
-      <>
-        {/* search box: matches folders, cart names, and voice names across ALL /dexed subfolders */}
-        <View style={s.navBar}>
-          <TextInput style={[s.input, { flex: 1 }]} value={dexQuery} onChangeText={setDexQuery}
-            placeholder="Search all voices & folders…" placeholderTextColor={C.muted}
-            autoCapitalize="none" autoCorrect={false} returnKeyType="search" />
-          {dexQuery.length > 0 && (
-            <Pressable style={s.upBtn} onPress={() => { setDexQuery(''); setDexResults(null); }}>
-              <Text style={s.upTxt}>✕</Text>
-            </Pressable>
-          )}
-        </View>
-        {dexResults !== null ? (
-          dexSearching && !dexRows.length ? (
-            <View style={{ padding: 20, alignItems: 'center' }}><ActivityIndicator color={C.accent} /><Text style={[s.muted, { marginTop: 8 }]}>Searching library…</Text></View>
-          ) : dexRows.length ? (
-            <FlatList data={dexRows} style={s.picker} nestedScrollEnabled keyExtractor={(_, i) => 'sr' + i}
-              renderItem={({ item }) => <ListBtn
-                label={item.kind === 'folder' ? '📁 ' + item.name
-                  : item.kind === 'cart' ? '🎛 ' + item.name
-                  : '🎹 ' + item.vn + '   ·   ' + item.name}
-                sel={item.kind === 'voice' && (target >= 3 ? (selVoiceX[target - 1] ?? '') : target === 2 ? selVoice2 : selVoice) === 'c' + item.rel + ':' + item.voice}
-                onPress={() => pickDexRow(item, target)} />} />
-          ) : (
-            <Text style={[s.muted, { padding: 12 }]}>{dexErr ? '⚠ ' + dexErr : 'No matches for “' + dexQuery.trim() + '”.'}</Text>
-          )
-        ) : (
-        <>
-        {/* nav bar: up-one-level on the left, breadcrumb trail beside it */}
-        <View style={s.navBar}>
-          <Pressable style={[s.upBtn, atRoot && s.upBtnOff]} onPress={goUp} disabled={atRoot}>
-            <Text style={s.upTxt}>‹</Text>
-          </Pressable>
-          <ScrollView horizontal style={s.crumbs} showsHorizontalScrollIndicator={false} contentContainerStyle={s.crumbsInner}>
-            {crumbs.map((c, i) => {
-              const last = i === crumbs.length - 1;
-              return (
-                <View key={i} style={s.crumbItem}>
-                  {i > 0 && <Text style={s.crumbSep}>›</Text>}
-                  <Pressable onPress={c.go} disabled={last}>
-                    <Text style={last ? s.crumbLast : s.crumbTxt} numberOfLines={1}>{c.label}</Text>
-                  </Pressable>
-                </View>
-              );
-            })}
-          </ScrollView>
-        </View>
-        {/* the picker: always fills the remaining page height */}
-        {!loaded ? <Text style={s.muted}>Connect to load voices.</Text> : voiceData.length ? (
-          <FlatList ref={lref} data={voiceData} style={s.picker} nestedScrollEnabled keyExtractor={d => d.key}
-            getItemLayout={(_, index) => ({ length: ROW_H, offset: ROW_H * index, index })}
-            onScrollToIndexFailed={() => {}} scrollEventThrottle={32}
-            onScroll={e => { pickerY.current[listId] = e.nativeEvent.contentOffset.y; }}
-            renderItem={({ item }) => <ListBtn label={item.label} sel={sel === item.key} onPress={() => pickVoice(item, target)} />} />
-        ) : libBusy ? (
-          <View style={{ padding: 20, alignItems: 'center' }}><ActivityIndicator color={C.accent} /><Text style={[s.muted, { marginTop: 8 }]}>Loading…</Text></View>
-        ) : cart ? (
-          <Text style={s.muted}>Couldn't read this cart's voices.</Text>
-        ) : (
-          <ScrollView ref={bref} style={s.picker} nestedScrollEnabled scrollEventThrottle={32}
-            onScroll={e => { pickerY.current[listId] = e.nativeEvent.contentOffset.y; }}>
-            {vpath === '' && <ListBtn label={'★ Bundled voices (' + cat.instruments.length + ')'} onPress={() => setVpath('@bundled')} />}
-            {cat.hasDexed && level.folders.map(f => <ListBtn key={'f' + f} label={'📁 ' + f} onPress={() => setVpath(vpath ? vpath + '/' + f : f)} />)}
-            {cat.hasDexed && level.carts.map(c => <ListBtn key={c.rel} label={'🎛 ' + c.name} onPress={() => setCart({ rel: c.rel, name: c.name })} />)}
-            {cat.hasDexed && !!libErr && <Text style={[s.muted, { padding: 12 }]}>⚠ SD library: {libErr} — restart the dev server with `expo start --web -c` and hard-reload.</Text>}
-            {cat.hasDexed && !libErr && level.folders.length === 0 && level.carts.length === 0 && <Text style={s.muted}>{vpath === '' ? 'No SD library found (/dexed empty?)' : '(empty folder)'}</Text>}
-          </ScrollView>
-        )}
-        </>
-        )}
-      </>
-    );
-  };
+  // Synth / Voices browser is in src/ui/synth/Voices.tsx; App owns the browse state + passes it in.
+  const voiceBrowserBody = (target: number) => _voiceBrowserBody({
+    tp, loaded, cat, trkEng, trkEngInstrs, trkNinstr, opllIdx, setOpllIdx, plaitsMacros, isPickerEngine,
+    selVoice, selVoice2, selVoiceX, voiceRef, voiceRef2, voiceRefX, browseRef, browseRef2, browseRefX, refFor,
+    pickVoice, dexQuery, setDexQuery, dexResults, setDexResults, dexRows, dexSearching, dexErr, pickDexRow,
+    voiceData, pickerY, listId, libBusy, libErr, cart, setCart, vpath, setVpath, level, atRoot, goUp, crumbs, stepVoice,
+  }, target);
 
   // ---- Per-player loop recorder ------------------------------------------------------------
   // Each MIDI player owns its synth's looper: player 1 -> voice 1 (g_loop1), player 2 -> voice 2
@@ -1555,13 +1444,7 @@ export default function App() {
 
   // ---- MIDI player renderers: ONE component set, driven by a deck (see makeSongDeck) --------
   // Both players render from these. Edit once, both change; a third synth is a new deck.
-  const playerActions = (D: SongDeckT) => (<>
-    <HdrBtn label="‹" stop onPress={() => D.step(-1)} />
-    <HdrBtn label="›" stop onPress={() => D.step(1)} />
-    <HdrBtn label="▶" onPress={D.play} active={D.player.playing} />
-    <HdrBtn label="■" stop onPress={D.stop} />
-    {!D.noEndMode && <HdrBtn label={(END_MODES.find(m => m.key === D.endMode) || END_MODES[3]).icon} stop onPress={D.cycleEnd} />}
-  </>);
+  // playerActions is in src/ui/synth/MidiPlayer.tsx (imported above).
   // Baked test/demo songs live in flash (no `file` field — they play by NAME on the firmware's
   // non-.mid branch). Surface them as a synthetic "built-ins" folder injected at the /midi root,
   // so the browser shows every real card folder (songs, drums, loops, tests, …) PLUS the baked
@@ -1571,37 +1454,12 @@ export default function App() {
   const songInjectFolders = bakedSongLeaves.length ? [{ name: 'built-ins', leaves: bakedSongLeaves }] : [];
   // The song half: pick a song via the recursive folder browser, set the player's level, choose
   // what happens when it ends. A tap plays the file immediately (restart on a fresh downbeat).
-  const playerSongBody = (D: SongDeckT) => (
-    <>
-      <VolSlider label="Volume" value={D.vol} onChange={D.onVol} onCommit={D.commitVol} disabled={!connected} />
-      {!!D.volNote && <Text style={s.muted}>{D.volNote}</Text>}
-      <View style={s.browseBox}>
-        <FolderBrowser tp={tp} root={D.browseRoot ?? '/midi'} ext="mid" enabled={connected && loaded}
-          selected={D.player.song} playing={D.player.playing ? D.player.song : undefined}
-          onSelectFile={(full, disp) => D.playFile(full, disp)} injectFolders={D.injectFolders ?? songInjectFolders}
-          onFolderList={D.onFolderList} filesFirst={D.filesFirst} />
-      </View>
-      {!D.noEndMode && <Row><Text style={[s.muted, { flex: 1 }]}>When finished</Text>
-        {END_MODES.map(m => (
-          <Pressable key={m.key} style={[s.pill, D.endMode === m.key && s.pillOn]} onPress={() => D.applyEnd(m.key)}>
-            <Text style={s.text}>{m.icon}  {m.label}</Text>
-          </Pressable>
-        ))}</Row>}
-    </>
-  );
+  const playerSongBody = (D: SongDeckT) => _playerSongBody(D, { tp, connected, loaded, songInjectFolders, hasRec: caps.rec, hasRecEdit: caps.recedit, recRow, recMax: rec.max });
   // The player page splits in two: the song selector, and THIS synth's own loop recorder. The
   // header transport (‹ › ▶ ■) drives the SONG on both tabs; the looper has its own Record/Stop
   // in its tab. The Looper tab only exists on a recorder build.
-  const playerBody = (D: SongDeckT) => (
-    <BodyTabs tabs={[
-      { key: 'song', label: 'MIDI PLAYER', body: playerSongBody(D) },
-      ...(caps.rec ? [{ key: 'loop', label: 'MIDI LOOPER', body: recRow(D.v) }] : []),
-      ...(caps.rec && caps.recedit ? [{ key: 'edit', label: 'NOTE EDITOR', body: <PianoRoll tp={tp} voice={D.v} maxEvents={rec.max} /> }] : []),
-    ]} />
-  );
-  // Card/page subtitle + progress bar (the bar only once the device reports a position).
-  const playerValue = (D: SongDeckT) => (D.player.playing ? '♪ ' : '') + (D.player.name || '—');
-  const playerProgress = (D: SongDeckT) => (D.player.playing && D.player.prog >= 0 ? D.player.prog : undefined);
+  const playerBody = (D: SongDeckT) => _playerBody(D, { tp, connected, loaded, songInjectFolders, hasRec: caps.rec, hasRecEdit: caps.recedit, recRow, recMax: rec.max });
+  // playerValue / playerProgress are in src/ui/synth/MidiPlayer.tsx (imported above).
 
   // MIDI Input selector (Phase 3, Thread C) — which physical device plays THIS synth, plus an
   // optional channel filter. `i` is the firmware track index (synth card N -> track N-1). Switching
@@ -1650,16 +1508,7 @@ export default function App() {
   // MIDI Player page drives (so Play uses the folder-aware "play the selected track" logic).
   // Synth landing play controls. Each button is capped at 50px wide (s.hdrBtnCap) so the row stays
   // compact instead of stretching each control across the whole card.
-  const synthQuick = (voiceTarget: number, deck: SongDeckT, arpOn?: boolean, toggleArp?: () => void) => (
-    <>
-      <HdrBtn label="‹ Ins" stop onPress={() => stepVoice(-1, voiceTarget)} style={s.hdrBtnCap} />
-      <HdrBtn label="Ins ›" stop onPress={() => stepVoice(1, voiceTarget)} style={s.hdrBtnCap} />
-      <HdrBtn label="▶" onPress={deck.play} active={deck.player.playing} style={s.hdrBtnCap} />
-      <HdrBtn label="■" stop onPress={deck.stop} style={s.hdrBtnCap} />
-      {toggleArp && <HdrBtn label="Arp" onPress={toggleArp} active={!!arpOn} style={s.hdrBtnCap} />}
-      <HdrBtn label="↻" active={deck.endMode === 'repeat'} onPress={() => deck.applyEnd(deck.endMode === 'repeat' ? 'stop' : 'repeat')} style={s.hdrBtnCap} />
-    </>
-  );
+  // Synth landing play controls now live in src/ui/synth/SynthCard.tsx (rendered via renderCard).
   const synthBody = (
     <View style={s.synthWrap}>
       {/* Synth output level — the same control as the MIDI Player's Volume (both drive
@@ -1755,64 +1604,9 @@ export default function App() {
   // sends @FX.<PARAM> / @TRK<i>.FXSEND on release (throttle-friendly); state hydrates from @STATE.
   //
   // Shared character params — identical in both topologies (they shape the reverb, not the routing).
-  const fxCharacter = fx.type === 'spring' ? (
-    <>
-      <Text style={[s.text, { marginTop: 6 }]}>Character</Text>
-      <VolSlider label="Time"   value={fx.time}   max={100} onChange={v => setFx(f => ({ ...f, time: v }))}   onCommit={v => tp.fx('TIME=' + v)}   disabled={!connected} />
-      <VolSlider label="Treble" value={fx.treble} max={100} onChange={v => setFx(f => ({ ...f, treble: v }))} onCommit={v => tp.fx('TREBLE=' + v)} disabled={!connected} />
-      <VolSlider label="Bass"   value={fx.bass}   max={100} onChange={v => setFx(f => ({ ...f, bass: v }))}   onCommit={v => tp.fx('BASS=' + v)}   disabled={!connected} />
-    </>
-  ) : (
-    <>
-      <Text style={[s.text, { marginTop: 6 }]}>Space</Text>
-      <VolSlider label="Size"    value={fx.size} max={100} onChange={v => setFx(f => ({ ...f, size: v }))}    onCommit={v => tp.fx('SIZE=' + v)}    disabled={!connected} />
-      <VolSlider label="Damping" value={fx.damp} max={100} onChange={v => setFx(f => ({ ...f, damp: v }))}    onCommit={v => tp.fx('DAMP=' + v)}    disabled={!connected} />
-      <VolSlider label="Diffuse" value={fx.diff} max={100} onChange={v => setFx(f => ({ ...f, diff: v }))}    onCommit={v => tp.fx('DIFF=' + v)}    disabled={!connected} />
-      <Text style={[s.text, { marginTop: 6 }]}>Shimmer</Text>
-      <VolSlider label="Amount"  value={fx.shimmer} max={100} onChange={v => setFx(f => ({ ...f, shimmer: v }))} onCommit={v => tp.fx('SHIMMER=' + v)} disabled={!connected} />
-      <Row><View style={{ flex: 1 }}>
-          <Text style={s.text}>Freeze</Text>
-          <Text style={s.muted}>Hold the reverb tail infinitely.</Text>
-        </View>
-        <Switch value={fx.freeze} onValueChange={v => { setFx(f => ({ ...f, freeze: v })); tp.fx('FREEZE=' + (v ? 1 : 0)); }} /></Row>
-    </>
-  );
-  // One send-matrix row: a throttled slider (0..100) tapping a track into the reverb bus.
-  const fxSendRow = (key: string, label: string, value: number, onChange: (v: number) => void, onCommit: (v: number) => void) => (
-    <VolSlider key={key} label={label} value={value} max={100} onChange={onChange} onCommit={onCommit} disabled={!connected || !fx.on} />
-  );
-  const reverbBody = fx.route === 'send' ? (
-    <>
-      <Row><View style={{ flex: 1 }}>
-          <Text style={s.text}>Enable reverb</Text>
-          <Text style={s.muted}>Turns the {fx.type === 'spring' ? 'spring' : 'plate'} reverb bus on. Raise a track's send to reverb it; sends at 0 stay dry.</Text>
-        </View>
-        <Switch value={fx.on} onValueChange={v => { setFx(f => ({ ...f, on: v })); tp.fx('ON=' + (v ? 1 : 0)); }} /></Row>
-      <Text style={[s.text, { marginTop: 8 }]}>Sends</Text>
-      <Text style={s.muted}>How much of each track feeds the reverb. 0 = fully dry.</Text>
-      {Array.from({ length: synthCount }).map((_, v) =>
-        fxSendRow('snd' + v, 'Synth ' + String.fromCharCode(65 + v) + (trkNames[v] ? ' · ' + engName(trkNames[v], trkEng[v]) : ''),
-          trkSend[v] ?? 0, val => setTrkSend(m => ({ ...m, [v]: val })), val => tp.trk(v, 'FXSEND=' + val)))}
-      {(cat.hasDrums || drumLive) &&
-        fxSendRow('snddrum', 'Drums', trkSend[synthCount] ?? 0, val => setTrkSend(m => ({ ...m, [synthCount]: val })), val => tp.trk(synthCount, 'FXSEND=' + val))}
-      {caps.audioloop > 0 &&
-        fxSendRow('sndloop', 'Audio Loop', fx.loopsend, val => setFx(f => ({ ...f, loopsend: val })), val => tp.fx('LOOPSEND=' + val))}
-      <Text style={[s.text, { marginTop: 10 }]}>Return</Text>
-      <VolSlider label="Wet" value={fx.return} max={100} onChange={v => setFx(f => ({ ...f, return: v }))} onCommit={v => tp.fx('RETURN=' + v)} disabled={!connected || !fx.on} />
-      {fxCharacter}
-    </>
-  ) : (
-    <>
-      <Row><View style={{ flex: 1 }}>
-          <Text style={s.text}>Enable reverb</Text>
-          <Text style={s.muted}>Inserts the {fx.type === 'spring' ? 'spring' : 'plate'} reverb on the master output. Off = clean (bypassed).</Text>
-        </View>
-        <Switch value={fx.on} onValueChange={v => { setFx(f => ({ ...f, on: v })); tp.fx('ON=' + (v ? 1 : 0)); }} /></Row>
-      <Text style={[s.text, { marginTop: 6 }]}>Dry / Wet</Text>
-      <VolSlider label="Mix" value={fx.mix} max={100} onChange={v => setFx(f => ({ ...f, mix: v }))} onCommit={v => tp.fx('MIX=' + v)} disabled={!connected} />
-      {fxCharacter}
-    </>
-  );
+  // FX / reverb (card foot + detail) live in src/ui/synth/Fx.tsx. Build the shared ctx + reverb node.
+  const fxCtx = { fx, setFx, tp, connected, synthCount, trkNames, trkEng, engName, trkSend, setTrkSend, hasDrums: cat.hasDrums || drumLive, audioloop: caps.audioloop };
+  const reverbBody = _reverbBody(fxCtx);
   // The Drums card's "Loops" page + header transport REUSE the synth deck component: playerSongBody
   // (drumDeck) / playerActions(drumDeck) / playerValue(drumDeck). No bespoke drum player — a drum
   // track is just another synth (see drumDeck above). Only the KIT page is drum-specific:
@@ -1846,6 +1640,15 @@ export default function App() {
   const drumDetail = !caps.drumkitsel ? drumEngineLabel + '  ·  fixed rhythm voice'
     : drumKitName ? drumEngineLabel + '  ·  Kit: ' + drumKitName
     : drumEngineLabel;
+  // Bare engine NAME (no " drum engine"/" drums" suffix) for the labelled "Engine:" line on the card.
+  const drumEngineName = cat.drumEngine || (cat.hasDrums ? (cat.engine ? cat.engine.split(/[\s(]/)[0] : 'GM') : 'Drums');
+  // The loaded drum voice — the selected GM kit on a kit-capable engine, else the engine's fixed rhythm
+  // voice (matches the Kit card). Shown on the Drums card as the labelled "Voice:" line.
+  const drumVoiceLabel = caps.drumkitsel ? (drumKitName || '—') : drumEngineName + ' Drums · fixed rhythm voice';
+  // The drum track's reverb send, shown as the "FX:" line — only on a send-bus FX build (same gate as
+  // the drum FX card). e.g. "Spring Reverb (0%)". The drum track's send index is synthCount (see makeFxCard).
+  const drumHasFx = caps.fx && fx.route === 'send';
+  const drumFxFlag = (fx.type === 'spring' ? 'Spring' : 'Plate') + ' ' + (trkSend[synthCount] ?? 0) + '%';   // compact FX flag chip, e.g. "Spring 0%"
   // KIT page — mirrors the synth's Synth / Voices: pick the GM drum kit (the drum "instrument") + level.
   const drumKitBody = (
     <>
@@ -1926,6 +1729,8 @@ export default function App() {
   // when @STATE tracks[] reports that many synth voices (synthCount). Voices 0/1 keep their bespoke
   // cards (the Synth-B split toggle / shared voice-2 bus that don't apply to the fixed N-way pool).
   const DEF_ARP = { on: false, pat: 0, rate: 0, oct: 1, latch: false };
+  // A square album-cover media box holding one emoji/glyph — the left tile of a hero-style child card.
+  const mediaBox = (icon: string) => <View style={s.cardMedia}><Text style={s.cardMediaIcon}>{icon}</Text></View>;
   // ── makeTrackCard: the ONE per-track card+detail component ────────────────────────────────────
   // A track (a synth voice OR the drum track) renders as a parent submenu card + its child pages.
   // This factory owns that STRUCTURE — the stable child ids (parentId+'p'/'v'/'a'), the parent↔child
@@ -1939,30 +1744,51 @@ export default function App() {
     show: boolean; disabledReason?: string; deck: SongDeckT;
     landing: { value: string; subtitle?: React.ReactNode; topRight?: React.ReactNode; actions?: React.ReactNode;
                progress?: number; foot?: React.ReactNode; bodyPrefix?: React.ReactNode };
-    player: { title: string; fullHeight?: boolean; body: React.ReactNode };
+    player: { title: string; fullHeight?: boolean; body: React.ReactNode; rec?: RecToggle; icon?: string };   // rec = the transport row's ● loop-record toggle (synth voices only); icon = album-cover glyph
     instrument: { title: string; value: string; subtitle?: React.ReactNode; topRight?: React.ReactNode;
-                  actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean };
-    arp?: ArpSlotT;
+                  actions?: React.ReactNode; body: React.ReactNode; fullHeight?: boolean; icon?: string };
+    arp?: ArpSlotT; arpIcon?: string;   // icon → render the Arpeggiator child as a hero album-cover card
     kbd?: number;   // USB-keyboard track index for this track (undefined = no live keyboard target)
+    submenuCols?: number;   // pin the child-card grid to a fixed column count (Drums wants a 2-up grid); default = responsive
+    gridInParent?: boolean;   // fold THIS card into its own child grid as the first tile (Drums), instead of a separate full-width page header
   };
   const makeTrackCard = (c: TrackCardCfg): { parent: Section; children: Section[] } => {
     const { parentId, theme, deck } = c;
-    const submenu = <SubMenu getItems={() => sections.filter(x => x.parent === parentId).sort((a, b) => ord(a.id) - ord(b.id))} onOpen={navigate} accent={theme.accent} tint={theme.tint} />;
     const parent: Section = {
-      id: parentId, title: c.title, show: c.show, asCard: true, accent: theme.accent, tint: theme.tint,
+      id: parentId, title: c.title, show: c.show, asCard: true, hideHeader: c.gridInParent, accent: theme.accent, tint: theme.tint,
       disabledReason: c.disabledReason, value: c.landing.value, subtitle: c.landing.subtitle,
       topRight: c.landing.topRight, actions: c.landing.actions, progress: c.landing.progress, foot: c.landing.foot,
       kbd: c.kbd,
-      body: c.landing.bodyPrefix ? <View style={{ gap: 10 }}>{c.landing.bodyPrefix}{submenu}</View> : submenu,
+      body: null,   // set below — the submenu's self-tile reads `parent` (incl. its later-assigned renderCard), so build it after
     };
+    // When gridInParent is set, the parent landing renders as the FIRST tile of the child grid (with a
+    // back arrow) rather than a full-width header — so e.g. Synthesizer A / MIDI Player / Synth-Voices /
+    // Arp / FX read as one uniform grid. <SelfTile> prefers the section's OWN renderCard (<SynthCard>,
+    // assigned after this factory returns — read lazily at render time) so the folded tile keeps its play
+    // controls + Vol; it falls back to the generic <Card> for tracks with no renderCard (Drums, which
+    // supplies its transport/Vol via landing.actions/foot). onBack → home (these cards have no parent),
+    // matching the page render's default target.
+    const selfTile = c.gridInParent ? (
+      <SelfTile parent={parent} onBack={() => navigate('home')}
+        fallback={<Card title={c.title} value={c.landing.value} subtitle={c.landing.subtitle} progress={c.landing.progress}
+          actions={c.landing.actions} foot={c.landing.foot} accent={theme.accent} tint={theme.tint}
+          topRight={c.landing.topRight} onBack={() => navigate('home')} style={[s.cardGrid, { height: 'auto', minHeight: 176 }]} />} />
+    ) : undefined;
+    const submenu = <SubMenu getItems={() => sections.filter(x => x.parent === parentId).sort((a, b) => ord(a.id) - ord(b.id))} onOpen={navigate} accent={theme.accent} tint={theme.tint} cols={c.submenuCols} lead={selfTile} />;
+    parent.body = c.landing.bodyPrefix ? <View style={{ gap: 10 }}>{c.landing.bodyPrefix}{submenu}</View> : submenu;
+    // When an `icon` is supplied, the child renders as a hero album-cover tile: the section name becomes
+    // the kicker, its live value the hero "track title", with the icon media box on the left (see SubMenu).
     const children: Section[] = [
       { id: parentId + 'p', title: c.player.title, show: false, parent: parentId, fullHeight: c.player.fullHeight, accent: theme.accent, tint: theme.tint,
-        value: playerValue(deck), progress: playerProgress(deck), actions: playerActions(deck), body: c.player.body },
+        value: playerValue(deck), progress: playerProgress(deck), actions: playerActions(deck, c.player.rec), body: c.player.body,
+        ...(c.player.icon ? { leading: mediaBox(c.player.icon), kicker: c.player.title, hero: playerValue(deck) } : {}) },
       { id: parentId + 'v', title: c.instrument.title, show: false, parent: parentId, fullHeight: c.instrument.fullHeight, accent: theme.accent, tint: theme.tint,
-        value: c.instrument.value, subtitle: c.instrument.subtitle, topRight: c.instrument.topRight, actions: c.instrument.actions, body: c.instrument.body },
+        value: c.instrument.value, subtitle: c.instrument.subtitle, topRight: c.instrument.topRight, actions: c.instrument.actions, body: c.instrument.body,
+        ...(c.instrument.icon ? { leading: mediaBox(c.instrument.icon), kicker: c.instrument.title, hero: c.instrument.value } : {}) },
     ];
     if (c.arp) children.push({ id: parentId + 'a', title: 'Arpeggiator', show: false, parent: parentId, accent: theme.accent, tint: theme.tint,
-      value: arpValue(c.arp), actions: arpActions(c.arp), body: arpBody(c.arp) });
+      value: arpValue(c.arp), actions: arpActions(c.arp), body: arpBody(c.arp),
+      ...(c.arpIcon ? { leading: mediaBox(c.arpIcon), kicker: 'Arpeggiator', hero: arpValue(c.arp) } : {}) });
     return { parent, children };
   };
   const extraSynthCards: Section[] = [];
@@ -2008,23 +1834,53 @@ export default function App() {
     // same structure the drum track uses. Bespoke bits (voice browser, USB-kbd claim, arp) are passed in.
     const synthTrackVol = <VolSlider label="Volume" value={trkVolX[v] ?? 100} disabled={!connected} onChange={n => setTrkVolX(m => ({ ...m, [v]: n }))} onCommit={n => tp.trk(v, 'VOL=' + n)} />;
     const engLabel = trkNames[v] ? engName(trkNames[v], trkEng[v]) : 'None';
+    // The MIDI Player transport's ● loop-record toggle (recorder builds only): arm a fresh recording of
+    // THIS synth (song + live keys) when idle, stop/close the loop when armed or capturing. The full
+    // Record/Overdub/Clear + loop-length controls stay in the player page's MIDI LOOPER tab (recRow).
+    const rd = caps.rec ? recDeck(v + 1) : null;
+    const recToggle: RecToggle | undefined = rd
+      ? { active: rd.st === 1 || rd.st === 2 || rd.st === 3, onToggle: () => (rd.st === 1 || rd.st === 2 || rd.st === 3 ? rd.stop() : rd.record()) }
+      : undefined;
+    // Playback position for the card's progress bar: the song player's position while a song plays,
+    // otherwise the loop recorder's phase while a loop is recording/overdubbing/playing (0 when idle).
+    const playProg = (deck.player.playing && deck.player.prog >= 0) ? deck.player.prog
+      : (rd && (rd.st === 2 || rd.st === 3 || rd.st === 4) ? rd.prog : 0);
     const { parent, children } = makeTrackCard({
       parentId, title: 'Synthesizer ' + letter, theme, show: synthCount > v, deck, kbd: v,
+      gridInParent: true,   // fold the Synthesizer card into its own child grid (inline with MIDI Player / Synth·Voices / Arp / FX)
+      submenuCols: 2,       // the synth detail page tiles its cards as an even 2-up grid
       landing: {
         value: engLabel,
         topRight: usbKbd(v),   // per-track USB-keyboard claim (white = this synth hears the USB MIDI keyboard)
-        actions: synthQuick(v + 1, deck, arpState.on, () => { const on = !arpState.on; setA({ on }); tp.trk(v, 'ARPON=' + (on ? 1 : 0)); }),
-        foot: <VolSlider label="Vol" value={trkVolX[v] ?? 100} onChange={n => setTrkVolX(m => ({ ...m, [v]: n }))} onCommit={n => tp.trk(v, 'VOL=' + n)} disabled={!connected} />,
         subtitle: synthCardSub(v, trkNames[v], undefined, playerX[v]?.name),
+        // NB: the landing card's play controls + Vol now render via parent.renderCard (SynthCard) set below.
       },
-      player: { title: 'MIDI Player', body: playerBody(deck) },
+      player: { title: 'Media', body: playerBody(deck), rec: recToggle, icon: '🎵' },
       instrument: {
-        title: 'Synth / Voices', fullHeight: true, value: engLabel, topRight: usbKbd(v),
-        actions: <><HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1, v + 1)} /><HdrBtn label="Next ›" stop onPress={() => stepVoice(1, v + 1)} /></>,
+        title: 'Synth / Voices', fullHeight: true, value: engLabel, topRight: usbKbd(v), icon: '👂',
+        actions: <><HdrBtn label="‹ Prev" stop onPress={() => stepVoice(-1, v + 1)} style={s.hdrBtnTall} /><HdrBtn label="Next ›" stop onPress={() => stepVoice(1, v + 1)} style={s.hdrBtnTall} /></>,
         body: <View style={s.synthWrap}>{synthTrackVol}{voiceBrowserBody(v + 1)}{midiInputBody(v)}</View>,
       },
-      arp: arpSlot,
+      arp: arpSlot, arpIcon: '🔁',
     });
+    // The synth landing card renders via the extracted <SynthCard> (src/ui/synth/SynthCard.tsx): on the
+    // home grid (rc.onPress) and as the folded first tile of its own child grid (rc.gridLead). Neither
+    // shows a back arrow — navigation is via the menu bar. The face (preset/media/engine/arp/fx) mirrors
+    // the drum card's kicker + hero + flag-chip layout.
+    const face = synthFace(v);
+    parent.renderCard = (rc) => (
+      <SynthCard accent={theme.accent} tint={theme.tint} letter={letter}
+        preset={face.preset} media={face.media} engine={face.engine} arp={face.arp} fx={face.fx} connected={connected}
+        kbdOwned={usbOwner(v)} onClaimKbd={() => claimUsb(v)}
+        vol={trkVolX[v] ?? 100} onVol={n => setTrkVolX(m => ({ ...m, [v]: n }))} onVolCommit={n => tp.trk(v, 'VOL=' + n)}
+        onToggleMute={() => { const cur = trkVolX[v] ?? 100; const nv = cur > 0 ? 0 : (muteVolRef.current[v] || 100); if (cur > 0) muteVolRef.current[v] = cur; setTrkVolX(m => ({ ...m, [v]: nv })); tp.trk(v, 'VOL=' + nv); }}
+        progress={playProg}
+        playing={deck.player.playing} onInsPrev={() => stepVoice(-1, v + 1)} onInsNext={() => stepVoice(1, v + 1)}
+        onPlay={deck.play} onStop={deck.stop}
+        arpOn={arpState.on} onToggleArp={() => { const on = !arpState.on; setA({ on }); tp.trk(v, 'ARPON=' + (on ? 1 : 0)); }}
+        repeatOn={deck.endMode === 'repeat'} onToggleRepeat={() => deck.applyEnd(deck.endMode === 'repeat' ? 'stop' : 'repeat')}
+        onPress={rc.onPress} onBack={rc.onBack} gridLead={rc.gridLead} />
+    );
     extraSynthCards.push(parent);
     extraChildCards.push(...children);
   }
@@ -2067,11 +1923,19 @@ export default function App() {
       id: parentId + 'f', title: 'FX', show: false, parent: parentId, accent: th.accent, tint: th.tint,
       value: snd > 0 ? 'Send ' + snd + '%' : 'Dry',
       subtitle: revName,
+      // Album-cover tile face: "FX" kicker + the send state as the hero "track title" + a ✨ media box.
+      leading: mediaBox('✨'), kicker: 'FX', hero: snd > 0 ? 'Send ' + snd + '%' : 'Dry',
       // Inline on the tile: the reverb SEND for this track, so you can dial it without opening the
       // sub-page (matches the Reverb card's own quick-slider foot). The full effect detail is inside.
       foot: <VolSlider label="Send" value={snd} max={100}
         onChange={n => setTrkSend(m => ({ ...m, [trkIdx]: n }))}
         onCommit={n => tp.trk(trkIdx, 'FXSEND=' + n)} disabled={!connected || !fx.on} />,
+      // Player-control-style − / + buttons that step this track's reverb send in 10% increments (0..100),
+      // matching the transport rows on the sibling cards. No-op while disconnected or the bus is off.
+      actions: (<>
+        <HdrBtn label="−" stop style={s.hdrBtnCap} onPress={() => { if (!connected || !fx.on) return; const nv = Math.max(0, snd - 10); setTrkSend(m => ({ ...m, [trkIdx]: nv })); tp.trk(trkIdx, 'FXSEND=' + nv); }} />
+        <HdrBtn label="+" stop style={s.hdrBtnCap} onPress={() => { if (!connected || !fx.on) return; const nv = Math.min(100, snd + 10); setTrkSend(m => ({ ...m, [trkIdx]: nv })); tp.trk(trkIdx, 'FXSEND=' + nv); }} />
+      </>),
       body: (
         <View style={s.synthWrap}>
           <Text style={s.muted}>Effects fed from this track. Each send sets how much of this track goes to the shared effect — 0 keeps it dry. Character &amp; return live on the Reverb card.</Text>
@@ -2100,21 +1964,64 @@ export default function App() {
   // has no Arpeggiator child. The landing shows the groove transport (tap ▶ plays a groove) + Volume.
   const drumCard = makeTrackCard({
     parentId: 'drumtrack', title: 'Drums', theme: THEME.drums, kbd: drumSrcIdx ?? undefined,
+    submenuCols: 2, gridInParent: true,   // Drums page: the Drums card + FX / Drum Loops / Kit as one even 2-up grid
     show: cat.hasDrums || drumLive || !!unavail.drums, disabledReason: unavail.drums, deck: drumDeck,
     landing: {
-      value: playerValue(drumDeck), progress: playerProgress(drumDeck), actions: playerActions(drumDeck),
-      subtitle: drumEngineLabel,   // show WHICH drum engine (OPLL/TSF/GM) plays these grooves, like the synth cards name their engine
+      value: playerValue(drumDeck), progress: playerProgress(drumDeck), actions: <DrumLoopsActions deck={drumDeck} />,
+      // The Drums card face is drawn by drumCard.parent.renderCard below (hero loop + kit + flag chips);
+      // this subtitle is only a fallback if that renderCard is ever removed.
+      subtitle: <Text style={s.drawerValue} numberOfLines={1}>{drumEngineName} · ♪ {drumDeck.player.name || '—'}</Text>,
       topRight: drumSrcIdx != null ? usbKbd(drumSrcIdx) : undefined,   // finger-drum the kit from the USB keyboard
       foot: <VolSlider label="Vol" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />,
     },
-    player: { title: 'Drum Loops', fullHeight: true, body: playerSongBody(drumDeck) },
+    // icon → these children render as hero album-cover tiles (leading media box + kicker + hero value),
+    // matching the synth track's Media / Synth-Voices cards. Loops = 🔁 (the groove player), the drum
+    // instrument = 🎛️ (the drum engine/kit). The FX child sets its own ✨ box in makeFxCard.
+    player: { title: 'Drum Loops', fullHeight: true, icon: '🔁', body: <DrumLoopsBody deck={drumDeck} tp={tp} connected={connected} loaded={loaded} /> },
     instrument: {
-      title: caps.drumkitsel ? 'Kit' : 'Drum Voice', subtitle: drumDetail,
+      title: caps.drumkitsel ? 'Kit' : 'Drum Voice', subtitle: drumDetail, icon: '🎛️',
       value: caps.drumkitsel ? (cat.drumkits[drums.kit]?.name || '—') : (cat.drumEngine || 'OPLL') + ' rhythm',
       actions: kitNav,   // ‹ Prev / Next › kit — renders on both the Kit card and its detail page
       body: drumKitBody,
     },
   });
+  // The Drums card face — same standard as the synth cards (a "DRUMS" kicker + a big hero title + flag
+  // chips + Vol + transport), but with the drum-specific hero: the LOOP (groove) is the title and the
+  // KIT/VOICE is a second hero line (a drum track is defined by both its beat and its kit). Engine and,
+  // on a send-bus build, FX ride below as flag chips. Read lazily by SelfTile / the grid / the page.
+  drumCard.parent.renderCard = (rc) => {
+    // Playback bar for the running groove (0-100%), rendered in the foot above the Vol slider — the
+    // same "Playing …%" row the synth cards use (not Card's thin progress line), so the cards match.
+    const drumPct = Math.round(Math.max(0, Math.min(1, playerProgress(drumDeck) ?? 0)) * 100);
+    return (
+    <Card accent={THEME.drums.accent} tint={THEME.drums.tint}
+      leading={<View style={s.cardMedia}><Text style={s.cardMediaIcon}>🥁</Text></View>}
+      kicker="Drums" title={drumDeck.player.name || 'No loop'}
+      subtitle={(
+        <>
+          <Text style={s.heroSub} numberOfLines={1}>{drumVoiceLabel}</Text>
+          <View style={s.flagRow}>
+            <Flag label="Engine" value={drumEngineName} />
+            {drumHasFx && <Flag label="FX" value={drumFxFlag} />}
+          </View>
+        </>
+      )}
+      topRight={drumSrcIdx != null ? usbKbd(drumSrcIdx) : undefined}
+      foot={(
+        <>
+          <View style={s.volRow}>
+            <Text style={[s.muted, { width: 52 }]}>Playing</Text>
+            <View style={s.progTrackFoot}><View style={[s.progFill, { width: `${drumPct}%` }]} /></View>
+            <Text style={[s.muted, { width: 44, textAlign: 'right' }]}>{drumPct}%</Text>
+          </View>
+          <VolSlider label="Vol" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />
+        </>
+      )}
+      actions={<DrumLoopsActions deck={drumDeck} />}
+      onPress={rc.onPress}   /* no onBack: the Drums card shows no back button — navigate via the menu bar / rail */
+      style={rc.onPress || rc.gridLead ? s.cardGridAuto : undefined} />
+    );
+  };
 
   const sections: Section[] = [
     ...extraSynthCards,
@@ -2184,19 +2091,11 @@ export default function App() {
     },
     // REVERB — FX master insert (caps.fx). Top-level card; sliders adapt to the built reverb type.
     {
-      id: 'reverb', title: 'Reverb', show: caps.fx, value: fx.on ? 'On' : 'Off',
-      subtitle: (fx.type === 'spring' ? 'Spring' : 'Plate') + (fx.route === 'send' ? ' · Send bus' : ''),
+      id: 'reverb', title: 'Reverb', show: caps.fx, value: reverbValue(fx),
+      subtitle: reverbSubtitle(fx),
       // On the tile: quick On/Off + the wet level (Return in send mode, Dry/Wet Mix in insert mode),
       // so you can dial reverb without opening the card. Per-track sends live inside the card.
-      foot: (
-        <>
-          <Row><Text style={[s.text, { flex: 1 }]}>{fx.on ? 'On' : 'Off'}</Text>
-            <Switch value={fx.on} onValueChange={v => { setFx(f => ({ ...f, on: v })); tp.fx('ON=' + (v ? 1 : 0)); }} /></Row>
-          {fx.route === 'send'
-            ? <VolSlider label="Return" value={fx.return} max={100} onChange={v => setFx(f => ({ ...f, return: v }))} onCommit={v => tp.fx('RETURN=' + v)} disabled={!connected || !fx.on} />
-            : <VolSlider label="Mix" value={fx.mix} max={100} onChange={v => setFx(f => ({ ...f, mix: v }))} onCommit={v => tp.fx('MIX=' + v)} disabled={!connected || !fx.on} />}
-        </>
-      ),
+      foot: reverbFoot(fxCtx),
       body: reverbBody,
     },
     // Synth A/B (voices 0/1) are now generated by makeTrackCard in the loop above (parentIds
@@ -2380,73 +2279,22 @@ export default function App() {
 
   return (
     <View style={s.app}>
-      {/* ===== header: brand, connect, master volume (global, on every page) ===== */}
-      <View style={s.header}>
-        <View style={s.brandRow}>
-          <View style={[s.dot, connected && s.dotOn]} />
-          <Text style={s.brand}>T-DSP</Text>
-          <View style={{ flex: 1 }} />
-          {/* Reload button (web only): app-window Chrome on the jay-mint touchscreen has no browser
-              toolbar, so this gives a tap target to pull the latest Metro bundle after a code change.
-              Always visible (any connection state) since a dev reload is wanted from anywhere. */}
-          {Platform.OS === 'web' && (
-            <Pressable style={s.refreshBtn} onPress={() => (globalThis as any).location?.reload?.()} accessibilityLabel="Reload the app">
-              <Text style={s.refreshTxt}>⟳</Text>
-            </Pressable>
-          )}
-          <Pressable style={s.btn} onPress={() => (connected || connecting ? userDisconnect() : userConnect())}>
-            <Text style={s.btnText}>{connected ? 'Disconnect App' : connecting ? 'Cancel' : 'Connect App'}</Text>
-          </Pressable>
-        </View>
-        <Text style={s.statline}>{headerStatus}</Text>
-        <BeatStrip sig={metro.sig} bpm={bpm} active={connected && (metro.on || player.playing || !!drums.playing)} live={beatFeed} />
-        {/* ===== MASTER TRANSPORT (always in the header): the metronome is the app-wide clock.
-            Play defines the downbeat and runs the grid everything (players, drums, arps) locks to;
-            Stop clears the stage. Mute toggles only whether you HEAR the click — the clock runs
-            either way. Buttons disable when not connected (like the VOL row). ===== */}
-        <View style={s.transportRow}>
-          <Pressable style={[s.tBtn, metro.on && s.tBtnOn]} onPress={playMetro} disabled={!connected}
-            accessibilityLabel={metro.on ? 'Transport running — restart the downbeat' : 'Start the transport'}>
-            <Text style={[s.tBtnText, metro.on && s.tBtnOnText]}>▶</Text></Pressable>
-          <Pressable style={[s.tBtn, s.tBtnGhost]} onPress={stopMetro} disabled={!connected}
-            accessibilityLabel="Stop everything">
-            <Text style={s.tBtnText}>■</Text></Pressable>
-          <Pressable style={[s.tBtn, s.tBtnGhost, !metro.muted && s.tBtnOn]} disabled={!connected}
-            onPress={() => { const muted = !metro.muted; setMetro(m => ({ ...m, muted })); tp.metronomeMute(muted); }}
-            accessibilityLabel={metro.muted ? 'Click muted — tap to hear it' : 'Click audible — tap to mute'}>
-            <Text style={[s.tBtnText, !metro.muted && s.tBtnOnText]}>{metro.muted ? '🔇' : '🔊'}</Text></Pressable>
-          <View style={{ flex: 1 }} />
-          <Pressable style={s.tBtn} onPress={() => stepBpm(-1)} disabled={!connected}><Text style={s.tBtnText}>−</Text></Pressable>
-          <Text style={s.tBpm}>{Math.round(bpm)}<Text style={s.tBpmUnit}> BPM</Text></Text>
-          <Pressable style={s.tBtn} onPress={() => stepBpm(1)} disabled={!connected}><Text style={s.tBtnText}>＋</Text></Pressable>
-          {/* Tempo lock: off ⇒ the sole piece of content you start sets the BPM; on ⇒ the tempo is held. */}
-          <Pressable style={[s.tBtn, s.tBtnGhost, metro.locked && s.tBtnOn]} disabled={!connected}
-            onPress={() => { const locked = !metro.locked; setMetro(m => ({ ...m, locked })); tp.metronomeLock(locked); }}
-            accessibilityLabel={metro.locked ? 'Tempo locked — tap to let content set the BPM' : 'Tempo follows content — tap to lock'}>
-            <Text style={[s.tBtnText, metro.locked && s.tBtnOnText]}>{metro.locked ? '🔒' : '🔓'}</Text></Pressable>
-        </View>
-        <View style={s.volRow}>
-          <Text style={s.volLbl}>VOL</Text>
-          <ThrottledSlider max={100} value={vol} onChange={setVol} onCommit={v => tp.masterVolume(v)} disabled={!connected} />
-          <Text style={s.volVal}>{Math.round(vol)}</Text>
-        </View>
-      </View>
+      {/* ===== header: brand, connect, tempo, master volume, transport (global, on every page) ===== */}
+      <Header
+        connected={connected} connecting={connecting}
+        onConnectToggle={() => (connected || connecting ? userDisconnect() : userConnect())}
+        sig={metro.sig} bpm={bpm}
+        beatActive={connected && (metro.on || player.playing || !!drums.playing)} beatFeed={beatFeed}
+        vol={vol} onVolChange={setVol} onVolCommit={v => tp.masterVolume(v)}
+        status={headerStatus} brandInSidebar={connected && loaded && desktop}
+        metroOn={metro.on} metroMuted={metro.muted} metroLocked={metro.locked}
+        onPlay={playMetro} onStop={stopMetro} onStepBpm={stepBpm}
+        onToggleMute={() => { const muted = !metro.muted; setMetro(m => ({ ...m, muted })); tp.metronomeMute(muted); }}
+        onToggleLock={() => { const locked = !metro.locked; setMetro(m => ({ ...m, locked })); tp.metronomeLock(locked); }}
+      />
 
-      {/* ===== menu bar: browser-style back / forward through the navigation history, plus the
-          current location. Sits just below the header; only shown once there's content to navigate. ===== */}
-      {connected && loaded && (
-        <View style={s.menuBar}>
-          <Pressable style={[s.menuBtn, !canBack && s.menuBtnOff]} onPress={goBack} disabled={!canBack} accessibilityLabel="Back">
-            <Text style={s.menuBtnText}>←</Text></Pressable>
-          <Pressable style={[s.menuBtn, !canForward && s.menuBtnOff]} onPress={goForward} disabled={!canForward} accessibilityLabel="Forward">
-            <Text style={s.menuBtnText}>→</Text></Pressable>
-          {route !== 'home' && (
-            <Pressable style={s.menuBtn} onPress={() => navigate('home')} accessibilityLabel="Home">
-              <Text style={s.menuBtnText}>⌂</Text></Pressable>
-          )}
-          <Text style={s.menuHere} numberOfLines={1}>{cur ? cur.title : 'Home'}</Text>
-        </View>
-      )}
+      {/* menu bar (back / forward / home + location) moved INTO the content column below, so it sits
+          to the RIGHT of the left nav rail instead of spanning full-width above it. */}
 
       {!connected && (
         <View style={s.connectHome}>
@@ -2519,7 +2367,13 @@ export default function App() {
           {/* ===== desktop-only left nav rail: direct links that dive straight into each root
                   section's detail page. Hidden on narrow (mobile) layouts. ===== */}
           {desktop && (
-            <ScrollView style={s.sideBar} contentContainerStyle={{ paddingBottom: 40 }}>
+            <View style={s.sideBar}>
+              {/* T-DSP brand filling the sidebar's top-left, level with the menu bar to its right. */}
+              <View style={s.sideBrand}>
+                <View style={[s.dot, connected && s.dotOn]} />
+                <Text style={s.brand}>T-DSP</Text>
+              </View>
+              <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 40 }}>
               <Pressable style={[s.sideItem, route === 'home' && s.sideItemOn]} onPress={() => navigate('home')}>
                 <View style={[s.sideDot, { backgroundColor: C.muted }]} />
                 <Text style={[s.sideLabel, route === 'home' && s.sideLabelOn]} numberOfLines={1}>Home</Text>
@@ -2549,17 +2403,54 @@ export default function App() {
                 );
               })}
             </ScrollView>
+            </View>
           )}
           {/* ===== main content column ===== */}
           <View style={s.content}>
+          {/* menu bar: back / forward / home + current location — INSIDE the content column so it sits
+              to the RIGHT of the nav rail rather than spanning above it. */}
+          <View style={s.menuBar}>
+            <Pressable style={[s.menuBtn, !canBack && s.menuBtnOff]} onPress={goBack} disabled={!canBack} accessibilityLabel="Back">
+              <Text style={s.menuBtnText}>←</Text></Pressable>
+            <Pressable style={[s.menuBtn, !canForward && s.menuBtnOff]} onPress={goForward} disabled={!canForward} accessibilityLabel="Forward">
+              <Text style={s.menuBtnText}>→</Text></Pressable>
+            {route !== 'home' && (
+              <Pressable style={s.menuBtn} onPress={() => navigate('home')} accessibilityLabel="Home">
+                <Text style={s.menuBtnText}>⌂</Text></Pressable>
+            )}
+            <Text style={s.menuHere} numberOfLines={1}>{cur ? cur.title : 'Home'}</Text>
+            {/* master transport (moved here from the header): the metronome is the app-wide clock —
+                Play defines the downbeat, Stop clears the stage, 🔊 toggles the audible click, −/＋ set
+                the BPM, 🔒 holds it. marginLeft:auto pushes the whole group to the right of the nav bar. */}
+            <View style={s.menuTransport}>
+              <Pressable style={[s.tBtn, metro.on && s.tBtnOn]} onPress={playMetro} disabled={!connected}
+                accessibilityLabel={metro.on ? 'Transport running — restart the downbeat' : 'Start the transport'}>
+                <Text style={[s.tBtnText, metro.on && s.tBtnOnText]}>▶</Text></Pressable>
+              <Pressable style={[s.tBtn, s.tBtnGhost]} onPress={stopMetro} disabled={!connected} accessibilityLabel="Stop everything">
+                <Text style={s.tBtnText}>■</Text></Pressable>
+              <Pressable style={[s.tBtn, s.tBtnGhost, !metro.muted && s.tBtnOn]} disabled={!connected}
+                onPress={() => { const muted = !metro.muted; setMetro(m => ({ ...m, muted })); tp.metronomeMute(muted); }}
+                accessibilityLabel={metro.muted ? 'Click muted — tap to hear it' : 'Click audible — tap to mute'}>
+                <Text style={[s.tBtnText, !metro.muted && s.tBtnOnText]}>{metro.muted ? '🔇' : '🔊'}</Text></Pressable>
+              <Pressable style={s.tBtn} onPress={() => stepBpm(-1)} disabled={!connected}><Text style={s.tBtnText}>−</Text></Pressable>
+              <Text style={s.tBpm}>{Math.round(bpm)}<Text style={s.tBpmUnit}> BPM</Text></Text>
+              <Pressable style={s.tBtn} onPress={() => stepBpm(1)} disabled={!connected}><Text style={s.tBtnText}>＋</Text></Pressable>
+              <Pressable style={[s.tBtn, s.tBtnGhost, metro.locked && s.tBtnOn]} disabled={!connected}
+                onPress={() => { const locked = !metro.locked; setMetro(m => ({ ...m, locked })); tp.metronomeLock(locked); }}
+                accessibilityLabel={metro.locked ? 'Tempo locked — tap to let content set the BPM' : 'Tempo follows content — tap to lock'}>
+                <Text style={[s.tBtnText, metro.locked && s.tBtnOnText]}>{metro.locked ? '🔒' : '🔓'}</Text></Pressable>
+            </View>
+          </View>
           {/* ===== HOMEPAGE: a responsive grid of section cards ===== */}
           {!cur && (
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 400 }}>
               <View style={s.home}>
                 {visible.map(sec => (
                   <View key={sec.id} style={[s.cell, { width: `${100 / cols}%` }]}>
-                    <Card title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions} foot={sec.foot}
-                      onPress={() => navigate(sec.id)} style={s.cardGrid} accent={sec.accent} topRight={sec.topRight} disabledReason={sec.disabledReason} />
+                    {sec.renderCard
+                      ? sec.renderCard({ onPress: () => navigate(sec.id) })
+                      : <Card title={sec.title} value={sec.value} status={sec.status} subtitle={sec.subtitle} progress={sec.progress} actions={sec.actions} foot={sec.foot}
+                          onPress={() => navigate(sec.id)} style={s.cardGrid} accent={sec.accent} topRight={sec.topRight} disabledReason={sec.disabledReason} />}
                   </View>
                 ))}
               </View>
@@ -2570,7 +2461,11 @@ export default function App() {
           {cur && !cur.fullHeight && (
             <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 400 }}>
               <View style={[s.page, curIsParent && s.pageWide]}>
-                {cur.asCard
+                {cur.hideHeader
+                  ? null   /* parent folds its own card into the body grid (see gridInParent) — no separate header */
+                  : cur.renderCard
+                  ? cur.renderCard({ onBack: () => navigate(cur.parent || 'home') })
+                  : cur.asCard
                   ? <Card title={cur.title} value={cur.value} status={cur.status} subtitle={cur.subtitle} progress={cur.progress} actions={cur.actions} foot={cur.foot} accent={cur.accent} topRight={cur.topRight} onBack={() => navigate(cur.parent || 'home')} />
                   : <PageHeader title={cur.title} value={cur.value} status={cur.status} subtitle={cur.subtitle} progress={cur.progress} actions={cur.actions} onBack={() => navigate(cur.parent || 'home')} accent={cur.accent} topRight={cur.topRight} />}
                 <View style={s.pageBody}>{cur.body}</View>
