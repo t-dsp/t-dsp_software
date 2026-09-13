@@ -36,6 +36,7 @@ import MpeMonitor from './src/ui/MpeMonitor';
 import { mpeBus, parseMpeLine } from './src/ui/mpeBus';
 import { ARP_PATTERNS as ARP_PAT, ARP_RATES, rateIndexFromFw, PAT_USER_SEQUENCE, DEFAULT_SHAPE, SeqStep, encodeSequence, encodeArpParams } from './src/arpSeq';
 import { applyArpPreset, ArpPreset, ARP_LIBRARY } from './src/arpLibrary';
+import { appUpdateInfo, checkAndApplyUpdate } from './src/appUpdates';
 
 // The folded landing tile (gridInParent): renders a track's own card as the first cell of its child
 // grid. Prefers the section's renderCard (e.g. <SynthCard>) — assigned onto `parent` AFTER makeTrackCard
@@ -204,6 +205,10 @@ export default function App() {
   // Which board file (PlatformIO env) the connected firmware was built from + its build timestamp
   // (@STATE.env / @STATE.built). Shown on the Settings › Firmware page so the running build is identifiable.
   const [fw, setFw] = useState<{ env: string; built: string }>({ env: '', built: '' });
+  // App-side OTA (EAS Update) status shown on the same page: which JS bundle is running and a manual
+  // "check now" (see src/appUpdates.ts). Static per launch, so read once.
+  const appUpd = useMemo(appUpdateInfo, []);
+  const [updMsg, setUpdMsg] = useState('');
   const [voice2, setVoice2] = useState({ on: false, vol: 100, name: '', path: '' });
   // Runtime pool partition (4-voice pool builds, @STATE.pool): the 8 Dexed engines redistributed among
   // the 4 fixed voices. `preset` 0=4voices 1=2voices 2=1voice 3=4+2+2; `engines[v]` = engines that voice
@@ -2222,6 +2227,18 @@ export default function App() {
       id: 'firmware', title: 'Firmware', show: false, parent: 'settings', status: connected ? (fw.env || '—') : 'offline',
       body: (
         <>
+          <View style={{ gap: 8, marginBottom: 12 }}>
+            <Text style={s.tag}>APP</Text>
+            <Text style={s.muted}>Bundle:   <Text style={s.text}>{appUpd.enabled ? (appUpd.isEmbedded ? 'built-in' : appUpd.updateId.slice(0, 8)) : 'web / dev build'}</Text>{appUpd.createdAt ? '   ·   ' + appUpd.createdAt : ''}</Text>
+            {appUpd.enabled && <Text style={s.muted}>Channel:   <Text style={s.text}>{appUpd.channel || '—'}</Text>   ·   Runtime:   <Text style={s.text}>{appUpd.runtimeVersion.slice(0, 8) || '—'}</Text></Text>}
+            {appUpd.enabled && (
+              <Row>
+                <Pressable style={s.btn} onPress={async () => { setUpdMsg('Checking…'); setUpdMsg(await checkAndApplyUpdate()); }}><Text style={s.btnText}>Check for app update</Text></Pressable>
+                {!!updMsg && <Text style={s.muted}>{updMsg}</Text>}
+              </Row>
+            )}
+          </View>
+          <Text style={s.tag}>FIRMWARE</Text>
           {!connected && <Text style={s.muted}>Connect to read the running firmware.</Text>}
           {connected && (
             <View style={{ gap: 8 }}>
