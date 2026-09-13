@@ -25,7 +25,7 @@ export function Header({
   vol, onVolChange, onVolCommit,
   status, brandInSidebar, nav,
   metroOn, metroMuted, metroLocked,
-  onPlay, onStop, onToggleMute, onStepBpm, onToggleLock,
+  onPlay, onStop, onPanic, onToggleMute, onStepBpm, onToggleLock,
 }: {
   connected: boolean; connecting: boolean; onConnectToggle: () => void;
   sig: number; bpm: number; beatActive: boolean; beatFeed: BeatFeed;
@@ -34,7 +34,7 @@ export function Header({
   // Section navigation data (same list the desktop rail shows) — rendered inside the mobile ☰ menu.
   nav?: { sections: NavSection[]; route: string; activeRootId?: string; navigate: (id: string) => void; usbOwner: (i: number) => boolean; claimUsb: (i: number) => void };
   metroOn: boolean; metroMuted: boolean; metroLocked: boolean;
-  onPlay: () => void; onStop: () => void; onToggleMute: () => void; onStepBpm: (d: number) => void; onToggleLock: () => void;
+  onPlay: () => void; onStop: () => void; onPanic: () => void; onToggleMute: () => void; onStepBpm: (d: number) => void; onToggleLock: () => void;
 }) {
   const { width } = useWindowDimensions();
   const narrow = width < 700;
@@ -46,6 +46,14 @@ export function Header({
       <View style={[s.dot, connected && s.dotOn]} />
       <Text style={s.brand}>T-DSP</Text>
     </View>
+  );
+  // PANIC (@PANIC): the stuck-note escape hatch. Stops everything and releases every note on every
+  // synth, on every build. Always one tap away: top-left transport on desktop, and in the always-visible
+  // top bar on mobile (never hidden behind the ☰ menu).
+  const panicBtn = (
+    <Pressable style={[s.tBtn, s.tBtnPanic]} onPress={onPanic} disabled={!connected}
+      accessibilityLabel="Panic — stop everything and release all stuck notes">
+      <Text style={s.tBtnPanicText}>PANIC</Text></Pressable>
   );
   const beat = <BeatStrip sig={sig} bpm={bpm} active={beatActive} live={beatFeed} />;
   // Master transport, split into two rows: play/stop/mute on top, the BPM stepper + tempo lock beneath.
@@ -60,6 +68,7 @@ export function Header({
       <Pressable style={[s.tBtn, s.tBtnGhost, !metroMuted && s.tBtnOn]} disabled={!connected} onPress={onToggleMute}
         accessibilityLabel={metroMuted ? 'Click muted — tap to hear it' : 'Click audible — tap to mute'}>
         <Text style={[s.tBtnText, !metroMuted && s.tBtnOnText]}>{metroMuted ? '🔇' : '🔊'}</Text></Pressable>
+      {!narrow && panicBtn}
     </View>
   );
   const transportBpm = (
@@ -103,6 +112,7 @@ export function Header({
           {logo}
           <View style={{ flex: 1 }} />
           {beat}
+          {panicBtn}
           <Pressable style={[s.menuToggle, open && s.tBtnOn]} onPress={() => setOpen(o => !o)}
             accessibilityLabel={open ? 'Hide controls' : 'Show controls'}>
             <Text style={s.menuToggleTxt}>{open ? '✕' : '☰'}</Text>

@@ -80,6 +80,8 @@ export const s = StyleSheet.create({
   tBtnGhost: { backgroundColor: 'transparent' },
   tBtnOn: { backgroundColor: '#238636', borderColor: '#238636' },   // transport running = lit green
   tBtnText: { color: C.text, fontSize: 16, fontWeight: '700' },
+  tBtnPanic: { backgroundColor: '#8b1a1a', borderColor: '#da3633' },   // PANIC: always red so it's findable in a hurry
+  tBtnPanicText: { color: '#fff', fontSize: 13, fontWeight: '800', letterSpacing: 0.5 },
   tBtnOnText: { color: '#fff' },
   tBpm: { color: C.text, fontSize: 18, fontWeight: '800', minWidth: 74, textAlign: 'center' },
   tBpmUnit: { color: C.muted, fontSize: 11, fontWeight: '600' },

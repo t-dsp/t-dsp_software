@@ -155,7 +155,7 @@ nav library, no URL router, no back-stack beyond one `parent` level (Back always
 
 **Global header** (every screen, `App.tsx:1985`): brand + connect dot;
 Connect/Disconnect App; status line; **BeatStrip** lights; **master transport row**
-(▶ `@METRO=1`, ■ `@METRO=0`, 🔇/🔊 `@METROMUTE=`, −/＋ `@BPM=`, 🔒 `@METROLOCK=`)
+(▶ `@METRO=1`, ■ `@METRO=0`, red **PANIC** `@PANIC` — also in the mobile top bar, 🔇/🔊 `@METROMUTE=`, −/＋ `@BPM=`, 🔒 `@METROLOCK=`)
 and a master **VOL** slider `@VOL=`.
 
 ### Cards → controls → commands (condensed)
@@ -328,6 +328,7 @@ voice-2: `@SONG2F=`, `@SONG2RESTART=`, `@SONG2=stop`, `@LOOP2=`.
 `@MIDIMODE=`, `@PRESSURE=`, `@MODWHEEL=`, `@TIMBRE=`; voice-2 `@VOICE2=`, `@VOICE2VOL=`,
 `@DXVOICE2=`, `@DXPICK2=`.
 **Tracks:** `@TRK<i>.{PLAY,SONGF,RESTART,STOP,VOL,LOOP,ARP*,SRC,SRCCH,INSTR,DXPICK,DXVOICE}`.
+**Panic:** `@PANIC` (every build — stops players/drums/MIDI loops, panics arps, sustain-up + bend 0 + all-notes-off on every sink; replies `@PANIC`).
 **Clock/metro:** `@BPM=`, `@METROLOCK=`, `@QUANTIZE=`, `@METRO=`, `@METROMUTE=`,
 `@METROSIG=`, `@METROVOL=`.
 **Catalog/transport:** `@GETCAT`, `@REINDEX`, `@READ=`, `@LS=`, `@WB=`, `@CRC=`, `@FXUP`.

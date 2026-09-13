@@ -1404,14 +1404,17 @@ export default function App() {
   // Global Stop halts the whole transport in firmware — both players + drums. Flag the resulting
   // @SONGP=-1 / @SONG2P=-1 as manual stops so they don't auto-advance to the next song, and clear
   // the player/drum UI optimistically (the device position feed confirms).
-  const stopMetro = () => {
+  const clearStageUi = () => {
     manualStopRef.current = true; manualStop2Ref.current = true;
     setMetro(m => ({ ...m, on: false }));
     setPlayer(p => ({ ...p, playing: false, prog: 0 }));
     setPlayer2(p => ({ ...p, playing: false, prog: 0 }));
     setDrums(d => ({ ...d, playing: null, prog: 0 }));
-    tp.metronome(false);
   };
+  const stopMetro = () => { clearStageUi(); tp.metronome(false); };
+  // PANIC (@PANIC): stuck-note escape hatch. Firmware stops everything Stop does PLUS the MIDI loops,
+  // and releases every note / sustain / bend on every synth (on every build, not just metronome ones).
+  const panic = () => { clearStageUi(); tp.panic(); };
 
   const headerStatus = !connected ? 'Not connected' :
     [cat.engine || 'synth', cat.drumEngine ? cat.drumEngine + ' drums' : '', '♩ ' + Math.round(bpm) + ' BPM', TP_LABEL[tp.name], bt.conn ? 'BT:' + (bt.peer || 'on') : '', drums.playing ? '♪ ' + drums.playing : ''].filter(Boolean).join('  ·  ');
@@ -2534,7 +2537,7 @@ export default function App() {
         status={headerStatus} brandInSidebar={connected && loaded && desktop}
         nav={{ sections: visible, route, activeRootId, navigate, usbOwner, claimUsb }}
         metroOn={metro.on} metroMuted={metro.muted} metroLocked={metro.locked}
-        onPlay={playMetro} onStop={stopMetro} onStepBpm={stepBpm}
+        onPlay={playMetro} onStop={stopMetro} onPanic={panic} onStepBpm={stepBpm}
         onToggleMute={() => { const muted = !metro.muted; setMetro(m => ({ ...m, muted })); tp.metronomeMute(muted); }}
         onToggleLock={() => { const locked = !metro.locked; setMetro(m => ({ ...m, locked })); tp.metronomeLock(locked); }}
       />

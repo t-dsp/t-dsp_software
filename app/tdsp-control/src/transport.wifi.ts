@@ -253,6 +253,7 @@ export class WiFiTransport implements Transport {
   songVol(pct: number) { this.send('@SONGVOL=' + Math.max(0, Math.min(150, Math.round(pct)))); }
   songLoop(on: boolean) { this.send('@LOOP=' + (on ? 1 : 0)); }
   launchQuantize(on: boolean) { this.send('@QUANTIZE=' + (on ? 1 : 0)); }
+  panic() { this.send('@PANIC'); }
   metronome(on: boolean) { this.send('@METRO=' + (on ? 1 : 0)); }
   metronomeMute(muted: boolean) { this.send('@METROMUTE=' + (muted ? 1 : 0)); }
   metronomeSig(bpb: number) { this.send('@METROSIG=' + Math.max(1, Math.min(16, Math.round(bpb)))); }

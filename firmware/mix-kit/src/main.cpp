@@ -2184,6 +2184,38 @@ static void transportStop() {
     Serial.println("[transport] STOP (all silenced)");
 }
 #endif  // TDSP_METRONOME
+
+// --- PANIC: the stuck-note escape hatch (@PANIC, the app's always-visible PANIC button) -----------
+// A superset of transport Stop that exists on EVERY build (Stop is METRONOME-only). It clears
+// everything that can hold or re-trigger a note: every song player + the drum groove, every MIDI
+// loop's playback (clips KEPT — resume them after), every arp's held/latched set + pending gate-offs,
+// then sustain-up + bend-recenter + all-notes-off on every track sink and the drum sink (a stuck
+// pedal would otherwise re-hang the very next note). Voice / arp settings and recorded clips are
+// untouched, so the box plays normally the moment it returns.
+static void panicSilenceSink(tdsp::MidiSink *s) {
+    if (!s) return;
+    for (uint8_t ch = 1; ch <= 16; ++ch) { s->onSustain(ch, false); s->onPitchBend(ch, 0.0f); }
+    s->onAllNotesOff(0);
+}
+static void panicAll() {
+    g_drumLaunchPending = false;
+    if (g_drumTrack.player) drumStop();
+    for (int v = 0; v < kSynthVoices; ++v) {
+        Track &t = g_tracks[v];
+        if (t.launchPending) *t.launchPending = false;
+        if (t.player && t.wasPlaying) songStop(t);
+        // stop() walks Recording -> Playing -> Idle (and Overdub -> Playing -> Idle): repeat until idle.
+        if (t.looper) for (int k = 0; k < 3 && t.looper->state() != tdsp::MidiLooper::Idle; ++k) t.looper->stop();
+        if (t.arp) t.arp->panic();
+        panicSilenceSink(t.sink);
+    }
+    if (g_drumTrack.sink != g_synthSink) panicSilenceSink(g_drumTrack.sink);
+    panicSilenceSink(g_synthSink);           // voice 1's sink even if a build left g_tracks[0] unbound
+#ifdef TDSP_METRONOME
+    g_conductor.stop();                      // halt the clock (and its click) like transport Stop
+#endif
+    Serial.println("[panic] all notes off (players, drums, loops, arps, sinks)");
+}
 static void setDrumKit(int i) {
     if (i < 0) i = 0;
     if (i >= numDrumKits()) i = numDrumKits() - 1;
@@ -3307,6 +3339,13 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
                                }   // dropping the mode cancels any armed launch
         reply.printf("@QUANTIZE=%d\n", g_launchQuantize ? 1 : 0);
         Serial.printf("[sync] launch quantize %s\n", g_launchQuantize ? "ON (starts land on the next bar)" : "off (start now)");
+    }
+    else if (strcmp(line, "@PANIC") == 0) {   // stuck notes: stop + release EVERYTHING (every build)
+        panicAll();
+#ifdef TDSP_METRONOME
+        reply.printf("@METRO=%d\n", g_conductor.running() ? 1 : 0);
+#endif
+        reply.print("@PANIC\n");
     }
     else if (strncmp(line, "@HPF=", 5) == 0)      setDacHpfMode(atoi(line + 5));
     else if (strncmp(line, "@LOOP=", 6) == 0)   { g_loop = (atoi(line + 6) != 0);
