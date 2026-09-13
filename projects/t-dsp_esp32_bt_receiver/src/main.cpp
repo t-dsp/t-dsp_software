@@ -101,7 +101,8 @@
 // serves the app's `expo export --platform web` bundle from LittleFS over plain HTTP, so
 // any phone/laptop gets the full UI with NO app install and NO internet. DNSServer is the
 // captive portal (every name -> us). All three ship with arduino-esp32 -- no lib_deps.
-#include <WebServer.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
 #include <DNSServer.h>
 #include <LittleFS.h>
 #include <functional>
@@ -993,28 +994,33 @@ static void onWsEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t lengt
   }
 }
 
-// ---- Hosted web UI: HTTP static server + captive portal + upload ------------
-// Files live in LittleFS exactly as `expo export --platform web` lays them out, but
-// gzipped by tools/push_ui.py ("/index.html.gz", "/_expo/static/js/web/<hash>.js.gz").
-// WebServer::streamFile() adds "Content-Encoding: gzip" itself when the open File's
-// name ends in .gz, so a request for /index.html is answered from /index.html.gz.
+// ---- Hosted web UI: async HTTP server (static files, captive portal, upload, Wi-Fi API) ----------
+// Files live in LittleFS exactly as `expo export --platform web` lays them out, gzipped by
+// tools/push_ui.py ("/index.html.gz", "/_expo/static/js/web/<hash>.js.gz"); a request for
+// /index.html is answered from /index.html.gz with Content-Encoding: gzip.
 //
-// Routes:
+// ESPAsyncWebServer, NOT the synchronous arduino WebServer. Measured 2026-09-13: the sync server
+// handles ONE connection at a time and waits up to 5 s (HTTP_MAX_DATA_WAIT) on every accepted socket
+// that hasn't sent its request yet. Browsers and Android's "Sign in to <network>" window open spare
+// preconnect sockets, so every file queued behind them: with two idle sockets open, each file took
+// 10 s and came back empty, and a phone's captive-portal page never finished loading. The async
+// server multiplexes connections in the AsyncTCP task and never waits on an idle socket.
+//
+// Routes (AsyncWebServer matches "<uri>" AND "<uri>/..." -- register the longer paths FIRST):
 //   GET  <any path>   -> the file (or its .gz twin); "/" -> /index.html. Unknown path ->
-//                        302 to "/" (this is also what turns OS captive-portal probes --
+//                        302 to the AP address (also what turns OS captive-portal probes --
 //                        generate_204, hotspot-detect.html, connecttest.txt -- into the UI).
-//   GET  /ui/list     -> JSON list of hosted files (name + size) for push_ui.py --verify.
-//   POST /ui/clear    -> delete every hosted file (X-Token). Called before a push so stale
-//                        hashed bundles don't accumulate.
-//   POST /ui          -> multipart upload, streamed straight into LittleFS (X-Token). The
-//                        part's filename is the full path ("/index.html.gz"); parent dirs
-//                        are created. Streaming keeps RAM flat -- a 250 KB bundle never
-//                        has to fit in the heap.
-static WebServer g_http(TDSP_HTTP_PORT);
+//   GET  /ui/list     -> JSON list of hosted files (name + size) for push_ui.py.
+//   POST /ui/clear    -> delete every hosted file (X-Token).
+//   POST /ui          -> multipart upload streamed into LittleFS (X-Token); the part's filename is
+//                        the full path ("/index.html.gz"); parent dirs are created.
+//   /api/wifi*        -> Wi-Fi settings API, see below.
+// Handlers run in the AsyncTCP task, not loop(): WifiNetManager takes its own lock.
+static AsyncWebServer g_http(TDSP_HTTP_PORT);
 static DNSServer g_dns;
 static WifiNetManager g_net;      // saved networks, AP settings, scan/connect policy (WifiNetManager.h)
 static bool      g_fsUp = false;
-static File      g_upFile;        // in-flight upload target
+static File      g_upFile;        // in-flight upload target (push_ui.py sends one file per request)
 static bool      g_upOk = false;
 
 static const char *contentTypeFor(const String &path) {
@@ -1030,60 +1036,48 @@ static const char *contentTypeFor(const String &path) {
   return "application/octet-stream";
 }
 
-static bool uiAuthorized() {
+static bool uiAuthorized(AsyncWebServerRequest *req) {
   if (TDSP_UI_TOKEN[0] == 0) return false;               // uploads disabled
-  return g_http.header("X-Token") == TDSP_UI_TOKEN;
+  return req->hasHeader("X-Token") && req->header("X-Token") == TDSP_UI_TOKEN;
 }
 
-// Serve `path` (already normalized, leading '/') from LittleFS; false if absent.
-static bool uiServeFile(String path) {
+// Serve the request's path from LittleFS; false if absent.
+static bool uiServeFile(AsyncWebServerRequest *req) {
   if (!g_fsUp) return false;
+  String path = req->url();
   if (path.endsWith("/")) path += "index.html";
   String gz = path + ".gz";
-  File f;
-  if (LittleFS.exists(gz))        f = LittleFS.open(gz, "r");
-  else if (LittleFS.exists(path)) f = LittleFS.open(path, "r");
-  if (!f || f.isDirectory()) { if (f) f.close(); return false; }
+  bool isGz = LittleFS.exists(gz);
+  if (!isGz && !LittleFS.exists(path)) return false;
+  AsyncWebServerResponse *res = req->beginResponse(LittleFS, isGz ? gz : path, contentTypeFor(path));
+  if (isGz) res->addHeader("Content-Encoding", "gzip");
   // The hashed bundle is immutable (new content = new name); index.html must always be
   // re-fetched so a pushed UI shows up on the next reload, not after a cache expiry.
-  g_http.sendHeader("Cache-Control", path.indexOf("/_expo/") == 0 ? "public, max-age=31536000, immutable" : "no-cache");
-  g_http.streamFile(f, contentTypeFor(path));
-  f.close();
+  res->addHeader("Cache-Control", path.startsWith("/_expo/") ? "public, max-age=31536000, immutable" : "no-cache");
+  req->send(res);
   return true;
 }
 
-static void uiRedirectRoot() {
-  // Absolute URL on the AP address: captive-portal probes come with foreign Host headers
-  // and phones on the AP can't always resolve tdsp.local (Android), so the IP is the
-  // reliable target.
-  IPAddress ip = WiFi.softAPIP();
-  char loc[48];
-  snprintf(loc, sizeof(loc), "http://%u.%u.%u.%u/", ip[0], ip[1], ip[2], ip[3]);
-  g_http.sendHeader("Location", loc, true);
-  g_http.send(302, "text/plain", "");
-}
-
-static void uiHandleNotFound() {
-  // HEAD is routed like GET: a HEAD on a file that exists must not be answered with the
-  // captive-portal redirect (WebServer has no HEAD mode, so streamFile still emits the
-  // body -- harmless, the response is Connection: close and the client discards it).
-  const HTTPMethod m = g_http.method();
-  if (m == HTTP_OPTIONS) {   // CORS preflight (API calls are simple requests, but be permissive)
-    g_http.sendHeader("Access-Control-Allow-Origin", "*");
-    g_http.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
-    g_http.sendHeader("Access-Control-Allow-Headers", "Content-Type");
-    g_http.send(204);
+static void uiHandleNotFound(AsyncWebServerRequest *req) {
+  if (req->method() == HTTP_OPTIONS) {   // CORS preflight (API calls are simple requests, but be permissive)
+    AsyncWebServerResponse *res = req->beginResponse(204);
+    res->addHeader("Access-Control-Allow-Origin", "*");
+    res->addHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res->addHeader("Access-Control-Allow-Headers", "Content-Type");
+    req->send(res);
     return;
   }
-  if ((m == HTTP_GET || m == HTTP_HEAD) && uiServeFile(g_http.uri())) return;
+  if ((req->method() == HTTP_GET || req->method() == HTTP_HEAD) && uiServeFile(req)) return;
   if (!g_fsUp || !LittleFS.exists("/index.html.gz")) {
-    g_http.send(200, "text/plain", "T-DSP: no web UI hosted yet. Push one with tools/push_ui.py (see planning/thin-shell-app).\n");
+    req->send(200, "text/plain", "T-DSP: no web UI hosted yet. Push one with tools/push_ui.py (see planning/thin-shell-app).\n");
     return;
   }
-  uiRedirectRoot();
+  // Absolute URL on the AP address: captive-portal probes come with foreign Host headers and phones
+  // on the AP can't always resolve tdsp.local (Android), so the IP is the reliable target.
+  req->redirect(String("http://") + WiFi.softAPIP().toString() + "/");
 }
 
-static void uiHandleList() {
+static void uiHandleList(AsyncWebServerRequest *req) {
   String out = "[";
   if (g_fsUp) {
     // LittleFS on arduino-esp32 2.x lists one level per openNextFile; walk it.
@@ -1100,7 +1094,7 @@ static void uiHandleList() {
     if (root) { walk(root, ""); root.close(); }
   }
   out += "]";
-  g_http.send(200, "application/json", out);
+  req->send(200, "application/json", out);
 }
 
 static void uiRemoveAll(const String &dirPath) {
@@ -1119,10 +1113,10 @@ static void uiRemoveAll(const String &dirPath) {
   for (auto &d : dirs)  { uiRemoveAll(d); LittleFS.rmdir(d); }
 }
 
-static void uiHandleClear() {
-  if (!uiAuthorized()) { g_http.send(403, "text/plain", "bad token"); return; }
+static void uiHandleClear(AsyncWebServerRequest *req) {
+  if (!uiAuthorized(req)) { req->send(403, "text/plain", "bad token"); return; }
   if (g_fsUp) uiRemoveAll("/");
-  g_http.send(200, "text/plain", "cleared");
+  req->send(200, "text/plain", "cleared");
 }
 
 static void uiMkdirs(const String &path) {
@@ -1132,34 +1126,30 @@ static void uiMkdirs(const String &path) {
   }
 }
 
-// Multipart body callback: called repeatedly with START / WRITE / END for each part.
-static void uiHandleUploadChunk() {
-  HTTPUpload &up = g_http.upload();
-  if (up.status == UPLOAD_FILE_START) {
+// Multipart body callback: index 0 starts a part, `final` ends it.
+static void uiHandleUploadChunk(AsyncWebServerRequest *req, const String &filename, size_t index,
+                                uint8_t *data, size_t len, bool final) {
+  if (index == 0) {
     g_upOk = false;
-    if (!uiAuthorized() || !g_fsUp) return;
-    String path = up.filename;
-    if (path.indexOf('/') != 0) path = "/" + path;
-    if (path.indexOf("..") >= 0) return;
-    uiMkdirs(path);
-    g_upFile = LittleFS.open(path, "w");
-    g_upOk = (bool)g_upFile;
-    Serial.printf("[ui] upload %s%s\n", path.c_str(), g_upOk ? "" : " FAILED to open");
-  } else if (up.status == UPLOAD_FILE_WRITE) {
-    if (g_upOk && g_upFile.write(up.buf, up.currentSize) != up.currentSize) { g_upOk = false; g_upFile.close(); }
-  } else if (up.status == UPLOAD_FILE_END) {
     if (g_upFile) g_upFile.close();
-    Serial.printf("[ui] upload done: %u bytes%s\n", (unsigned)up.totalSize, g_upOk ? "" : " (error)");
-  } else if (up.status == UPLOAD_FILE_ABORTED) {
-    if (g_upFile) g_upFile.close();
-    g_upOk = false;
+    if (uiAuthorized(req) && g_fsUp) {
+      String path = filename;
+      if (path.indexOf('/') != 0) path = "/" + path;
+      if (path.indexOf("..") < 0) {
+        uiMkdirs(path);
+        g_upFile = LittleFS.open(path, "w");
+        g_upOk = (bool)g_upFile;
+      }
+    }
   }
+  if (g_upOk && len && g_upFile.write(data, len) != len) { g_upOk = false; g_upFile.close(); }
+  if (final && g_upFile) g_upFile.close();
 }
 
-static void uiHandleUploadDone() {
-  if (!uiAuthorized()) { g_http.send(403, "text/plain", "bad token"); return; }
-  if (!g_fsUp)         { g_http.send(500, "text/plain", "no filesystem"); return; }
-  g_http.send(g_upOk ? 200 : 500, "text/plain", g_upOk ? "ok" : "write failed");
+static void uiHandleUploadDone(AsyncWebServerRequest *req) {
+  if (!uiAuthorized(req)) { req->send(403, "text/plain", "bad token"); return; }
+  if (!g_fsUp)            { req->send(500, "text/plain", "no filesystem"); return; }
+  req->send(g_upOk ? 200 : 500, "text/plain", g_upOk ? "ok" : "write failed");
 }
 
 // ---- Wi-Fi settings API (used by the control UI's Settings > Device Wi-Fi page) ----------
@@ -1175,49 +1165,31 @@ static void uiHandleUploadDone() {
 //   POST /api/wifi/connect    scan + join the best saved network now, even with phones on the AP
 //   POST /api/wifi/ap         ssid, pass  -> rename / re-key the device network (applies in ~1.5 s)
 // Passwords are never returned.
-static void apiSend(int code, const String &body) {
-  g_http.sendHeader("Access-Control-Allow-Origin", "*");
-  g_http.sendHeader("Cache-Control", "no-store");
-  g_http.send(code, "application/json", body);
+static void apiSend(AsyncWebServerRequest *req, int code, const String &body) {
+  AsyncWebServerResponse *res = req->beginResponse(code, "application/json", body);
+  res->addHeader("Access-Control-Allow-Origin", "*");
+  res->addHeader("Cache-Control", "no-store");
+  req->send(res);
 }
 
-static void apiResult(const String &err, int errCode = 400) {
-  if (err.length() == 0) { apiSend(200, "{\"ok\":true}"); return; }
+static void apiResult(AsyncWebServerRequest *req, const String &err, int errCode = 400) {
+  if (err.length() == 0) { apiSend(req, 200, "{\"ok\":true}"); return; }
   String o = "{\"ok\":false,\"error\":";
   WifiNetManager::jsonStr(o, err);
   o += "}";
-  apiSend(errCode, o);
+  apiSend(req, errCode, o);
 }
 
-static bool apiAuthed() {
-  if (g_net.authorized(g_http.arg("auth"), TDSP_UI_TOKEN)) return true;
-  apiResult("wrong device password", 403);
+static String formArg(AsyncWebServerRequest *req, const char *name) {
+  if (req->hasParam(name, true)) return req->getParam(name, true)->value();   // form body
+  if (req->hasParam(name)) return req->getParam(name)->value();               // query string
+  return String();
+}
+
+static bool apiAuthed(AsyncWebServerRequest *req) {
+  if (g_net.authorized(formArg(req, "auth"), TDSP_UI_TOKEN)) return true;
+  apiResult(req, "wrong device password", 403);
   return false;
-}
-
-static void apiWifiStatus() { String o; o.reserve(512); g_net.statusJson(o); apiSend(200, o); }
-static void apiWifiScanGet() { String o; o.reserve(1024); g_net.scanJson(o); apiSend(200, o); }
-static void apiWifiScanPost() {
-  if (!apiAuthed()) return;
-  if (g_net.requestScan()) apiResult("");
-  else apiResult("scan busy, try again in a few seconds", 429);
-}
-static void apiWifiSave() {
-  if (!apiAuthed()) return;
-  apiResult(g_net.saveNetwork(g_http.arg("ssid"), g_http.arg("pass")));
-}
-static void apiWifiForget() {
-  if (!apiAuthed()) return;
-  apiResult(g_net.forgetNetwork(g_http.arg("ssid")) ? "" : "not a saved network", 404);
-}
-static void apiWifiConnect() {
-  if (!apiAuthed()) return;
-  g_net.connectNow();
-  apiResult("");
-}
-static void apiWifiAp() {
-  if (!apiAuthed()) return;
-  apiResult(g_net.setAp(g_http.arg("ssid"), g_http.arg("pass")));
 }
 
 static void uiHttpBegin() {
@@ -1225,18 +1197,41 @@ static void uiHttpBegin() {
   g_fsUp = LittleFS.begin(true, "/littlefs", 8, "spiffs");
   Serial.printf("[ui] LittleFS %s (%u / %u KB used)\n", g_fsUp ? "mounted" : "FAILED",
                 g_fsUp ? (unsigned)(LittleFS.usedBytes() / 1024) : 0, g_fsUp ? (unsigned)(LittleFS.totalBytes() / 1024) : 0);
-  const char *hdrs[] = { "X-Token" };
-  g_http.collectHeaders(hdrs, 1);          // WebServer drops unknown headers unless asked
+
+  // Longer paths first: a handler for "/x" also matches "/x/...".
   g_http.on("/ui/list",  HTTP_GET,  uiHandleList);
   g_http.on("/ui/clear", HTTP_POST, uiHandleClear);
   g_http.on("/ui",       HTTP_POST, uiHandleUploadDone, uiHandleUploadChunk);
-  g_http.on("/api/wifi",         HTTP_GET,  apiWifiStatus);
-  g_http.on("/api/wifi/scan",    HTTP_GET,  apiWifiScanGet);
-  g_http.on("/api/wifi/scan",    HTTP_POST, apiWifiScanPost);
-  g_http.on("/api/wifi/save",    HTTP_POST, apiWifiSave);
-  g_http.on("/api/wifi/forget",  HTTP_POST, apiWifiForget);
-  g_http.on("/api/wifi/connect", HTTP_POST, apiWifiConnect);
-  g_http.on("/api/wifi/ap",      HTTP_POST, apiWifiAp);
+
+  g_http.on("/api/wifi/scan", HTTP_GET, [](AsyncWebServerRequest *req) {
+    String o; o.reserve(1024); g_net.scanJson(o); apiSend(req, 200, o);
+  });
+  g_http.on("/api/wifi/scan", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (!apiAuthed(req)) return;
+    if (g_net.requestScan()) apiResult(req, "");
+    else apiResult(req, "scan busy, try again in a few seconds", 429);
+  });
+  g_http.on("/api/wifi/save", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (!apiAuthed(req)) return;
+    apiResult(req, g_net.saveNetwork(formArg(req, "ssid"), formArg(req, "pass")));
+  });
+  g_http.on("/api/wifi/forget", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (!apiAuthed(req)) return;
+    apiResult(req, g_net.forgetNetwork(formArg(req, "ssid")) ? "" : "not a saved network", 404);
+  });
+  g_http.on("/api/wifi/connect", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (!apiAuthed(req)) return;
+    g_net.connectNow();
+    apiResult(req, "");
+  });
+  g_http.on("/api/wifi/ap", HTTP_POST, [](AsyncWebServerRequest *req) {
+    if (!apiAuthed(req)) return;
+    apiResult(req, g_net.setAp(formArg(req, "ssid"), formArg(req, "pass")));
+  });
+  g_http.on("/api/wifi", HTTP_GET, [](AsyncWebServerRequest *req) {
+    String o; o.reserve(512); g_net.statusJson(o); apiSend(req, 200, o);
+  });
+
   g_http.onNotFound(uiHandleNotFound);
   g_http.begin();
   // Captive portal: answer every DNS query on the AP with our address; the OS probe
@@ -1293,8 +1288,7 @@ class WifiControlTransport : public ControlTransport {
 
   void loop() override {
     g_ws.loop();
-    g_http.handleClient();
-    g_dns.processNextRequest();
+    g_dns.processNextRequest();   // HTTP is served by the AsyncTCP task, not polled here
     g_net.loop();
     // Flush broadcasts requested from the BT task (see pushStatus/pushSources).
     if (pendingStatus)  { pendingStatus  = false; broadcastStatus(); }
@@ -1523,5 +1517,11 @@ void loop() {
   }
   // A2DP + (BLE, if built) run in their own FreeRTOS tasks; the WiFi transport is
   // serviced above via controlTransport().loop(). Small delay to yield.
+#if defined(TDSP_CTRL_WIFI)
+  // DNS (captive portal) and the WebSocket server are polled from this loop: 20 ms per pass made
+  // both sluggish for phones on the access point. A2DP is off in WiFi builds, so spin faster.
+  delay(2);
+#else
   delay(20);
+#endif
 }

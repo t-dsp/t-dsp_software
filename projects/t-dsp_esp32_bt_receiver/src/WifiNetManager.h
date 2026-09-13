@@ -25,14 +25,16 @@
 //         phone off. The UI's "Connect now" / "Save" override the hold explicitly.
 //       - A lost LAN link gets one quick retry (3 s) and then the same backoff + hold rules.
 //
-// Threading: everything runs on the Arduino loop task except the STA_DISCONNECTED event lambda,
-// which the WiFi event task calls; it only bumps volatile counters.
+// Threading: loop() runs on the Arduino task; the UI actions and JSON readers are called from the
+// AsyncTCP task (HTTP handlers). Every public method takes `mu_` (recursive: actions call each other).
+// The STA_DISCONNECTED event lambda runs on the WiFi event task and only bumps volatile counters.
 #pragma once
 
 #include <Arduino.h>
 #include <Preferences.h>
 #include <WiFi.h>
 #include <utility>
+#include <mutex>
 #include <esp_wifi.h>   // esp_wifi_scan_stop
 
 class WifiNetManager {
@@ -76,6 +78,7 @@ class WifiNetManager {
   }
 
   void loop() {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     uint32_t now = millis();
 
     if (apRestartAt_ && (int32_t)(now - apRestartAt_) >= 0) {   // deferred so the HTTP reply flushes first
@@ -131,6 +134,7 @@ class WifiNetManager {
   // try to join now, overriding the AP-client hold (the user asked for it).
   // Returns "" on success, else a short error for the UI.
   String saveNetwork(const String &ssid, const String &pass) {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     if (!validSsid(ssid)) return "network name must be 1-32 bytes";
     if (!(pass.length() == 0 || (pass.length() >= 8 && pass.length() <= 64))) return "password must be empty (open) or 8-63 characters";
     int i = find(ssid);
@@ -146,6 +150,7 @@ class WifiNetManager {
   }
 
   bool forgetNetwork(const String &ssid) {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     int i = find(ssid);
     if (i < 0) return false;
     for (int j = i; j < count_ - 1; ++j) { ssids_[j] = ssids_[j + 1]; passes_[j] = passes_[j + 1]; }
@@ -164,6 +169,7 @@ class WifiNetManager {
 
   // Scan + join the best saved network immediately, even with phones on the AP.
   void connectNow() {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     if (count_ == 0 || state_ == State::Connecting) return;
     if (state_ == State::Connected) return;
     backoffIdx_ = 0;
@@ -175,6 +181,7 @@ class WifiNetManager {
   // User-requested scan (to pick a network). Results only; never auto-connects, so a phone
   // browsing networks on the AP is not kicked off. Returns false if busy/rate-limited.
   bool requestScan() {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     uint32_t now = millis();
     if (scanning_ || state_ == State::Connecting) return false;
     if (lastManualScanAt_ && now - lastManualScanAt_ < kManualScanMinMs) return false;
@@ -185,6 +192,7 @@ class WifiNetManager {
   // New AP name/password. Applied ~1.5 s later so the HTTP response reaches the phone first;
   // every phone on the AP then has to rejoin with the new password.
   String setAp(const String &ssid, const String &pass) {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     if (!validApSsid(ssid)) return "device network name must be 1-32 bytes";
     if (!validApPass(pass)) return "device password must be 8-63 characters";
     apSsid_ = ssid; apPass_ = pass;
@@ -197,12 +205,14 @@ class WifiNetManager {
   // ---- read side ------------------------------------------------------------------------------
 
   bool authorized(const String &secret, const char *token) const {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     if (secret.length() == 0) return false;
     if (secret == apPass_) return true;
     return token && token[0] && secret == token;
   }
 
   void statusJson(String &o) const {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     uint32_t now = millis();
     o += "{\"ap\":{\"ssid\":"; jsonStr(o, apSsid_);
     o += ",\"ip\":\"" + WiFi.softAPIP().toString() + "\"";
@@ -226,6 +236,7 @@ class WifiNetManager {
   }
 
   void scanJson(String &o) const {
+    std::lock_guard<std::recursive_mutex> lock(mu_);
     o += "{\"state\":\"";
     o += scanning_ ? "running" : (resultCount_ || lastScanAt_ ? "done" : "idle");
     o += "\",\"ageS\":" + String(lastScanAt_ ? (millis() - lastScanAt_) / 1000 : 0);
@@ -270,6 +281,7 @@ class WifiNetManager {
   // still finishes the scan and publishes results later, so we wait for them under our own deadline.
   static constexpr uint32_t kScanDeadlineMs = 10000;
 
+  mutable std::recursive_mutex mu_;
   Preferences prefs_;
   const char *publicDefaultPass_ = nullptr;
   const char *apSsidDefault_ = "";
