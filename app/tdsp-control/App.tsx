@@ -43,7 +43,9 @@ import type { LastConn } from './src/ui/constants';
 import { deviceHttpBase } from './src/deviceWifi';
 import { loadDeviceNetworkCreds, openWifiSettings, canOpenWifiSettings } from './src/deviceNetwork';
 import type { DeviceNetworkCreds } from './src/deviceNetwork';
-import { wifiJoinSupported, joinWifi, releaseWifi } from './modules/tdsp-wifi';
+import { wifiJoinSupported, joinWifi, releaseWifi, scanWifi, ensureWifiScanPermission } from './modules/tdsp-wifi';
+import type { WifiSeen } from './modules/tdsp-wifi';
+import * as Clipboard from 'expo-clipboard';
 
 // The folded landing tile (gridInParent): renders a track's own card as the first cell of its child
 // grid. Prefers the section's renderCard (e.g. <SynthCard>) — assigned onto `parent` AFTER makeTrackCard
@@ -106,6 +108,23 @@ export default function App() {
   const [devNet, setDevNet] = useState<DeviceNetworkCreds | null>(null);
   const devNetRef = useRef<DeviceNetworkCreds | null>(null);
   devNetRef.current = devNet;
+  // T-DSP access points the phone can see (names containing "T-DSP"), refreshed while on the connect
+  // screen. null = not scanning (unsupported build, Android 12, or permission not granted).
+  const [nearbyAps, setNearbyAps] = useState<WifiSeen[] | null>(null);
+  useEffect(() => {
+    if (connected || !wifiJoinSupported) return;
+    let stop = false;
+    (async () => {
+      if (!(await ensureWifiScanPermission())) return;
+      while (!stop) {
+        try { const r = await scanWifi('T-DSP'); if (!stop) setNearbyAps(r); }
+        catch { break; }   // permission revoked: keep the generic card
+        await new Promise(res => setTimeout(res, 5000));
+      }
+    })();
+    return () => { stop = true; };
+  }, [connected]);
+  const joinSsidRef = useRef<string | null>(null);   // which access point connectTo() asked to join
   useEffect(() => { if (!connected) loadDeviceNetworkCreds().then(setDevNet).catch(() => {}); }, [connected]);
 
   // mDNS discovery: browse _tdsp._tcp while the Wi-Fi picker is open and disconnected, so
@@ -683,6 +702,11 @@ export default function App() {
   // A target is the platform's built-in transport ('default' = Web Serial on desktop, Bluetooth on
   // native) or a Wi-Fi host. Its id keys the connect-screen card that shows the attempt.
   const DEVICE_AP_IP = '192.168.4.1';   // the T-DSP access point's fixed address
+  // The access point to join for a target, or null: only the AP address, on a build that can join, with
+  // credentials known. Defaults to the built-in network name.
+  const apJoinSsid = (kind: TransportKind, host: string | undefined, ssid: string | null | undefined): string | null =>
+    kind === 'wifi' && (host || '').trim() === DEVICE_AP_IP && wifiJoinSupported && devNetRef.current
+      ? (ssid || devNetRef.current.ssid) : null;
   const targetId = (kind: TransportKind, host?: string) => (kind === 'wifi' ? 'wifi:' + ((host || '').trim() || 'tdsp.local') : 'default');
 
   // Plain-language reason for a failed attempt, shown under its card.
@@ -711,7 +735,8 @@ export default function App() {
   // @REINDEX into the dead socket, so every later Connect tap returned silently.)
   async function connect(auto = false, reconnectOnly = false) {
     const t = tp, kind = tkind, host = wifiHost;
-    const id = targetId(kind, host);
+    const apSsid = apJoinSsid(kind, host, joinSsidRef.current);
+    const id = apSsid ? 'ap:' + apSsid : targetId(kind, host);
     const gen = ++connGenRef.current;
     const live = () => gen === connGenRef.current;
     connectingRef.current = true; setConnecting(true);
@@ -722,8 +747,8 @@ export default function App() {
       // no password typing, phone keeps its normal internet). Any other target leaves that app-only network
       // so LAN addresses are reachable again.
       const creds = devNetRef.current;
-      if (kind === 'wifi' && host.trim() === DEVICE_AP_IP && wifiJoinSupported && creds) {
-        await joinWifi(creds.ssid, creds.pass);
+      if (apSsid && creds) {
+        await joinWifi(apSsid, creds.pass);   // every T-DSP shares the built-in password
         if (!live()) return;
       } else if (wifiJoinSupported) {
         await releaseWifi();
@@ -754,7 +779,7 @@ export default function App() {
       }
       t.requestState();   // pull the device's real current settings → hydrate every card (see @STATE handler)
       t.requestFonts();   // pull the swappable drum-font list (runtime @DRUMFONT builds) → the Drum Font picker
-      const lc: LastConn = { kind, host: host.trim(), auto: true };
+      const lc: LastConn = { kind, host: host.trim(), auto: true, ...(apSsid ? { ssid: apSsid } : {}) };
       saveLastConn(lc); setLastConn(lc);   // the "last used" card, and auto-reconnect on the next launch
     } catch (e: any) {
       if (live()) setConnError({ id, message: connFailMessage(e, kind, host) });
@@ -767,10 +792,12 @@ export default function App() {
   // Connect to a target from the UI, boot restore or app resume. Supersedes any attempt in flight. If
   // `tp` has to change (other transport or host) the connect runs once it is rebuilt (effect below).
   const pendingConnRef = useRef<{ auto: boolean } | null>(null);
-  function connectTo(kind: TransportKind, host: string | undefined, auto = false) {
+  function connectTo(kind: TransportKind, host: string | undefined, auto = false, ssid?: string) {
     if (connectingRef.current) { connGenRef.current++; connectingRef.current = false; tp.disconnect().catch(() => {}); }
     userDiscRef.current = false; setUserDisc(false);
-    setConnError(null); setAttemptId(targetId(kind, host)); setAttemptAuto(auto); setConnecting(true);
+    joinSsidRef.current = ssid || null;
+    const apSsid = apJoinSsid(kind, host, ssid);
+    setConnError(null); setAttemptId(apSsid ? 'ap:' + apSsid : targetId(kind, host)); setAttemptAuto(auto); setConnecting(true);
     const h = (host || '').trim() || 'tdsp.local';
     if (kind === tkind && (kind !== 'wifi' || h === wifiHost.trim())) { connect(auto); return; }
     pendingConnRef.current = { auto };
@@ -825,7 +852,7 @@ export default function App() {
       const dev = servedByDevice();
       if (!last && dev) { connectTo('wifi', dev, true); return; }
       if (!last || last.auto === false) return;
-      if (last.kind === 'wifi') connectTo('wifi', last.host, true);
+      if (last.kind === 'wifi') connectTo('wifi', last.host, true, last.ssid);
       else if (Platform.OS === 'web') connect(true, true);
       else connectTo('default', undefined, true);
     })();
@@ -856,7 +883,7 @@ export default function App() {
       if (st !== 'active') return;
       const last = lastConnRef.current;
       if (!last || last.auto === false || userDiscRef.current || connectingRef.current || tpRef.current.isConnected()) return;
-      connectTo(last.kind, last.host, true);
+      connectTo(last.kind, last.host, true, last.ssid);
     });
     return () => sub.remove();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -872,23 +899,36 @@ export default function App() {
     const builtin: ConnOption | null = Platform.OS === 'web'
       ? (hasWebSerial ? { id: 'default', kind: 'default', icon: '🔌', title: 'USB cable', subtitle: 'T-DSP plugged into this computer (Chrome or Edge)' } : null)
       : { id: 'default', kind: 'default', icon: 'ᛒ', title: 'Bluetooth', subtitle: 'Only with the Bluetooth firmware build' };
+    // The easiest first connect: "Connect to <T-DSP network> Access Point", first in the list. One card per
+    // T-DSP network the phone can see; the built-in name when none is seen (or it can't look).
+    if (wifiJoinSupported && devNet) {
+      const bars = (rssi: number) => (rssi >= -60 ? 'strong signal' : rssi >= -75 ? 'good signal' : 'weak signal');
+      const aps = nearbyAps && nearbyAps.length
+        ? nearbyAps.map(n => ({ ssid: n.ssid, sub: `Found nearby · ${bars(n.rssi)}` }))
+        : [{ ssid: devNet.ssid, sub: nearbyAps ? 'Not seen nearby yet · tap to try' : "Joins the T-DSP's own Wi-Fi for you" }];
+      aps.forEach((a, i) => add({
+        id: 'ap:' + a.ssid, kind: 'wifi', host: DEVICE_AP_IP, joinSsid: a.ssid, icon: '📡',
+        title: `Connect to ${a.ssid} Access Point`, subtitle: a.sub, help: i === 0 ? 'deviceNetwork' : undefined,
+      }));
+    }
     const dev = servedByDevice();
     if (dev) add(wifi(dev, '📡', 'This T-DSP', `${dev} · the device showing this page`));
     for (const d of found) add(wifi(d.host, '📶', d.name || 'T-DSP', `${d.host} · on this Wi-Fi`));
-    if (lastConn?.kind === 'wifi') { const h = lastConn.host || 'tdsp.local'; add(wifi(h, '📶', 'T-DSP', `${h} · Wi-Fi`)); }
+    if (lastConn?.kind === 'wifi' && !lastConn.ssid) { const h = lastConn.host || 'tdsp.local'; add(wifi(h, '📶', 'T-DSP', `${h} · Wi-Fi`)); }
     if (lastConn?.kind === 'default') add(builtin);
     if (Platform.OS !== 'android') add(wifi('tdsp.local', '📶', 'T-DSP on this Wi-Fi', 'tdsp.local'));
-    add({ ...wifi(DEVICE_AP_IP, '📡', 'T-DSP network',
-      wifiJoinSupported && devNet ? `${DEVICE_AP_IP} · joins the T-DSP Wi-Fi for you` : `${DEVICE_AP_IP} · join the T-DSP Wi-Fi first`), help: 'deviceNetwork' });
+    if (!(wifiJoinSupported && devNet)) {
+      add({ ...wifi(DEVICE_AP_IP, '📡', 'T-DSP Access Point', `${DEVICE_AP_IP} · join its Wi-Fi first, then tap here`), help: 'deviceNetwork' });
+    }
     // A typed address that is connecting or just failed gets its own card, so its spinner and error stay
     // visible (the connect screen unmounts while connected, which drops the "Another address" field).
     const typed = [attemptId, connError?.id].find(id => id && id.startsWith('wifi:'));
     if (typed) add(wifi(typed.slice(5), '⌨', 'T-DSP', `${typed.slice(5)} · Wi-Fi`));
     add(builtin);
-    const lastId = lastConn ? targetId(lastConn.kind, lastConn.host) : null;
+    const lastId = lastConn ? (lastConn.ssid ? 'ap:' + lastConn.ssid : targetId(lastConn.kind, lastConn.host)) : null;
     return out.map(o => (o.id === lastId ? { ...o, badge: 'last used' } : o));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [found, lastConn, hasWebSerial, attemptId, connError, devNet]);
+  }, [found, lastConn, hasWebSerial, attemptId, connError, devNet, nearbyAps]);
 
   // Pull down to refresh (native; the web has the browser's refresh): restart the app, picking up a
   // newer published bundle if one is available, then the boot path reconnects to the last device.
@@ -2698,13 +2738,15 @@ export default function App() {
           attemptAuto={attemptAuto}
           error={connError}
           searching={discoRef.current.supported && scanning && found.length === 0}
-          onConnect={o => connectTo(o.kind, o.host)}
+          onConnect={o => connectTo(o.kind, o.host, false, o.joinSsid)}
+          onCopy={text => Clipboard.setStringAsync(text)}
           onCancel={cancelAttempt}
           refreshControl={refreshCtl}
           deviceNetwork={devNet}
           onOpenWifiSettings={canOpenWifiSettings ? () => { openWifiSettings(); } : undefined}
           footer={servedByDevice() ? undefined
-            : 'No Wi-Fi at the venue? Join the T-DSP network in this device\u2019s Wi-Fi settings, then tap T-DSP network.'}
+            : wifiJoinSupported ? undefined
+            : 'No Wi-Fi at the venue? Join the T-DSP Wi-Fi in this device\u2019s settings, then tap T-DSP Access Point.'}
         />
       )}
 

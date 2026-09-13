@@ -13,6 +13,7 @@ import { wifiApi, staSummary, ScanNet, WifiStatus } from '../deviceWifi';
 import { loadDeviceNetworkCreds, rememberDeviceNetworkCreds } from '../deviceNetwork';
 import type { DeviceNetworkCreds } from '../deviceNetwork';
 import WifiQr, { wifiQrPayload } from './WifiQr';
+import * as Clipboard from 'expo-clipboard';
 
 const PASS_KEY = 'tdsp.devicePassword';
 const POLL_MS = 3000;
@@ -172,7 +173,10 @@ export default function DeviceWifi({ base }: { base: string | null }) {
             <Row><Btn ghost label="Show password and QR code" onPress={() => setShare(true)} /></Row>
           ) : (
             <View style={{ gap: 8, alignItems: 'flex-start' }}>
-              <Text style={s.muted}>Password:   <Text selectable style={[s.text, { fontSize: 18, fontWeight: '700' }]}>{creds.pass}</Text></Text>
+              <Row>
+                <Text style={s.muted}>Password:   <Text selectable style={[s.text, { fontSize: 18, fontWeight: '700' }]}>{creds.pass}</Text></Text>
+                <Btn ghost label="Copy" onPress={() => { Clipboard.setStringAsync(creds.pass).then(() => setMsg('Password copied.')).catch(() => {}); }} />
+              </Row>
               <WifiQr value={wifiQrPayload(creds.ssid, creds.pass)} size={200} />
               <Note>Another phone can scan this with its camera to join {creds.ssid}.</Note>
               <Row><Btn ghost label="Hide" onPress={() => setShare(false)} /></Row>

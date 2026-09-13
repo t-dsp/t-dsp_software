@@ -6,6 +6,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.wifi.WifiManager
 import android.net.wifi.WifiNetworkSpecifier
 import android.os.Build
 import android.os.Handler
@@ -19,7 +20,7 @@ import expo.modules.kotlin.modules.ModuleDefinition
 //  * the network is requested WITHOUT internet capability, so the phone keeps its normal Wi-Fi/mobile
 //    data for everything else, and never nags "this network has no internet"
 //  * the app's sockets are bound to that network (bindProcessToNetwork) until release() or the app exits
-//  * no location or nearby-devices runtime permission is involved
+//  * joining needs no runtime permission; only the optional scan() for nearby "T-DSP" names does
 //
 // All state is touched on the main thread. Each join bumps `generation`; callbacks and timeouts from an
 // older join are ignored, so a cancelled attempt can never release or answer for a newer one.
@@ -47,6 +48,22 @@ class TdspWifiModule : Module() {
           promise.reject("ERR_UNSUPPORTED", "Joining Wi-Fi from the app needs Android 10 or newer.", null)
         } else {
           startJoin(manager, ssid, passphrase, timeoutMs.toLong(), promise)
+        }
+      }
+    }
+
+    // Nearby Wi-Fi networks whose name contains `match` (case-insensitive), strongest first, one entry
+    // per name. Reads the phone's recent scan results (and nudges a fresh scan, which Android throttles).
+    // Needs NEARBY_WIFI_DEVICES (Android 13+) or location (Android 10/11); the JS side asks first.
+    AsyncFunction("scan") { match: String, promise: Promise ->
+      val wifi = appContext.reactContext?.applicationContext?.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+      if (wifi == null) {
+        promise.resolve(emptyList<Map<String, Any>>())
+      } else {
+        try {
+          promise.resolve(matchingNetworks(wifi, match))
+        } catch (e: SecurityException) {
+          promise.reject("ERR_PERMISSION", "Permission to see nearby Wi-Fi networks was not granted.", e)
         }
       }
     }
@@ -116,6 +133,19 @@ class TdspWifiModule : Module() {
       callback = null
       settle(gen) { it.reject("ERR_REQUEST", e.message ?: "The Wi-Fi request failed.", e) }
     }
+  }
+
+  @Suppress("DEPRECATION")
+  private fun matchingNetworks(wifi: WifiManager, match: String): List<Map<String, Any>> {
+    try { wifi.startScan() } catch (_: Exception) {}
+    val best = HashMap<String, Int>()
+    for (r in wifi.scanResults) {
+      val ssid = r.SSID ?: continue
+      if (ssid.isEmpty() || !ssid.contains(match, ignoreCase = true)) continue
+      val prev = best[ssid]
+      if (prev == null || r.level > prev) best[ssid] = r.level
+    }
+    return best.entries.sortedByDescending { it.value }.map { mapOf("ssid" to it.key, "rssi" to it.value) }
   }
 
   // Answer the pending join exactly once, and only if it is still the current one.

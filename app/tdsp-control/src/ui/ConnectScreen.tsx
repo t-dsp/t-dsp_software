@@ -22,13 +22,14 @@ export interface ConnOption {
   subtitle: string;
   badge?: string;      // e.g. 'last used'
   help?: 'deviceNetwork';   // show the device network's name/password/QR under this card
+  joinSsid?: string;        // tapping joins this access point first (Android app)
 }
 
 export interface ConnError { id: string; message: string }
 
 export default function ConnectScreen({
   options, attemptId, attemptAuto, error, searching, onConnect, onCancel, footer, refreshControl,
-  deviceNetwork, onOpenWifiSettings,
+  deviceNetwork, onOpenWifiSettings, onCopy,
 }: {
   options: ConnOption[];
   attemptId: string | null;      // option currently connecting
@@ -41,10 +42,16 @@ export default function ConnectScreen({
   refreshControl?: React.ReactElement<any>;   // pull-to-refresh (native)
   deviceNetwork?: { ssid: string; pass: string } | null;   // the T-DSP's own Wi-Fi, when the app knows it
   onOpenWifiSettings?: () => void;                         // system Wi-Fi picker (Android)
+  onCopy?: (text: string) => unknown;                      // clipboard
 }) {
   const [manualOpen, setManualOpen] = useState(false);
   const [manual, setManual] = useState('');
   const [showNet, setShowNet] = useState(false);
+  const [showQr, setShowQr] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const copy = (text: string) => {
+    Promise.resolve(onCopy?.(text)).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000); }).catch(() => {});
+  };
   const manualId = manual.trim() ? 'wifi:' + manual.trim() : '';
   const manualBusy = !!manualId && attemptId === manualId && !options.some(o => o.id === manualId);
 
@@ -103,17 +110,39 @@ export default function ConnectScreen({
                 </Pressable>
               ) : (
                 <View style={st.netPanel}>
-                  <Text style={st.hint}>Join this Wi-Fi on your phone, then tap T-DSP network above.</Text>
-                  <View style={st.kv}><Text style={st.k}>Network</Text><Text selectable style={st.v}>{deviceNetwork.ssid}</Text></View>
-                  <View style={st.kv}><Text style={st.k}>Password</Text><Text selectable style={[st.v, st.pw]}>{deviceNetwork.pass}</Text></View>
-                  {onOpenWifiSettings && (
-                    <Pressable onPress={onOpenWifiSettings} style={({ pressed }) => [st.go, st.goWide, pressed && st.cardPressed]} accessibilityRole="button">
-                      <Text style={st.goText}>Open Wi-Fi settings</Text>
+                  <View style={st.kv}><Text style={st.k}>Network</Text><Text selectable style={st.v}>{o.joinSsid || deviceNetwork.ssid}</Text></View>
+                  <View style={st.kvRow}>
+                    <Text style={st.k}>Password</Text>
+                    <Text selectable style={[st.v, st.pw]}>{deviceNetwork.pass}</Text>
+                    {onCopy && (
+                      <Pressable onPress={() => copy(deviceNetwork.pass)} style={({ pressed }) => [st.copyBtn, pressed && st.cardPressed]} accessibilityRole="button">
+                        <Text style={st.copyText}>{copied ? 'Copied ✓' : 'Copy'}</Text>
+                      </Pressable>
+                    )}
+                  </View>
+                  {o.joinSsid ? (
+                    <Pressable onPress={() => onConnect(o)} style={({ pressed }) => [st.go, st.goWide, pressed && st.cardPressed]} accessibilityRole="button">
+                      <Text style={st.goText}>Connect to {o.joinSsid} Wi-Fi</Text>
                     </Pressable>
+                  ) : (
+                    <>
+                      <Text style={st.hint}>Join this Wi-Fi in your phone's settings, then come back and tap T-DSP Access Point.</Text>
+                      {onOpenWifiSettings && (
+                        <Pressable onPress={onOpenWifiSettings} style={({ pressed }) => [st.go, st.goWide, pressed && st.cardPressed]} accessibilityRole="button">
+                          <Text style={st.goText}>Open Wi-Fi settings</Text>
+                        </Pressable>
+                      )}
+                    </>
                   )}
-                  <WifiQr value={wifiQrPayload(deviceNetwork.ssid, deviceNetwork.pass)} size={200} />
-                  <Text style={[st.hint, { textAlign: 'center' }]}>Another phone can scan this with its camera to join.</Text>
-                  <Pressable onPress={() => setShowNet(false)} style={st.linkRow}><Text style={st.link}>Hide</Text></Pressable>
+                  {!showQr ? (
+                    <Pressable onPress={() => setShowQr(true)} style={st.linkRow}><Text style={st.link}>Share with another phone</Text></Pressable>
+                  ) : (
+                    <>
+                      <WifiQr value={wifiQrPayload(o.joinSsid || deviceNetwork.ssid, deviceNetwork.pass)} size={200} />
+                      <Text style={[st.hint, { textAlign: 'center' }]}>The other phone scans this with its camera to join.</Text>
+                    </>
+                  )}
+                  <Pressable onPress={() => { setShowNet(false); setShowQr(false); }} style={st.linkRow}><Text style={st.link}>Hide</Text></Pressable>
                 </View>
               ))}
             </View>
@@ -200,5 +229,8 @@ const st = StyleSheet.create({
   k: { color: C.muted, fontSize: 13, width: 72 },
   v: { color: C.text, fontSize: 16, fontWeight: '600', flexShrink: 1 },
   pw: { fontSize: 20, letterSpacing: 0.5 },
+  kvRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 10 },
+  copyBtn: { borderWidth: 1, borderColor: C.border, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6, marginLeft: 'auto' },
+  copyText: { color: C.text, fontSize: 14, fontWeight: '600' },
   goWide: { alignSelf: 'stretch' },
 });

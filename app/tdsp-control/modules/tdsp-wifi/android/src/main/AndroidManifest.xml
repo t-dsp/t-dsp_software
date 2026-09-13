@@ -1,8 +1,13 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:tools="http://schemas.android.com/tools">
   <!-- ConnectivityManager.requestNetwork() + WifiNetworkSpecifier. All normal (install-time) permissions:
        no location or nearby-devices prompt. -->
   <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
   <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
   <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+  <!-- Seeing nearby "T-DSP" networks on Android 13+ (runtime prompt), explicitly NOT used for location.
+       Android 10/11 use the location permission react-native-ble-plx already declares (maxSdkVersion 30). -->
+  <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES"
+    android:usesPermissionFlags="neverForLocation" tools:targetApi="tiramisu" />
 </manifest>

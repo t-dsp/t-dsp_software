@@ -50,7 +50,8 @@ export const catalogCache: CatalogCache = {
 const LASTCONN_KEY = 'tdsp.lastconn.v1';
 // auto=false: remembered for the connect screen's "last used" card, but don't auto-reconnect to it
 // (set by an explicit Disconnect; cleared the next time it's connected).
-export type LastConn = { kind: 'default' | 'wifi'; host: string; auto?: boolean };
+// ssid: set when the connection went through the T-DSP's own access point joined by the app.
+export type LastConn = { kind: 'default' | 'wifi'; host: string; auto?: boolean; ssid?: string };
 export const saveLastConn = (c: LastConn) => { AsyncStorage.setItem(LASTCONN_KEY, JSON.stringify(c)).catch(() => {}); };
 export const clearLastConn = () => { AsyncStorage.removeItem(LASTCONN_KEY).catch(() => {}); };
 export const loadLastConn = async (): Promise<LastConn | null> => {
