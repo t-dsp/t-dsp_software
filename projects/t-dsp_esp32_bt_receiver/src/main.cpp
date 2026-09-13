@@ -106,6 +106,7 @@
 #include <LittleFS.h>
 #include <functional>
 #include <vector>
+#include "WifiNetManager.h"
 // esp_coexist.h (WiFi/BT coexistence arbiter) is present on IDF 4.4 but guard it so
 // the build survives if a future platform drops/renames it.
 #if __has_include(<esp_coexist.h>)
@@ -139,8 +140,12 @@
 #ifndef TDSP_AP_SSID
 #define TDSP_AP_SSID "T-DSP"
 #endif
+// The fallback below is PUBLIC (it is in this repo), so anyone could join a device built without
+// a .env. The status API flags it and the control UI asks you to change it.
+#define TDSP_AP_PASS_PUBLIC "tdsp1234"
 #ifndef TDSP_AP_PASS
-#define TDSP_AP_PASS "tdsp1234"
+#define TDSP_AP_PASS TDSP_AP_PASS_PUBLIC
+#warning "TDSP_AP_PASS not defined -- the device network uses the PUBLIC default password; set it in .env."
 #endif
 // HTTP port for the hosted UI (WebSocket control stays on TDSP_WS_PORT).
 #ifndef TDSP_HTTP_PORT
@@ -1007,6 +1012,7 @@ static void onWsEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t lengt
 //                        has to fit in the heap.
 static WebServer g_http(TDSP_HTTP_PORT);
 static DNSServer g_dns;
+static WifiNetManager g_net;      // saved networks, AP settings, scan/connect policy (WifiNetManager.h)
 static bool      g_fsUp = false;
 static File      g_upFile;        // in-flight upload target
 static bool      g_upOk = false;
@@ -1062,6 +1068,13 @@ static void uiHandleNotFound() {
   // captive-portal redirect (WebServer has no HEAD mode, so streamFile still emits the
   // body -- harmless, the response is Connection: close and the client discards it).
   const HTTPMethod m = g_http.method();
+  if (m == HTTP_OPTIONS) {   // CORS preflight (API calls are simple requests, but be permissive)
+    g_http.sendHeader("Access-Control-Allow-Origin", "*");
+    g_http.sendHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    g_http.sendHeader("Access-Control-Allow-Headers", "Content-Type");
+    g_http.send(204);
+    return;
+  }
   if ((m == HTTP_GET || m == HTTP_HEAD) && uiServeFile(g_http.uri())) return;
   if (!g_fsUp || !LittleFS.exists("/index.html.gz")) {
     g_http.send(200, "text/plain", "T-DSP: no web UI hosted yet. Push one with tools/push_ui.py (see planning/thin-shell-app).\n");
@@ -1149,6 +1162,64 @@ static void uiHandleUploadDone() {
   g_http.send(g_upOk ? 200 : 500, "text/plain", g_upOk ? "ok" : "write failed");
 }
 
+// ---- Wi-Fi settings API (used by the control UI's Settings > Device Wi-Fi page) ----------
+// Bodies are application/x-www-form-urlencoded, and auth travels in the body ("auth" = the device
+// network password, or TDSP_UI_TOKEN for tooling). No custom headers + a form content type makes
+// every call a CORS "simple request", so the app works cross-origin (jay-mint web host, APK)
+// without a preflight; responses carry Access-Control-Allow-Origin: *.
+//   GET  /api/wifi            status: AP (ssid, clients, publicDefaultPass), station, saved names
+//   GET  /api/wifi/scan       last scan results (strongest first, saved flag)
+//   POST /api/wifi/scan       start a scan (never auto-connects; rate-limited)
+//   POST /api/wifi/save       ssid, pass  -> add/update a network; joins now if not connected
+//   POST /api/wifi/forget     ssid
+//   POST /api/wifi/connect    scan + join the best saved network now, even with phones on the AP
+//   POST /api/wifi/ap         ssid, pass  -> rename / re-key the device network (applies in ~1.5 s)
+// Passwords are never returned.
+static void apiSend(int code, const String &body) {
+  g_http.sendHeader("Access-Control-Allow-Origin", "*");
+  g_http.sendHeader("Cache-Control", "no-store");
+  g_http.send(code, "application/json", body);
+}
+
+static void apiResult(const String &err, int errCode = 400) {
+  if (err.length() == 0) { apiSend(200, "{\"ok\":true}"); return; }
+  String o = "{\"ok\":false,\"error\":";
+  WifiNetManager::jsonStr(o, err);
+  o += "}";
+  apiSend(errCode, o);
+}
+
+static bool apiAuthed() {
+  if (g_net.authorized(g_http.arg("auth"), TDSP_UI_TOKEN)) return true;
+  apiResult("wrong device password", 403);
+  return false;
+}
+
+static void apiWifiStatus() { String o; o.reserve(512); g_net.statusJson(o); apiSend(200, o); }
+static void apiWifiScanGet() { String o; o.reserve(1024); g_net.scanJson(o); apiSend(200, o); }
+static void apiWifiScanPost() {
+  if (!apiAuthed()) return;
+  if (g_net.requestScan()) apiResult("");
+  else apiResult("scan busy, try again in a few seconds", 429);
+}
+static void apiWifiSave() {
+  if (!apiAuthed()) return;
+  apiResult(g_net.saveNetwork(g_http.arg("ssid"), g_http.arg("pass")));
+}
+static void apiWifiForget() {
+  if (!apiAuthed()) return;
+  apiResult(g_net.forgetNetwork(g_http.arg("ssid")) ? "" : "not a saved network", 404);
+}
+static void apiWifiConnect() {
+  if (!apiAuthed()) return;
+  g_net.connectNow();
+  apiResult("");
+}
+static void apiWifiAp() {
+  if (!apiAuthed()) return;
+  apiResult(g_net.setAp(g_http.arg("ssid"), g_http.arg("pass")));
+}
+
 static void uiHttpBegin() {
   // LittleFS: format on first boot with the new partition table (formatOnFail=true).
   g_fsUp = LittleFS.begin(true, "/littlefs", 8, "spiffs");
@@ -1159,6 +1230,13 @@ static void uiHttpBegin() {
   g_http.on("/ui/list",  HTTP_GET,  uiHandleList);
   g_http.on("/ui/clear", HTTP_POST, uiHandleClear);
   g_http.on("/ui",       HTTP_POST, uiHandleUploadDone, uiHandleUploadChunk);
+  g_http.on("/api/wifi",         HTTP_GET,  apiWifiStatus);
+  g_http.on("/api/wifi/scan",    HTTP_GET,  apiWifiScanGet);
+  g_http.on("/api/wifi/scan",    HTTP_POST, apiWifiScanPost);
+  g_http.on("/api/wifi/save",    HTTP_POST, apiWifiSave);
+  g_http.on("/api/wifi/forget",  HTTP_POST, apiWifiForget);
+  g_http.on("/api/wifi/connect", HTTP_POST, apiWifiConnect);
+  g_http.on("/api/wifi/ap",      HTTP_POST, apiWifiAp);
   g_http.onNotFound(uiHandleNotFound);
   g_http.begin();
   // Captive portal: answer every DNS query on the AP with our address; the OS probe
@@ -1174,12 +1252,12 @@ static void uiHttpBegin() {
 class WifiControlTransport : public ControlTransport {
  public:
   void begin() override {
-    WiFi.persistent(false);            // don't wear flash writing creds every boot
-    // AP+STA: the access point is unconditional (festival / no-router use); the station
-    // side only joins if a LAN SSID was configured. Both share one channel -- the AP
-    // follows whatever channel the STA lands on, which is fine for control traffic.
-    WiFi.mode(WIFI_AP_STA);
-    WiFi.setHostname(TDSP_MDNS_HOST);  // DHCP hostname (mDNS name set separately)
+    WiFi.setHostname(TDSP_MDNS_HOST);  // DHCP hostname (mDNS name set separately); before mode()
+    // AP+STA with runtime settings + the scan/connect policy: see WifiNetManager.h. The AP is
+    // unconditional (festival / no-router use); saved networks are joined when in range. The .env
+    // LAN creds only seed the saved list on first boot; the .env AP creds are defaults until the
+    // UI saves its own.
+    g_net.begin(TDSP_AP_SSID, TDSP_AP_PASS, TDSP_WIFI_SSID, TDSP_WIFI_PASS, TDSP_AP_PASS_PUBLIC);
 #if TDSP_A2DP
     // WiFi modem sleep MUST stay ENABLED while Bluetooth is up. A2DP (Bluetooth Classic)
     // and WiFi share the one 2.4 GHz radio, and the coexistence arbiter time-slices them
@@ -1206,27 +1284,18 @@ class WifiControlTransport : public ControlTransport {
     // Pointless with the A2DP gate off -- there is nothing to coexist with.
     esp_coex_preference_set(ESP_COEX_PREFER_BT);
 #endif
-    bool apUp = WiFi.softAP(TDSP_AP_SSID, TDSP_AP_PASS);
-    Serial.printf("[wifi] AP \"%s\" %s at %s\n", TDSP_AP_SSID, apUp ? "up" : "FAILED", WiFi.softAPIP().toString().c_str());
-    staConfigured = TDSP_WIFI_SSID[0] != 0;
-    if (staConfigured) {
-      Serial.printf("[wifi] connecting to \"%s\"...\n", TDSP_WIFI_SSID);
-      WiFi.begin(TDSP_WIFI_SSID, TDSP_WIFI_PASS);   // non-blocking; loop() reports when up
-    } else {
-      Serial.println("[wifi] no LAN SSID configured -> AP-only");
-    }
     g_ws.begin();
     g_ws.onEvent(onWsEvent);
     Serial.printf("[ws] server listening on port %u\n", (unsigned)TDSP_WS_PORT);
     uiHttpBegin();
-    if (apUp) startMdns();   // tdsp.local answers on the AP even with no LAN
+    if (g_net.apUp()) startMdns();   // tdsp.local answers on the AP even with no LAN
   }
 
   void loop() override {
     g_ws.loop();
     g_http.handleClient();
     g_dns.processNextRequest();
-    maintainWifi();
+    g_net.loop();
     // Flush broadcasts requested from the BT task (see pushStatus/pushSources).
     if (pendingStatus)  { pendingStatus  = false; broadcastStatus(); }
     if (pendingSources) { pendingSources = false; broadcastSources(); }
@@ -1248,9 +1317,6 @@ class WifiControlTransport : public ControlTransport {
   volatile bool pendingStatus  = false;
   volatile bool pendingSources = false;
   bool     mdnsUp   = false;
-  bool     wasConn  = false;
-  bool     staConfigured = false;
-  uint32_t lastTry  = 0;
 
   void broadcastStatus() {
     char buf[96];
@@ -1264,22 +1330,6 @@ class WifiControlTransport : public ControlTransport {
     char buf[640];
     snprintf(buf, sizeof(buf), "@SOURCES=%s", src);   // framed so the app can tell it apart
     wsSendLine(-1, buf);
-  }
-
-  void maintainWifi() {
-    if (!staConfigured) return;           // AP-only: nothing to (re)join
-    if (WiFi.status() == WL_CONNECTED) {
-      if (!wasConn) {
-        wasConn = true;
-        IPAddress ip = WiFi.localIP();
-        Serial.printf("[wifi] connected: %u.%u.%u.%u\n", ip[0], ip[1], ip[2], ip[3]);
-        if (!mdnsUp) startMdns();
-      }
-    } else {
-      if (wasConn) { wasConn = false; Serial.println("[wifi] link lost -> reconnecting"); }
-      uint32_t now = millis();
-      if (now - lastTry >= 5000) { lastTry = now; WiFi.reconnect(); }   // non-blocking retry
-    }
   }
 
   void startMdns() {

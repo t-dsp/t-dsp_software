@@ -67,11 +67,44 @@ Optional overrides (plain build flags, not secrets): `TDSP_WS_PORT` (default `81
 
 > Must be a **2.4 GHz** network — the classic ESP32 has no 5 GHz radio.
 
+### Runtime Wi-Fi settings (no reflash)
+
+The networks the device joins and its own network's name/password live in NVS and are edited
+from the control app: **Settings › Device Wi-Fi** (visible when connected over Wi-Fi). Up to 5
+saved networks; the device joins the strongest one in range. `.env` values are only
+**first-boot seeds**: `TDSP_WIFI_SSID/PASS` is imported once, and `TDSP_AP_SSID/PASS` apply
+until the app saves its own. Code: [`src/WifiNetManager.h`](src/WifiNetManager.h).
+
+**Connection policy (why phones on the device network don't stutter).** The AP and the station
+share one radio, and a station scan hops channels away from the AP. The old policy
+(`WiFi.reconnect()` every 5 s plus arduino-esp32 AutoReconnect, which re-`begin()`s instantly
+on "network not found") scanned almost continuously whenever the home network was absent.
+Measured with a laptop on the AP and the home network absent (60 s each):
+
+| | ping loss | longest loss | WS control p95 | WS max | WS timeouts |
+|---|---|---|---|---|---|
+| old policy | 22.8% | 4.2 s | 680 ms | 1510 ms | 7 |
+
+The new policy: AutoReconnect off; one short async scan, then connect straight to the best saved
+network by channel+BSSID; exponential backoff 10 s → 5 min when none is in range; **no scanning
+and no auto-connect while any phone is on the device network** (the app's *Connect now* and
+*Save network* override that on purpose).
+
+HTTP API (form-encoded POSTs, `auth` = device network password or `TDSP_UI_TOKEN`; CORS `*`):
+`GET /api/wifi`, `GET|POST /api/wifi/scan`, `POST /api/wifi/save` (ssid, pass),
+`/api/wifi/forget` (ssid), `/api/wifi/connect`, `/api/wifi/ap` (ssid, pass). Passwords are
+never returned.
+
+**Locked out** (forgot the device network password and no LAN access)? Erase the settings
+namespace by erasing NVS through the Teensy bridge, which restores the `.env` defaults:
+`esptool.py ... erase_region 0x9000 0x5000` (same `g` passthrough recipe as flashing).
+
 ### Access point + hosted web UI (no app, no internet)
 
-The WiFi build runs **AP+STA**: it always raises its own access point (`TDSP_AP_SSID` /
-`TDSP_AP_PASS` in `.env`, defaults `T-DSP` / `tdsp1234`) and only *additionally* joins a
-LAN if `TDSP_WIFI_SSID` is set. Leave the SSID empty for AP-only (festival mode).
+The WiFi build runs **AP+STA**: it always raises its own access point and *additionally*
+joins a saved network when one is in range (see Runtime Wi-Fi settings above). A build without
+`.env` falls back to the **public** password `tdsp1234` and warns at compile time; the app shows
+a warning until you change it.
 
 It also serves the control app's web export from a **1.375 MB LittleFS** partition over
 plain HTTP (port 80), with a captive-portal DNS so a phone that joins the AP is bounced

@@ -37,6 +37,8 @@ import { mpeBus, parseMpeLine } from './src/ui/mpeBus';
 import { ARP_PATTERNS as ARP_PAT, ARP_RATES, rateIndexFromFw, PAT_USER_SEQUENCE, DEFAULT_SHAPE, SeqStep, encodeSequence, encodeArpParams } from './src/arpSeq';
 import { applyArpPreset, ArpPreset, ARP_LIBRARY } from './src/arpLibrary';
 import { appUpdateInfo, checkAndApplyUpdate } from './src/appUpdates';
+import DeviceWifi from './src/ui/DeviceWifi';
+import { deviceHttpBase } from './src/deviceWifi';
 
 // The folded landing tile (gridInParent): renders a track's own card as the first cell of its child
 // grid. Prefers the section's renderCard (e.g. <SynthCard>) — assigned onto `parent` AFTER makeTrackCard
@@ -2266,6 +2268,13 @@ export default function App() {
         </>
       ),
     },
+    // DEVICE WI-FI — networks the T-DSP joins + its own network's name/password, changed at runtime over
+    // the ESP32's HTTP API (src/deviceWifi.ts). WiFi control build only, so it needs a Wi-Fi connection.
+    {
+      id: 'devwifi', title: 'Device Wi-Fi', show: false, parent: 'settings',
+      status: tp.name === 'WIFI' ? 'networks' : 'Wi-Fi only',
+      body: <DeviceWifi base={tp.name === 'WIFI' ? deviceHttpBase(wifiHost.trim() || 'tdsp.local') : null} />,
+    },
     // FIRMWARE — which board file (PlatformIO env) is flashed on the connected Teensy, its build time,
     // and the build's capabilities. Lets you confirm at a glance exactly which firmware is running.
     {
@@ -2498,7 +2507,7 @@ export default function App() {
   // Unlisted ids fall to the end in their definition order (stable sort).
   // Order for the home grid AND for each submenu's children (SubMenu sorts by this too).
   const SECTION_ORDER = ['synthesizer', 'synthesizerB', 'synthX2', 'synthX3', 'drumtrack', 'reverb', 'audioloop', 'usbaudio', 'tempo', 'bt', 'settings',
-    'player', 'synth', 'arp', 'player2', 'synth2', 'arp2', 'bpm', 'metro', 'conn', 'firmware', 'codec'];   // all synths: MIDI Player, Synth/Voices, Arp
+    'player', 'synth', 'arp', 'player2', 'synth2', 'arp2', 'bpm', 'metro', 'conn', 'devwifi', 'firmware', 'codec'];   // all synths: MIDI Player, Synth/Voices, Arp
   // NB: the drum children (drumtrackp/drumtrackv) and generated-synth children (synthXNp/v/a) are NOT
   // listed here — like all makeTrackCard children they fall to ord()=999 and keep their push order.
   const ord = (id: string) => { const i = SECTION_ORDER.indexOf(id); return i < 0 ? 999 : i; };
