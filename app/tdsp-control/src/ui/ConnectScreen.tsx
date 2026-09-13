@@ -9,6 +9,7 @@
 import React, { useState } from 'react';
 import { View, Text, Pressable, TextInput, ScrollView, ActivityIndicator, StyleSheet } from 'react-native';
 import { C } from './theme';
+import WifiQr, { wifiQrPayload } from './WifiQr';
 
 export type ConnKind = 'default' | 'wifi';
 
@@ -20,12 +21,14 @@ export interface ConnOption {
   title: string;
   subtitle: string;
   badge?: string;      // e.g. 'last used'
+  help?: 'deviceNetwork';   // show the device network's name/password/QR under this card
 }
 
 export interface ConnError { id: string; message: string }
 
 export default function ConnectScreen({
   options, attemptId, attemptAuto, error, searching, onConnect, onCancel, footer, refreshControl,
+  deviceNetwork, onOpenWifiSettings,
 }: {
   options: ConnOption[];
   attemptId: string | null;      // option currently connecting
@@ -36,9 +39,12 @@ export default function ConnectScreen({
   onCancel: () => void;
   footer?: string;
   refreshControl?: React.ReactElement<any>;   // pull-to-refresh (native)
+  deviceNetwork?: { ssid: string; pass: string } | null;   // the T-DSP's own Wi-Fi, when the app knows it
+  onOpenWifiSettings?: () => void;                         // system Wi-Fi picker (Android)
 }) {
   const [manualOpen, setManualOpen] = useState(false);
   const [manual, setManual] = useState('');
+  const [showNet, setShowNet] = useState(false);
   const manualId = manual.trim() ? 'wifi:' + manual.trim() : '';
   const manualBusy = !!manualId && attemptId === manualId && !options.some(o => o.id === manualId);
 
@@ -91,6 +97,25 @@ export default function ConnectScreen({
                 )}
               </Pressable>
               {renderError(o.id)}
+              {o.help === 'deviceNetwork' && deviceNetwork && (!showNet ? (
+                <Pressable onPress={() => setShowNet(true)} style={st.linkRow} accessibilityRole="button">
+                  <Text style={st.link}>Show the Wi-Fi password</Text>
+                </Pressable>
+              ) : (
+                <View style={st.netPanel}>
+                  <Text style={st.hint}>Join this Wi-Fi on your phone, then tap T-DSP network above.</Text>
+                  <View style={st.kv}><Text style={st.k}>Network</Text><Text selectable style={st.v}>{deviceNetwork.ssid}</Text></View>
+                  <View style={st.kv}><Text style={st.k}>Password</Text><Text selectable style={[st.v, st.pw]}>{deviceNetwork.pass}</Text></View>
+                  {onOpenWifiSettings && (
+                    <Pressable onPress={onOpenWifiSettings} style={({ pressed }) => [st.go, st.goWide, pressed && st.cardPressed]} accessibilityRole="button">
+                      <Text style={st.goText}>Open Wi-Fi settings</Text>
+                    </Pressable>
+                  )}
+                  <WifiQr value={wifiQrPayload(deviceNetwork.ssid, deviceNetwork.pass)} size={200} />
+                  <Text style={[st.hint, { textAlign: 'center' }]}>Another phone can scan this with its camera to join.</Text>
+                  <Pressable onPress={() => setShowNet(false)} style={st.linkRow}><Text style={st.link}>Hide</Text></Pressable>
+                </View>
+              ))}
             </View>
           );
         })}
@@ -168,4 +193,12 @@ const st = StyleSheet.create({
   searchRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 },
   hint: { color: C.muted, fontSize: 13 },
   footer: { marginTop: 16, lineHeight: 19 },
+  linkRow: { alignSelf: 'flex-start', paddingVertical: 6, paddingHorizontal: 6, marginTop: -4, marginBottom: 8 },
+  link: { color: '#58a6ff', fontSize: 14, fontWeight: '600' },
+  netPanel: { gap: 10, backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 12, padding: 14, marginTop: -2, marginBottom: 12 },
+  kv: { flexDirection: 'row', alignItems: 'baseline', gap: 10 },
+  k: { color: C.muted, fontSize: 13, width: 72 },
+  v: { color: C.text, fontSize: 16, fontWeight: '600', flexShrink: 1 },
+  pw: { fontSize: 20, letterSpacing: 0.5 },
+  goWide: { alignSelf: 'stretch' },
 });

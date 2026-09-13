@@ -10,6 +10,9 @@ import { C } from './theme';
 import { s } from './styles';
 import { Row } from './primitives';
 import { wifiApi, staSummary, ScanNet, WifiStatus } from '../deviceWifi';
+import { loadDeviceNetworkCreds, rememberDeviceNetworkCreds } from '../deviceNetwork';
+import type { DeviceNetworkCreds } from '../deviceNetwork';
+import WifiQr, { wifiQrPayload } from './WifiQr';
 
 const PASS_KEY = 'tdsp.devicePassword';
 const POLL_MS = 3000;
@@ -41,11 +44,19 @@ export default function DeviceWifi({ base }: { base: string | null }) {
   const [apSsid, setApSsid] = useState('');
   const [apPass, setApPass] = useState('');
   const [confirmForget, setConfirmForget] = useState<string | null>(null);
+  const [creds, setCreds] = useState<DeviceNetworkCreds | null>(null);
+  const [share, setShare] = useState(false);
   const alive = useRef(true);
 
   useEffect(() => {
     alive.current = true;
     AsyncStorage.getItem(PASS_KEY).then(v => { if (v && alive.current) setAuth(v); }).catch(() => {});
+    // The app usually already knows the device network password: use it so nothing has to be typed.
+    loadDeviceNetworkCreds().then(c => {
+      if (!alive.current || !c) return;
+      setCreds(c);
+      setAuth(a => a || c.pass);
+    }).catch(() => {});
     return () => { alive.current = false; };
   }, []);
 
@@ -119,7 +130,7 @@ export default function DeviceWifi({ base }: { base: string | null }) {
     if (apPass.length < 8) { setMsg('The device password needs at least 8 characters.'); return; }
     const ok = await act('Change device network', () => api.setAp(auth, name, apPass),
       `Changed. The device network restarts as ${name} in a moment; rejoin it with the new password.`);
-    if (ok) { rememberAuth(apPass); setApPass(''); setApOpen(false); }
+    if (ok) { rememberAuth(apPass); rememberDeviceNetworkCreds(name, apPass); setCreds({ ssid: name, pass: apPass, source: 'saved' }); setApPass(''); setApOpen(false); }
   };
 
   const sta = st?.sta;
@@ -157,6 +168,16 @@ export default function DeviceWifi({ base }: { base: string | null }) {
           {st.ap.publicDefaultPass && (
             <Note warn>This network still uses the public default password from the source code. Anyone nearby could join and control the device. Change it below.</Note>
           )}
+          {creds && creds.ssid === st.ap.ssid && (!share ? (
+            <Row><Btn ghost label="Show password and QR code" onPress={() => setShare(true)} /></Row>
+          ) : (
+            <View style={{ gap: 8, alignItems: 'flex-start' }}>
+              <Text style={s.muted}>Password:   <Text selectable style={[s.text, { fontSize: 18, fontWeight: '700' }]}>{creds.pass}</Text></Text>
+              <WifiQr value={wifiQrPayload(creds.ssid, creds.pass)} size={200} />
+              <Note>Another phone can scan this with its camera to join {creds.ssid}.</Note>
+              <Row><Btn ghost label="Hide" onPress={() => setShare(false)} /></Row>
+            </View>
+          ))}
           {!apOpen ? (
             <Row><Btn ghost label="Change name or password" onPress={() => { setApSsid(st.ap.ssid); setApOpen(true); }} /></Row>
           ) : (

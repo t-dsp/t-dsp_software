@@ -41,6 +41,8 @@ import DeviceWifi from './src/ui/DeviceWifi';
 import ConnectScreen, { ConnOption, ConnError } from './src/ui/ConnectScreen';
 import type { LastConn } from './src/ui/constants';
 import { deviceHttpBase } from './src/deviceWifi';
+import { loadDeviceNetworkCreds, openWifiSettings, canOpenWifiSettings } from './src/deviceNetwork';
+import type { DeviceNetworkCreds } from './src/deviceNetwork';
 
 // The folded landing tile (gridInParent): renders a track's own card as the first cell of its child
 // grid. Prefers the section's renderCard (e.g. <SynthCard>) — assigned onto `parent` AFTER makeTrackCard
@@ -98,6 +100,10 @@ export default function App() {
   lastConnRef.current = lastConn;
   const tpRef = useRef(tp);
   tpRef.current = tp;
+  // The T-DSP's own Wi-Fi name/password as this app knows them (native only; see src/deviceNetwork.d.ts).
+  // Re-read whenever we land on the connect screen, in case Settings > Device Wi-Fi changed it.
+  const [devNet, setDevNet] = useState<DeviceNetworkCreds | null>(null);
+  useEffect(() => { if (!connected) loadDeviceNetworkCreds().then(setDevNet).catch(() => {}); }, [connected]);
 
   // mDNS discovery: browse _tdsp._tcp while the Wi-Fi picker is open and disconnected, so
   // you tap a device instead of hunting for its IP. Each hit carries its RESOLVED address,
@@ -858,7 +864,7 @@ export default function App() {
     if (lastConn?.kind === 'wifi') { const h = lastConn.host || 'tdsp.local'; add(wifi(h, '📶', 'T-DSP', `${h} · Wi-Fi`)); }
     if (lastConn?.kind === 'default') add(builtin);
     if (Platform.OS !== 'android') add(wifi('tdsp.local', '📶', 'T-DSP on this Wi-Fi', 'tdsp.local'));
-    add(wifi('192.168.4.1', '📡', 'T-DSP network', '192.168.4.1 · join the T-DSP Wi-Fi first'));
+    add({ ...wifi('192.168.4.1', '📡', 'T-DSP network', '192.168.4.1 · join the T-DSP Wi-Fi first'), help: 'deviceNetwork' });
     // A typed address that is connecting or just failed gets its own card, so its spinner and error stay
     // visible (the connect screen unmounts while connected, which drops the "Another address" field).
     const typed = [attemptId, connError?.id].find(id => id && id.startsWith('wifi:'));
@@ -2680,6 +2686,8 @@ export default function App() {
           onConnect={o => connectTo(o.kind, o.host)}
           onCancel={cancelAttempt}
           refreshControl={refreshCtl}
+          deviceNetwork={devNet}
+          onOpenWifiSettings={canOpenWifiSettings ? () => { openWifiSettings(); } : undefined}
           footer={servedByDevice() ? undefined
             : 'No Wi-Fi at the venue? Join the T-DSP network in this device\u2019s Wi-Fi settings, then tap T-DSP network.'}
         />
