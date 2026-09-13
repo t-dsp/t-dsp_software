@@ -89,6 +89,10 @@ App work (small):
   pushed the 250 KB UI (4 files) which serves gzipped, unknown paths 302 to the AP address
   (captive portal), hosted files survive an app reflash, and WebSocket control on :81 still
   returns `@STATE` from the Teensy alongside the HTTP server.
+- **Runtime Device Wi-Fi DONE (commit fc60126), flash-verified:** saved networks + device network
+  name/password in NVS, edited in the app at Settings › Device Wi-Fi; station never scans while a
+  phone is on the AP. Old policy measured at 22.8% ping loss / 4.2 s outages for a phone on the AP
+  when the home network is absent; the new-policy run's data is still on jay-mint (offline).
 - **Not yet tested:** a phone actually joining the `T-DSP` AP and the captive portal popping
   (both bench machines are Wi-Fi-only, so joining the AP would have cut the SSH link).
 - PWA manifest/service worker: not started, and arguably pointless — the page only has a job
