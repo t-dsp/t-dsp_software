@@ -81,13 +81,27 @@ App work (small):
 
 ## Status (2026-09-13)
 
-- Path 1 **DONE**: expo-updates wired (commit 9de6bfa), channel/branch `preview` created,
-  first OTA published (runtime fingerprint `616ec22a…`), EAS Android preview build started.
-- Path 2 **BUILT, NOT FLASHED**: `esp32dev_wifi` compiles green (1.67 MB / 2.5 MB) with
-  AP+STA, captive portal, LittleFS static server, `/ui` upload; `tools/push_ui.py` written;
-  app defaults to Wi-Fi at its own host when device-served. Needs a BOOT-held ESP32 flash
-  (partition table changed → full `pio run -t upload`), then `python tools/push_ui.py`.
-- PWA manifest/service worker: not started.
+- Path 1 **DONE**: expo-updates wired (commit 9de6bfa), channel/branch `preview`, two OTA
+  updates published, EAS Android preview APK built (runtime fingerprint `616ec22a…`).
+- Path 2 **DONE + HARDWARE-VERIFIED on the jay-mint board**: `esp32dev_wifi` flashed over
+  the Teensy `g` bridge. Verified live: AP `T-DSP` broadcasting (BSS `c4:dd:57:ca:b4:c9`),
+  STA joined the LAN, `tdsp.local` → 10.0.0.154, mDNS `_http._tcp`, `tools/push_ui.py`
+  pushed the 250 KB UI (4 files) which serves gzipped, unknown paths 302 to the AP address
+  (captive portal), hosted files survive an app reflash, and WebSocket control on :81 still
+  returns `@STATE` from the Teensy alongside the HTTP server.
+- **Not yet tested:** a phone actually joining the `T-DSP` AP and the captive portal popping
+  (both bench machines are Wi-Fi-only, so joining the AP would have cut the SSH link).
+- PWA manifest/service worker: not started, and arguably pointless — the page only has a job
+  when the device is powered, and then the device serves it.
+
+### Flashing the ESP32 from jay-mint (recipe that works)
+
+One SSH session, never split: `stty` once, prove the Teensy answers (`@STATE` returns
+bytes), `printf 'g'`, `flash_id`, then `write_flash`, with a `trap` sending `@BOOTAPP@`.
+**Never run esptool unless `g` has actually taken:** esptool's sync frame is 32 × `0x55`,
+and `0x55` is ASCII `U` — the mix-kit's jump-to-HalfKay command. Sending it to a Teensy
+that is NOT in passthrough drops the board into its bootloader (recover with
+`~/.platformio/packages/tool-teensy/teensy_loader_cli --mcu=imxrt1062 -w <hex>`).
 
 ## Order of work
 

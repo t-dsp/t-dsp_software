@@ -1058,7 +1058,11 @@ static void uiRedirectRoot() {
 }
 
 static void uiHandleNotFound() {
-  if (g_http.method() == HTTP_GET && uiServeFile(g_http.uri())) return;
+  // HEAD is routed like GET: a HEAD on a file that exists must not be answered with the
+  // captive-portal redirect (WebServer has no HEAD mode, so streamFile still emits the
+  // body -- harmless, the response is Connection: close and the client discards it).
+  const HTTPMethod m = g_http.method();
+  if ((m == HTTP_GET || m == HTTP_HEAD) && uiServeFile(g_http.uri())) return;
   if (!g_fsUp || !LittleFS.exists("/index.html.gz")) {
     g_http.send(200, "text/plain", "T-DSP: no web UI hosted yet. Push one with tools/push_ui.py (see planning/thin-shell-app).\n");
     return;
