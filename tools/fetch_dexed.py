@@ -300,8 +300,11 @@ def main() -> int:
     if args.push:
         push(out_dexed)
     else:
-        print(f"\nHold: copy {out_dexed} onto the card as /dexed when the fast transfer is ready,")
-        print("then send @REINDEX (or delete /tdsp/.sig first) to rebuild dexed.ndjson.")
+        print(f"\nHold: copy {out_dexed} onto the card as /dexed.")
+    # Voice search reads /tdsp/.dxsearch, which the firmware does NOT build itself.
+    print("Then build the voice-search index from what is on the card:")
+    print("  python tools/build_dexed_index.py            (reads the card over USB + pushes)")
+    print("  python tools/build_dexed_index.py --from-dir <card>/dexed   (card reader)")
     return 0
 
 

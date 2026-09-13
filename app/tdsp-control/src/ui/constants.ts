@@ -14,6 +14,9 @@ export const EMPTY_DIR: DirPage = { path: '', page: 0, npages: 1, folders: [], c
 // `voices` its 32 voice names. The app decides WHICH rows to show (which voices matched vs a
 // folder/cart-name-only match), so the firmware stays a dumb line filter.
 export type DexHit = { rel: string; name: string; voices: string[] };
+// Shown when the device answers @dxfind with "no search index": the firmware no longer builds
+// /tdsp/.dxsearch itself (that blocking walk froze the synth) — the PC tool builds and pushes it.
+export const DEX_NO_INDEX_MSG = 'No voice-search index on the SD card yet. Disconnect the app, run "python tools/build_dexed_index.py", then reconnect and search again.';
 export function parseDexFind(text: string): DexHit[] {
   const out: DexHit[] = [];
   for (const l of text.split('\n')) {

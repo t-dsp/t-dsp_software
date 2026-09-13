@@ -18,7 +18,7 @@ import type { Transport, DirPage, TransportKind } from './src/transport';
 // now live in ./src/ui/*. App composes them; see src/ui/{theme,styles,constants,primitives}.
 import { C, THEME } from './src/ui/theme';
 import { s } from './src/ui/styles';
-import { EMPTY_DIR, parseDexFind, DexHit, DexRow, catalogCache, grooveDisp, TP_LABEL, DEFAULT_TP_LABEL, HPF_MODES, volDb, EndMode, END_MODES, REC_STATES, AppState, isEndMode, notify, ROW_H, VItem, InjectFolder, saveLastConn, clearLastConn, loadLastConn } from './src/ui/constants';
+import { EMPTY_DIR, parseDexFind, DEX_NO_INDEX_MSG, DexHit, DexRow, catalogCache, grooveDisp, TP_LABEL, DEFAULT_TP_LABEL, HPF_MODES, volDb, EndMode, END_MODES, REC_STATES, AppState, isEndMode, notify, ROW_H, VItem, InjectFolder, saveLastConn, clearLastConn, loadLastConn } from './src/ui/constants';
 import { Subtitle, LoopStepGrid, Card, Flag, PageHeader, ProgressBus, LoadScreen, HdrBtn, KbdBtn, KbdGlyph, Row, ThrottledSlider, VolSlider, Stat, ListBtn, BodyTabs, SubMenu, FolderBrowser } from './src/ui/primitives';
 import { Header } from './src/ui/Header';
 import { SideNav } from './src/ui/SideNav';
@@ -862,18 +862,44 @@ export default function App() {
   // /dexed full-library search: debounce the query, then ask the device to search folders + cart
   // names + ALL voice names across every subfolder (@dxfind rides the @READ file transport, so it
   // works on USB/BLE/WiFi). null result = search inactive → the normal folder browser shows.
+  // SINGLE-FLIGHT: only one @dxfind is ever on the wire. Typing while one runs just updates
+  // dexWantRef; the in-flight search re-checks it when it lands and runs the LATEST query once,
+  // dropping the stale result. (Firing a search per debounced keystroke used to pile requests up
+  // behind a slow device scan — part of the "search crashes the synth" bug.) Another @READ holding
+  // the file transport (catalog load, drum-font swap) is waited out instead of shown as an error.
+  const dexWantRef = useRef<string | null>(null);   // latest query the UI wants; null = search inactive
+  const dexFlightRef = useRef(false);               // a @dxfind is on the wire
+  async function runDexSearch() {
+    if (dexFlightRef.current) return;               // the in-flight loop picks up dexWantRef when it lands
+    dexFlightRef.current = true;
+    try {
+      for (;;) {
+        const q = dexWantRef.current;
+        if (q === null) break;
+        let text: string | null = null, err = '';
+        for (let attempt = 0; ; attempt++) {
+          try { text = await tp.readFile('@dxfind:' + q); break; }
+          catch (e) {
+            err = String((e as any)?.message || e || 'search failed');
+            if (err === 'a file read is in progress' && attempt < 40 && dexWantRef.current === q) { await new Promise(r => setTimeout(r, 300)); continue; }
+            break;
+          }
+        }
+        if (dexWantRef.current !== q) continue;     // query changed mid-flight — run the latest instead
+        if (text !== null) { setDexResults(parseDexFind(text)); setDexErr(''); }
+        else { setDexResults([]); setDexErr(err === 'no search index' ? DEX_NO_INDEX_MSG : err); }
+        setDexSearching(false);
+        break;
+      }
+    } finally { dexFlightRef.current = false; }
+  }
   useEffect(() => {
     const query = dexQuery.trim();
-    if (!loaded || !cat.hasDexed || query.length < 2) { setDexResults(null); setDexErr(''); setDexSearching(false); return; }
-    let alive = true;
+    if (!loaded || !cat.hasDexed || query.length < 2) { dexWantRef.current = null; setDexResults(null); setDexErr(''); setDexSearching(false); return; }
+    dexWantRef.current = query;
     setDexSearching(true); setDexErr('');
-    const t = setTimeout(() => {
-      tp.readFile('@dxfind:' + query)
-        .then(text => { if (alive) setDexResults(parseDexFind(text)); })
-        .catch(e => { if (alive) { setDexResults([]); setDexErr(String((e as any)?.message || e || 'search failed')); } })
-        .finally(() => { if (alive) setDexSearching(false); });
-    }, 450);
-    return () => { alive = false; clearTimeout(t); };
+    const t = setTimeout(() => { runDexSearch(); }, 450);
+    return () => clearTimeout(t);
   }, [dexQuery, loaded, cat.hasDexed]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   // The voices currently listed in Synth/Voices (a cart's voices, or the bundled set).

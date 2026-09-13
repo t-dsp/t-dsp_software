@@ -2447,70 +2447,21 @@ static void streamFile(Print& out, const char* path) {
 // Backs the voice browser's search box. Reached as a VIRTUAL @READ path
 // ("@READ=@dxfind:<query>") so it rides the existing file transport on every link
 // (USB/BLE/WiFi) with no new command or transport code — the app parses the streamed
-// result lines. A one-time index (/tdsp/.dxsearch) holds every cart's rel path + its 32
-// voice names; it is cached and keyed by a /dexed signature, so it rebuilds only when the
-// library changes (the first search after that pays the all-carts walk; the rest are
-// sub-second scans). Index line == result line, so a match streams back verbatim:
-//     <rel>\t<name>\t<v0>\x1f<v1>\x1f...\x1f<vN>\n
+// result lines. The index (/tdsp/.dxsearch) holds every cart's rel path + its 32 voice
+// names, one line per cart; index line == result line, so a match streams back verbatim:
+//     <rel>	<name>	<v0><v1>...<vN>
+
 // `rel` keeps its ".syx" (what @DXVL/@DXPICK expect); `name` is the display label.
+//
+// The index is built OFF the device by tools/build_dexed_index.py (from the card over
+// @DXLS/@DXVL, or from a local copy of /dexed) and pushed with @WB. The firmware NEVER
+// builds it: the old on-demand rebuild opened every cart inside one @READ, stalling loop()
+// for minutes (commands, @STATE and the app link all frozen) while the app's 15 s read
+// watchdog fired and re-sent searches — "search crashes the synth". A missing index now
+// fails fast with kDxNoIndex, which the app turns into a "build the search index" hint.
 static const char *kDxIdxPath = "/tdsp/.dxsearch";
-static const char *kDxIdxSig  = "/tdsp/.dxsearch.sig";
 static const char *kDxResPath = "/tdsp/.dxfind";
-
-// Recursive walk that writes the index. Interleaves pumpTransport() so the long all-carts
-// read never freezes the master clock. Mirrors catdb::walkDexed's traversal + cart filter.
-static void dxIndexWalk(Print &out, const char *absDir, const char *relDir, int depth, uint32_t &nCarts, elapsedMicros &svc) {
-    if (depth > tdsp::catdb::kMaxDepth) return;
-    File d = SD.open(absDir);
-    if (!d || !d.isDirectory()) { if (d) d.close(); return; }
-    for (File f = d.openNextFile(); f; f = d.openNextFile()) {
-        char nm[64]; snprintf(nm, sizeof nm, "%s", f.name());
-        bool isDir = f.isDirectory();
-        uint32_t sz = (uint32_t)f.size();
-        f.close();                                          // close before recursing / reading the cart
-        char rel[192];
-        if (relDir[0]) snprintf(rel, sizeof rel, "%s/%s", relDir, nm);
-        else           snprintf(rel, sizeof rel, "%s", nm);
-        if (isDir) {
-            char sub[200]; snprintf(sub, sizeof sub, "%s/%s", absDir, nm);
-            dxIndexWalk(out, sub, rel, depth + 1, nCarts, svc);
-        } else if (tdsp::catdb::endsWithCI(nm, ".syx") && (sz == 4104 || sz == 4096)) {
-            static char names[tdsp::dexed::kVoicesPerBank][tdsp::dexed::kVoiceNameBufBytes];
-            int nv = tdsp::dexed::sdCartVoiceNames(rel, names);
-            if (nv <= 0) continue;
-            char base[64]; tdsp::catdb::stripExt(base, sizeof base, nm);
-            out.print(rel); out.write('\t'); out.print(base); out.write('\t');
-            for (int i = 0; i < nv; ++i) { if (i) out.write('\x1f'); out.print(names[i]); }
-            out.write('\n');
-            nCarts++;
-        }
-        if (svc >= 2000) { svc = 0; pumpTransport(); }       // ~2ms: keep clock/click/grooves alive
-    }
-    d.close();
-}
-
-// Rebuild the index if it's missing or /dexed changed (recursive count+bytes signature, no
-// content reads — same cheap probe catdb uses). Returns false only on an SD failure.
-static bool dxEnsureIndex() {
-    tdsp::catdb::ensureRoot();
-    tdsp::catdb::Sig cur{0, 0};
-    if (SD.exists("/dexed")) tdsp::catdb::sigOf("/dexed", ".syx", 0, cur);
-    uint32_t oc = 0, ob = 0; bool have = false;
-    { File s = SD.open(kDxIdxSig);
-      if (s) { char l[48]; int n = s.readBytesUntil('\n', l, sizeof l - 1); l[n] = 0; s.close();
-               unsigned long c = 0, b = 0; if (sscanf(l, "%lu %lu", &c, &b) == 2) { oc = (uint32_t)c; ob = (uint32_t)b; have = true; } } }
-    if (have && oc == cur.count && ob == cur.bytes && SD.exists(kDxIdxPath)) return true;   // fresh
-    SD.remove(kDxIdxPath);
-    File idx = SD.open(kDxIdxPath, FILE_WRITE);
-    if (!idx) return false;
-    uint32_t nCarts = 0; elapsedMicros svc = 0;
-    dxIndexWalk(idx, "/dexed", "", 0, nCarts, svc);
-    idx.close();
-    File s = SD.open(kDxIdxSig, FILE_WRITE);
-    if (s) { s.print(cur.count); s.write(' '); s.print(cur.bytes); s.write('\n'); s.close(); }
-    Serial.printf("[dxfind] index built: %lu carts\n", (unsigned long)nCarts);
-    return true;
-}
+static const char *kDxNoIndex = "no search index";   // the app matches this string — keep in sync
 
 // Case-insensitive substring test (`needle` is already lowercased by the caller).
 static bool dxCiContains(const char *hay, const char *needle) {
@@ -2540,22 +2491,38 @@ static void streamDexedSearch(Print &out, const char *query) {
         while (*p && *p != ' ') ++p;
     }
     if (nterms < 1) { const uint8_t id = ++g_xferId; out.printf("@FB=%u\x1f%s\x1f0\n@FE=%u\x1f0\n", id, kDxResPath, id); return; }
-    if (!dxEnsureIndex()) { out.printf("@FERR=%u\x1f%s\n", ++g_xferId, "index build failed"); return; }
     File idx = SD.open(kDxIdxPath);
-    if (!idx) { out.printf("@FERR=%u\x1f%s\n", ++g_xferId, "no index"); return; }
+    if (!idx || idx.isDirectory()) { if (idx) idx.close(); out.printf("@FERR=%u\x1f%s\n", ++g_xferId, kDxNoIndex); return; }
     SD.remove(kDxResPath);
     File res = SD.open(kDxResPath, FILE_WRITE);
     if (!res) { idx.close(); out.printf("@FERR=%u\x1f%s\n", ++g_xferId, "tmp open failed"); return; }
-    char line[1024]; int matches = 0; const int kCap = 500; elapsedMicros svc = 0;
-    while (idx.available() && matches < kCap) {
-        int n = idx.readBytesUntil('\n', line, sizeof line - 1); line[n] = 0;
-        if (n > 0) {
+    // Block reads + an in-RAM line splitter (readBytesUntil pulls one byte per File::read call,
+    // which made the scan needlessly slow). A line longer than `line` is SKIPPED, never split —
+    // a fragment would stream back as a malformed hit. The index tool keeps lines far below this.
+    char chunk[512], line[1024]; int ln = 0; bool overlong = false;
+    int matches = 0; const int kCap = 500; elapsedMicros svc = 0;
+    auto flushLine = [&]() {
+        if (ln > 0 && !overlong) {
+            line[ln] = 0;
             bool all = true;
             for (int i = 0; i < nterms; ++i) if (!dxCiContains(line, terms[i])) { all = false; break; }
-            if (all) { res.print(line); res.write('\n'); matches++; }
+            if (all) { res.write((const uint8_t *)line, ln); res.write('\n'); matches++; }
+        }
+        ln = 0; overlong = false;
+    };
+    while (matches < kCap) {
+        int n = idx.read(chunk, sizeof chunk);
+        if (n <= 0) break;
+        for (int i = 0; i < n && matches < kCap; ++i) {
+            char c = chunk[i];
+            if (c == '\n') flushLine();
+            else if (c == '\r') continue;
+            else if (ln < (int)sizeof(line) - 1) line[ln++] = c;
+            else overlong = true;
         }
         if (svc >= 2000) { svc = 0; pumpTransport(); }
     }
+    if (matches < kCap) flushLine();                         // last line without a trailing newline
     idx.close(); res.close();
     streamFile(out, kDxResPath);
 }
