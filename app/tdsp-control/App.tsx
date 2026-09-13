@@ -7,7 +7,7 @@
 // (title + live value + the same header controls); tapping a card opens that section's
 // own page. No nav library — just a `route` string ('home' | section id).
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { View, Text, Pressable, ScrollView, FlatList, TextInput, Switch, ActivityIndicator, Platform, useWindowDimensions, AppState as RNAppState } from 'react-native';
+import { View, Text, Pressable, ScrollView, FlatList, TextInput, Switch, ActivityIndicator, Platform, RefreshControl, useWindowDimensions, AppState as RNAppState } from 'react-native';
 import type { AppStateStatus } from 'react-native';
 import { createTransport } from './src/transportFactory';
 import { createDiscovery } from './src/discoveryFactory';
@@ -18,7 +18,7 @@ import type { Transport, DirPage, TransportKind } from './src/transport';
 // now live in ./src/ui/*. App composes them; see src/ui/{theme,styles,constants,primitives}.
 import { C, THEME } from './src/ui/theme';
 import { s } from './src/ui/styles';
-import { EMPTY_DIR, parseDexFind, DEX_NO_INDEX_MSG, DexHit, DexRow, catalogCache, grooveDisp, TP_LABEL, DEFAULT_TP_LABEL, HPF_MODES, volDb, EndMode, END_MODES, REC_STATES, AppState, isEndMode, notify, ROW_H, VItem, InjectFolder, saveLastConn, clearLastConn, loadLastConn } from './src/ui/constants';
+import { EMPTY_DIR, parseDexFind, DEX_NO_INDEX_MSG, DexHit, DexRow, catalogCache, grooveDisp, TP_LABEL, HPF_MODES, volDb, EndMode, END_MODES, REC_STATES, AppState, isEndMode, notify, ROW_H, VItem, InjectFolder, saveLastConn, loadLastConn } from './src/ui/constants';
 import { Subtitle, LoopStepGrid, Card, Flag, PageHeader, ProgressBus, LoadScreen, HdrBtn, KbdBtn, KbdGlyph, Row, ThrottledSlider, VolSlider, Stat, ListBtn, BodyTabs, SubMenu, FolderBrowser } from './src/ui/primitives';
 import { Header } from './src/ui/Header';
 import { SideNav } from './src/ui/SideNav';
@@ -36,8 +36,10 @@ import MpeMonitor from './src/ui/MpeMonitor';
 import { mpeBus, parseMpeLine } from './src/ui/mpeBus';
 import { ARP_PATTERNS as ARP_PAT, ARP_RATES, rateIndexFromFw, PAT_USER_SEQUENCE, DEFAULT_SHAPE, SeqStep, encodeSequence, encodeArpParams } from './src/arpSeq';
 import { applyArpPreset, ArpPreset, ARP_LIBRARY } from './src/arpLibrary';
-import { appUpdateInfo, checkAndApplyUpdate } from './src/appUpdates';
+import { appUpdateInfo, checkAndApplyUpdate, refreshApp } from './src/appUpdates';
 import DeviceWifi from './src/ui/DeviceWifi';
+import ConnectScreen, { ConnOption, ConnError } from './src/ui/ConnectScreen';
+import type { LastConn } from './src/ui/constants';
 import { deviceHttpBase } from './src/deviceWifi';
 
 // The folded landing tile (gridInParent): renders a track's own card as the first cell of its child
@@ -83,7 +85,19 @@ export default function App() {
   const [connecting, setConnecting] = useState(false);
   const [userDisc, setUserDisc] = useState(false);      // user tapped Disconnect App → suppress auto-reconnect
   const userDiscRef = useRef(false);                    // synchronous mirror of userDisc so an in-flight connect() can see a cancel immediately
-  const connectingRef = useRef(false);                  // synchronous guard so the auto-poll can't double-connect
+  const connectingRef = useRef(false);                  // an attempt is in flight (see connect(): generation-owned)
+  // Connect-screen state: which option is connecting (null = idle), whether that attempt was automatic,
+  // and the last failure (shown under its card). connGenRef numbers attempts: cancelling or starting a
+  // new one bumps it, so a superseded attempt never keeps the guard set or touches the UI when it settles.
+  const [attemptId, setAttemptId] = useState<string | null>(null);
+  const [attemptAuto, setAttemptAuto] = useState(false);
+  const [connError, setConnError] = useState<ConnError | null>(null);
+  const connGenRef = useRef(0);
+  const [lastConn, setLastConn] = useState<LastConn | null>(null);
+  const lastConnRef = useRef<LastConn | null>(null);
+  lastConnRef.current = lastConn;
+  const tpRef = useRef(tp);
+  tpRef.current = tp;
 
   // mDNS discovery: browse _tdsp._tcp while the Wi-Fi picker is open and disconnected, so
   // you tap a device instead of hunting for its IP. Each hit carries its RESOLVED address,
@@ -91,12 +105,12 @@ export default function App() {
   // T-DSPs on one LAN all show up. Web has no mDNS (supported === false) → host box only.
   useEffect(() => {
     const d = discoRef.current;
-    // Only scan when it's actually usable: Wi-Fi selected, disconnected, not mid-connect.
-    if (!d.supported || tkind !== 'wifi' || connected || connecting) { d.stop(); setScanning(false); return; }
+    // Browse whenever disconnected: found devices are one-tap cards on the connect screen.
+    if (!d.supported || connected) { d.stop(); setScanning(false); return; }
     setScanning(true); setFound([]);
     d.start(setFound);
     return () => { d.stop(); setScanning(false); };
-  }, [tkind, connected, connecting]);
+  }, [connected]);
   useEffect(() => () => discoRef.current.stop(), []);   // release the scanner on unmount
   // Catalog-load progress rides a ProgressBus (module scope) into <LoadScreen>, NOT App state,
   // so the ~10/sec load ticks don't re-render the whole App (that starved the USB reader and
@@ -656,55 +670,124 @@ export default function App() {
     // (an []-dep here would leave the subscription stranded on the dead transport).
   }), [tp]);
 
-  // reconnectOnly: attempt a GESTURE-FREE reconnect (tp.reconnect() — Web Serial getPorts) instead of
-  // tp.connect() (which prompts). Used by the boot auto-reconnect after a page refresh; if there's
-  // nothing granted to reconnect to, it bails quietly and the normal Connect screen stays up.
-  async function connect(auto = false, reconnectOnly = false) {
-    if (connectingRef.current || tp.isConnected()) return;   // live check (state may be stale) — no double-connect
-    connectingRef.current = true; setConnecting(true);
-    try {
-      if (reconnectOnly) {
-        const ok = await tp.reconnect?.();
-        if (!ok) return;   // no previously-granted port → stay on the Connect screen
-      } else {
-        await tp.connect();
-      }
-      // The user may have tapped Disconnect while the link was being established — honor it
-      // and bail before we show any UI or pull the catalog (userDiscRef is the synchronous truth).
-      if (userDiscRef.current) { await tp.disconnect().catch(() => {}); return; }
-      setConnected(true);
-      await load();
-      if (userDiscRef.current) { await disconnect(); return; }   // cancelled during the catalog load
-      tp.requestState();   // pull the device's real current settings → hydrate every card (see @STATE handler)
-      tp.requestFonts();   // pull the swappable drum-font list (runtime @DRUMFONT builds) → the Drum Font picker
-      saveLastConn({ kind: tkind, host: wifiHost.trim() });   // remember the server so a refresh auto-reconnects
+  // ── Connecting ─────────────────────────────────────────────────────────────────────────────────
+  // A target is the platform's built-in transport ('default' = Web Serial on desktop, Bluetooth on
+  // native) or a Wi-Fi host. Its id keys the connect-screen card that shows the attempt.
+  const targetId = (kind: TransportKind, host?: string) => (kind === 'wifi' ? 'wifi:' + ((host || '').trim() || 'tdsp.local') : 'default');
+
+  // Plain-language reason for a failed attempt, shown under its card.
+  function connFailMessage(e: any, kind: TransportKind, host: string): string {
+    const raw = String(e?.message || e || 'failed');
+    if (kind === 'wifi') {
+      const h = host.trim() || 'tdsp.local';
+      if (/timed out|WebSocket error|closed/i.test(raw))
+        return `Couldn't reach ${h}. Check that this ${Platform.OS === 'web' ? 'computer' : 'phone'} is on the same Wi-Fi as the T-DSP, or joined to the T-DSP network.`;
+      return raw;
     }
-    // A user cancel can surface as a connect rejection (port/scan aborted) — don't toast that.
-    // The "one page owns the port" hint is Web-Serial-specific — over WiFi nothing owns a
-    // port, so it would just be misleading noise.
-    catch (e: any) { if (!auto && !userDiscRef.current) notify('Connect failed: ' + e + (Platform.OS === 'web' && tkind !== 'wifi' ? '\n\nClose any control.html tab (one page owns the port), then retry.' : '')); }
-    finally { connectingRef.current = false; setConnecting(false); }
+    if (Platform.OS === 'web') {
+      if (/No port selected|NotFoundError/i.test(raw)) return 'No USB device was chosen.';
+      if (/Failed to open|InvalidStateError/i.test(raw)) return 'That USB port is busy. Close any other page or app using the T-DSP, then try again.';
+      return raw;
+    }
+    if (/No T-DSP device found/i.test(raw)) return 'No T-DSP found over Bluetooth. Bluetooth control needs the Bluetooth firmware build.';
+    return raw;
+  }
+
+  // Connect the CURRENT transport (`tp`). UI code calls connectTo(), which binds `tp` to a target first.
+  // reconnectOnly: gesture-free Web Serial reconnect (getPorts) for the boot restore.
+  // Each attempt owns a generation number. cancelAttempt(), userDisconnect() and newer attempts bump it,
+  // and a superseded attempt then neither holds the guard nor updates the UI when it finally settles.
+  // (The old single boolean guard stayed set forever when a link dropped mid-load and load() looped on
+  // @REINDEX into the dead socket, so every later Connect tap returned silently.)
+  async function connect(auto = false, reconnectOnly = false) {
+    const t = tp, kind = tkind, host = wifiHost;
+    const id = targetId(kind, host);
+    const gen = ++connGenRef.current;
+    const live = () => gen === connGenRef.current;
+    connectingRef.current = true; setConnecting(true);
+    setAttemptId(id); setAttemptAuto(auto); setConnError(null);
+    try {
+      if (t.isConnected()) await t.disconnect().catch(() => {});   // a half-open link the UI lost track of
+      if (reconnectOnly) {
+        if (!(await t.reconnect?.())) return;   // nothing previously granted: stay on the connect screen
+      } else {
+        await t.connect();
+      }
+      if (!live()) { if (t !== tpRef.current) await t.disconnect().catch(() => {}); return; }
+      setConnected(true);
+      // A cancelled earlier attempt's catalog load unwinds within moments; don't coalesce into it.
+      for (let i = 0; loadingRef.current && i < 50 && live(); i++) await new Promise(r => setTimeout(r, 100));
+      if (!live()) return;
+      // Race the load against the link: if it drops (or the attempt is superseded), stop waiting now.
+      let watch: any;
+      const ok = await Promise.race([
+        load(),
+        new Promise<boolean>(res => { watch = setInterval(() => { if (!t.isConnected() || !live()) res(false); }, 400); }),
+      ]).finally(() => clearInterval(watch));
+      if (!live()) return;
+      if (!ok) {
+        const dropped = !t.isConnected();
+        await t.disconnect().catch(() => {});
+        setConnected(false); setLoaded(false);
+        throw new Error(dropped ? 'The connection dropped while loading. Tap to try again.'
+                                : "Connected, but the device's catalog didn't load. Tap to try again.");
+      }
+      t.requestState();   // pull the device's real current settings → hydrate every card (see @STATE handler)
+      t.requestFonts();   // pull the swappable drum-font list (runtime @DRUMFONT builds) → the Drum Font picker
+      const lc: LastConn = { kind, host: host.trim(), auto: true };
+      saveLastConn(lc); setLastConn(lc);   // the "last used" card, and auto-reconnect on the next launch
+    } catch (e: any) {
+      if (live()) setConnError({ id, message: connFailMessage(e, kind, host) });
+    } finally {
+      if (live()) { connectingRef.current = false; setConnecting(false); setAttemptId(null); }
+    }
   }
   async function disconnect() { try { await tp.disconnect(); } catch {} setConnected(false); setConnecting(false); setLoaded(false); progBus.emit(null); resetNav(); }
-  // Button handlers wrap connect/disconnect so a *manual* disconnect suppresses auto-reconnect
-  // (else the poll below would immediately reconnect and the Disconnect button would do nothing).
-  // userDiscRef is set synchronously (before the async setState lands) so connect() sees a
-  // mid-connect cancel right away. A user disconnect works from the connecting state too.
-  const userConnect = () => { userDiscRef.current = false; setUserDisc(false); connect(); };
-  // An explicit Disconnect also forgets the remembered server, so the next page refresh does NOT
-  // auto-reconnect (it comes up on the Connect screen). A dropped link keeps it, so a refresh recovers.
-  const userDisconnect = () => { userDiscRef.current = true; setUserDisc(true); clearLastConn(); disconnect(); };
 
-  // ── Boot auto-reconnect (web): after a page refresh, silently re-establish the last server ──────
-  // Web has no OS-suspend, so a refresh is the only time we'd need this; native uses the foreground
-  // reconnect below. Serial reconnects gesture-free via getPorts() (no port picker); Wi-Fi restores
-  // the transport then connects. If nothing is remembered (or the port was never granted), we stay
-  // on the Connect screen. `autoWifiRef` gates the follow-up so only a RESTORE auto-connects — a user
-  // manually picking Wi-Fi still types a host and taps Connect.
+  // Connect to a target from the UI, boot restore or app resume. Supersedes any attempt in flight. If
+  // `tp` has to change (other transport or host) the connect runs once it is rebuilt (effect below).
+  const pendingConnRef = useRef<{ auto: boolean } | null>(null);
+  function connectTo(kind: TransportKind, host: string | undefined, auto = false) {
+    if (connectingRef.current) { connGenRef.current++; connectingRef.current = false; tp.disconnect().catch(() => {}); }
+    userDiscRef.current = false; setUserDisc(false);
+    setConnError(null); setAttemptId(targetId(kind, host)); setAttemptAuto(auto); setConnecting(true);
+    const h = (host || '').trim() || 'tdsp.local';
+    if (kind === tkind && (kind !== 'wifi' || h === wifiHost.trim())) { connect(auto); return; }
+    pendingConnRef.current = { auto };
+    if (kind === 'wifi') setWifiHost(h);
+    setTkind(kind);
+  }
+  useEffect(() => {
+    const p = pendingConnRef.current;
+    if (!p) return;
+    pendingConnRef.current = null;
+    connect(p.auto);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tp]);
+
+  // The connect screen's Cancel: stop the attempt, and hold off automatic reconnects until the next tap.
+  function cancelAttempt() {
+    connGenRef.current++;
+    connectingRef.current = false;
+    userDiscRef.current = true;
+    setAttemptId(null); setConnError(null);
+    disconnect();
+  }
+  const userConnect = () => connectTo(tkind, wifiHost);
+  // Explicit Disconnect: keep the device as the "last used" card, but don't auto-reconnect to it.
+  const userDisconnect = () => {
+    connGenRef.current++; connectingRef.current = false; setAttemptId(null);
+    userDiscRef.current = true; setUserDisc(true);
+    const lc = lastConnRef.current;
+    if (lc) { const off = { ...lc, auto: false }; saveLastConn(off); setLastConn(off); }
+    disconnect();
+  };
+
+  // ── Boot: reconnect to the last device (all platforms) ─────────────────────────────────────────
+  // Served by the T-DSP itself (the ESP32's AP or LAN web server)? The page's host IS the device, so a
+  // first visit connects to it with zero setup. Otherwise reconnect to the remembered target unless the
+  // user last disconnected on purpose. Web Serial uses the gesture-free getPorts() path.
   const bootRef = useRef(false);
-  const autoWifiRef = useRef(false);
-  // Hostname when this page was served over plain http by a T-DSP (not a dev server / file /
-  // localhost), else ''. The ESP32 serves the web export from its own AP at 192.168.4.1 / tdsp.local.
   const servedByDevice = (): string => {
     if (Platform.OS !== 'web' || typeof window === 'undefined') return '';
     const { protocol, hostname, port } = window.location;
@@ -713,36 +796,24 @@ export default function App() {
     return hostname;
   };
   useEffect(() => {
-    if (bootRef.current || Platform.OS !== 'web') return;
+    if (bootRef.current) return;
     bootRef.current = true;
     (async () => {
       const last = await loadLastConn();
-      if (userDiscRef.current) return;
-      // Served by the T-DSP itself (ESP32 access point / LAN, see projects/t-dsp_esp32_bt_receiver
-      // HTTP server): the page's own host IS the device, so default to Wi-Fi at that host and
-      // auto-connect -- a festival phone on the "T-DSP" AP gets a working UI with zero setup.
-      // A saved connection still wins so a user can point a device-served page elsewhere.
+      setLastConn(last);
+      if (userDiscRef.current || connectingRef.current) return;   // the user already tapped something
       const dev = servedByDevice();
-      if (!last && dev) { autoWifiRef.current = true; setWifiHost(dev); setTkind('wifi'); return; }
-      if (!last) return;
-      if (last.kind === 'wifi') { autoWifiRef.current = true; setWifiHost(last.host || ''); setTkind('wifi'); }
-      else connect(true, true);   // serial: gesture-free reconnect to the already-granted port
+      if (!last && dev) { connectTo('wifi', dev, true); return; }
+      if (!last || last.auto === false) return;
+      if (last.kind === 'wifi') connectTo('wifi', last.host, true);
+      else if (Platform.OS === 'web') connect(true, true);
+      else connectTo('default', undefined, true);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-  // Wi-Fi restore lands here once `tp` has rebuilt as the Wi-Fi transport (state set above).
-  useEffect(() => {
-    if (!autoWifiRef.current || tp.name !== 'WIFI') return;
-    autoWifiRef.current = false;
-    connect(true);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tp]);
 
-  // Connecting is EXPLICIT: no auto-connect and no auto-reconnect. This poll only reflects
-  // a DROPPED link into the UI (flip to "Not connected") — it never opens a connection. You
-  // tap Connect App to connect, and once disconnected the app stays put until you do.
-  // [tp]: re-arm against the CURRENT transport — the picker can swap it, and an []-dep would
-  // leave this polling the dead instance forever (reporting a stale "connected").
+  // Drop detector: this poll only reflects a DROPPED link into the UI (flip to the connect screen).
+  // [tp]: re-arm against the CURRENT transport, else it would poll a dead instance forever.
   useEffect(() => {
     // Web Serial reports drops through its own read loop, so the poll was skipped on web.
     // A WiFi socket still needs it though (a dropped WS would otherwise leave the UI
@@ -756,22 +827,55 @@ export default function App() {
     return () => { cancelled = true; clearInterval(id); };
   }, [tp, tkind]);
 
-  // Foreground auto-reconnect. Mobile OSes suspend the JS runtime and tear down the WebSocket/
-  // BLE link whenever the app is backgrounded (screen off, phone in pocket) — there's no
-  // reliable way to hold a plain socket open across that, so instead of fighting it we make the
-  // return trip cheap: when the app comes back to the foreground, silently re-establish the
-  // link. The cached catalog (above) means this reconnect skips the multi-file download, so it
-  // lands in a second or two with no visible "Loading catalog…" pass. We DON'T auto-reconnect
-  // if the user explicitly tapped Disconnect (userDiscRef), and skip on web where the OS never
-  // suspends a foreground tab (a Web Serial reconnect would also re-prompt for the port).
+  // App resumed (native). Mobile OSes tear down the socket/BLE link in the background, so coming back
+  // quietly reconnects to the last device. Only a connection the user actually made (never a speculative
+  // Bluetooth scan on a fresh install), and never over an attempt or a deliberate disconnect/cancel.
   useEffect(() => {
     if (Platform.OS === 'web') return;
     const sub = RNAppState.addEventListener('change', (st: AppStateStatus) => {
       if (st !== 'active') return;
-      if (!userDiscRef.current && !connectingRef.current && !tp.isConnected()) connect(true);
+      const last = lastConnRef.current;
+      if (!last || last.auto === false || userDiscRef.current || connectingRef.current || tpRef.current.isConnected()) return;
+      connectTo(last.kind, last.host, true);
     });
     return () => sub.remove();
-  }, [tp]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tp, tkind, wifiHost]);
+
+  // Connect-screen cards, most specific first; the remembered target gets a "last used" badge.
+  const hasWebSerial = Platform.OS === 'web' && typeof navigator !== 'undefined' && 'serial' in (navigator as any);
+  const connOptions = useMemo<ConnOption[]>(() => {
+    const out: ConnOption[] = [];
+    const add = (o: ConnOption | null) => { if (o && !out.some(x => x.id === o.id)) out.push(o); };
+    const wifi = (host: string, icon: string, title: string, subtitle: string): ConnOption =>
+      ({ id: targetId('wifi', host), kind: 'wifi', host, icon, title, subtitle });
+    const builtin: ConnOption | null = Platform.OS === 'web'
+      ? (hasWebSerial ? { id: 'default', kind: 'default', icon: '🔌', title: 'USB cable', subtitle: 'T-DSP plugged into this computer (Chrome or Edge)' } : null)
+      : { id: 'default', kind: 'default', icon: 'ᛒ', title: 'Bluetooth', subtitle: 'Only with the Bluetooth firmware build' };
+    const dev = servedByDevice();
+    if (dev) add(wifi(dev, '📡', 'This T-DSP', `${dev} · the device showing this page`));
+    for (const d of found) add(wifi(d.host, '📶', d.name || 'T-DSP', `${d.host} · on this Wi-Fi`));
+    if (lastConn?.kind === 'wifi') { const h = lastConn.host || 'tdsp.local'; add(wifi(h, '📶', 'T-DSP', `${h} · Wi-Fi`)); }
+    if (lastConn?.kind === 'default') add(builtin);
+    if (Platform.OS !== 'android') add(wifi('tdsp.local', '📶', 'T-DSP on this Wi-Fi', 'tdsp.local'));
+    add(wifi('192.168.4.1', '📡', 'T-DSP network', '192.168.4.1 · join the T-DSP Wi-Fi first'));
+    // A typed address that is connecting or just failed gets its own card, so its spinner and error stay
+    // visible (the connect screen unmounts while connected, which drops the "Another address" field).
+    const typed = [attemptId, connError?.id].find(id => id && id.startsWith('wifi:'));
+    if (typed) add(wifi(typed.slice(5), '⌨', 'T-DSP', `${typed.slice(5)} · Wi-Fi`));
+    add(builtin);
+    const lastId = lastConn ? targetId(lastConn.kind, lastConn.host) : null;
+    return out.map(o => (o.id === lastId ? { ...o, badge: 'last used' } : o));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [found, lastConn, hasWebSerial, attemptId, connError]);
+
+  // Pull down to refresh (native; the web has the browser's refresh): restart the app, picking up a
+  // newer published bundle if one is available, then the boot path reconnects to the last device.
+  const [refreshing, setRefreshing] = useState(false);
+  const refreshCtl = Platform.OS === 'web' ? undefined : (
+    <RefreshControl refreshing={refreshing} tintColor={C.accent} colors={[C.accent]} progressBackgroundColor={C.card}
+      onRefresh={() => { setRefreshing(true); refreshApp().finally(() => setRefreshing(false)); }} />
+  );
   // (elapsed-seconds ticker now lives inside <LoadScreen>, which mounts exactly while the
   // catalog is loading — so it no longer re-renders App every second.)
   // Serialize catalog loads. The transport services ONE @READ at a time, so a drum-font swap firing
@@ -783,27 +887,37 @@ export default function App() {
   // (a swap must skip the differential cache — the device rewrote drumkits.ndjson but NOT index.ndjson).
   const loadingRef = useRef(false);
   const reloadPendingRef = useRef<boolean | null>(null);
-  async function load(bypassCache = false) {
-    if (loadingRef.current) { reloadPendingRef.current = (reloadPendingRef.current ?? false) || bypassCache; return; }
+  // Returns whether a catalog pass succeeded. A failed pass rebuilds the device index (@REINDEX) at most
+  // once per load, and only while the link is still up: a dropped link is not a broken catalog. (Before,
+  // a drop mid-load sent @REINDEX into the dead socket, waited the 3-minute fallback, re-entered load()
+  // and looped forever.)
+  async function load(bypassCache = false): Promise<boolean> {
+    if (loadingRef.current) { reloadPendingRef.current = (reloadPendingRef.current ?? false) || bypassCache; return true; }
     loadingRef.current = true;
+    let ok = false, rebuilt = false;
     try {
       for (;;) {
         reloadPendingRef.current = null;
-        try { const c = await loadCatalog(tp, progBus.emit, bypassCache ? undefined : catalogCache); setCat(c); setLoaded(true); progBus.emit(null); }
+        let retry = false;
+        try { const c = await loadCatalog(tp, progBus.emit, bypassCache ? undefined : catalogCache); setCat(c); setLoaded(true); progBus.emit(null); ok = true; }
         catch (e: any) {
           progBus.emit(null);
-          const yes = Platform.OS === 'web'
-            ? (globalThis as any).confirm?.('Catalog load failed: ' + (e?.message || e) + '\n\nRebuild it now (@REINDEX)?')
-            : true;
-          if (yes) await reindex();
+          if (tp.isConnected() && !rebuilt) {
+            const yes = Platform.OS === 'web'
+              ? (globalThis as any).confirm?.('Catalog load failed: ' + (e?.message || e) + '\n\nRebuild it now (@REINDEX)?')
+              : true;
+            if (yes) { rebuilt = true; await rebuildIndex(); retry = tp.isConnected(); bypassCache = true; }
+          }
         }
-        if (reloadPendingRef.current === null) break;   // nobody asked for another pass while we ran
-        bypassCache = reloadPendingRef.current;          // a swap/change arrived mid-load — reload once more
+        if (retry) continue;                              // one pass on the freshly rebuilt catalog
+        if (reloadPendingRef.current === null) break;     // nobody asked for another pass while we ran
+        bypassCache = reloadPendingRef.current;           // a swap/change arrived mid-load — reload once more
       }
     } finally { loadingRef.current = false; }
+    return ok;
   }
-  async function reindex() { setBusy(true); try { await tp.reindex(); await load(); } finally { setBusy(false); } }
-
+  async function rebuildIndex() { setBusy(true); try { await tp.reindex(); } finally { setBusy(false); } }
+  async function reindex() { await rebuildIndex(); await load(); }
   // Startup default: once the catalog is loaded, PRELOAD the first drum groove so the Drums card
   // opens with a loop ready (the first song in the list) instead of "—". Only when nothing is
   // already selected — a groove restored from @APP (remember-where-you-left-it) or one the user
@@ -2537,88 +2651,44 @@ export default function App() {
   return (
     <View style={s.app}>
       {/* ===== header: brand, connect, tempo, master volume, transport (global, on every page) ===== */}
-      <Header
-        connected={connected} connecting={connecting}
-        onConnectToggle={() => (connected || connecting ? userDisconnect() : userConnect())}
-        sig={metro.sig} bpm={bpm}
-        beatActive={connected && (metro.on || player.playing || !!drums.playing)} beatFeed={beatFeed}
-        vol={vol} onVolChange={setVol} onVolCommit={v => tp.masterVolume(v)}
-        status={headerStatus} brandInSidebar={connected && loaded && desktop}
-        nav={{ sections: visible, route, activeRootId, navigate, usbOwner, claimUsb }}
-        metroOn={metro.on} metroMuted={metro.muted} metroLocked={metro.locked}
-        onPlay={playMetro} onStop={stopMetro} onPanic={panic} onStepBpm={stepBpm}
-        onToggleMute={() => { const muted = !metro.muted; setMetro(m => ({ ...m, muted })); tp.metronomeMute(muted); }}
-        onToggleLock={() => { const locked = !metro.locked; setMetro(m => ({ ...m, locked })); tp.metronomeLock(locked); }}
-      />
+      {connected && (
+        <Header
+          connected={connected} connecting={connecting}
+          onConnectToggle={() => (connected || connecting ? userDisconnect() : userConnect())}
+          sig={metro.sig} bpm={bpm}
+          beatActive={connected && (metro.on || player.playing || !!drums.playing)} beatFeed={beatFeed}
+          vol={vol} onVolChange={setVol} onVolCommit={v => tp.masterVolume(v)}
+          status={headerStatus} brandInSidebar={connected && loaded && desktop}
+          nav={{ sections: visible, route, activeRootId, navigate, usbOwner, claimUsb }}
+          metroOn={metro.on} metroMuted={metro.muted} metroLocked={metro.locked}
+          onPlay={playMetro} onStop={stopMetro} onPanic={panic} onStepBpm={stepBpm}
+          onToggleMute={() => { const muted = !metro.muted; setMetro(m => ({ ...m, muted })); tp.metronomeMute(muted); }}
+          onToggleLock={() => { const locked = !metro.locked; setMetro(m => ({ ...m, locked })); tp.metronomeLock(locked); }}
+        />
+      )}
 
       {/* menu bar (back / forward / home + location) moved INTO the content column below, so it sits
           to the RIGHT of the left nav rail instead of spanning full-width above it. */}
 
       {!connected && (
-        <View style={s.connectHome}>
-          {/* Transport picker. Only offered while disconnected, and frozen mid-connect:
-              switching rebuilds `tp`, which must never happen under a live/opening link. */}
-          <View style={s.segRow}>
-            <Pressable style={[s.seg, tkind === 'default' && s.segOn]} disabled={connecting}
-                       onPress={() => setTkind('default')}>
-              <Text style={[s.segText, tkind === 'default' && s.segTextOn]}>{DEFAULT_TP_LABEL}</Text>
-            </Pressable>
-            <Pressable style={[s.seg, tkind === 'wifi' && s.segOn]} disabled={connecting}
-                       onPress={() => setTkind('wifi')}>
-              <Text style={[s.segText, tkind === 'wifi' && s.segTextOn]}>Wi-Fi</Text>
-            </Pressable>
-          </View>
-          {tkind === 'wifi' && (
-            <>
-              {/* Discovered devices (mDNS _tdsp._tcp). Tapping one fills in its resolved
-                  address, so you never hunt for an IP — and several T-DSPs on one LAN each
-                  get a row. Hidden on web, which can't browse mDNS. */}
-              {discoRef.current.supported && (
-                <View style={s.devWrap}>
-                  <View style={s.devHead}>
-                    <Text style={s.muted}>{found.length ? `Found ${found.length} device${found.length > 1 ? 's' : ''}` : scanning ? 'Scanning for T-DSP devices…' : 'No devices found'}</Text>
-                    {scanning && <ActivityIndicator color={C.accent} size="small" />}
-                  </View>
-                  {found.map(d => {
-                    const sel = wifiHost.trim() === d.host;
-                    return (
-                      <Pressable key={d.id} style={[s.devRow, sel && s.devRowOn]} disabled={connecting}
-                                 onPress={() => setWifiHost(d.host)}>
-                        <Text style={s.devName}>{d.name}</Text>
-                        <Text style={s.devAddr}>{d.host}:{d.port}{d.a2dp === false ? '  ·  no BT audio' : ''}</Text>
-                      </Pressable>
-                    );
-                  })}
-                </View>
-              )}
-              <TextInput style={[s.input, s.hostInput]} value={wifiHost} onChangeText={setWifiHost}
-                         editable={!connecting} placeholder="tdsp.local" placeholderTextColor={C.muted}
-                         autoCapitalize="none" autoCorrect={false} keyboardType="url" />
-              <Text style={s.hostHint}>
-                {discoRef.current.supported
-                  ? 'Tap a device above, or type a host — blank uses tdsp.local. An IP or host:port works too.'
-                  : 'Blank uses tdsp.local. An IP or host:port works too.'}
-              </Text>
-            </>
-          )}
-          {/* While connecting, this big button cancels the attempt (and suppresses auto-reconnect)
-              so you can stop it from the connecting state, not just once connected. */}
-          <Pressable style={[s.btn, s.connectBig, connecting && s.btnGhost]} onPress={() => (connecting ? userDisconnect() : userConnect())}>
-            <Text style={s.connectBigText}>{connecting ? 'Cancel' : 'Connect App'}</Text>
-          </Pressable>
-          <Text style={[s.muted, { textAlign: 'center', marginTop: 14 }]}>
-            {connecting
-              ? (tkind === 'wifi' ? `Connecting to ${wifiHost.trim() || 'tdsp.local'}…`
-                 : Platform.OS === 'web' ? 'Opening the serial port…' : 'Searching for your T-DSP over Bluetooth…')
-                : `Connect the app to your T-DSP over ${TP_LABEL[tp.name]} to begin.`}
-          </Text>
-        </View>
+        <ConnectScreen
+          options={connOptions}
+          attemptId={attemptId}
+          attemptAuto={attemptAuto}
+          error={connError}
+          searching={discoRef.current.supported && scanning && found.length === 0}
+          onConnect={o => connectTo(o.kind, o.host)}
+          onCancel={cancelAttempt}
+          refreshControl={refreshCtl}
+          footer={servedByDevice() ? undefined
+            : 'No Wi-Fi at the venue? Join the T-DSP network in this device\u2019s Wi-Fi settings, then tap T-DSP network.'}
+        />
       )}
 
       {/* Connected but the catalog is still streaming: show a load screen instead of the
           half-populated (broken-looking) homepage. Determinate bar when the device announced
           sizes; otherwise an indeterminate spinner. */}
-      {connected && !loaded && <LoadScreen bus={progBus} tpLabel={TP_LABEL[tp.name]} />}
+      {connected && !loaded && <LoadScreen bus={progBus} tpLabel={TP_LABEL[tp.name]} onCancel={userDisconnect} />}
 
       {connected && loaded && (
         <View style={{ flex: 1, flexDirection: 'row' }}>
@@ -2655,7 +2725,7 @@ export default function App() {
           </View>
           {/* ===== HOMEPAGE: a responsive grid of section cards ===== */}
           {!cur && (
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 400 }}>
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 400 }} refreshControl={refreshCtl}>
               <View style={s.home}>
                 {visible.map(sec => (
                   <View key={sec.id} style={[s.cell, { width: `${100 / cols}%` }]}>
@@ -2671,7 +2741,7 @@ export default function App() {
 
           {/* ===== a normal (scrolling) section page ===== */}
           {cur && !cur.fullHeight && (
-            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 400 }}>
+            <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingBottom: 400 }} refreshControl={refreshCtl}>
               <View style={[s.page, curIsParent && s.pageWide]}>
                 {cur.hideHeader
                   ? null   /* parent folds its own card into the body grid (see gridInParent) — no separate header */

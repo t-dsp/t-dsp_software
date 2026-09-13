@@ -10,6 +10,26 @@
 // On web (jay-mint / Web Serial) and in a dev-client, expo-updates is disabled: every call here
 // degrades to "not available" instead of throwing, so the Firmware page can render unconditionally.
 import * as Updates from 'expo-updates';
+import { DevSettings, Platform } from 'react-native';
+
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([p, new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+}
+
+// Pull-to-refresh: restart the app like a browser refresh. A newer published bundle is looked for
+// for at most 4 s (so a festival with no internet never stalls) and run if it downloads in time.
+// Reconnecting is App's boot path: back to the last device, unless the user disconnected on purpose.
+export async function refreshApp(): Promise<void> {
+  if (Platform.OS === 'web') { (globalThis as any).location?.reload(); return; }
+  if (Updates.isEnabled) {
+    try {
+      const r = await withTimeout(Updates.checkForUpdateAsync(), 4000);
+      if (r.isAvailable) await withTimeout(Updates.fetchUpdateAsync(), 15000);
+    } catch { /* offline or slow: reload the bundle we already have */ }
+    try { await Updates.reloadAsync(); return; } catch { /* fall through (dev client) */ }
+  }
+  try { DevSettings.reload(); } catch {}
+}
 
 export interface AppUpdateInfo {
   enabled: boolean;            // false on web / dev-client / builds without updates configured

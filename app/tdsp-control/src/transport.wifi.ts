@@ -47,6 +47,9 @@ function toWsUrl(target?: string): string {
 export class WiFiTransport implements Transport {
   readonly name = 'WIFI' as const;
   private ws: WebSocket | null = null;
+  // A socket still opening. A newer connect() or a disconnect() abandons it, so a slow, cancelled
+  // attempt can never land late and replace (or null out) the live connection.
+  private opening: WebSocket | null = null;
   private url: string;
   private buf = '';
   private handlers = new Set<LineHandler>();
@@ -63,24 +66,30 @@ export class WiFiTransport implements Transport {
   isConnected() { return !!this.ws && this.ws.readyState === 1 /* OPEN */; }
 
   connect(): Promise<void> {
+    this.abandonOpening();
     return new Promise((resolve, reject) => {
       let settled = false;
       const done = (fn: () => void) => { if (settled) return; settled = true; clearTimeout(deadline); fn(); };
+      const mine = () => this.opening === ws;
       // Bound the whole connect: an unreachable host (wrong LAN, device asleep, .local not
       // resolving on Android) can otherwise leave the UI's Connect button wedged.
-      const deadline = setTimeout(() => done(() => { try { ws.close(); } catch {} ; this.ws = null; reject(new Error(`No T-DSP at ${this.url} (timed out)`)); }), 8000);
+      const deadline = setTimeout(() => done(() => { if (mine()) this.opening = null; try { ws.close(); } catch {} ; reject(new Error(`No T-DSP at ${this.url} (timed out)`)); }), 8000);
 
       let ws: WebSocket;
       try { ws = new WebSocket(this.url); }
       catch (e) { clearTimeout(deadline); reject(e); return; }
+      this.opening = ws;
 
-      this.buf = '';
-      ws.onopen = () => { this.ws = ws; done(resolve); };
+      ws.onopen = () => {
+        if (!mine()) { try { ws.close(); } catch {} ; return; }   // abandoned while opening
+        this.opening = null; this.buf = ''; this.ws = ws; done(resolve);
+      };
       // Fires for a failed connect AND for a mid-session drop; only the former rejects
       // (done() is a no-op once we've resolved).
-      ws.onerror = () => done(() => { this.ws = null; reject(new Error(`WebSocket error connecting to ${this.url}`)); });
-      ws.onclose = () => { done(() => { this.ws = null; reject(new Error(`Connection to ${this.url} closed`)); }); if (this.ws === ws) this.teardown(); };
+      ws.onerror = () => done(() => { if (mine()) this.opening = null; reject(new Error(`WebSocket error connecting to ${this.url}`)); });
+      ws.onclose = () => { done(() => { if (mine()) this.opening = null; reject(new Error(`Connection to ${this.url} closed`)); }); if (this.ws === ws) this.teardown(); };
       ws.onmessage = (ev: MessageEvent) => {
+        if (this.ws !== ws) return;                // an abandoned socket's frames are not ours
         if (typeof ev.data !== 'string') return;   // firmware only sends TEXT frames
         // Accumulate until '\n' — a line is NOT necessarily one frame. The firmware splits
         // long lines (a catalog @INSTR is ~7 KB) into ~1 KB chunks and terminates each line
@@ -104,9 +113,16 @@ export class WiFiTransport implements Transport {
   }
 
   async disconnect(): Promise<void> {
+    this.abandonOpening();
     const ws = this.ws;
     this.teardown();
     try { ws?.close(); } catch {}
+  }
+
+  private abandonOpening() {
+    const o = this.opening;
+    this.opening = null;
+    if (o) { try { o.close(); } catch {} }
   }
 
   private teardown() {
@@ -182,6 +198,7 @@ export class WiFiTransport implements Transport {
 
   readFile(path: string, onProgress?: (received: number, total: number) => void): Promise<string> {
     return new Promise((resolve, reject) => {
+      if (!this.isConnected()) { reject(new Error('not connected')); return; }   // fail fast: a dead link never answers
       if (this.file) { reject('a file read is in progress'); return; }
       const f: FilePending = { path, parts: {}, resolve, reject, timer: null, onProgress, total: 0, received: 0 };
       this.file = f;
@@ -192,6 +209,7 @@ export class WiFiTransport implements Transport {
 
   browseDir(path: string, page = 0): Promise<DirPage> {
     return new Promise((resolve, reject) => {
+      if (!this.isConnected()) { reject(new Error('not connected')); return; }   // fail fast: a dead link never answers
       if (this.dir) { clearTimeout(this.dir.timer); this.dir.reject('superseded'); }
       const d: DirPending = { path, resolve, reject, timer: null };
       this.dir = d;
@@ -202,6 +220,7 @@ export class WiFiTransport implements Transport {
 
   cartVoices(cartRel: string): Promise<string[]> {
     return new Promise((resolve, reject) => {
+      if (!this.isConnected()) { reject(new Error('not connected')); return; }   // fail fast: a dead link never answers
       if (this.voices) { clearTimeout(this.voices.timer); this.voices.reject('superseded'); }
       const v: VoicesPending = { rel: cartRel, resolve, reject, timer: null };
       this.voices = v;
@@ -212,6 +231,7 @@ export class WiFiTransport implements Transport {
 
   browse(path: string, ext?: string): Promise<BrowseResult> {
     return new Promise((resolve, reject) => {
+      if (!this.isConnected()) { reject(new Error('not connected')); return; }   // fail fast: a dead link never answers
       if (this.ls) { clearTimeout(this.ls.timer); this.ls.reject('superseded'); }
       const s: BrowsePending = { path, id: -1, entries: [], resolve, reject, timer: null };
       this.ls = s;
@@ -223,6 +243,7 @@ export class WiFiTransport implements Transport {
   reindex(): Promise<void> {
     // Wait for the firmware's @REINDEXED reply (a full /dexed scan can take minutes),
     // not a fixed delay. Falls back after 3 min so the UI never hangs forever.
+    if (!this.isConnected()) return Promise.resolve();   // nothing to rebuild over a dead link
     return new Promise<void>(resolve => {
       const off = this.onLine(l => { if (l.indexOf('@REINDEXED') >= 0) { clearTimeout(timer); off(); resolve(); } });
       const timer = setTimeout(() => { off(); resolve(); }, 180000);

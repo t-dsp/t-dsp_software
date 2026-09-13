@@ -48,7 +48,9 @@ export const catalogCache: CatalogCache = {
 // picking a transport/port again). `kind` = which transport; `host` = the Wi-Fi host (blank for
 // serial/BLE). Written on connect, cleared on an explicit Disconnect. See App's boot effect.
 const LASTCONN_KEY = 'tdsp.lastconn.v1';
-export type LastConn = { kind: 'default' | 'wifi'; host: string };
+// auto=false: remembered for the connect screen's "last used" card, but don't auto-reconnect to it
+// (set by an explicit Disconnect; cleared the next time it's connected).
+export type LastConn = { kind: 'default' | 'wifi'; host: string; auto?: boolean };
 export const saveLastConn = (c: LastConn) => { AsyncStorage.setItem(LASTCONN_KEY, JSON.stringify(c)).catch(() => {}); };
 export const clearLastConn = () => { AsyncStorage.removeItem(LASTCONN_KEY).catch(() => {}); };
 export const loadLastConn = async (): Promise<LastConn | null> => {

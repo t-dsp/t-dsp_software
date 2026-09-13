@@ -173,7 +173,7 @@ export class ProgressBus {
 
 // The "Loading catalog…" screen. Owns progress + elapsed-seconds state locally (fed by the
 // ProgressBus) so its 10x/sec updates re-render this component alone, not the whole App.
-export function LoadScreen({ bus, tpLabel }: { bus: ProgressBus; tpLabel: string }) {
+export function LoadScreen({ bus, tpLabel, onCancel }: { bus: ProgressBus; tpLabel: string; onCancel?: () => void }) {
   const [prog, setProg] = useState<LoadProgress | null>(bus.value);
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => bus.subscribe(setProg), [bus]);
@@ -200,6 +200,12 @@ export function LoadScreen({ bus, tpLabel }: { bus: ProgressBus; tpLabel: string
         <Text style={s.loadSub}>{prog && prog.index > 0 ? `${prog.label} · ${prog.index}/${prog.count}` : 'Reading catalog index…'}</Text>
       )}
       <Text style={s.loadHint}>{elapsed}s elapsed{elapsed >= 6 ? ` · streaming over ${tpLabel}…` : ''}</Text>
+      {/* Always an exit: a stalled load must never trap you on this screen. */}
+      {onCancel && (
+        <Pressable onPress={onCancel} style={[s.btn, s.btnGhost, { marginTop: 18, paddingHorizontal: 22 }]} accessibilityRole="button">
+          <Text style={s.btnText}>Cancel</Text>
+        </Pressable>
+      )}
     </View>
   );
 }

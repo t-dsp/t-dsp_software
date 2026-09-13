@@ -196,6 +196,7 @@ export class WebSerialTransport implements Transport {
 
   readFile(path: string, onProgress?: (received: number, total: number) => void): Promise<string> {
     return new Promise((resolve, reject) => {
+      if (!this.isConnected()) { reject(new Error('not connected')); return; }   // fail fast: a dead link never answers
       if (this.file) { reject('a file read is in progress'); return; }
       const f: FilePending = { path, parts: {}, resolve, reject, timer: null, onProgress, total: 0, received: 0 };
       this.file = f;
@@ -206,6 +207,7 @@ export class WebSerialTransport implements Transport {
 
   browseDir(path: string, page = 0): Promise<DirPage> {
     return new Promise((resolve, reject) => {
+      if (!this.isConnected()) { reject(new Error('not connected')); return; }   // fail fast: a dead link never answers
       if (this.dir) { clearTimeout(this.dir.timer); this.dir.reject('superseded'); }
       const d: DirPending = { path, resolve, reject, timer: null };
       this.dir = d;
@@ -216,6 +218,7 @@ export class WebSerialTransport implements Transport {
 
   cartVoices(cartRel: string): Promise<string[]> {
     return new Promise((resolve, reject) => {
+      if (!this.isConnected()) { reject(new Error('not connected')); return; }   // fail fast: a dead link never answers
       if (this.voices) { clearTimeout(this.voices.timer); this.voices.reject('superseded'); }
       const v: VoicesPending = { rel: cartRel, resolve, reject, timer: null };
       this.voices = v;
@@ -226,6 +229,7 @@ export class WebSerialTransport implements Transport {
 
   browse(path: string, ext?: string): Promise<BrowseResult> {
     return new Promise((resolve, reject) => {
+      if (!this.isConnected()) { reject(new Error('not connected')); return; }   // fail fast: a dead link never answers
       if (this.ls) { clearTimeout(this.ls.timer); this.ls.reject('superseded'); }
       const s: BrowsePending = { path, id: -1, entries: [], resolve, reject, timer: null };
       this.ls = s;
@@ -237,6 +241,7 @@ export class WebSerialTransport implements Transport {
   reindex(): Promise<void> {
     // Wait for the firmware's @REINDEXED reply (a full /dexed scan can take minutes),
     // not a fixed delay. Falls back after 3 min so the UI never hangs forever.
+    if (!this.isConnected()) return Promise.resolve();   // nothing to rebuild over a dead link
     return new Promise<void>(resolve => {
       const off = this.onLine(l => { if (l.indexOf('@REINDEXED') >= 0) { clearTimeout(timer); off(); resolve(); } });
       const timer = setTimeout(() => { off(); resolve(); }, 180000);

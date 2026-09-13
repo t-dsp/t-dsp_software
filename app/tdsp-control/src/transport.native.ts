@@ -99,10 +99,20 @@ export class BleTransport implements Transport {
 
   isConnected() { return !!this.device; }
 
+  // Attempt number: disconnect() and each new connect() bump it, so a cancelled attempt that finds the
+  // device late disconnects instead of taking over. abortScan settles an in-flight scan immediately.
+  private attempt = 0;
+  private abortScan: (() => void) | null = null;
+
   async connect(): Promise<void> {
+    const my = ++this.attempt;
+    const cancelled = () => my !== this.attempt;
     if (!(await ensurePermissions())) throw new Error('Bluetooth permission denied');
+    if (cancelled()) throw new Error('cancelled');
     await this.waitPoweredOn();
-    const dev = await this.scanAndConnect();
+    if (cancelled()) throw new Error('cancelled');
+    const dev = await this.scanAndConnect(my);
+    if (cancelled()) { try { await dev.cancelConnection(); } catch {} throw new Error('cancelled'); }
     await dev.discoverAllServicesAndCharacteristics();
     if (Platform.OS === 'android') { try { await dev.requestMTU(512); } catch {} }
     this.device = dev;
@@ -117,6 +127,8 @@ export class BleTransport implements Transport {
   }
 
   async disconnect(): Promise<void> {
+    this.attempt++;
+    const abort = this.abortScan; this.abortScan = null; abort?.();
     const dev = this.device;
     this.teardown();
     try { await dev?.cancelConnection(); } catch {}
@@ -141,10 +153,11 @@ export class BleTransport implements Transport {
     });
   }
 
-  private scanAndConnect(): Promise<Device> {
+  private scanAndConnect(my: number): Promise<Device> {
     return new Promise((resolve, reject) => {
       let settled = false, picking = false;
-      const stopScan = () => { try { this.mgr.stopDeviceScan(); } catch {} };
+      // Only the current attempt may stop the shared scanner (a stale deadline must not kill a newer scan).
+      const stopScan = () => { if (my === this.attempt) { try { this.mgr.stopDeviceScan(); } catch {} } };
       // ONE deadline for the whole scan+connect. Critically this also bounds the GATT
       // connect: dev.connect() can hang forever when reconnecting to the ESP32 (single
       // central, still tearing down the prior link), which would leave connectingRef
@@ -152,6 +165,7 @@ export class BleTransport implements Transport {
       // and the Connect button stays responsive (user can retry).
       const done = (fn: () => void) => { if (settled) return; settled = true; clearTimeout(deadline); stopScan(); fn(); };
       const deadline = setTimeout(() => done(() => reject(new Error('No T-DSP device found (timed out)'))), 20000);
+      this.abortScan = () => { try { this.mgr.stopDeviceScan(); } catch {} done(() => reject(new Error('cancelled'))); };
       stopScan();   // clear any lingering scan from a prior/aborted attempt so this one is clean
       this.mgr.startDeviceScan([TDSP_SVC_UUID], null, async (err, dev) => {
         if (err) { done(() => reject(err)); return; }

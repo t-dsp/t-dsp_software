@@ -203,24 +203,8 @@ export const s = StyleSheet.create({
   btn: { backgroundColor: '#238636', paddingHorizontal: 12, paddingVertical: 8, borderRadius: 7, alignItems: 'center' },
   btnWide: { marginTop: 4 },
   // prominent "Connect App" call-to-action shown on the home screen when disconnected
-  connectHome: { marginTop: 56, paddingHorizontal: 24, alignItems: 'center' },
-  connectBig: { paddingVertical: 16, paddingHorizontal: 44, minWidth: 240 },
-  connectBigText: { color: C.text, fontSize: 17, fontWeight: '700' },
   // Transport picker (connect screen): segmented USB/Bluetooth | Wi-Fi + optional host box.
-  segRow: { flexDirection: 'row', borderWidth: 1, borderColor: C.border, borderRadius: 8, overflow: 'hidden', marginBottom: 14 },
-  seg: { paddingVertical: 9, paddingHorizontal: 22, backgroundColor: C.card2, minWidth: 104, alignItems: 'center' },
-  segOn: { backgroundColor: C.sel },
-  segText: { color: C.muted, fontSize: 13, fontWeight: '600' },
-  segTextOn: { color: C.text },
-  hostInput: { width: 260, marginBottom: 6, textAlign: 'center' },
-  hostHint: { color: C.muted, fontSize: 11, textAlign: 'center', maxWidth: 300, marginBottom: 16 },
   // Discovered-device list (mDNS)
-  devWrap: { width: 280, marginBottom: 12 },
-  devHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, marginBottom: 8 },
-  devRow: { backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 7, paddingVertical: 8, paddingHorizontal: 12, marginBottom: 6 },
-  devRowOn: { borderColor: C.accent, backgroundColor: C.sel },
-  devName: { color: C.text, fontSize: 14, fontWeight: '600' },
-  devAddr: { color: C.muted, fontSize: 11, marginTop: 2 },
   // catalog loading screen (connected, not yet loaded)
   loadWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, gap: 14 },
   loadTitle: { color: C.text, fontSize: 17, fontWeight: '700' },
