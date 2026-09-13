@@ -238,6 +238,11 @@ class DeviceWalker:
 
 
 def walk_device(dev: Device, timeout: float, skips: Skips):
+    # Device reads read(4096) with the port timeout; a short @DXVL reply never fills 4096 bytes, so
+    # every request would sit out the whole 0.2 s timeout (~17 min for 3,700 carts). wait_line
+    # already loops to its own deadline, so a tiny port timeout just returns replies promptly.
+    if hasattr(dev, "s"):
+        dev.s.timeout = 0.005
     w = DeviceWalker(dev, timeout)
     lines = []
     t0 = time.monotonic()
