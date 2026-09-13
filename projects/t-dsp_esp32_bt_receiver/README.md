@@ -95,6 +95,13 @@ HTTP API (form-encoded POSTs, `auth` = device network password or `TDSP_UI_TOKEN
 `/api/wifi/forget` (ssid), `/api/wifi/connect`, `/api/wifi/ap` (ssid, pass). Passwords are
 never returned.
 
+**First connect from a phone.** The Android app has the device network name/password built in (EAS
+env vars `EXPO_PUBLIC_TDSP_AP_SSID` / `EXPO_PUBLIC_TDSP_AP_PASS`, preview environment, kept equal to
+this `.env`; native bundle only, never the web page the device serves). On Android 10+ tapping
+**T-DSP network** joins it for the app alone (local module `app/tdsp-control/modules/tdsp-wifi`); on
+older builds, iOS or other phones, **Show the Wi-Fi password** shows it plus a QR code any camera can
+scan. Change `TDSP_AP_PASS` here and you must update the EAS variable and publish an update too.
+
 **Locked out** (forgot the device network password and no LAN access)? Erase the settings
 namespace by erasing NVS through the Teensy bridge, which restores the `.env` defaults:
 `esptool.py ... erase_region 0x9000 0x5000` (same `g` passthrough recipe as flashing).
