@@ -2883,6 +2883,13 @@ static void usbHostPressure(byte ch, byte pressure)       { midihub::channelPres
 // stop clamping (its kBendRange is 24), so every backend now agrees on the range.
 static constexpr float kMpeMemberBendRange = (float)TDSP_MPE_BEND_RANGE;   // build-configurable (default 24; e.g. 48 for a 4-octave slide)
 
+// The channel an MPE-mode arp emits its (MpeMono/ExprFollow) steps on. It MUST be a member
+// channel (2..16), never the master channel 1: MPE-aware sinks (e.g. Plaits2Sink, whose master
+// channel is set to 1 in MPE) DROP every note-on that arrives on the master channel, so an arp
+// defaulting to output channel 1 goes completely silent on those engines. Emit on the first
+// member channel instead. (MpeScatter/MpePerNote already target member channels 2..16.)
+static constexpr uint8_t kMpeArpOutChannel = 2;
+
 // Bend-range authority (fixes: Plaits bent far less than Dexed under MPE). Each synth track has its
 // OWN router (g_routerV[voice]), each with its own per-channel bend range. A controller's RPN 0,0
 // (pitch-bend sensitivity) is delivered only to the SUBSCRIBED track's router, so honoring it
@@ -2921,9 +2928,14 @@ static void applyMidiMode(bool mpe) {
     trackEnginesSetMpe(mpe);
     // In MPE the arps follow the gesture: ExprFollow re-emits each step on the output channel AND
     // steers it live with the most-recent bend/pressure/timbre, so an arpeggiated line bends with the
-    // LinnStrument. Normal MIDI reverts to plain MpeMono (mono output, no expression steer).
-    for (tdsp::ArpFilter &a : g_arpFilterV)
+    // LinnStrument. Normal MIDI reverts to plain MpeMono (mono output, no expression steer). The MPE
+    // output channel MUST be a member channel (kMpeArpOutChannel): on the master channel (1) an
+    // MPE-aware sink drops every arp note (Plaits2Sink), so the arp would be silent. Normal MIDI goes
+    // back to channel 1 (the conventional single-channel target for a non-MPE engine).
+    for (tdsp::ArpFilter &a : g_arpFilterV) {
         a.setMpeMode(mpe ? tdsp::ArpFilter::MpeExprFollow : tdsp::ArpFilter::MpeMono);
+        a.setOutputChannel(mpe ? kMpeArpOutChannel : 1);
+    }
     Serial.printf("[mode] %s\n", mpe ? "MPE (per-note bend/pressure)" : "normal MIDI");
 }
 
@@ -3011,7 +3023,7 @@ FLASHMEM static bool handleArpLine(const char* line, Print& reply, tdsp::ArpFilt
             else if (!strcmp(k, "mask"))  A.setStepMask((uint32_t)v);
             else if (!strcmp(k, "len"))   A.setStepLength((uint8_t)v);
             else if (!strcmp(k, "mpe"))   A.setMpeMode(g_mpeMode ? AF::MpeExprFollow : (AF::MpeMode)v);   // MPE mode keeps ExprFollow so the arp follows the bend; app presets can't clobber it
-            else if (!strcmp(k, "outch")) A.setOutputChannel((uint8_t)v);
+            else if (!strcmp(k, "outch")) A.setOutputChannel(g_mpeMode && v < kMpeArpOutChannel ? kMpeArpOutChannel : (uint8_t)v);   // never let an app preset drop the MPE arp onto the master channel (silent on Plaits)
             else if (!strcmp(k, "scb"))   A.setScatterBaseChannel((uint8_t)v);
             else if (!strcmp(k, "scc"))   A.setScatterCount((uint8_t)v);
             else if (!strcmp(k, "scale")) A.setScale((AF::Scale)v);
