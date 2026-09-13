@@ -43,6 +43,7 @@ import type { LastConn } from './src/ui/constants';
 import { deviceHttpBase } from './src/deviceWifi';
 import { loadDeviceNetworkCreds, openWifiSettings, canOpenWifiSettings } from './src/deviceNetwork';
 import type { DeviceNetworkCreds } from './src/deviceNetwork';
+import { wifiJoinSupported, joinWifi, releaseWifi } from './modules/tdsp-wifi';
 
 // The folded landing tile (gridInParent): renders a track's own card as the first cell of its child
 // grid. Prefers the section's renderCard (e.g. <SynthCard>) — assigned onto `parent` AFTER makeTrackCard
@@ -103,6 +104,8 @@ export default function App() {
   // The T-DSP's own Wi-Fi name/password as this app knows them (native only; see src/deviceNetwork.d.ts).
   // Re-read whenever we land on the connect screen, in case Settings > Device Wi-Fi changed it.
   const [devNet, setDevNet] = useState<DeviceNetworkCreds | null>(null);
+  const devNetRef = useRef<DeviceNetworkCreds | null>(null);
+  devNetRef.current = devNet;
   useEffect(() => { if (!connected) loadDeviceNetworkCreds().then(setDevNet).catch(() => {}); }, [connected]);
 
   // mDNS discovery: browse _tdsp._tcp while the Wi-Fi picker is open and disconnected, so
@@ -679,6 +682,7 @@ export default function App() {
   // ── Connecting ─────────────────────────────────────────────────────────────────────────────────
   // A target is the platform's built-in transport ('default' = Web Serial on desktop, Bluetooth on
   // native) or a Wi-Fi host. Its id keys the connect-screen card that shows the attempt.
+  const DEVICE_AP_IP = '192.168.4.1';   // the T-DSP access point's fixed address
   const targetId = (kind: TransportKind, host?: string) => (kind === 'wifi' ? 'wifi:' + ((host || '').trim() || 'tdsp.local') : 'default');
 
   // Plain-language reason for a failed attempt, shown under its card.
@@ -714,6 +718,16 @@ export default function App() {
     setAttemptId(id); setAttemptAuto(auto); setConnError(null);
     try {
       if (t.isConnected()) await t.disconnect().catch(() => {});   // a half-open link the UI lost track of
+      // The T-DSP's own network: on Android 10+ the app joins it by itself first (system "Connect?" prompt,
+      // no password typing, phone keeps its normal internet). Any other target leaves that app-only network
+      // so LAN addresses are reachable again.
+      const creds = devNetRef.current;
+      if (kind === 'wifi' && host.trim() === DEVICE_AP_IP && wifiJoinSupported && creds) {
+        await joinWifi(creds.ssid, creds.pass);
+        if (!live()) return;
+      } else if (wifiJoinSupported) {
+        await releaseWifi();
+      }
       if (reconnectOnly) {
         if (!(await t.reconnect?.())) return;   // nothing previously granted: stay on the connect screen
       } else {
@@ -748,7 +762,7 @@ export default function App() {
       if (live()) { connectingRef.current = false; setConnecting(false); setAttemptId(null); }
     }
   }
-  async function disconnect() { try { await tp.disconnect(); } catch {} setConnected(false); setConnecting(false); setLoaded(false); progBus.emit(null); resetNav(); }
+  async function disconnect() { releaseWifi(); try { await tp.disconnect(); } catch {} setConnected(false); setConnecting(false); setLoaded(false); progBus.emit(null); resetNav(); }
 
   // Connect to a target from the UI, boot restore or app resume. Supersedes any attempt in flight. If
   // `tp` has to change (other transport or host) the connect runs once it is rebuilt (effect below).
@@ -864,7 +878,8 @@ export default function App() {
     if (lastConn?.kind === 'wifi') { const h = lastConn.host || 'tdsp.local'; add(wifi(h, '📶', 'T-DSP', `${h} · Wi-Fi`)); }
     if (lastConn?.kind === 'default') add(builtin);
     if (Platform.OS !== 'android') add(wifi('tdsp.local', '📶', 'T-DSP on this Wi-Fi', 'tdsp.local'));
-    add({ ...wifi('192.168.4.1', '📡', 'T-DSP network', '192.168.4.1 · join the T-DSP Wi-Fi first'), help: 'deviceNetwork' });
+    add({ ...wifi(DEVICE_AP_IP, '📡', 'T-DSP network',
+      wifiJoinSupported && devNet ? `${DEVICE_AP_IP} · joins the T-DSP Wi-Fi for you` : `${DEVICE_AP_IP} · join the T-DSP Wi-Fi first`), help: 'deviceNetwork' });
     // A typed address that is connecting or just failed gets its own card, so its spinner and error stay
     // visible (the connect screen unmounts while connected, which drops the "Another address" field).
     const typed = [attemptId, connError?.id].find(id => id && id.startsWith('wifi:'));
@@ -873,7 +888,7 @@ export default function App() {
     const lastId = lastConn ? targetId(lastConn.kind, lastConn.host) : null;
     return out.map(o => (o.id === lastId ? { ...o, badge: 'last used' } : o));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [found, lastConn, hasWebSerial, attemptId, connError]);
+  }, [found, lastConn, hasWebSerial, attemptId, connError, devNet]);
 
   // Pull down to refresh (native; the web has the browser's refresh): restart the app, picking up a
   // newer published bundle if one is available, then the boot path reconnects to the last device.
