@@ -97,6 +97,15 @@
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <WebSocketsServer.h>
+// Hosted control UI (planning/thin-shell-app): the ESP32 raises its own access point and
+// serves the app's `expo export --platform web` bundle from LittleFS over plain HTTP, so
+// any phone/laptop gets the full UI with NO app install and NO internet. DNSServer is the
+// captive portal (every name -> us). All three ship with arduino-esp32 -- no lib_deps.
+#include <WebServer.h>
+#include <DNSServer.h>
+#include <LittleFS.h>
+#include <functional>
+#include <vector>
 // esp_coexist.h (WiFi/BT coexistence arbiter) is present on IDF 4.4 but guard it so
 // the build survives if a future platform drops/renames it.
 #if __has_include(<esp_coexist.h>)
@@ -123,6 +132,25 @@
 // mDNS hostname -> the device is reachable at tdsp.local on the LAN.
 #ifndef TDSP_MDNS_HOST
 #define TDSP_MDNS_HOST "tdsp"
+#endif
+// Access point the device ALWAYS raises (AP+STA). Joining a LAN (TDSP_WIFI_SSID above) is
+// optional; the AP is what makes the UI work at a festival with no router. WPA2 needs a
+// password of >= 8 chars, otherwise softAP() silently falls back to an OPEN network.
+#ifndef TDSP_AP_SSID
+#define TDSP_AP_SSID "T-DSP"
+#endif
+#ifndef TDSP_AP_PASS
+#define TDSP_AP_PASS "tdsp1234"
+#endif
+// HTTP port for the hosted UI (WebSocket control stays on TDSP_WS_PORT).
+#ifndef TDSP_HTTP_PORT
+#define TDSP_HTTP_PORT 80
+#endif
+// Shared secret tools/push_ui.py sends (X-Token) to replace the hosted UI files. Empty
+// string = uploads disabled (the served UI is then whatever was last pushed).
+#ifndef TDSP_UI_TOKEN
+#define TDSP_UI_TOKEN "change-me"
+#warning "TDSP_UI_TOKEN not defined -- using the default 'change-me'; set it in .env."
 #endif
 #endif  // TDSP_CTRL_WIFI
 
@@ -960,6 +988,182 @@ static void onWsEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t lengt
   }
 }
 
+// ---- Hosted web UI: HTTP static server + captive portal + upload ------------
+// Files live in LittleFS exactly as `expo export --platform web` lays them out, but
+// gzipped by tools/push_ui.py ("/index.html.gz", "/_expo/static/js/web/<hash>.js.gz").
+// WebServer::streamFile() adds "Content-Encoding: gzip" itself when the open File's
+// name ends in .gz, so a request for /index.html is answered from /index.html.gz.
+//
+// Routes:
+//   GET  <any path>   -> the file (or its .gz twin); "/" -> /index.html. Unknown path ->
+//                        302 to "/" (this is also what turns OS captive-portal probes --
+//                        generate_204, hotspot-detect.html, connecttest.txt -- into the UI).
+//   GET  /ui/list     -> JSON list of hosted files (name + size) for push_ui.py --verify.
+//   POST /ui/clear    -> delete every hosted file (X-Token). Called before a push so stale
+//                        hashed bundles don't accumulate.
+//   POST /ui          -> multipart upload, streamed straight into LittleFS (X-Token). The
+//                        part's filename is the full path ("/index.html.gz"); parent dirs
+//                        are created. Streaming keeps RAM flat -- a 250 KB bundle never
+//                        has to fit in the heap.
+static WebServer g_http(TDSP_HTTP_PORT);
+static DNSServer g_dns;
+static bool      g_fsUp = false;
+static File      g_upFile;        // in-flight upload target
+static bool      g_upOk = false;
+
+static const char *contentTypeFor(const String &path) {
+  if (path.endsWith(".html")) return "text/html";
+  if (path.endsWith(".js"))   return "application/javascript";
+  if (path.endsWith(".css"))  return "text/css";
+  if (path.endsWith(".json")) return "application/json";
+  if (path.endsWith(".ico"))  return "image/x-icon";
+  if (path.endsWith(".png"))  return "image/png";
+  if (path.endsWith(".svg"))  return "image/svg+xml";
+  if (path.endsWith(".wasm")) return "application/wasm";
+  if (path.endsWith(".woff2")) return "font/woff2";
+  return "application/octet-stream";
+}
+
+static bool uiAuthorized() {
+  if (TDSP_UI_TOKEN[0] == 0) return false;               // uploads disabled
+  return g_http.header("X-Token") == TDSP_UI_TOKEN;
+}
+
+// Serve `path` (already normalized, leading '/') from LittleFS; false if absent.
+static bool uiServeFile(String path) {
+  if (!g_fsUp) return false;
+  if (path.endsWith("/")) path += "index.html";
+  String gz = path + ".gz";
+  File f;
+  if (LittleFS.exists(gz))        f = LittleFS.open(gz, "r");
+  else if (LittleFS.exists(path)) f = LittleFS.open(path, "r");
+  if (!f || f.isDirectory()) { if (f) f.close(); return false; }
+  // The hashed bundle is immutable (new content = new name); index.html must always be
+  // re-fetched so a pushed UI shows up on the next reload, not after a cache expiry.
+  g_http.sendHeader("Cache-Control", path.indexOf("/_expo/") == 0 ? "public, max-age=31536000, immutable" : "no-cache");
+  g_http.streamFile(f, contentTypeFor(path));
+  f.close();
+  return true;
+}
+
+static void uiRedirectRoot() {
+  // Absolute URL on the AP address: captive-portal probes come with foreign Host headers
+  // and phones on the AP can't always resolve tdsp.local (Android), so the IP is the
+  // reliable target.
+  IPAddress ip = WiFi.softAPIP();
+  char loc[48];
+  snprintf(loc, sizeof(loc), "http://%u.%u.%u.%u/", ip[0], ip[1], ip[2], ip[3]);
+  g_http.sendHeader("Location", loc, true);
+  g_http.send(302, "text/plain", "");
+}
+
+static void uiHandleNotFound() {
+  if (g_http.method() == HTTP_GET && uiServeFile(g_http.uri())) return;
+  if (!g_fsUp || !LittleFS.exists("/index.html.gz")) {
+    g_http.send(200, "text/plain", "T-DSP: no web UI hosted yet. Push one with tools/push_ui.py (see planning/thin-shell-app).\n");
+    return;
+  }
+  uiRedirectRoot();
+}
+
+static void uiHandleList() {
+  String out = "[";
+  if (g_fsUp) {
+    // LittleFS on arduino-esp32 2.x lists one level per openNextFile; walk it.
+    std::function<void(File &, const String &)> walk = [&](File &dir, const String &prefix) {
+      for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+        String name = f.name();
+        if (name.indexOf('/') != 0) name = prefix + "/" + name;   // 2.0.x returns bare names
+        if (f.isDirectory()) { walk(f, name); }
+        else { if (out.length() > 1) out += ","; out += "{\"name\":\"" + name + "\",\"size\":" + String((unsigned)f.size()) + "}"; }
+        f.close();
+      }
+    };
+    File root = LittleFS.open("/");
+    if (root) { walk(root, ""); root.close(); }
+  }
+  out += "]";
+  g_http.send(200, "application/json", out);
+}
+
+static void uiRemoveAll(const String &dirPath) {
+  File dir = LittleFS.open(dirPath);
+  if (!dir) return;
+  // Collect first: deleting while iterating confuses openNextFile.
+  std::vector<String> files, dirs;
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    String name = f.name();
+    if (name.indexOf('/') != 0) name = (dirPath == "/" ? "" : dirPath) + "/" + name;
+    (f.isDirectory() ? dirs : files).push_back(name);
+    f.close();
+  }
+  dir.close();
+  for (auto &f : files) LittleFS.remove(f);
+  for (auto &d : dirs)  { uiRemoveAll(d); LittleFS.rmdir(d); }
+}
+
+static void uiHandleClear() {
+  if (!uiAuthorized()) { g_http.send(403, "text/plain", "bad token"); return; }
+  if (g_fsUp) uiRemoveAll("/");
+  g_http.send(200, "text/plain", "cleared");
+}
+
+static void uiMkdirs(const String &path) {
+  for (int i = 1; (i = path.indexOf('/', i)) > 0; ++i) {
+    String d = path.substring(0, i);
+    if (!LittleFS.exists(d)) LittleFS.mkdir(d);
+  }
+}
+
+// Multipart body callback: called repeatedly with START / WRITE / END for each part.
+static void uiHandleUploadChunk() {
+  HTTPUpload &up = g_http.upload();
+  if (up.status == UPLOAD_FILE_START) {
+    g_upOk = false;
+    if (!uiAuthorized() || !g_fsUp) return;
+    String path = up.filename;
+    if (path.indexOf('/') != 0) path = "/" + path;
+    if (path.indexOf("..") >= 0) return;
+    uiMkdirs(path);
+    g_upFile = LittleFS.open(path, "w");
+    g_upOk = (bool)g_upFile;
+    Serial.printf("[ui] upload %s%s\n", path.c_str(), g_upOk ? "" : " FAILED to open");
+  } else if (up.status == UPLOAD_FILE_WRITE) {
+    if (g_upOk && g_upFile.write(up.buf, up.currentSize) != up.currentSize) { g_upOk = false; g_upFile.close(); }
+  } else if (up.status == UPLOAD_FILE_END) {
+    if (g_upFile) g_upFile.close();
+    Serial.printf("[ui] upload done: %u bytes%s\n", (unsigned)up.totalSize, g_upOk ? "" : " (error)");
+  } else if (up.status == UPLOAD_FILE_ABORTED) {
+    if (g_upFile) g_upFile.close();
+    g_upOk = false;
+  }
+}
+
+static void uiHandleUploadDone() {
+  if (!uiAuthorized()) { g_http.send(403, "text/plain", "bad token"); return; }
+  if (!g_fsUp)         { g_http.send(500, "text/plain", "no filesystem"); return; }
+  g_http.send(g_upOk ? 200 : 500, "text/plain", g_upOk ? "ok" : "write failed");
+}
+
+static void uiHttpBegin() {
+  // LittleFS: format on first boot with the new partition table (formatOnFail=true).
+  g_fsUp = LittleFS.begin(true, "/littlefs", 8, "spiffs");
+  Serial.printf("[ui] LittleFS %s (%u / %u KB used)\n", g_fsUp ? "mounted" : "FAILED",
+                g_fsUp ? (unsigned)(LittleFS.usedBytes() / 1024) : 0, g_fsUp ? (unsigned)(LittleFS.totalBytes() / 1024) : 0);
+  const char *hdrs[] = { "X-Token" };
+  g_http.collectHeaders(hdrs, 1);          // WebServer drops unknown headers unless asked
+  g_http.on("/ui/list",  HTTP_GET,  uiHandleList);
+  g_http.on("/ui/clear", HTTP_POST, uiHandleClear);
+  g_http.on("/ui",       HTTP_POST, uiHandleUploadDone, uiHandleUploadChunk);
+  g_http.onNotFound(uiHandleNotFound);
+  g_http.begin();
+  // Captive portal: answer every DNS query on the AP with our address; the OS probe
+  // then hits uiHandleNotFound() and gets bounced to the UI.
+  g_dns.setErrorReplyCode(DNSReplyCode::NoError);
+  g_dns.start(53, "*", WiFi.softAPIP());
+  Serial.printf("[ui] http://%s/ on port %u (captive portal on)\n", WiFi.softAPIP().toString().c_str(), (unsigned)TDSP_HTTP_PORT);
+}
+
 // WiFi + WebSocket + mDNS front-end behind the ControlTransport seam. WiFi shares the
 // radio with A2DP (Bluetooth Classic); the coex arbiter is biased toward BT so audio
 // stays glitch-free. BLE is intentionally NOT started (frees the BLE controller RAM).
@@ -967,7 +1171,10 @@ class WifiControlTransport : public ControlTransport {
  public:
   void begin() override {
     WiFi.persistent(false);            // don't wear flash writing creds every boot
-    WiFi.mode(WIFI_STA);
+    // AP+STA: the access point is unconditional (festival / no-router use); the station
+    // side only joins if a LAN SSID was configured. Both share one channel -- the AP
+    // follows whatever channel the STA lands on, which is fine for control traffic.
+    WiFi.mode(WIFI_AP_STA);
     WiFi.setHostname(TDSP_MDNS_HOST);  // DHCP hostname (mDNS name set separately)
 #if TDSP_A2DP
     // WiFi modem sleep MUST stay ENABLED while Bluetooth is up. A2DP (Bluetooth Classic)
@@ -995,16 +1202,26 @@ class WifiControlTransport : public ControlTransport {
     // Pointless with the A2DP gate off -- there is nothing to coexist with.
     esp_coex_preference_set(ESP_COEX_PREFER_BT);
 #endif
-    Serial.printf("[wifi] connecting to \"%s\"...\n", TDSP_WIFI_SSID);
-    WiFi.begin(TDSP_WIFI_SSID, TDSP_WIFI_PASS);   // non-blocking; loop() reports when up
-
+    bool apUp = WiFi.softAP(TDSP_AP_SSID, TDSP_AP_PASS);
+    Serial.printf("[wifi] AP \"%s\" %s at %s\n", TDSP_AP_SSID, apUp ? "up" : "FAILED", WiFi.softAPIP().toString().c_str());
+    staConfigured = TDSP_WIFI_SSID[0] != 0;
+    if (staConfigured) {
+      Serial.printf("[wifi] connecting to \"%s\"...\n", TDSP_WIFI_SSID);
+      WiFi.begin(TDSP_WIFI_SSID, TDSP_WIFI_PASS);   // non-blocking; loop() reports when up
+    } else {
+      Serial.println("[wifi] no LAN SSID configured -> AP-only");
+    }
     g_ws.begin();
     g_ws.onEvent(onWsEvent);
     Serial.printf("[ws] server listening on port %u\n", (unsigned)TDSP_WS_PORT);
+    uiHttpBegin();
+    if (apUp) startMdns();   // tdsp.local answers on the AP even with no LAN
   }
 
   void loop() override {
     g_ws.loop();
+    g_http.handleClient();
+    g_dns.processNextRequest();
     maintainWifi();
     // Flush broadcasts requested from the BT task (see pushStatus/pushSources).
     if (pendingStatus)  { pendingStatus  = false; broadcastStatus(); }
@@ -1028,6 +1245,7 @@ class WifiControlTransport : public ControlTransport {
   volatile bool pendingSources = false;
   bool     mdnsUp   = false;
   bool     wasConn  = false;
+  bool     staConfigured = false;
   uint32_t lastTry  = 0;
 
   void broadcastStatus() {
@@ -1045,6 +1263,7 @@ class WifiControlTransport : public ControlTransport {
   }
 
   void maintainWifi() {
+    if (!staConfigured) return;           // AP-only: nothing to (re)join
     if (WiFi.status() == WL_CONNECTED) {
       if (!wasConn) {
         wasConn = true;
@@ -1060,6 +1279,7 @@ class WifiControlTransport : public ControlTransport {
   }
 
   void startMdns() {
+    if (mdnsUp) return;
     if (MDNS.begin(TDSP_MDNS_HOST)) {
       // Advertise TWO service types on the same port:
       //  * _tdsp._tcp -- OUR type. The app browses this so it finds T-DSP units and ONLY
@@ -1068,6 +1288,7 @@ class WifiControlTransport : public ControlTransport {
       //  * _ws._tcp   -- generic, kept so plain WS tooling/browsers can still see it.
       MDNS.addService("tdsp", "tcp", TDSP_WS_PORT);
       MDNS.addService("ws", "tcp", TDSP_WS_PORT);
+      MDNS.addService("http", "tcp", TDSP_HTTP_PORT);   // the hosted control UI
       // TXT records: let a client label the device in a picker WITHOUT connecting to it,
       // and skip units it can't talk to. `name` is the friendly label; `proto` guards
       // against a future wire-format change; `a2dp` says whether this build has Bluetooth

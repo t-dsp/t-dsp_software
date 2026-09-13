@@ -1,0 +1,12 @@
+# T-DSP ESP32 WiFi build: 4 MB flash, single app + a LittleFS partition that holds the
+# control web UI (the `expo export --platform web` bundle, gzipped ~250 KB).
+# app0 = 2.5 MB (WiFi build is ~1.6 MB, room to grow), spiffs(LittleFS) = 1.375 MB.
+# No OTA slots: the ESP32 is flashed over USB / the Teensy bridge, the UI is updated
+# by tools/push_ui.py over HTTP -- no reflash. NOTE: changing the layout does not move
+# NVS (same offset as huge_app.csv), so the stored A2DP bond survives.
+# Name,   Type, SubType,  Offset,   Size,     Flags
+nvs,      data, nvs,      0x9000,   0x5000,
+otadata,  data, ota,      0xe000,   0x2000,
+app0,     app,  ota_0,    0x10000,  0x280000,
+spiffs,   data, spiffs,   0x290000, 0x160000,
+coredump, data, coredump, 0x3F0000, 0x10000,

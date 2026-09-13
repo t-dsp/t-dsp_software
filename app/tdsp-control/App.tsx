@@ -701,12 +701,28 @@ export default function App() {
   // manually picking Wi-Fi still types a host and taps Connect.
   const bootRef = useRef(false);
   const autoWifiRef = useRef(false);
+  // Hostname when this page was served over plain http by a T-DSP (not a dev server / file /
+  // localhost), else ''. The ESP32 serves the web export from its own AP at 192.168.4.1 / tdsp.local.
+  const servedByDevice = (): string => {
+    if (Platform.OS !== 'web' || typeof window === 'undefined') return '';
+    const { protocol, hostname, port } = window.location;
+    if (protocol !== 'http:' || !hostname) return '';
+    if (hostname === 'localhost' || hostname === '127.0.0.1' || port === '8081' || port === '19006' || port === '19007') return '';
+    return hostname;
+  };
   useEffect(() => {
     if (bootRef.current || Platform.OS !== 'web') return;
     bootRef.current = true;
     (async () => {
       const last = await loadLastConn();
-      if (!last || userDiscRef.current) return;
+      if (userDiscRef.current) return;
+      // Served by the T-DSP itself (ESP32 access point / LAN, see projects/t-dsp_esp32_bt_receiver
+      // HTTP server): the page's own host IS the device, so default to Wi-Fi at that host and
+      // auto-connect -- a festival phone on the "T-DSP" AP gets a working UI with zero setup.
+      // A saved connection still wins so a user can point a device-served page elsewhere.
+      const dev = servedByDevice();
+      if (!last && dev) { autoWifiRef.current = true; setWifiHost(dev); setTkind('wifi'); return; }
+      if (!last) return;
       if (last.kind === 'wifi') { autoWifiRef.current = true; setWifiHost(last.host || ''); setTkind('wifi'); }
       else connect(true, true);   // serial: gesture-free reconnect to the already-granted port
     })();

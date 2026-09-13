@@ -67,6 +67,27 @@ Optional overrides (plain build flags, not secrets): `TDSP_WS_PORT` (default `81
 
 > Must be a **2.4 GHz** network — the classic ESP32 has no 5 GHz radio.
 
+### Access point + hosted web UI (no app, no internet)
+
+The WiFi build runs **AP+STA**: it always raises its own access point (`TDSP_AP_SSID` /
+`TDSP_AP_PASS` in `.env`, defaults `T-DSP` / `tdsp1234`) and only *additionally* joins a
+LAN if `TDSP_WIFI_SSID` is set. Leave the SSID empty for AP-only (festival mode).
+
+It also serves the control app's web export from a **1.375 MB LittleFS** partition over
+plain HTTP (port 80), with a captive-portal DNS so a phone that joins the AP is bounced
+straight to `http://192.168.4.1/` (also `http://tdsp.local/`). The page defaults to the
+Wi-Fi transport at its own host and auto-connects — full UI, zero setup, no app install.
+
+Put a UI on the device (and update it later — no reflash) with
+[`tools/push_ui.py`](../../tools/push_ui.py): it runs `expo export --platform web`,
+gzips the files (~250 KB total) and POSTs them to `/ui` with the `X-Token` from
+`TDSP_UI_TOKEN` in `.env`. `--list` shows what is hosted; `--host tdsp.local` for LAN.
+
+Routes: `GET /*` static (gz twin served with `Content-Encoding: gzip`, unknown →
+302 `/`), `GET /ui/list`, `POST /ui/clear` (token), `POST /ui` multipart (token, streamed
+into LittleFS). Partition table: [`partitions_ui.csv`](partitions_ui.csv) (2.5 MB app +
+LittleFS; NVS offset unchanged so the A2DP bond survives).
+
 ### Wire contract
 
 The device is discoverable via mDNS at **`tdsp.local`**, advertising `_ws._tcp`
@@ -164,15 +185,16 @@ boots **idle** (explicit-only): connect it from the app — over WiFi use `!pair
 for a new phone or `!reconnect` for one already bonded (over BLE, the pairing /
 reconnect opcodes) — or send `p` over UART.
 
-### Image sizes (3 MB `huge_app` partition)
+### Image sizes
 
-| Env | Flash | RAM (static) |
-|-----|-------|--------------|
-| `esp32dev` (BLE) | 1,182,957 B — 37.6% | 48,856 B — 14.9% |
-| `esp32dev_wifi` | 1,591,205 B — 50.6% | 70,996 B — 21.7% |
+| Env | Partition | Flash | RAM (static) |
+|-----|-----------|-------|--------------|
+| `esp32dev` (BLE) | `huge_app` 3 MB | 1,182,957 B — 37.6% | 48,856 B — 14.9% |
+| `esp32dev_wifi` | `partitions_ui` 2.5 MB | 1,671,709 B — 63.8% | 71,900 B — 21.9% |
 
-The WiFi build drops the BLE GATT stack but adds WiFi + lwIP + WebSocket + mDNS,
-netting ~400 KB more flash. Both fit the 3 MB partition with room to spare.
+The WiFi build drops the BLE GATT stack but adds WiFi + lwIP + WebSocket + mDNS + the
+HTTP/LittleFS UI host, netting ~500 KB more flash; it gives up 0.5 MB of app partition
+to the LittleFS that holds the web UI.
 
 ## Status
 

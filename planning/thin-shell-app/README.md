@@ -79,6 +79,16 @@ App work (small):
 - **Pure PWA on phones over BLE**: Web Bluetooth is Android-Chrome only,
   absent on iOS.
 
+## Status (2026-09-13)
+
+- Path 1 **DONE**: expo-updates wired (commit 9de6bfa), channel/branch `preview` created,
+  first OTA published (runtime fingerprint `616ec22a…`), EAS Android preview build started.
+- Path 2 **BUILT, NOT FLASHED**: `esp32dev_wifi` compiles green (1.67 MB / 2.5 MB) with
+  AP+STA, captive portal, LittleFS static server, `/ui` upload; `tools/push_ui.py` written;
+  app defaults to Wi-Fi at its own host when device-served. Needs a BOOT-held ESP32 flash
+  (partition table changed → full `pio run -t upload`), then `python tools/push_ui.py`.
+- PWA manifest/service worker: not started.
+
 ## Order of work
 
 1. EAS Update wiring + one new build (unblocks feature shipping now).
