@@ -84,6 +84,7 @@ Measured with a laptop on the AP and the home network absent (60 s each):
 | | ping loss | longest loss | WS control p95 | WS max | WS timeouts |
 |---|---|---|---|---|---|
 | old policy | 22.8% | 4.2 s | 680 ms | 1510 ms | 7 |
+| new policy (phone held) | 0% | none | 87 ms | 121 ms | 0 |
 
 The new policy: AutoReconnect off; one short async scan, then connect straight to the best saved
 network by channel+BSSID; exponential backoff 10 s → 5 min when none is in range; **no scanning
@@ -107,6 +108,21 @@ namespace by erasing NVS through the Teensy bridge, which restores the `.env` de
 `esptool.py ... erase_region 0x9000 0x5000` (same `g` passthrough recipe as flashing).
 
 ### Access point + hosted web UI (no app, no internet)
+
+**HTTP server is async (ESPAsyncWebServer).** The synchronous arduino `WebServer` served one
+connection at a time and waited 5 s on every idle browser preconnect, so a phone's "Sign in to
+T-DSP" page never loaded. Measured on the device over the LAN, 5 concurrent requests:
+
+| idle preconnect sockets open | sync WebServer | async server |
+|---|---|---|
+| 2 | 10 s per file, empty bodies | all small files < 0.7 s |
+| 6 | (not tried) | all small files < 1.3 s |
+
+The 259 KB bundle is throughput-limited (~50 KB/s over this LAN, where the device's round trip
+averages 50 ms; lwIP's 5.7 KB send buffer is fixed in the arduino-esp32 2.x libs), so it takes 5-7 s
+there and should be faster for a phone on the access point (18 ms median round trip).
+Note: while Android shows "Sign in", only that window (and the app's own join) reach the device;
+Chrome is routed over mobile data.
 
 The WiFi build runs **AP+STA**: it always raises its own access point and *additionally*
 joins a saved network when one is in range (see Runtime Wi-Fi settings above). A build without

@@ -93,6 +93,11 @@ App work (small):
   name/password in NVS, edited in the app at Settings › Device Wi-Fi; station never scans while a
   phone is on the AP. Old policy measured at 22.8% ping loss / 4.2 s outages for a phone on the AP
   when the home network is absent; the new-policy run's data is still on jay-mint (offline).
+- **First connect (Android app):** "Connect to <T-DSP> Access Point" card joins the AP for the app
+  (local module modules/tdsp-wifi); password panel with Copy; QR behind "Share with another phone".
+- **Captive portal page fixed (async HTTP server, flashed + verified 2026-09-13):** the sync
+  WebServer stalled 5 s per idle preconnect, so "Sign in to T-DSP" never loaded. Stall-policy
+  after-numbers: phone on AP with LAN absent = 0% ping loss, WS p95 87 ms, 0 timeouts.
 - **Not yet tested:** a phone actually joining the `T-DSP` AP and the captive portal popping
   (both bench machines are Wi-Fi-only, so joining the AP would have cut the SSH link).
 - PWA manifest/service worker: not started, and arguably pointless — the page only has a job
