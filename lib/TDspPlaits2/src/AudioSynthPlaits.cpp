@@ -63,7 +63,10 @@ void AudioSynthPlaits::setMorph(float v)         { patch_.morph = clamp01(v); }
 void AudioSynthPlaits::setDecay(float v)         { patch_.decay = clamp01(v); }
 void AudioSynthPlaits::setLpgColour(float v)     { patch_.lpg_colour = clamp01(v); }
 void AudioSynthPlaits::setLevel(float v)         { modulations_.level = clamp01(v); }
-void AudioSynthPlaits::gate(bool on)             { modulations_.trigger = on ? 1.0f : 0.0f; }
+void AudioSynthPlaits::gate(bool on) {
+    modulations_.trigger = on ? 1.0f : 0.0f;
+    if (on) { idle_ = false; quietBlocks_ = 0; }   // wake before the next update()
+}
 
 const char *AudioSynthPlaits::engineName(int e) {
     static const char *kNames[kNumEngines] = {
@@ -77,6 +80,7 @@ const char *AudioSynthPlaits::engineName(int e) {
 }
 
 void AudioSynthPlaits::update(void) {
+    if (idle_) return;                 // released + silent: no DSP, no block (reads as silence downstream)
     audio_block_t *out = allocate();
     if (!out) return;
 
@@ -84,12 +88,26 @@ void AudioSynthPlaits::update(void) {
     // native control-block cadence and stays within its 24-sample scratch.
     Voice::Frame frames[plaits::kBlockSize];
     size_t done = 0;
+    int peak = 0;
     while (done < AUDIO_BLOCK_SAMPLES) {
         size_t n = AUDIO_BLOCK_SAMPLES - done;
         if (n > plaits::kBlockSize) n = plaits::kBlockSize;
         voice_.Render(patch_, modulations_, frames, n);
-        for (size_t i = 0; i < n; ++i) out->data[done + i] = frames[i].out;
+        for (size_t i = 0; i < n; ++i) {
+            int16_t v = frames[i].out;
+            out->data[done + i] = v;
+            int a = v < 0 ? -v : v;
+            if (a > peak) peak = a;
+        }
         done += n;
+    }
+
+    // Gate down and the tail has died away -> go idle until the next gate(true).
+    if (modulations_.trigger == 0.0f && peak < 4) {
+        if (quietBlocks_ < 255) ++quietBlocks_;
+        if (quietBlocks_ >= kQuietBlocks) idle_ = true;
+    } else {
+        quietBlocks_ = 0;
     }
 
     transmit(out, 0);

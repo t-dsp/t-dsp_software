@@ -1095,14 +1095,24 @@ static const int kNumBuiltin = sizeof(kBuiltinSongs) / sizeof(kBuiltinSongs[0]);
 // g_sdReady is declared earlier (before the synth backend include).
 
 static const int MAX_EVENTS = 24000;                 // longest playable song (baked or SD)
-DMAMEM static tdsp::MidiFileEvent g_buf[MAX_EVENTS];  // ~144KB in OCRAM (off the DTCM budget)
+// Where the song event buffers live. DMAMEM (OCRAM) by default. A PSRAM board can set
+// TDSP_SONGBUF_EXTMEM (boards/jaymint.h) to move all of them (~250 KB) to EXTMEM: the player only
+// reads them sequentially from loop(), and OCRAM is the scarce pool the Plaits voices, drum buffers
+// and the audio block pools fight over. NOTE EXTMEM is not zeroed at boot (core TODO) -- fine here,
+// a buffer is always parsed into before it is read.
+#if TDSP_SONGBUF_EXTMEM
+#define TDSP_SONGBUF_MEM EXTMEM
+#else
+#define TDSP_SONGBUF_MEM DMAMEM
+#endif
+TDSP_SONGBUF_MEM static tdsp::MidiFileEvent g_buf[MAX_EVENTS];  // ~144KB (OCRAM, or PSRAM on jay-mint)
 #if TDSP_VOICE2
 // Player 2 needs its OWN event buffer — MidiFilePlayer::play() holds a pointer (does not copy),
 // so it can't share g_buf with player 1. Half-size (~72KB) to keep OCRAM in budget on the
 // no-PSRAM pool build; a second simultaneous song is typically a shorter backing/loop. A song
 // longer than this is truncated on player 2 (player 1 still gets the full 24000-event buffer).
 static const int MAX_EVENTS2 = 12000;
-DMAMEM static tdsp::MidiFileEvent g_buf2[MAX_EVENTS2];
+TDSP_SONGBUF_MEM static tdsp::MidiFileEvent g_buf2[MAX_EVENTS2];
 #endif
 #if TDSP_SYNTH_VOICES >= 3
 // Voices 3/4 (and the hetero OPLL voice at index 2) each need their OWN event buffer (the player
@@ -1112,12 +1122,12 @@ DMAMEM static tdsp::MidiFileEvent g_buf2[MAX_EVENTS2];
 // A short backing loop fits 2000 events; a longer song truncates on voices 3/4 only (voices 0/1
 // keep their full buffers).
 static const int MAX_EVENTS3 = 2000;
-DMAMEM static tdsp::MidiFileEvent g_buf3[MAX_EVENTS3];
+TDSP_SONGBUF_MEM static tdsp::MidiFileEvent g_buf3[MAX_EVENTS3];
 #if TDSP_SYNTH_VOICES >= 4
-DMAMEM static tdsp::MidiFileEvent g_buf4[MAX_EVENTS3];
+TDSP_SONGBUF_MEM static tdsp::MidiFileEvent g_buf4[MAX_EVENTS3];
 #endif
 #if TDSP_SYNTH_VOICES >= 5
-DMAMEM static tdsp::MidiFileEvent g_buf5[MAX_EVENTS3];   // Synth E (2nd Plaits) song buffer
+TDSP_SONGBUF_MEM static tdsp::MidiFileEvent g_buf5[MAX_EVENTS3];   // Synth E (2nd Plaits) song buffer
 #endif
 #endif
 

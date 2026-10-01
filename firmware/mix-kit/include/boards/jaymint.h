@@ -40,6 +40,15 @@
 #define TDSP_DEFAULT_MPE 1
 #endif
 
+// --- PSRAM: song event buffers off OCRAM --------------------------------------
+// This board has 8 MB PSRAM. The MIDI players' event buffers (~250 KB, read
+// sequentially from loop()) go to EXTMEM so OCRAM is free for what must be fast:
+// Plaits voice pools (16 KB working memory each), drum buffers, audio block pools.
+// That is what pays for 4-voice Plaits on Synth D/E (TDSP_HP_VOICES=4).
+#ifndef TDSP_SONGBUF_EXTMEM
+#define TDSP_SONGBUF_EXTMEM 1
+#endif
+
 // Capabilities/roles otherwise identical to the digital-audio board -> left at
 // firmware defaults (ESP32 BT, DIN + USB-host MIDI, synth/song/mixer roles). The
 // I2C mux + RAM-tuning flags come from the env (same as digital_audio_board.h).

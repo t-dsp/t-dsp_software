@@ -52,6 +52,7 @@ public:
     // articulation (rising edge fires the attack; falling starts release).
     void setLevel(float v);                  // 0..1
     void gate(bool on);                      // note held?
+    bool idle() const { return idle_; }      // released and silent: update() skips rendering
 
     static const char *engineName(int e);
 
@@ -64,4 +65,12 @@ private:
     // Persistent working memory the Plaits engines carve up in Init(). Sized
     // per the upstream Teensy port; the largest engine fits well under this.
     char                shared_buffer_[16384];
+    // Idle bypass. A released voice keeps costing a full Render() per block even when its LPG has
+    // long closed; with 4-voice pools on two tracks that is 8 voices of constant DSP for silence.
+    // After the gate drops and the output stays under a tiny threshold for kQuietBlocks blocks,
+    // update() stops rendering (and transmits nothing -- the mixer treats a missing input as 0).
+    // gate(true) wakes the voice before its first block, so attacks are never clipped.
+    bool    idle_        = false;
+    uint8_t quietBlocks_ = 0;
+    static constexpr uint8_t kQuietBlocks = 16;   // ~43 ms at 48 kHz / 128-sample blocks
 };
