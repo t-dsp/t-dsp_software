@@ -28,6 +28,18 @@
 #define TDSP_DEFAULT_APP_VOL_PCT 100
 #endif
 
+// --- Boot MIDI mode: MPE ON --------------------------------------------------
+// This box is played from an MPE controller (LinnStrument), and toggling MPE in the
+// app after every power-up got old. Boot straight into MPE (member bend range =
+// TDSP_MPE_BEND_RANGE, default 24). Still a runtime toggle (@MIDIMODE=0 / app).
+// Trade-off to know: in MPE mode the melodic Plaits tracks (Plaits2Sink) ignore notes
+// on the MPE master channel (ch 1), which is what a plain non-MPE keyboard or the
+// web UI's on-screen keys send -> Plaits is silent from those until MPE is toggled
+// off. Dexed/OPLL play either way. An env can still force -D TDSP_DEFAULT_MPE=0.
+#ifndef TDSP_DEFAULT_MPE
+#define TDSP_DEFAULT_MPE 1
+#endif
+
 // Capabilities/roles otherwise identical to the digital-audio board -> left at
 // firmware defaults (ESP32 BT, DIN + USB-host MIDI, synth/song/mixer roles). The
 // I2C mux + RAM-tuning flags come from the env (same as digital_audio_board.h).

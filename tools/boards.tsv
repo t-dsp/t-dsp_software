@@ -20,4 +20,4 @@
 # not by local flash.py serial detection. Builds+flashes clean; has a boot power-contention
 # hang on good firmware (run it off ONE 5V source). See project_jaymint_flash_host memory.
 # ESP32 = WiFi control build (esp32dev_wifi): joins Pancakehouse 2.4GHz, serves tdsp.local:81.
-7681380	teensy41_sf2_tsf_jaymint	boards/jaymint.h	esp32dev_wifi	jay-mint PSRAM board (SN 7681380), LINE OUT; TSF GM engine = TSF synth + its own GM drums
+7681380	teensy41_dexed2_opll1_plaits2_tsfdrums_fx_loop_jaymint	boards/jaymint.h	esp32dev_wifi	jay-mint PSRAM board (SN 7681380), LINE OUT; 2 Dexed + OPLL + 2 Plaits + TSF drums + looper + plate reverb; MPE-on-boot (boards/jaymint.h); FlasherX OTA (@FXUP) linked since 2026-10-01
