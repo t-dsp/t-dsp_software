@@ -10,7 +10,7 @@
 // scroll refs) whose state currently lives in App. This file is the extracted RENDERER — App owns
 // the browse state and passes it in via VoicesCtx, so the JSX is editable here without moving ~15
 // useState/useMemo/effects blind. A later pass can relocate that state machine into this file.
-import React from 'react';
+import React, { useMemo, useState } from 'react';
 import { View, Text, Pressable, ScrollView, FlatList, TextInput, ActivityIndicator } from 'react-native';
 import { C } from '../theme';
 import { s } from '../styles';
@@ -57,6 +57,53 @@ export const voicesActions = (ctx: VoicesCtx, target: number) => (<>
   <HdrBtn label="Next ›" stop onPress={() => ctx.stepVoice(1, target)} />
 </>);
 
+// Folder-grouped picker for the flat-list engines. Names arrive as "<Bank>: <patch>" (the firmware
+// prefixes every catalog entry with its source: "OPLL", "PSS-140", or an /opll/<file>.txt bank name);
+// each distinct prefix becomes a left-rail folder, "All" shows everything. Index into the firmware's
+// flat catalog is preserved (arg 'e<i>'), so the ‹/› stepper and @TRK<i>.INSTR= are unchanged. A
+// component (not a plain body fn) because the open folder is local UI state.
+function PickerVoiceBrowser({ engine, list, cur, onPick }: {
+  engine: string; list: string[]; cur: number; onPick: (i: number) => void;
+}) {
+  const split = (it: string): [string, string] => {
+    const k = it.indexOf(': ');
+    return k > 0 ? [it.slice(0, k), it.slice(k + 2)] : ['', it];
+  };
+  const banks = useMemo(() => {
+    const out: string[] = [];
+    for (const it of list) { const b = split(it)[0]; if (b && !out.includes(b)) out.push(b); }
+    return out;
+  }, [list]);
+  // Default to the folder holding the current pick; fall back to All.
+  const curBank = split(list[cur] ?? '')[0];
+  const [folder, setFolder] = useState<string | null>(null);
+  const open = folder === null ? (curBank || '') : folder;
+  const multi = banks.length > 1;
+  const folders: BrowserFolder[] = multi
+    ? [{ key: 'all', label: 'All voices (' + list.length + ')', icon: '★', active: open === '', onPress: () => setFolder('') },
+       ...banks.map(b => ({ key: 'b/' + b, label: b, icon: '📁', active: open === b, onPress: () => setFolder(b) }))]
+    : [];
+  const items = list
+    .map((it, i) => ({ it, i }))
+    .filter(({ it }) => !multi || open === '' || split(it)[0] === open)
+    .map(({ it, i }) => ({
+      arg: 'e' + i,
+      name: (open === '' && multi) ? it : split(it)[1],   // in "All", keep the bank prefix for context
+      onPress: () => onPick(i),
+    }));
+  const source: BrowserSource = {
+    loading: !list.length,
+    crumbs: [{ label: engine.toUpperCase() + ' voices', go: () => setFolder('') }, ...(multi && open ? [{ label: open, go: () => {} }] : [])],
+    atRoot: !multi || open === '', goUp: () => setFolder(''),
+    folders,
+    singlePane: !multi,
+    selectedArg: 'e' + cur,
+    items,
+    emptyItems: 'No voices in this bank.',
+  };
+  return <MediaBrowser source={source} />;
+}
+
 export const voiceBrowserBody = (ctx: VoicesCtx, target: number) => {
   const {
     tp, loaded, cat, trkEng, trkEngInstrs, trkNinstr, opllIdx, setOpllIdx, plaitsMacros, isPickerEngine,
@@ -75,26 +122,15 @@ export const voiceBrowserBody = (ctx: VoicesCtx, target: number) => {
           onSelectModel={idx => { setOpllIdx(m => ({ ...m, [oi]: idx })); tp.trk(oi, 'INSTR=' + idx); tp.requestState(); }}
           onMacro={(field, permille) => tp.trk(oi, field + '=' + permille)} />;
   }
-  // PICKER ENGINES (OPLL / YM2151 / OPL3 / Rings / VA / SF2 …): a FLAT patch list, no folder tree —
-  // a single-pane <MediaBrowser> with a live filter over the engine's @TRK<i>.INSTRS names. Steps the
-  // same @TRK<i>.INSTR= path the ‹/› card stepper uses.
+  // PICKER ENGINES (OPLL / YM2151 / OPL3 / Rings / VA / SF2 …): the engine's @TRK<i>.INSTRS names,
+  // folded into one folder per "<Bank>: " prefix (OPLL ROM / PSS-140 / every /opll SD bank …).
   if (isPickerEngine(trkEng[oi])) {
-    const list = trkEngInstrs[oi] ?? [];
-    const cur = opllIdx[oi] ?? 0;
-    const pickerSource: BrowserSource = {
-      loading: !list.length,
-      crumbs: [{ label: String(trkEng[oi]).toUpperCase() + ' voices', go: () => {} }],
-      atRoot: true, goUp: () => {},
-      folders: [],
-      singlePane: true,
-      selectedArg: 'e' + cur,
-      items: list.map((it, i) => ({
-        arg: 'e' + i,
-        name: it.includes(': ') ? it.slice(it.indexOf(': ') + 2) : it,
-        onPress: () => { setOpllIdx(m => ({ ...m, [oi]: i })); tp.trk(oi, 'INSTR=' + i); tp.requestState(); },
-      })),
-    };
-    return <MediaBrowser source={pickerSource} />;
+    return (
+      <PickerVoiceBrowser
+        engine={String(trkEng[oi])} list={trkEngInstrs[oi] ?? []} cur={opllIdx[oi] ?? 0}
+        onPick={i => { setOpllIdx(m => ({ ...m, [oi]: i })); tp.trk(oi, 'INSTR=' + i); tp.requestState(); }}
+      />
+    );
   }
 
   // DEXED: the /dexed cart LIBRARY as a two-pane <MediaBrowser> — folders + carts on the left rail,

@@ -31,7 +31,9 @@
 #pragma once
 #if TDSP_HETERO
 #include <AudioSynthYmfmOPLL.h>
+#include <OpllBank.h>          // SD patch banks (/opll/*.txt), see lib/TDspYmfm/src/OpllBank.h
 #include "OpllSink.h"
+#include "Pss140Patches.h"     // the 100 Yamaha PSS-140 user-voice patches (baked; study-only data)
 
 #ifndef TDSP_OPLL_ENGINES
 #define TDSP_OPLL_ENGINES 1
@@ -79,14 +81,41 @@ tdsp::MidiSink       *g_hoOpllVoiceSink[TDSP_OPLL_ENGINES] = {
 #endif
 };
 
+// ---- Instrument catalog ---------------------------------------------------------------------------
+// One flat index space, three sources, each name prefixed "<Bank>: " so the app's voice browser can
+// fold the list into folders (one per bank):
+//   [0, 15)                 "OPLL: <name>"     the chip's 15 ROM voices (immutable, selected by nibble)
+//   [15, 15+100)            "PSS-140: <name>"  the baked PSS-140 set — unless the SD card carries a
+//                                              bank of the same name (then the card's copy wins)
+//   [.., +g_hoBanks.count)  "<file>: <name>"   every /opll/*.txt bank on the card (OpllBankLib)
+// Anything past the ROM range is a USER-VOICE patch: 8 bytes written into the engine's single
+// programmable slot, then all channels pointed at instrument 0. One user voice per chip, so a
+// hetero OPLL track is mono-timbral in that mode (every channel = the picked patch).
 static const int kHoNumRom = 15;                         // OPLL built-in ROM instruments 1..15
-static int       g_hoInstrument[TDSP_OPLL_ENGINES] = { 0 };   // current melodic voice per engine (0..14 -> ROM 1..15)
+static int       g_hoInstrument[TDSP_OPLL_ENGINES] = { 0 };   // current catalog index per engine
+static tdsp::OpllBankLib g_hoBanks;                      // SD banks; count()==0 until heteroOpllBegin()
+static bool      g_hoBakedPss = true;                    // baked PSS-140 shown? (false when the card has one)
 
-static int         heteroOpllNumInstruments()      { return kHoNumRom; }
-static const char *heteroOpllInstrumentName(int idx) {   // ROM name (engine-independent table)
-    static char buf[40];
-    if (idx < 0 || idx >= kHoNumRom) return "";
-    snprintf(buf, sizeof(buf), "OPLL: %s", g_hoOpll[0].instrumentName(idx + 1));   // "OPLL: " -> app groups it
+static int heteroOpllNumBaked()        { return g_hoBakedPss ? kPss140Count : 0; }
+static int heteroOpllNumInstruments()  { return kHoNumRom + heteroOpllNumBaked() + g_hoBanks.count(); }
+// The 8 user-voice bytes for catalog index idx (idx >= kHoNumRom), or nullptr for a ROM voice.
+static const uint8_t *heteroOpllUserBytes(int idx, uint8_t tmp[8]) {
+    if (idx < kHoNumRom) return nullptr;
+    idx -= kHoNumRom;
+    if (idx < heteroOpllNumBaked()) { memcpy_P(tmp, kPss140Patches[idx], 8); return tmp; }
+    idx -= heteroOpllNumBaked();
+    if (idx < g_hoBanks.count()) return g_hoBanks.patch(idx).regs;
+    return nullptr;
+}
+static const char *heteroOpllInstrumentName(int idx) {
+    static char buf[72];
+    if (idx < 0 || idx >= heteroOpllNumInstruments()) return "";
+    if (idx < kHoNumRom) { snprintf(buf, sizeof(buf), "OPLL: %s", g_hoOpll[0].instrumentName(idx + 1)); return buf; }
+    idx -= kHoNumRom;
+    if (idx < heteroOpllNumBaked()) { snprintf(buf, sizeof(buf), "PSS-140: %s", kPss140Names[idx]); return buf; }
+    idx -= heteroOpllNumBaked();
+    const tdsp::OpllPatch &pt = g_hoBanks.patch(idx);
+    snprintf(buf, sizeof(buf), "%s: %s", g_hoBanks.bankName(pt.bank), pt.name);
     return buf;
 }
 static int heteroOpllInstrument(int eng) {
@@ -94,14 +123,20 @@ static int heteroOpllInstrument(int eng) {
     return g_hoInstrument[eng];
 }
 
-// Force one ROM voice on every melodic channel of ONE engine (mirrors synthSetInstrument).
-// A song's own Program Change events later re-diversify per channel; ch10 is left for drums.
+// Put one catalog voice on every melodic channel of ONE engine (mirrors synthSetInstrument).
+// ROM voice: per-channel override to nibble 1..15. User-voice patch (PSS-140 / SD bank): load the
+// 8 bytes into the chip's user slot and override every channel to instrument 0. A song's own
+// Program Change events later re-diversify per channel; ch10 is left for drums.
 static void heteroOpllSetInstrument(int eng, int idx) {
     if (eng < 0 || eng >= TDSP_OPLL_ENGINES) return;
+    const int n = heteroOpllNumInstruments();
     if (idx < 0) idx = 0;
-    if (idx >= kHoNumRom) idx = kHoNumRom - 1;
+    if (idx >= n) idx = n - 1;
+    uint8_t tmp[8];
+    const uint8_t *user = heteroOpllUserBytes(idx, tmp);
+    if (user) g_hoOpll[eng].setUserVoice(user);
     for (uint8_t ch = 1; ch <= 16; ch++)
-        if (ch != 10) g_hoOpll[eng].setInstrumentOverride(ch, idx + 1);   // ROM 1..15
+        if (ch != 10) g_hoOpll[eng].setInstrumentOverride(ch, user ? 0 : idx + 1);
     g_hoInstrument[eng] = idx;
     Serial.printf("[hetero-opll] engine %d all channels -> %s\n", eng, heteroOpllInstrumentName(idx));
 }
@@ -124,6 +159,15 @@ static void heteroOpllSetVol1(int pct) { heteroOpllSetVol(1, pct); }
 // Bring up the melodic OPLLs and open their shared mix slot. Called from setup() AFTER
 // synthBegin() (mirrors drumVoiceBegin()). Returns true (OPLL needs no font -> always ok).
 static bool heteroOpllBegin() {
+    // SD patch banks (/opll/*.txt). If the card carries its own "PSS-140" bank, hide the baked copy
+    // so the browser doesn't show the set twice. Needs the card mounted (setup() mounts SD first).
+    if (g_hoBanks.begin(SD, "/opll")) {
+        g_hoBakedPss = g_hoBanks.findBank("PSS-140") < 0;
+        Serial.printf("[hetero-opll] SD banks: %d patches in %d bank(s) (%s)%s\n", g_hoBanks.count(), g_hoBanks.bankCount(),
+                      g_hoBanks.inPsram() ? "PSRAM" : "heap", g_hoBakedPss ? "" : "; card PSS-140 replaces the baked set");
+    } else {
+        Serial.println("[hetero-opll] no /opll banks on the card (ROM + baked PSS-140 only)");
+    }
     for (int k = 0; k < TDSP_OPLL_ENGINES; k++) {
         g_hoOpll[k].begin();
         g_hoOpll[k].setGain(5.5f);                              // OPLL's 9-bit DAC runs quiet (match the OPLL backend)

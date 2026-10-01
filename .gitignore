@@ -45,3 +45,6 @@ references/teensy-4-usbAudio/
 # Python bytecode
 __pycache__/
 *.pyc
+
+# OPLL patch banks are FETCHED, not tracked (tools/fetch_opll_patches.py); keep the README.
+firmware/mix-kit/assets/opll/*.txt

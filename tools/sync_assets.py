@@ -228,6 +228,8 @@ def main():
                     "tools/build_mars_kits.py, e.g. c:/tmp/mars-curated/drums) to /drums. The "
                     "<kit>/<n>-*.wav one-shots the TDSP_DRUM_SD/DFD sampler streams; like loops "
                     "these are NOT tracked in the repo, so pass the staged dir explicitly.")
+    ap.add_argument("--opll", action="store_true", help="also push the staged OPLL patch banks "
+                    "(firmware/mix-kit/assets/opll/*.txt from tools/fetch_opll_patches.py) to /opll")
     ap.add_argument("--skip-manifest", action="store_true", help="do NOT push the repo manifest "
                     "asset sets (assets/); push only the explicit staged dirs (--drums-src / "
                     "--loops-src / --soundfont). Use when topping up one set on a board.")
@@ -274,6 +276,15 @@ def main():
         else:
             files = collect(drums_abs, "/drums", ".wav")
             plan.append(("drums -> /drums", files))
+
+    # OPLL patch banks are staged (fetched, git-ignored). One .txt per bank -> one browser folder.
+    if args.opll:
+        opll_abs = os.path.join(REPO_ROOT, "firmware/mix-kit/assets/opll")
+        files = collect(opll_abs, "/opll", ".txt") if os.path.isdir(opll_abs) else []
+        if not files:
+            print("skip  opll: no banks staged; run tools/fetch_opll_patches.py first", file=sys.stderr)
+        else:
+            plan.append(("opll banks -> /opll", files))
 
     if args.soundfont:
         sf2_src = args.sf2_src or os.path.join(REPO_ROOT, "tools/sf2/fonts/gm_tim.sf2")
