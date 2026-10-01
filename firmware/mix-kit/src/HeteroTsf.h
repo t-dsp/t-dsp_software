@@ -1,14 +1,17 @@
 // HeteroTsf.h — a MELODIC SoundFont (TinySoundFont) track for a heterogeneous engine inventory.
 //
 // "Synth F": a second TSF instance (the first renders the sampled drums, DrumTsf.h). It is the box's
-// general SoundFont synth: it plays ANY .sf2 on the card. The voice catalog has two folders:
+// general SoundFont synth: it plays any MELODIC .sf2 on the card (drum-only fonts -- every preset in
+// the SF2 percussion bank 128 -- belong to the drum track and are hidden here). The voice catalog is
+// one folder per font ("<Font>: ..."), so the app's picker shows the fonts as folders:
 //
-//   "<Font>: <preset>"   the presets of the font that is loaded right now (bank 0 first; a drum-only
-//                        font lists its kits) -- pick one and it plays
-//   "Fonts: <name>"      every /sf2/*.sf2 on the card -- pick one and the track UNLOADS the current
-//                        font, loads that one into PSRAM (a few seconds; audio keeps running), selects
-//                        its first preset and re-pushes the voice list so the app re-lists. Fonts that
-//                        won't fit the free PSRAM are tagged "(too big)" and refused.
+//   "<Font>: <preset>"              the presets of the font that is LOADED right now (bank 0 first)
+//                                   -- pick one and it plays
+//   "<Font>: Load font (N.N MB)"    every other melodic font on the card -- pick it and the track
+//                                   UNLOADS the current font, loads that one into PSRAM (~0.3 s/MB;
+//                                   audio keeps running), selects its first preset and re-pushes the
+//                                   voice list so the folder fills with its presets
+//   "Too big for this device: <Font> (N.N MB)"   the fonts that won't fit the free PSRAM, in one folder (refused)
 //
 // Boot font = TDSP_TSF_FONT_PATH (the sampled handpan, tools/fetch_handpan.py). RING mode (ignore
 // note-off, let a struck note decay to the sample end) switches on automatically for fonts named
@@ -63,7 +66,7 @@ static char  g_htFontDisp[22] = TDSP_TSF_FONT_LABEL;
 static uint32_t g_htFontBytes = 0;
 
 // Fonts on the card (scanned at boot; display names from /sf2/fonts.tsv when listed there).
-struct HtFont { char path[40]; char disp[22]; uint32_t bytes; };
+struct HtFont { char path[40]; char disp[22]; uint32_t bytes; uint16_t presets; bool melodic; };
 static const int kHtMaxFonts = 96;
 static HtFont *g_htFonts = nullptr;          // PSRAM
 static int     g_htFontCount = 0;
@@ -115,6 +118,53 @@ FLASHMEM static void htDisplayFor(const char *path, char *out, int outLen) {
         if (!strcasecmp(out, "handpan")) snprintf(out, outLen, "%s", TDSP_TSF_FONT_LABEL);
     }
 }
+// Peek an SF2's preset headers WITHOUT loading it: walk the RIFF chunks (seeking over the sample data),
+// count presets, and flag the font melodic when any preset sits outside the percussion banks. A few SD
+// reads per font. Returns false for something that isn't a readable SF2.
+FLASHMEM static bool htPeekFont(const char *path, uint16_t &presets, bool &melodic) {
+    presets = 0; melodic = false;
+    File f = SD.open(path);
+    if (!f) return false;
+    uint8_t h[12];
+    if (f.read(h, 12) != 12 || memcmp(h, "RIFF", 4) || memcmp(h + 8, "sfbk", 4)) { f.close(); return false; }
+    auto rd32 = [](const uint8_t *q) { return (uint32_t)q[0] | ((uint32_t)q[1] << 8) | ((uint32_t)q[2] << 16) | ((uint32_t)q[3] << 24); };
+    const uint32_t end = f.size();
+    uint32_t pos = 12;
+    bool ok = false;
+    while (pos + 8 <= end) {
+        f.seek(pos);
+        uint8_t ch[12];
+        if (f.read(ch, 8) != 8) break;
+        const uint32_t sz = rd32(ch + 4);
+        if (!memcmp(ch, "LIST", 4) && f.read(ch + 8, 4) == 4 && !memcmp(ch + 8, "pdta", 4)) {
+            uint32_t sp = pos + 12; const uint32_t send = pos + 8 + sz;
+            while (sp + 8 <= send) {
+                f.seek(sp);
+                uint8_t sh[8];
+                if (f.read(sh, 8) != 8) break;
+                const uint32_t ssz = rd32(sh + 4);
+                if (!memcmp(sh, "phdr", 4)) {
+                    const uint32_t n = ssz / 38;                 // incl. the terminal EOP record
+                    for (uint32_t i = 0; i + 1 < n; i++) {
+                        uint8_t rec[38];
+                        f.seek(sp + 8 + i * 38);
+                        if (f.read(rec, 38) != 38) break;
+                        const uint16_t bank = (uint16_t)(rec[22] | (rec[23] << 8));
+                        presets++;
+                        if (bank < 120) melodic = true;         // 128 (and 127 in some fonts) = percussion
+                    }
+                    ok = true;
+                    break;
+                }
+                sp += 8 + ssz + (ssz & 1);
+            }
+            break;
+        }
+        pos += 8 + sz + (sz & 1);
+    }
+    f.close();
+    return ok;
+}
 FLASHMEM static void htScanFonts() {
     if (!g_htFonts) g_htFonts = (HtFont *)extmem_malloc(sizeof(HtFont) * kHtMaxFonts);
     if (!g_htFonts) return;
@@ -129,6 +179,7 @@ FLASHMEM static void htScanFonts() {
             size_t L = strlen(b);
             if (L > 4 && !strcasecmp(b + L - 4, ".sf2") && L + 5 < sizeof(g_htFonts[0].path) && g_htFontCount < kHtMaxFonts) {
                 HtFont F; snprintf(F.path, sizeof(F.path), "/sf2/%s", b); F.bytes = e.size();
+                if (!htPeekFont(F.path, F.presets, F.melodic) || !F.melodic) { e.close(); continue; }   // drum-only / unreadable: not ours
                 htDisplayFor(F.path, F.disp, sizeof(F.disp));
                 int i = g_htFontCount++;                    // insertion sort by display name
                 while (i > 0 && strcasecmp(g_htFonts[i - 1].disp, F.disp) > 0) { g_htFonts[i] = g_htFonts[i - 1]; i--; }
@@ -152,21 +203,34 @@ FLASHMEM static void htBuildPresetMap() {
     }
 }
 
-static int heteroTsfNumInstruments() { return g_htPresetCount + g_htFontCount; }
+// The loaded font is excluded from the "Load font" entries (its presets ARE its folder).
+static bool htIsLoaded(const HtFont &F) { return g_htReady && !strcmp(F.path, g_htFontPath); }
+static int  htOtherFontCount() { int n = 0; for (int i = 0; i < g_htFontCount; i++) if (!htIsLoaded(g_htFonts[i])) n++; return n; }
+static bool htFits(const HtFont &F) { return F.bytes <= g_htPsramFreeCached + g_htFontBytes; }   // the current font is freed first (cached: see htPsramFree)
+static const HtFont *htOtherFont(int k) {   // k-th font that is NOT the loaded one: the ones that FIT first, then the too-big ones
+    for (int pass = 0; pass < 2; pass++)
+        for (int i = 0; i < g_htFontCount; i++) {
+            if (htIsLoaded(g_htFonts[i]) || htFits(g_htFonts[i]) != (pass == 0)) continue;
+            if (k-- == 0) return &g_htFonts[i];
+        }
+    return nullptr;
+}
+static int heteroTsfNumInstruments() { return g_htPresetCount + htOtherFontCount(); }
 static const char *heteroTsfInstrumentName(int idx) {
-    static char buf[64];
+    static char buf[96];   // "<disp>: Too big for PSRAM (11.7 MB, 263 presets)" needs > 64;
     if (idx < 0) return "";
     if (idx < g_htPresetCount) {
         const char *pn = g_htHandle ? tsf_get_presetname(g_htHandle, g_htPresetMap[idx]) : nullptr;
         snprintf(buf, sizeof(buf), "%s: %s", g_htFontDisp, (pn && pn[0]) ? pn : "preset");
         return buf;
     }
-    const int fi = idx - g_htPresetCount;
-    if (fi >= g_htFontCount) return "";
-    const HtFont &F = g_htFonts[fi];
-    const bool cur  = g_htReady && !strcmp(F.path, g_htFontPath);
-    const bool fits = cur || F.bytes <= g_htPsramFreeCached + g_htFontBytes;   // the current font is freed first (cached: see htPsramFree)
-    snprintf(buf, sizeof(buf), "Fonts: %s%s", F.disp, cur ? " (loaded)" : fits ? "" : " (too big)");
+    const HtFont *F = htOtherFont(idx - g_htPresetCount);
+    if (!F) return "";
+    // A font that fits is its own folder ("<Font>: Load font …"); the ones this device can't hold are
+    // gathered under ONE folder so they don't clutter the picker but are still visible.
+    const unsigned long mb = F->bytes / 1000000UL, tenth = (F->bytes / 100000UL) % 10;
+    if (htFits(*F)) snprintf(buf, sizeof(buf), "%s: Load font (%lu.%lu MB, %u presets)", F->disp, mb, tenth, (unsigned)F->presets);
+    else            snprintf(buf, sizeof(buf), "Too big for this device: %s (%lu.%lu MB)", F->disp, mb, tenth);
     return buf;
 }
 static int heteroTsfInstrument() { return g_htInstrument; }
@@ -247,10 +311,9 @@ FLASHMEM static bool heteroTsfLoadFont(const char *path) {
 FLASHMEM static void heteroTsfSetInstrument(int idx) {
     if (idx < 0) idx = 0;
     if (idx < g_htPresetCount) { htSelectPreset(idx); return; }
-    const int fi = idx - g_htPresetCount;
-    if (fi >= g_htFontCount) return;
-    const HtFont &F = g_htFonts[fi];
-    if (g_htReady && !strcmp(F.path, g_htFontPath)) { htSelectPreset(0); return; }   // already loaded
+    const HtFont *Fp = htOtherFont(idx - g_htPresetCount);
+    if (!Fp) return;
+    const HtFont &F = *Fp;
     if (F.bytes > htPsramFree() + g_htFontBytes) {
         Serial.printf("[hetero-tsf] %s is %lu KB; only %lu KB PSRAM would be free -> not loading\n", F.disp,
                       (unsigned long)(F.bytes / 1024), (unsigned long)((htPsramFree() + g_htFontBytes) / 1024));
@@ -267,6 +330,8 @@ FLASHMEM static void heteroTsfService() {
     g_htCatalogDirty = false;
     if (!g_htLine) g_htLine = (char *)extmem_malloc(12288);
     if (!g_htLine) return;
+    htPsramFree();   // refresh the cached free figure (one ~280 ms walk, only here) so the "Load font" /
+                     // "Too big" tags reflect what has been allocated since boot (song buffers, rings …)
     int n = snprintf(g_htLine, 12288, "@TRK%d.INSTRS=", (int)HT_TRACK_INDEX);
     const int total = heteroTsfNumInstruments();
     for (int k = 0; k < total && n < 12288 - 80; k++) {
@@ -280,17 +345,27 @@ FLASHMEM static void heteroTsfService() {
 }
 
 // setup(): scan the card's fonts and load the boot font.
+// Two-step bring-up. heteroTsfBegin() wires the mix + scans the card + grabs this track's PSRAM scratch;
+// heteroTsfLoadBootFont() loads the boot font and must be setup()'s LAST PSRAM allocation: a font swap
+// frees the resident font and the new one needs ONE contiguous block, so the resident font has to sit
+// right below the free top of the PSRAM heap. (With the 1.7 MB drum font allocated after it, freeing the
+// 1.4 MB handpan left two holes and a 4.1 MB GM font failed with 4.8 MB "free" -- hardware, 2026-10-01.)
 FLASHMEM static bool heteroTsfBegin() {
     g_htSum.gain(0, 0.5f); g_htSum.gain(1, 0.5f);
     g_htTrim.setGain(1.0f);
     g_hpSubMix.gain(2, 1.0f);
     if (!g_sdReady) { Serial.println("[hetero-tsf] no SD card -> SoundFont track idle"); return false; }
     htScanFonts();
-    Serial.printf("[hetero-tsf] %d font(s) on the card\n", g_htFontCount);
+    if (!g_htLine) g_htLine = (char *)extmem_malloc(12288);   // the pushed voice-list line: allocate BEFORE any font
+    Serial.printf("[hetero-tsf] %d melodic font(s) on the card (drum-only fonts hidden)\n", g_htFontCount);
+    return g_htFontCount > 0;
+}
+FLASHMEM static bool heteroTsfLoadBootFont() {
+    if (!g_sdReady) return false;
     if (!SD.exists((char *)TDSP_TSF_FONT_PATH)) {
         Serial.println("[hetero-tsf] " TDSP_TSF_FONT_PATH " not on the card -> pick a font from the voice list (run tools/fetch_handpan.py for the handpan)");
-        htPsramFree();             // one walk, so the Fonts: entries can be tagged (too big)
-        g_htCatalogDirty = true;   // the Fonts: entries are still pickable
+        htPsramFree();             // one walk, so the font entries can be tagged
+        g_htCatalogDirty = true;   // the "Load font" entries are still pickable
         return false;
     }
     return heteroTsfLoadFont(TDSP_TSF_FONT_PATH);

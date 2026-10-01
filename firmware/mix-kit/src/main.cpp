@@ -4686,7 +4686,7 @@ FLASHMEM void setup() {
     for (int k = 0; k < TDSP_PLAITS_ENGINES; k++) heteroPlaitsBegin(k);   // bring up each Plaits track (D, E) + open its mix slot
 #if TDSP_TSF_ENGINES >= 1
     g_htPush = &ctrl;   // the SoundFont track pushes its refreshed voice list on every lane after a font swap
-    heteroTsfBegin();   // Synth F: load the melodic SoundFont (handpan) into PSRAM; sums into the Plaits sub-mix
+    heteroTsfBegin();   // Synth F: mix wiring + font scan; the boot font itself loads LAST in setup (see heteroTsfLoadBootFont)
 #endif
 #endif
 #if TDSP_VOICE2
@@ -4758,6 +4758,12 @@ FLASHMEM void setup() {
     Serial.println("                 D=play/stop drums  C=next groove (GM engines only)");
     Serial.println("      ESP32/kit:  r=reset  g=flash mode  @BOOTAPP@=exit flash  U=Teensy prog");
     Serial.println("                 P=ESP32 pairing mode  F=ESP32 forget bond + pair");
+
+#if TDSP_HETERO_PLAITS && TDSP_TSF_ENGINES >= 1
+    // LAST PSRAM allocation of setup(): the SoundFont track's resident font (so a swap can free it into
+    // one contiguous hole next to the free top -- see HeteroTsf.h).
+    heteroTsfLoadBootFont();
+#endif
 
     // LATE, SETTLED reset — the automatic "press BOOT for you" once everything's configured.
     Serial.println("[setup] settle 2.5s, then late kit.bootApp()..."); Serial.flush();

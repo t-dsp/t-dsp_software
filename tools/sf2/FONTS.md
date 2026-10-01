@@ -97,9 +97,24 @@ out; measured on the box: a chord audible for ~8 s after the strike. The firmwar
 whose envelope has decayed to a silent sustain (`tsf.h`, T-DSP patch) so looped one-shots free their
 voice. Loaded by the kitchen-sink jay-mint env (`TDSP_TSF_ENGINES=1`, `TDSP_TSF_FONT_PATH=/sf2/handpan.sf2`)
 as the sixth melodic track (Synth F); fonts named *hang*/*handpan* boot in RING mode (`@TRK<i>.RING=1`:
-note-off, song end and transport stop let notes decay; only PANIC cuts them). Synth F's voice list also
-offers every `/sf2/*.sf2` on the card as `Fonts: <name>` (`(loaded)` / `(too big)` tags); picking one
-swaps the resident font in ~0.3 s and the list is re-pushed. Push:
+note-off, song end and transport stop let notes decay; only PANIC cuts them).
+
+**Synth F's voice list = one folder per MELODIC font on the card.** At boot the track peeks every
+`/sf2/*.sf2`'s preset headers (no load): fonts whose presets all sit in the percussion bank (the Mars
+kits, `drumkits.sf2`) belong to the drum track and are hidden. The loaded font's folder holds its presets
+(`<Font>: <preset>`, bank 0 first); every other melodic font that fits the free PSRAM is a folder with one
+entry, `<Font>: Load font (N.N MB, P presets)` — pick it and the resident font is unloaded, this one loads
+(~0.15 s/MB) and the list is re-pushed with its presets; fonts this device can't hold are gathered in one
+folder, `Too big for this device: <Font> (N.N MB)`. The boot font is setup()'s LAST PSRAM allocation so a
+swap frees one contiguous hole. **Budget on the 8 MB jay-mint box (1.7 MB drum font resident): a melodic
+font's file must be ≲ 4.6 MB** — none of the shipped GM fonts fit (TimGM6mb is 5.9 MB), so build a
+downsampled one with `build_gu_fonts.py` (it works on ANY SF2; it names outputs `gm_gu<kHz>.sf2`, so run
+it into a scratch folder and rename, or it overwrites the GeneralUser variants):
+`python tools/sf2/build_gu_fonts.py tools/sf2/fonts/gm_tim.sf2 <scratch> 18000` → `gm_gu18.sf2` (4.5 MB,
+136 presets, 9 kHz bandwidth) → push as `/sf2/gm_tim18.sf2`. HW-verified: loads in 645 ms with 299 KB
+PSRAM to spare, plays, the handpan swaps back in 187 ms. 16 kHz = 4.1 MB if more headroom is needed.
+Other melodic sources: FreePats (CC0, SF2 downloads per instrument; `fetch_handpan.py --sf2` only
+rebuilds Hang-style one-take-per-pitch banks, a general compactor is not written yet). Push:
 `python tools/sync_assets.py --skip-manifest --soundfont --sf2-src tools/sf2/fonts/handpan.sf2 --sf2-dest /sf2/handpan.sf2`
 (no reboot needed: pick another font and back to reload). Knobs: `--variants`, `--seconds`, `--rate`,
 `--ring`; `--sf2 other.sf2 --label "Name"` rebuilds any font compactly.
