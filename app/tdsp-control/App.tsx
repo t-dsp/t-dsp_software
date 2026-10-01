@@ -2577,7 +2577,7 @@ export default function App() {
             {appUpd.enabled && <Text style={s.muted}>Channel:   <Text style={s.text}>{appUpd.channel || '—'}</Text>   ·   Runtime:   <Text style={s.text}>{appUpd.runtimeVersion.slice(0, 8) || '—'}</Text></Text>}
             {appUpd.enabled && (
               <Row>
-                <Pressable style={s.btn} onPress={async () => { setUpdMsg('Checking…'); setUpdMsg(await checkAndApplyUpdate()); }}><Text style={s.btnText}>Check for app update</Text></Pressable>
+                <Pressable style={s.btn} onPress={async () => { setUpdMsg('Checking…'); setUpdMsg(await checkAndApplyUpdate(connected && tp.name === 'WIFI' && !!lastConn?.ssid)); }}><Text style={s.btnText}>Check for app update</Text></Pressable>
                 <Pressable style={[s.btn, s.btnGhost]} onPress={() => { refreshApp(); }}><Text style={s.btnText}>Reload app</Text></Pressable>
                 {!!updMsg && <Text style={s.muted}>{updMsg}</Text>}
               </Row>

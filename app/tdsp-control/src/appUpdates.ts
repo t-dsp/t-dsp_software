@@ -57,15 +57,26 @@ export function appUpdateInfo(): AppUpdateInfo {
 
 // Check EAS now; if a newer bundle exists, download it and relaunch into it immediately.
 // Resolves to a one-line status for the UI. Never throws.
-export async function checkAndApplyUpdate(): Promise<string> {
+// onDeviceNetwork: the phone is joined to the T-DSP's own Wi-Fi via the app (Android binds ALL of the
+// app's sockets to that network, which has no internet), so the update server cannot be reached no
+// matter what else the phone is connected to. Say that instead of a raw native error.
+export async function checkAndApplyUpdate(onDeviceNetwork = false): Promise<string> {
   if (!Updates.isEnabled) return 'Updates not available in this build';
+  if (onDeviceNetwork)
+    return 'No internet while connected to the T-DSP network (the app\u2019s traffic is pinned to it). '
+         + 'Disconnect App, make sure the phone has internet, then check again \u2014 or just relaunch the app '
+         + 'on home Wi-Fi: it fetches updates at startup and applies them on the next launch.';
   try {
     const r = await Updates.checkForUpdateAsync();
     if (!r.isAvailable) return 'Up to date';
     await Updates.fetchUpdateAsync();
     await Updates.reloadAsync();
-    return 'Restarting into new version…';
+    return 'Restarting into new version\u2026';
   } catch (e: any) {
-    return 'Update check failed: ' + (e?.message || String(e));
+    const raw = e?.message || String(e);
+    const offline = /network|internet|unreachable|timed? ?out|host|manifest|ENOTFOUND|ECONN/i.test(raw);
+    return offline
+      ? 'Update check failed: no route to the update server. Make sure this phone has internet (not only the T-DSP network), then try again.'
+      : 'Update check failed: ' + raw;
   }
 }
