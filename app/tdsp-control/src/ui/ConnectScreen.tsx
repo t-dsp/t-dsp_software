@@ -27,9 +27,21 @@ export interface ConnOption {
 
 export interface ConnError { id: string; message: string }
 
+// App-update controls for the disconnected state: Settings is only reachable once connected, but
+// "is my app current?" matters most right here (and the phone is OFF the T-DSP network now, so the
+// update server is reachable). App supplies the running bundle's facts and the actions.
+export interface ConnAppUpdate {
+  enabled: boolean;          // false on web / dev client
+  bundle: string;            // short id of the running bundle, or 'built-in'
+  channel: string;
+  publishedAt: string;       // '' when unknown
+  check: () => Promise<string>;   // resolves to a status line (restarts the app if it applied one)
+  reload: () => void;             // plain bundle restart
+}
+
 export default function ConnectScreen({
   options, attemptId, attemptAuto, error, searching, onConnect, onCancel, footer, refreshControl,
-  deviceNetwork, onOpenWifiSettings, onCopy,
+  deviceNetwork, onOpenWifiSettings, onCopy, appUpdate,
 }: {
   options: ConnOption[];
   attemptId: string | null;      // option currently connecting
@@ -43,7 +55,10 @@ export default function ConnectScreen({
   deviceNetwork?: { ssid: string; pass: string } | null;   // the T-DSP's own Wi-Fi, when the app knows it
   onOpenWifiSettings?: () => void;                         // system Wi-Fi picker (Android)
   onCopy?: (text: string) => unknown;                      // clipboard
+  appUpdate?: ConnAppUpdate;                               // app version + OTA check (native builds)
 }) {
+  const [updMsg, setUpdMsg] = useState('');
+  const [updBusy, setUpdBusy] = useState(false);
   const [manualOpen, setManualOpen] = useState(false);
   const [manual, setManual] = useState('');
   const [showNet, setShowNet] = useState(false);
@@ -181,6 +196,28 @@ export default function ConnectScreen({
           </View>
         )}
         {!!footer && <Text style={[st.hint, st.footer]}>{footer}</Text>}
+
+        {appUpdate && (
+          <View style={st.updBox}>
+            <Text style={st.updTitle}>App version &amp; updates</Text>
+            <Text style={st.hint}>
+              Bundle {appUpdate.bundle}{appUpdate.channel ? ' \u00b7 ' + appUpdate.channel : ''}{appUpdate.publishedAt ? ' \u00b7 published ' + appUpdate.publishedAt : ''}
+            </Text>
+            {appUpdate.enabled ? (
+              <View style={st.updRow}>
+                <Pressable style={[st.updBtn, updBusy && { opacity: 0.6 }]} disabled={updBusy}
+                  onPress={async () => { setUpdBusy(true); setUpdMsg('Checking\u2026'); try { setUpdMsg(await appUpdate.check()); } finally { setUpdBusy(false); } }}
+                  accessibilityRole="button">
+                  <Text style={st.updBtnText}>Check for app update</Text>
+                </Pressable>
+                <Pressable style={[st.updBtn, st.updBtnGhost]} onPress={appUpdate.reload} accessibilityRole="button">
+                  <Text style={st.updBtnText}>Reload app</Text>
+                </Pressable>
+              </View>
+            ) : <Text style={st.hint}>Over-the-air updates are not available in this build.</Text>}
+            {!!updMsg && <Text style={st.hint}>{updMsg}</Text>}
+          </View>
+        )}
       </View>
     </ScrollView>
   );
@@ -222,6 +259,12 @@ const st = StyleSheet.create({
   searchRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 },
   hint: { color: C.muted, fontSize: 13 },
   footer: { marginTop: 16, lineHeight: 19 },
+  updBox: { marginTop: 28, paddingTop: 14, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, gap: 6 },
+  updTitle: { color: C.text, fontSize: 14, fontWeight: '700' },
+  updRow: { flexDirection: 'row', gap: 10, marginTop: 6, flexWrap: 'wrap' },
+  updBtn: { backgroundColor: C.accent, paddingVertical: 10, paddingHorizontal: 14, borderRadius: 10 },
+  updBtnGhost: { backgroundColor: 'transparent', borderWidth: 1, borderColor: C.border },
+  updBtnText: { color: C.text, fontSize: 13, fontWeight: '600' },
   linkRow: { alignSelf: 'flex-start', paddingVertical: 6, paddingHorizontal: 6, marginTop: -4, marginBottom: 8 },
   link: { color: '#58a6ff', fontSize: 14, fontWeight: '600' },
   netPanel: { gap: 10, backgroundColor: C.card2, borderWidth: 1, borderColor: C.border, borderRadius: 12, padding: 14, marginTop: -2, marginBottom: 12 },

@@ -2860,6 +2860,13 @@ export default function App() {
           refreshControl={refreshCtl}
           deviceNetwork={devNet}
           onOpenWifiSettings={canOpenWifiSettings ? () => { openWifiSettings(); } : undefined}
+          appUpdate={Platform.OS === 'web' ? undefined : {
+            enabled: appUpd.enabled,
+            bundle: appUpd.enabled ? (appUpd.isEmbedded ? 'built-in' : appUpd.updateId.slice(0, 8)) : 'dev',
+            channel: appUpd.channel, publishedAt: appUpd.createdAt,
+            check: () => checkAndApplyUpdate(false),   // disconnected: the app is off the T-DSP network, EAS is reachable
+            reload: () => { refreshApp(); },
+          }}
           footer={servedByDevice() ? undefined
             : wifiJoinSupported ? undefined
             : 'No Wi-Fi at the venue? Join the T-DSP Wi-Fi in this device\u2019s settings, then tap T-DSP Access Point.'}
