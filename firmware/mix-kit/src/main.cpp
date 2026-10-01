@@ -988,17 +988,43 @@ static uint8_t g_metroBpb = 4;
 // pushes (@BEAT / @BPM / @RECP / player positions / alive) to BOTH ports, so EITHER port is a complete
 // control port; per-command REPLIES still go only to the port that issued the command (the Stream&
 // threaded through handleControlLine). On single-serial builds `ctrl` is simply Serial — unchanged.
-#if defined(USB_DUAL_SERIAL)
+// `ctrl` fans a push out to EVERY control lane: the USB CDC port(s) AND the ESP32 UART (Serial7),
+// which is the only way the Wi-Fi / BLE app ever hears the Teensy (Teensy -> ESP32 -> WebSocket/BLE,
+// relayed line-for-line). Until 2026-10-01 the broadcast was USB-only, so over Wi-Fi the app got
+// no beat lights, no player positions and no recorder state -- commands worked, feedback didn't.
+//
+// NON-BLOCKING by design: a lane whose TX buffer can't take the whole write DROPS that write instead
+// of stalling loop() (audio timing beats one status frame; every push is periodic and self-healing).
+// Whole-write-or-nothing per lane keeps lines intact per lane. The ESP32 lane gets an 8 KB TX ring
+// (ctrlLaneBegin) so at 115200 baud (~11.5 KB/s) it only ever drops under a genuine flood.
 struct CtrlBroadcast : public Print {
-    size_t write(uint8_t b) override { Serial.write(b); return SerialUSB1.write(b); }
-    size_t write(const uint8_t *buf, size_t n) override { Serial.write(buf, n); return SerialUSB1.write(buf, n); }
-    int    availableForWrite() override { int a = Serial.availableForWrite(), b = SerialUSB1.availableForWrite(); return a < b ? a : b; }
+    static void put(Print &p, const uint8_t *buf, size_t n) { if ((size_t)p.availableForWrite() >= n) p.write(buf, n); }
+    size_t write(uint8_t b) override { return write(&b, 1); }
+    size_t write(const uint8_t *buf, size_t n) override {
+        put(Serial, buf, n);
+#if defined(USB_DUAL_SERIAL)
+        put(SerialUSB1, buf, n);
+#endif
+        put(kit.uart(), buf, n);        // ESP32 lane (no-op on boards without an ESP32: nothing listens)
+        return n;
+    }
+    // Gates like emitBeat() ask "can I push without blocking?" -- answer for the primary USB lane;
+    // the other lanes drop independently.
+    int availableForWrite() override { return Serial.availableForWrite(); }
 };
 static CtrlBroadcast g_ctrlBroadcast;
 static Print &ctrl = g_ctrlBroadcast;
-#else
-static Print &ctrl = Serial;
-#endif
+// Big TX ring for the ESP32 lane so broadcast pushes never meet a full 40-byte FIFO. PSRAM when the
+// board has it (zero OCRAM cost), else a small heap ring. Called from setup() right after kit.begin().
+FLASHMEM static void ctrlLaneBegin() {
+    static uint8_t *ring = nullptr;
+    if (ring) return;
+    size_t n = 8192;
+    if (external_psram_size > 0) ring = (uint8_t *)extmem_malloc(n);
+    if (!ring) { n = 2048; ring = (uint8_t *)malloc(n); }
+    if (ring) Serial7.addMemoryForWrite(ring, n);
+    Serial.printf("[ctrl] ESP32 lane TX ring: %u B (%s)\n", (unsigned)(ring ? n : 0), external_psram_size > 0 && n == 8192 ? "PSRAM" : "heap");
+}
 #if TDSP_AUDIOREC
 #include "AudioRec.inc.h"   // @AREC.* commands, "arec" state, service (needs ctrl + SD + g_arec)
 #endif
@@ -4395,6 +4421,7 @@ FLASHMEM void setup() {
     // high. kit.begin() also sets up the LED (heartbeat).
     Serial.println("[setup] kit.begin() -> boot ESP32 into app (EN+IO0 held)..."); Serial.flush();
     kit.begin();
+    ctrlLaneBegin();     // broadcasts (@BEAT/@BPM/positions/@AREC...) also go to the ESP32 lane: give it room
 #ifdef TDSP_ESP32_SDFLASH
     espSdFlashBegin();   // 8 KB Serial7 RX ring: the ESP32 tunnel's @WB payload must survive SD write stalls
 #endif
