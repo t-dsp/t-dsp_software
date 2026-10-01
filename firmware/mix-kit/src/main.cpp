@@ -38,6 +38,10 @@
 #include <MTP_Teensy.h>   // expose the SD card to the host over USB (Serial+MTP)
 #endif
 #include <TDspSdXfer.h>   // host->SD file push over USB CDC (@WB), fast, no reflash
+#if TDSP_AUDIOREC
+#include <AudioRecorderF32.h>   // Audio Recorder: master-out WAV recorder node (lib/TDspAudioRec)
+#include <playsdresmp.h>        // AudioPlaySdResmp (lib/teensy-variable-playback), also used by the SD drum sampler
+#endif
 #include "async_input.h"
 #include "input_i2s2_16bit.h"
 // OpenAudio F32: the mix bus, int16->F32 converts, F32-native async S/PDIF input,
@@ -433,13 +437,34 @@ AudioConnection_F32 c_extPR (extR,     0, postR, 2);
 AudioConnection_F32 c_fxRetL(g_fxReverb, 0, postL, 3);   // reverb wet RETURN (post-everything); level = postL.gain(3) via @FX.RETURN
 AudioConnection_F32 c_fxRetR(g_fxReverb, 1, postR, 3);
 #endif
+#if TDSP_AUDIOREC
+// Audio Recorder (AudioRec.inc.h): the recorder node sits INLINE between the post mixer and the
+// DAC so a take is exactly what reaches the outputs, before the app master fader (tdmOut gain).
+// The SD WAV player sums into its outputs through inputs 2/3 and is NOT recorded.
+tdsp::AudioRecorderF32 g_arec;
+AudioPlaySdResmp       g_arecPlay;                 // int16 stereo WAV from /recordings (teensy-variable-playback: plays 48 kHz files;
+                                                   // the stock AudioPlaySdWav only accepts 44.1 kHz-family rates and silently stops on ours)
+AudioConvert_I16toF32  g_arecPlayL, g_arecPlayR;
+AudioConnection        c_arecPl (g_arecPlay, 0, g_arecPlayL, 0);
+AudioConnection        c_arecPr (g_arecPlay, 1, g_arecPlayR, 0);
+AudioConnection_F32    c_arecIn2(g_arecPlayL, 0, g_arec, 2);
+AudioConnection_F32    c_arecIn3(g_arecPlayR, 0, g_arec, 3);
+AudioConnection_F32    c_postL  (postL,  0, g_arec, 0);
+AudioConnection_F32    c_postR  (postR,  0, g_arec, 1);
+AudioConnection_F32    c_arecOutL(g_arec, 0, tdmOut, 0);
+AudioConnection_F32    c_arecOutR(g_arec, 1, tdmOut, 1);
+#else
 AudioConnection_F32 c_postL (postL, 0, tdmOut, 0);
 AudioConnection_F32 c_postR (postR, 0, tdmOut, 1);
+#endif
 #define TDSP_DAC_L_NODE postL
 #define TDSP_DAC_L_SLOT 0
 #define TDSP_DAC_R_NODE postR
 #define TDSP_DAC_R_SLOT 0
 #else
+#if TDSP_AUDIOREC
+#error "TDSP_AUDIOREC taps the post mixer: enable TDSP_METRONOME, TDSP_EXT_MIX or TDSP_FX_SEND"
+#endif
 #define TDSP_DAC_L_NODE tdmOut
 #define TDSP_DAC_L_SLOT 0
 #define TDSP_DAC_R_NODE tdmOut
@@ -973,6 +998,9 @@ static CtrlBroadcast g_ctrlBroadcast;
 static Print &ctrl = g_ctrlBroadcast;
 #else
 static Print &ctrl = Serial;
+#endif
+#if TDSP_AUDIOREC
+#include "AudioRec.inc.h"   // @AREC.* commands, "arec" state, service (needs ctrl + SD + g_arec)
 #endif
 
 // Emit "@BEAT=<i>/<n>" for the app's beat lights — but ONLY if the USB serial can
@@ -3221,6 +3249,9 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
 #ifdef TDSP_FLASHERX
     else if (strncmp(line, "@FXUP", 5) == 0)      fxRunUpdate(reply);    // OTA self-update on the arriving link (USB or ESP32/Serial7); blocks, reboots
 #endif
+#if TDSP_AUDIOREC
+    else if (strncmp(line, "@AREC.", 6) == 0)     arecCommand(line + 6, reply);   // Audio Recorder: START/STOP/PLAY=/PAUSE/STOPPLAY/DEL=/STATUS
+#endif
 #ifdef TDSP_ESP32_SDFLASH
     else if (strncmp(line, "@ESPUP?", 7) == 0)    reply.printf("@ESPUP_LAST=%s\n", g_espupLast);   // result of the last ESP32 flash (client asks after the box comes back)
     else if (strncmp(line, "@ESPUP=", 7) == 0)    espupCommand(line + 7, reply);   // flash an SD image into the ESP32; blocks, reboots the ESP32
@@ -3792,6 +3823,9 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         // FX (reverb) bus state — the app hydrates the Reverb card from this.
         reply.print("\"fx\":"); fxEmitJson(reply); reply.print(",");
 #endif
+#if TDSP_AUDIOREC
+        reply.print("\"arec\":"); arecEmitJson(reply); reply.print(",");   // Audio Recorder card state
+#endif
 #if TDSP_USB_AUDIO
         // USB Audio interface status — the app's USB Audio card reads this. "active" = the host
         // is streaming (pop_ok advanced since the last @STATE); gain = the USB-in return level;
@@ -3922,7 +3956,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         // compiled track count (2 synth voices + 1 drum, or 1+1 on a non-voice2 build).
         // caps.audioloop = the number of audio loops that ACTUALLY allocated (0 = the board
         // couldn't spare the RAM -> the app hides the card), not just the build flag.
-        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"tracks\":%d,\"audioloop\":%d,\"fx\":%d,\"usbaudio\":%d,\"drumkitsel\":%d,\"drumfontsel\":%d}",
+        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"tracks\":%d,\"audioloop\":%d,\"fx\":%d,\"usbaudio\":%d,\"drumkitsel\":%d,\"drumfontsel\":%d,\"arec\":%d}",
                      TDSP_VOICE2 ? 1 : 0, (TDSP_VOICE2 && TDSP_ARP2) ? 1 : 0, TDSP_RECORDER ? 1 : 0,
                      TDSP_RECORDER_EDIT ? 1 : 0, kSynthVoices + 1,   // N synth voices + the drum track
 #if TDSP_AUDIOLOOP
@@ -3938,6 +3972,8 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
 #else
                      , 0
 #endif
+                     
+                     , TDSP_AUDIOREC ? 1 : 0   // caps.arec: the Audio Recorder card (master-out WAV takes)
                      );
         // PSRAM presence (top-level, MB): the app greys PSRAM-dependent cards with a reason when 0.
         reply.printf(",\"psram\":%u", (unsigned)external_psram_size);
@@ -4525,6 +4561,9 @@ FLASHMEM void setup() {
     // independent of the TOTAL voice count (which now also counts the melodic OPLL tracks).
 #if TDSP_OPLL_ENGINES >= 1
     heteroOpllBegin();   // skipped when the hetero inventory has no hetero-OPLL voices (e.g. 0-Dexed OPLL-primary + Plaits)
+#if TDSP_AUDIOREC
+    arecBegin();         // Audio Recorder: /recordings on the card, ring in PSRAM
+#endif
 #endif
 #if TDSP_HETERO_PLAITS
     for (int k = 0; k < TDSP_PLAITS_ENGINES; k++) heteroPlaitsBegin(k);   // bring up each Plaits track (D, E) + open its mix slot
@@ -4894,6 +4933,9 @@ void loop() {
 #endif
 
     g_sdWrite.tick(*g_sdWriteSrc, millis());   // abort a stalled @WB transfer (watchdog), on its own lane
+#if TDSP_AUDIOREC
+    arecService();   // drain the take to the card (one 16 KB write per pass), end-of-playback, 1 s status push
+#endif
 
     // USB CDC input serves two roles: '@'-prefixed control LINES (the same protocol
     // the ESP32 relays from BLE — lets a Web Serial browser page drive the device with

@@ -391,6 +391,7 @@ export class WiFiTransport implements Transport {
   song2Loop(on: boolean) { this.send('@LOOP2=' + (on ? 1 : 0)); }
   trk(index: number, cmd: string) { this.send('@TRK' + index + '.' + cmd); }
   fx(cmd: string) { this.send('@FX.' + cmd); }
+  arec(cmd: string) { this.send('@AREC.' + cmd); }   // Audio Recorder
   // ---- Loop recorder ----
   recVoice(v: number) { this.send('@RECV=' + (Math.max(1, v))); }
   recBars(n: number) { this.send('@RECBARS=' + n); }

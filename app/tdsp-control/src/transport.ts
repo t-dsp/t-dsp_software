@@ -140,6 +140,9 @@ export interface Transport {
   // method like trk(): the card builds '@FX.<cmd>' — fx('ON=1'), fx('MIX=50'), fx('SIZE=70') (plate)
   // / fx('TIME=55') (spring). Which params exist depends on @STATE.fx.type (plate|spring). ----
   fx(cmd: string): void;                              // @FX.<cmd>
+  // Audio Recorder (build-flag gated, caps.arec): @AREC.<cmd> — START | STOP | PLAY=<name> | PAUSE |
+  // STOPPLAY | DEL=<name> | STATUS. The device answers/pushes "@AREC=<json>" via onLine().
+  arec(cmd: string): void;
   arpOn(on: boolean): void;
   arpRestart(): void;                                 // re-trigger the running arp cycle from step 0 (@ARPRESTART)
   arpPattern(i: number): void;

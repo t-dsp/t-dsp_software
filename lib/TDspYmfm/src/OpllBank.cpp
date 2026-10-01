@@ -19,7 +19,7 @@ static int hexNib(char c) {
 }
 
 // "13 01 18 0F 9E 60 00 9F<TAB>Piano 1" -> regs + name. Returns false for comments/blank/bad lines.
-bool OpllBankLib::parseLine(const char* line, uint8_t regs[8], char* name, size_t nameCap) {
+FLASHMEM bool OpllBankLib::parseLine(const char* line, uint8_t regs[8], char* name, size_t nameCap) {
     const char* p = line;
     while (*p == ' ' || *p == '\t') p++;
     if (!*p || *p == '#' || *p == ';' || (p[0] == '/' && p[1] == '/')) return false;
@@ -42,7 +42,7 @@ bool OpllBankLib::parseLine(const char* line, uint8_t regs[8], char* name, size_
     return true;
 }
 
-bool OpllBankLib::loadFile(FS& fs, const char* path, const char* defaultName) {
+FLASHMEM bool OpllBankLib::loadFile(FS& fs, const char* path, const char* defaultName) {
     if (bankCount_ >= kMaxBanks) return false;
     File f = fs.open(path);
     if (!f || f.isDirectory()) return false;
@@ -87,7 +87,7 @@ bool OpllBankLib::loadFile(FS& fs, const char* path, const char* defaultName) {
     return true;
 }
 
-bool OpllBankLib::begin(FS& fs, const char* dir, int maxPatches, int heapCap) {
+FLASHMEM bool OpllBankLib::begin(FS& fs, const char* dir, int maxPatches, int heapCap) {
     count_ = 0; bankCount_ = 0;
     File d = fs.open(dir);
     if (!d || !d.isDirectory()) return false;
@@ -132,7 +132,7 @@ bool OpllBankLib::begin(FS& fs, const char* dir, int maxPatches, int heapCap) {
     return count_ > 0;
 }
 
-int OpllBankLib::findBank(const char* name) const {
+FLASHMEM int OpllBankLib::findBank(const char* name) const {
     for (int b = 0; b < bankCount_; b++)
         if (!strcasecmp(bankNames_[b], name) || !strcasecmp(bankFiles_[b], name)) return b;
     return -1;

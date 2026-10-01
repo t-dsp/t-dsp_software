@@ -354,6 +354,7 @@ export class BleTransport implements Transport {
   song2Loop(on: boolean) { this.relay('@LOOP2=' + (on ? 1 : 0)); }
   trk(index: number, cmd: string) { this.relay('@TRK' + index + '.' + cmd); }
   fx(cmd: string) { this.relay('@FX.' + cmd); }
+  arec(cmd: string) { this.relay('@AREC.' + cmd); }   // Audio Recorder
   launchQuantize(on: boolean) { this.relay('@QUANTIZE=' + (on ? 1 : 0)); }
   panic() { this.relay('@PANIC'); }
   metronome(on: boolean) { this.relay('@METRO=' + (on ? 1 : 0)); }

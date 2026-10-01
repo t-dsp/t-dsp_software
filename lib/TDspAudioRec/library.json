@@ -1,0 +1,7 @@
+{
+  "name": "TDspAudioRec",
+  "version": "0.1.0",
+  "description": "Master-output WAV recorder for the T-DSP (OpenAudio F32 node: records the bus, sums a player, drains to SD from loop()).",
+  "frameworks": "arduino",
+  "platforms": "teensy"
+}

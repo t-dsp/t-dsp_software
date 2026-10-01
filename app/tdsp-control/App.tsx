@@ -21,6 +21,7 @@ import { s } from './src/ui/styles';
 import { EMPTY_DIR, parseDexFind, DEX_NO_INDEX_MSG, DexHit, DexRow, catalogCache, grooveDisp, TP_LABEL, HPF_MODES, volDb, EndMode, END_MODES, REC_STATES, AppState, isEndMode, notify, ROW_H, VItem, InjectFolder, saveLastConn, loadLastConn, saveKeepAwakePref, loadKeepAwakePref } from './src/ui/constants';
 import { Subtitle, LoopStepGrid, Card, Flag, PageHeader, ProgressBus, LoadScreen, HdrBtn, KbdBtn, KbdGlyph, Row, ThrottledSlider, VolSlider, Stat, ListBtn, BodyTabs, SubMenu, FolderBrowser } from './src/ui/primitives';
 import { Header } from './src/ui/Header';
+import { MediaBrowser } from './src/ui/browser/MediaBrowser';
 import { SideNav } from './src/ui/SideNav';
 import { DrumLoopsActions, DrumLoopsBody } from './src/ui/elements/DrumLoops';
 import { SynthCard } from './src/ui/synth/SynthCard';
@@ -223,7 +224,7 @@ export default function App() {
   // selection + volume + arp state; the folder browser is shared (pickVoice takes a target).
   // caps.audioloop is a COUNT (how many audio loops the device actually allocated —
   // RAM/PSRAM dependent), not a bool: 0 hides the Audio Loop card entirely.
-  const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, recedit: false, audioloop: 0, fx: false, usbaudio: false, drumkitsel: true, drumfontsel: false });
+  const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, recedit: false, audioloop: 0, fx: false, usbaudio: false, arec: false, drumkitsel: true, drumfontsel: false });
   // Runtime drum-font swap (build-flag gated, caps.drumfontsel → the sampled-drum TSF build with >1 SF2
   // on the card). `fonts` = the swappable list from the device's "@FONTS=" line; `drumFont` = the
   // resident font (path + display) from @STATE.drumfont. Selecting one sends @DRUMFONT= (a picker, not
@@ -326,6 +327,12 @@ export default function App() {
   // = the selected loop's config, st[]/p[] = per-loop state (same 0..4 codes as `rec`) and
   // 0..1 progress, capS = the selected loop's capacity in seconds (bars that don't fit are
   // disabled). See planning/audio-looper/DESIGN.md.
+  // Audio Recorder (caps.arec): mirrors the firmware's "arec" object (@STATE and the pushed @AREC= line).
+  type ArecPlay = { file: string; st: 'stop' | 'play' | 'pause'; pos: number; len: number };
+  const [arec, setArec] = useState<{ ok: boolean; rec: boolean; file: string; sec: number; drop: number; play: ArecPlay }>(
+    { ok: false, rec: false, file: '', sec: 0, drop: 0, play: { file: '', st: 'stop', pos: 0, len: 0 } });
+  const [arecFiles, setArecFiles] = useState<{ arg: string; name: string }[]>([]);   // the browser's current list, for ⏮/⏭
+  const applyArec = (j: any) => { if (j && typeof j === 'object') setArec(a => ({ ...a, ...j, play: { ...a.play, ...(j.play || {}) } })); };
   const [aloop, setAloop] = useState({ sel: 0, bars: 4, mono: false, follow: true, capS: 0, level: 100,
                                        st: [0, 0, 0], p: [0, 0, 0] });
   const [selVoice2, setSelVoice2] = useState('');   // voice-2 browser highlight (independent of voice 1)
@@ -404,9 +411,11 @@ export default function App() {
       else if (j.voice.i != null && j.voice.i < 320) { setSelVoice('b' + (j.voice.i | 0)); setSelVoiceName(j.voice.name || ''); setSelVoicePath('Bundled'); }
     }
     // Voices 2 / Arp 2 — build capabilities (SHOW the cards) + the keyboard half's state.
+    if (j.arec) applyArec(j.arec);
     if (j.caps) setCaps({ voice2: !!j.caps.voice2, arp2: !!j.caps.arp2, rec: !!j.caps.rec,
                           recedit: !!j.caps.recedit, audioloop: Math.max(0, j.caps.audioloop | 0), fx: !!j.caps.fx,
                           usbaudio: !!j.caps.usbaudio,
+                          arec: !!j.caps.arec,   // Audio Recorder card (master-out WAV takes on the card)
                           // absent (older firmware) -> assume selectable; explicit 0 = a fixed drum voice (OPLL) with no GM kits
                           drumkitsel: j.caps.drumkitsel !== 0,
                           // runtime drum-font swap: only the sampled-drum TSF build with >1 SF2 on the card sets this
@@ -569,6 +578,8 @@ export default function App() {
     if (line.startsWith('@MPE=')) { const ev = parseMpeLine(line); if (ev) mpeBus.emit(ev); return; }
     if (line.startsWith('@STATE=')) {
       try { hydrate(JSON.parse(line.slice(line.indexOf('=') + 1))); } catch {}
+    } else if (line.startsWith('@AREC=')) {
+      try { applyArec(JSON.parse(line.slice(6))); } catch {}   // Audio Recorder status (command replies + 1 s pushes)
     } else if (line.startsWith('@FONTS=')) {
       // The swappable drum-font list (runtime @DRUMFONT swap). Parse into the picker's state; the
       // current-flag / @STATE.drumfont drive which one is highlighted.
@@ -1701,6 +1712,14 @@ export default function App() {
   // and releases every note / sustain / bend on every synth (on every build, not just metronome ones).
   const panic = () => { clearStageUi(); tp.panic(); };
 
+  // Audio Recorder helpers: m:ss and ⏮/⏭ over the browser's current take list (wraps).
+  const mmss = (sec: number) => { const t = Math.max(0, Math.floor(sec || 0)); return Math.floor(t / 60) + ':' + String(t % 60).padStart(2, '0'); };
+  const arecStep = (d: number) => {
+    if (!arecFiles.length) return;
+    const cur = arecFiles.findIndex(f => f.arg.endsWith('/' + arec.play.file));
+    const next = arecFiles[((cur < 0 ? (d > 0 ? -1 : 0) : cur) + d + arecFiles.length) % arecFiles.length];
+    tp.arec('PLAY=' + next.arg);
+  };
   const headerStatus = !connected ? 'Not connected' : linkLost ? 'Reconnecting…' :
     [cat.engine || 'synth', cat.drumEngine ? cat.drumEngine + ' drums' : '', '♩ ' + Math.round(bpm) + ' BPM', TP_LABEL[tp.name], bt.conn ? 'BT:' + (bt.peer || 'on') : '', drums.playing ? '♪ ' + drums.playing : ''].filter(Boolean).join('  ·  ');
 
@@ -2719,6 +2738,42 @@ export default function App() {
     // TDSP_USB_AUDIO). Host audio streams IN to the mix bus and the full mix streams back OUT
     // to the host for recording. Shows the live stream status + the USB-in return level.
     // See planning/usb-audio-mixkit/DESIGN.md.
+    // AUDIO RECORDER — record the master outputs to /recordings/*.wav on the card, browse + play takes.
+    // Build-flag gated (TDSP_AUDIOREC, caps.arec). The tap is before the master fader, so takes are
+    // full level; playback sums back in before the fader, so a take is as loud as it was live.
+    {
+      id: 'arec', title: 'Audio Recorder', show: caps.arec, fullHeight: true,
+      accent: THEME.arec.accent, tint: THEME.arec.tint,
+      value: arec.rec ? '● REC ' + mmss(arec.sec) + (arec.drop ? ' · ' + arec.drop + ' dropped' : '')
+           : arec.play.st !== 'stop' ? (arec.play.st === 'pause' ? '❚❚ ' : '▶ ') + arec.play.file.replace(/\.wav$/i, '') + '  ' + mmss(arec.play.pos) + ' / ' + mmss(arec.play.len)
+           : arec.file ? 'Last take: ' + arec.file.replace(/\.wav$/i, '') : (arec.ok ? 'Ready' : 'No SD card'),
+      progress: arec.play.st !== 'stop' && arec.play.len > 0 ? Math.min(1, arec.play.pos / arec.play.len) : undefined,
+      actions: (<>
+        <HdrBtn label={arec.rec ? '■ Stop' : '● Rec'} active={arec.rec} onPress={() => tp.arec(arec.rec ? 'STOP' : 'START')} />
+      </>),
+      body: (
+        <View style={{ flex: 1, gap: 8 }}>
+          <Text style={s.muted}>Records exactly what comes out of the headphone / line outputs — every synth, the drums, reverb, metronome — at full level, before the master fader. Takes are 16-bit 48 kHz WAV in /recordings on the card. Tap a take to play it through the same fader, so it sounds as loud as it did live.</Text>
+          <Row>
+            <HdrBtn label="⏮" onPress={() => arecStep(-1)} />
+            <HdrBtn label={arec.play.st === 'play' ? '❚❚' : '▶'} active={arec.play.st === 'play'} onPress={() => {
+              if (arec.play.st === 'stop') { const f = arecFiles[0]; if (f) tp.arec('PLAY=' + f.arg); }
+              else tp.arec('PAUSE');
+            }} />
+            <HdrBtn label="■" stop onPress={() => tp.arec('STOPPLAY')} />
+            <HdrBtn label="⏭" onPress={() => arecStep(1)} />
+            <Text style={[s.muted, { flex: 1, textAlign: 'right' }]}>
+              {arec.rec ? 'Recording ' + mmss(arec.sec) : arec.play.st !== 'stop' ? mmss(arec.play.pos) + ' / ' + mmss(arec.play.len) : arecFiles.length ? arecFiles.length + ' take' + (arecFiles.length === 1 ? '' : 's') : ''}
+            </Text>
+          </Row>
+          <MediaBrowser tp={tp} root="/recordings" ext="wav" enabled={connected && loaded} scope="recordings" accent={THEME.arec.accent}
+            selected={arec.play.file ? '/recordings/' + arec.play.file : undefined}
+            playing={arec.play.st === 'play' ? '/recordings/' + arec.play.file : undefined}
+            onSelectFile={full => tp.arec('PLAY=' + full)}
+            onFolderList={items => setArecFiles(items.map(it => ({ arg: it.arg, name: it.name })))} />
+        </View>
+      ),
+    },
     {
       id: 'usbaudio', title: 'USB Audio', show: caps.usbaudio || !!unavail.usbaudio, disabledReason: unavail.usbaudio,
       accent: THEME.usb.accent, tint: THEME.usb.tint,
@@ -2797,7 +2852,7 @@ export default function App() {
   // (play → pick a voice → tempo → arp → drums), then system (connection, BT, codec).
   // Unlisted ids fall to the end in their definition order (stable sort).
   // Order for the home grid AND for each submenu's children (SubMenu sorts by this too).
-  const SECTION_ORDER = ['synthesizer', 'synthesizerB', 'synthX2', 'synthX3', 'drumtrack', 'reverb', 'audioloop', 'usbaudio', 'tempo', 'bt', 'settings',
+  const SECTION_ORDER = ['synthesizer', 'synthesizerB', 'synthX2', 'synthX3', 'synthX4', 'synthX5', 'drumtrack', 'reverb', 'audioloop', 'arec', 'usbaudio', 'tempo', 'bt', 'settings',
     'player', 'synth', 'arp', 'player2', 'synth2', 'arp2', 'bpm', 'metro', 'conn', 'devwifi', 'firmware', 'codec'];   // all synths: MIDI Player, Synth/Voices, Arp
   // NB: the drum children (drumtrackp/drumtrackv) and generated-synth children (synthXNp/v/a) are NOT
   // listed here — like all makeTrackCard children they fall to ord()=999 and keep their push order.

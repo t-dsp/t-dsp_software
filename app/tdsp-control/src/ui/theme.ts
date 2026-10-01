@@ -20,6 +20,7 @@ export const THEME = {
   settings: th('#ff7b72', 0.13),   // coral
   recorder:  th('#f85149', 0.14),  // red (MIDI record)
   audioloop: th('#f778ba', 0.14),  // pink (audio loop)
+  arec: th('#f0883e', 0.14),       // orange (audio recorder)
   drums:     th('#f0883e', 0.14),  // orange (drum track)
 };
 export const HDR_H = 38;   // shared height for page-header control buttons (back / keyboard / transport) so they line up

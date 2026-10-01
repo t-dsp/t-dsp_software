@@ -277,6 +277,7 @@ export class WebSerialTransport implements Transport {
   song2Loop(on: boolean) { this.send('@LOOP2=' + (on ? 1 : 0)); }
   trk(index: number, cmd: string) { this.send('@TRK' + index + '.' + cmd); }
   fx(cmd: string) { this.send('@FX.' + cmd); }
+  arec(cmd: string) { this.send('@AREC.' + cmd); }   // Audio Recorder
   launchQuantize(on: boolean) { this.send('@QUANTIZE=' + (on ? 1 : 0)); }
   panic() { this.send('@PANIC'); }
   metronome(on: boolean) { this.send('@METRO=' + (on ? 1 : 0)); }

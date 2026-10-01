@@ -25,7 +25,7 @@
 // (2) Digital app master start. Line out usually runs near unity so it feeds a
 //     consistent level; the app fader can still pull it down.
 #ifndef TDSP_DEFAULT_APP_VOL_PCT
-#define TDSP_DEFAULT_APP_VOL_PCT 100
+#define TDSP_DEFAULT_APP_VOL_PCT 45     // was 100 (line-out unity); the owner wants the fader to come up mid-way, like before
 #endif
 
 // --- Boot MIDI mode: MPE ON --------------------------------------------------
