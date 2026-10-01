@@ -1021,9 +1021,29 @@ export default function App() {
   // Pull down to refresh (native; the web has the browser's refresh): restart the app, picking up a
   // newer published bundle if one is available, then the boot path reconnects to the last device.
   const [refreshing, setRefreshing] = useState(false);
+  // Pull-to-refresh refreshes the page you are on, IN PLACE. (It used to restart the whole app
+  // bundle, which dropped the link and landed on the connect screen every time.) Connected: check the
+  // link is alive, then re-pull everything the pages render from — device state, drum fonts, each
+  // picker engine's voice list, the drum kit list and the catalog (differential cache → instant when
+  // nothing changed). Disconnected: retry the remembered device. A full app reload is still available
+  // on Settings › Firmware ("Reload app").
+  async function refreshInPlace() {
+    const t = tpRef.current;
+    if (!connectedRef.current) {
+      const last = lastConnRef.current;
+      if (last && !connectingRef.current && !userDiscRef.current) connectTo(last.kind, last.host, true, last.ssid);
+      return;
+    }
+    if (t.probe && !(await t.probe(1500))) return;   // dead link: the in-place reconnect takes over
+    t.requestState();
+    t.requestFonts();
+    Object.keys(trkEng).forEach(k => { const i = +k; if (isPickerEngine(trkEng[i])) t.trk(i, 'INSTRS'); });
+    if (drumIdxRef.current >= 0) t.trk(drumIdxRef.current, 'INSTRS');
+    await load();
+  }
   const refreshCtl = Platform.OS === 'web' ? undefined : (
     <RefreshControl refreshing={refreshing} tintColor={C.accent} colors={[C.accent]} progressBackgroundColor={C.card}
-      onRefresh={() => { setRefreshing(true); refreshApp().finally(() => setRefreshing(false)); }} />
+      onRefresh={() => { setRefreshing(true); refreshInPlace().catch(() => {}).finally(() => setRefreshing(false)); }} />
   );
   // (elapsed-seconds ticker now lives inside <LoadScreen>, which mounts exactly while the
   // catalog is loading — so it no longer re-renders App every second.)
@@ -2558,6 +2578,7 @@ export default function App() {
             {appUpd.enabled && (
               <Row>
                 <Pressable style={s.btn} onPress={async () => { setUpdMsg('Checking…'); setUpdMsg(await checkAndApplyUpdate()); }}><Text style={s.btnText}>Check for app update</Text></Pressable>
+                <Pressable style={[s.btn, s.btnGhost]} onPress={() => { refreshApp(); }}><Text style={s.btnText}>Reload app</Text></Pressable>
                 {!!updMsg && <Text style={s.muted}>{updMsg}</Text>}
               </Row>
             )}
