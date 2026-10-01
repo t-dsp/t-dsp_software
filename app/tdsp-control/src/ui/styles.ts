@@ -64,6 +64,7 @@ export const s = StyleSheet.create({
   muteBtnOn: { backgroundColor: '#da3633', borderColor: '#da3633' },   // muted (track at 0%) — red
   muteTxt: { fontSize: 16, lineHeight: 20 },
   volRowHdr: { flexDirection: 'row', alignItems: 'center', gap: 8, width: '100%' },   // VOL under the beat dots — fills the center column so the slider has room
+  volRowMobile: { marginTop: 4 },   // phone: the always-visible master VOL row under the brand bar
   volLbl: { color: C.muted, fontSize: 11, width: 26 },
   volVal: { color: C.text, fontSize: 13, width: 28, textAlign: 'right' },
   // Navigation menu bar (below the header): browser-style back / forward / home + current location.

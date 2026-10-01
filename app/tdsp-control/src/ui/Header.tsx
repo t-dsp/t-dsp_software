@@ -118,6 +118,9 @@ export function Header({
             <Text style={s.menuToggleTxt}>{open ? '✕' : '☰'}</Text>
           </Pressable>
         </View>
+        {/* Master VOL always visible at the top on the phone (it used to hide behind the ☰ menu). The
+            digital master (@VOL) ahead of the codec; the TAC5212's own output level stays in Settings. */}
+        <View style={s.volRowMobile}>{volBar}</View>
         {open && (
           <View style={s.mobileMenu}>
             {/* master transport (two rows: play/stop/mute, then BPM), under the logo/beat/✕ top bar */}
@@ -130,7 +133,6 @@ export function Header({
                   onNavigate={id => { nav.navigate(id); setOpen(false); }} usbOwner={nav.usbOwner} onClaimKbd={nav.claimUsb} />
               </View>
             )}
-            {volBar}
             <View style={s.mobileConnectRow}>{connectCtrls}</View>
             {!!status && <Text style={s.statline}>{status}</Text>}
           </View>
