@@ -153,6 +153,23 @@ struct PlaitsVoiceEngineAdapter : ITrackEngine {
 static PlaitsVoiceEngineAdapter g_plaitsVoiceEngine[TDSP_PLAITS_ENGINES];   // one adapter per Plaits track
 #endif
 
+#if TDSP_TSF_ENGINES >= 1
+// --- Melodic SoundFont (TSF) track (HeteroTsf.h) — "Synth F" -----------------------------------
+struct TsfVoiceEngineAdapter : ITrackEngine {
+    tdsp::MidiSink*      sink() override           { return &g_htSink; }
+    AudioEffectGain_F32* trim() override           { return &g_htTrim; }
+    const char*         name() override            { return "SoundFont"; }
+    int                 numInstruments() override  { return heteroTsfNumInstruments(); }
+    const char*         instrumentName(int i) override { return heteroTsfInstrumentName(i); }
+    int                 instrument() override      { return heteroTsfInstrument(); }
+    void                setInstrument(int i) override  { heteroTsfSetInstrument(i); }
+    void                setVol(int pct) override   { heteroTsfSetVol(pct); }
+    const char*         engTag() override          { return "sf2"; }
+    void                setMpeMode(bool mpe) override { heteroTsfSetMpe(mpe); }
+};
+static TsfVoiceEngineAdapter g_tsfVoiceEngine;
+#endif
+
 // --- Drum track: a track whose engine plays ch10 (kit = its "instrument") ----------------------
 struct DrumTrackEngineAdapter : ITrackEngine {
     tdsp::MidiSink*     sink() override            { return g_drumTrack.sink; }
@@ -175,6 +192,9 @@ static ITrackEngine *g_drumTrackEngine = &g_drumTrackEngineImpl;
 // Bind each track to its engine, using the CURRENT mapping (kept identical during migration).
 static void trackEnginesInit() {
     for (int v = 0; v < kNumTracks; v++) {
+#if TDSP_TSF_ENGINES >= 1
+        if (voiceIsTsf(v)) { g_trackEngine[v] = &g_tsfVoiceEngine; continue; }
+#endif
 #if TDSP_HETERO_PLAITS
         if (voiceIsPlaits(v)) {
             const int k = v - (kDexedVoices + kOpllVoices);   // 0..TDSP_PLAITS_ENGINES-1

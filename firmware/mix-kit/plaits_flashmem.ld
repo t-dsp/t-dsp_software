@@ -33,5 +33,22 @@ SECTIONS
     *(.rodata._ZN6plaits*)
     *(.rodata._ZN6stmlib*)
     *libTDspPlaits2.a:(.text* .rodata*)
+    /* 2026-10-01: ITCM was 4 KB from the 288 KB block cliff (crossing it costs ~26 KB of
+     * stack). The biggest cold tenants were newlib's printf/scanf/dtoa family (~25 KB,
+     * used for logging and text parsing, never in the audio ISR) and libstdc++'s C++ name
+     * demangler (~12 KB, only reachable from crash/typeinfo paths). Run them from flash. */
+    *libc.a:libc_a-svfprintf.o(.text* .rodata*)
+    *libc.a:libc_a-svfiprintf.o(.text* .rodata*)
+    *libc.a:libc_a-vfprintf.o(.text* .rodata*)
+    *libc.a:libc_a-vfiprintf.o(.text* .rodata*)
+    *libc.a:libc_a-svfscanf.o(.text* .rodata*)
+    *libc.a:libc_a-svfiscanf.o(.text* .rodata*)
+    *libc.a:libc_a-vfscanf.o(.text* .rodata*)
+    *libc.a:libc_a-dtoa.o(.text* .rodata*)
+    *libc.a:libc_a-strtod.o(.text* .rodata*)
+    *libc.a:libc_a-gdtoa-gethex.o(.text* .rodata*)
+    *libc.a:libc_a-gdtoa-hexnan.o(.text* .rodata*)
+    *libc.a:libc_a-mprec.o(.text* .rodata*)
+    *libstdc++.a:cp-demangle.o(.text* .rodata*)
   } > FLASH
 } INSERT BEFORE .text.itcm;

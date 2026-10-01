@@ -37,6 +37,11 @@
 #ifndef TDSP_PLAITS_ENGINES
 #define TDSP_PLAITS_ENGINES 1
 #endif
+// Boot instrument for the FIRST Plaits track (Synth D): a catalog index — 0..15 = raw model, 16.. =
+// preset (16 = Handpan). Other Plaits tracks boot on model 0 (VA). Override: -D TDSP_HP_DEFAULT_INSTR=n.
+#ifndef TDSP_HP_DEFAULT_INSTR
+#define TDSP_HP_DEFAULT_INSTR 0
+#endif
 #ifndef TDSP_HP2_SLOT
 #define TDSP_HP2_SLOT 2          // second Plaits track (Synth E) -> mix slot 2 (free when TDSP_NO_SPDIF_IN)
 #endif
@@ -150,22 +155,54 @@ static inline AudioEffectGain_F32 &hpTrimNode(int k) {
 // + level so Synth D and Synth E are fully independent.
 static int g_hpInstrument[TDSP_PLAITS_ENGINES];   // current Plaits synthesis engine 0..15, per track
 
-static int         heteroPlaitsNumInstruments()      { return AudioSynthPlaits::kNumEngines; }
+// ---- Presets: catalog entries past the 16 raw models that set a model AND its macros -------------
+// Picking a model only changes the synthesis engine and keeps whatever HARMONICS/TIMBRE/MORPH/LPG the
+// knobs were left at. A preset is "a sound": model + the five macros, applied together. They appear in
+// the app's model matrix as extra cells (third bank) and in the voice list as "Plaits: <name>".
+struct HpPreset { const char *name; uint8_t engine; uint16_t harm, timbre, morph, decay, color; };
+static const HpPreset kHpPresets[] = {
+    // Handpan: the Modal resonator (Rings' modal mode) is the classic hang/handpan patch. Low-ish
+    // HARMONICS = the stretched, slightly inharmonic partial spread of a struck steel shell; TIMBRE
+    // ~1/3 = a soft hand/mallet strike (dust-free, not too bright); MORPH high = long resonance; a
+    // long LPG decay lets the ring breathe; colour near neutral. Pressure (MPE) swells the LPG.
+    { "Handpan",        12, 340, 300, 790, 920, 480 },
+    { "Hang (bright)",  12, 420, 480, 760, 880, 560 },   // harder strike, more partials
+    { "Steel Tongue",   12, 260, 220, 700, 850, 420 },   // tank-drum: darker, shorter
+    { "Glass Bowl",     12, 150, 180, 900, 960, 520 },   // near-harmonic, very long
+};
+static constexpr int kHpNumPresets = sizeof(kHpPresets) / sizeof(kHpPresets[0]);
+
+static int         heteroPlaitsNumInstruments()      { return AudioSynthPlaits::kNumEngines + kHpNumPresets; }
 static const char *heteroPlaitsInstrumentName(int idx) {
     static char buf[40];
-    if (idx < 0 || idx >= AudioSynthPlaits::kNumEngines) return "";
-    snprintf(buf, sizeof(buf), "Plaits: %s", AudioSynthPlaits::engineName(idx));   // "Plaits: " -> app groups it
+    if (idx < 0 || idx >= heteroPlaitsNumInstruments()) return "";
+    if (idx < AudioSynthPlaits::kNumEngines) snprintf(buf, sizeof(buf), "Plaits: %s", AudioSynthPlaits::engineName(idx));   // "Plaits: " -> app groups it
+    else snprintf(buf, sizeof(buf), "Plaits: %s", kHpPresets[idx - AudioSynthPlaits::kNumEngines].name);
     return buf;
 }
 static int heteroPlaitsInstrument(int k) { return g_hpInstrument[k]; }
 
-// Pick one of the 16 Plaits synthesis models for Plaits track k's pool.
+static void heteroPlaitsSetHarm(int k, int v);  static void heteroPlaitsSetTimbre(int k, int v);
+static void heteroPlaitsSetMorph(int k, int v); static void heteroPlaitsSetDecay(int k, int v);
+static void heteroPlaitsSetColor(int k, int v);
+
+// Pick a Plaits synthesis model (0..15) or a preset (16..) for Plaits track k's pool.
 static void heteroPlaitsSetInstrument(int k, int idx) {
+    const int n = heteroPlaitsNumInstruments();
     if (idx < 0) idx = 0;
-    if (idx >= AudioSynthPlaits::kNumEngines) idx = AudioSynthPlaits::kNumEngines - 1;
-    hpSink(k).setEngine((uint8_t)idx);
+    if (idx >= n) idx = n - 1;
+    if (idx < AudioSynthPlaits::kNumEngines) {
+        hpSink(k).setEngine((uint8_t)idx);
+        g_hpInstrument[k] = idx;
+        Serial.printf("[hetero-plaits] k%d engine -> %d \"%s\"\n", k, idx, AudioSynthPlaits::engineName(idx));
+        return;
+    }
+    const HpPreset &pr = kHpPresets[idx - AudioSynthPlaits::kNumEngines];
+    hpSink(k).setEngine(pr.engine);
+    heteroPlaitsSetHarm(k, pr.harm); heteroPlaitsSetTimbre(k, pr.timbre); heteroPlaitsSetMorph(k, pr.morph);
+    heteroPlaitsSetDecay(k, pr.decay); heteroPlaitsSetColor(k, pr.color);
     g_hpInstrument[k] = idx;
-    Serial.printf("[hetero-plaits] k%d engine -> %d \"%s\"\n", k, idx, AudioSynthPlaits::engineName(idx));
+    Serial.printf("[hetero-plaits] k%d preset -> \"%s\" (engine %d)\n", k, pr.name, pr.engine);
 }
 
 // Timbre-shaping macros — HARMONICS/TIMBRE/MORPH + LPG decay/colour, per Plaits track (permille 0..1000).
@@ -226,8 +263,7 @@ static bool heteroPlaitsBegin(int k) {
     hpTrimNode(k).setGain(1.0f);
     outL.gain(slot, TDSP_DEFAULT_SYNTH_MAKEUP);   // bus make-up (matches the synth slot)
     outR.gain(slot, TDSP_DEFAULT_SYNTH_MAKEUP);
-    g_hpInstrument[k] = 0;
-    heteroPlaitsSetInstrument(k, g_hpInstrument[k]);
+    heteroPlaitsSetInstrument(k, k == 0 ? TDSP_HP_DEFAULT_INSTR : 0);   // Synth D's boot sound (preset or model)
     Serial.printf("[hetero-plaits] k%d ready: %d voices -> mix slot %d\n", k, kHpVoices, slot);
     return true;
 }

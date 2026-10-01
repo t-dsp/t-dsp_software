@@ -230,19 +230,23 @@ static const int kSynthVoices = TDSP_SYNTH_VOICES;
 #ifndef TDSP_PLAITS_ENGINES
 #define TDSP_PLAITS_ENGINES 0                     // melodic Plaits tracks appended after the OPLL ones (HeteroPlaits.h)
 #endif
+#ifndef TDSP_TSF_ENGINES
+#define TDSP_TSF_ENGINES 0                        // melodic SoundFont (TSF) tracks appended after the Plaits ones (HeteroTsf.h)
+#endif
 #if TDSP_HETERO
 static const int kDexedVoices = TDSP_DEXED_VOICES;     // tracks [0, kDexedVoices)                        = Dexed
 static const int kOpllVoices  = TDSP_OPLL_ENGINES;     // tracks [kDexedVoices, +kOpllVoices)             = OPLL
-// tracks [kDexedVoices + kOpllVoices, kSynthVoices) = Plaits (TDSP_PLAITS_ENGINES of them)
-static_assert(TDSP_DEXED_VOICES + TDSP_OPLL_ENGINES + TDSP_PLAITS_ENGINES == TDSP_SYNTH_VOICES,
-              "TDSP_SYNTH_VOICES must equal DEXED + OPLL + PLAITS engine counts");
+// tracks [kDexedVoices + kOpllVoices, +TDSP_PLAITS_ENGINES) = Plaits; then TDSP_TSF_ENGINES SoundFont tracks
+static_assert(TDSP_DEXED_VOICES + TDSP_OPLL_ENGINES + TDSP_PLAITS_ENGINES + TDSP_TSF_ENGINES == TDSP_SYNTH_VOICES,
+              "TDSP_SYNTH_VOICES must equal DEXED + OPLL + PLAITS + TSF engine counts");
 #else
 static const int kDexedVoices = kSynthVoices;          // homogeneous: every voice is Dexed (or the sole backend)
 static const int kOpllVoices  = 0;
 #endif
 // Compile-time engine-kind predicates for a track index (per-track dispatch + inventory binding).
 static inline bool voiceIsOpll(int v)   { return TDSP_HETERO && v >= kDexedVoices && v < kDexedVoices + kOpllVoices; }
-static inline bool voiceIsPlaits(int v) { return TDSP_HETERO && v >= kDexedVoices + kOpllVoices; }
+static inline bool voiceIsPlaits(int v) { return TDSP_HETERO && v >= kDexedVoices + kOpllVoices && v < kDexedVoices + kOpllVoices + TDSP_PLAITS_ENGINES; }
+static inline bool voiceIsTsf(int v)    { return TDSP_HETERO && v >= kDexedVoices + kOpllVoices + TDSP_PLAITS_ENGINES; }   // melodic SoundFont track(s)
 
 tdsp::MidiFilePlayer   g_playerV[kSynthVoices];   // one song player per synth voice
 tdsp::MidiFilePlayer  &g_player = g_playerV[0];   // alias: voice 0 (all existing g_player refs)
@@ -318,6 +322,9 @@ tdsp::PlayerFollower   g_songFollow4{g_playerV[3]};
 #endif
 #if TDSP_SYNTH_VOICES >= 5
 tdsp::PlayerFollower   g_songFollow5{g_playerV[4]};   // voice index 4 (Synth E, 2nd melodic Plaits)
+#endif
+#if TDSP_SYNTH_VOICES >= 6
+tdsp::PlayerFollower   g_songFollow6{g_playerV[5]};   // voice index 5 (Synth F, melodic SoundFont)
 #endif
 tdsp::ClockSink        g_clockSink{&g_conductor.clock()};
 tdsp::ArpFilter       &g_arpFilter = g_arpFilterV[0];        // alias: voice 0 arp (live MIDI -> arp -> synth, bypass by default)
@@ -649,6 +656,9 @@ static bool g_sdReady = false;
 #endif
 #if TDSP_HETERO_PLAITS
   #include "HeteroPlaits.h" // a melodic Plaits track ALONGSIDE the others (generalized inventory)
+#if TDSP_TSF_ENGINES >= 1
+  #include "HeteroTsf.h"    // a melodic SoundFont (TSF) track after the Plaits ones — "Synth F", e.g. the sampled handpan
+#endif
 #endif
 
 #if TDSP_FX_SEND
@@ -1183,6 +1193,9 @@ TDSP_SONGBUF_MEM static tdsp::MidiFileEvent g_buf4[MAX_EVENTS3];
 #if TDSP_SYNTH_VOICES >= 5
 TDSP_SONGBUF_MEM static tdsp::MidiFileEvent g_buf5[MAX_EVENTS3];   // Synth E (2nd Plaits) song buffer
 #endif
+#if TDSP_SYNTH_VOICES >= 6
+TDSP_SONGBUF_MEM static tdsp::MidiFileEvent g_buf6[MAX_EVENTS3];   // Synth F (SoundFont) song buffer
+#endif
 #endif
 
 static bool endsWithMid(const char *s) {
@@ -1330,6 +1343,17 @@ static float  g_song5Bpm = 120.0f;
 static uint8_t g_song5Bpb = 4;
 static double g_song5LoopBeats = 0.0;
 static bool   g_song5LaunchPending = false;
+#endif
+#if TDSP_SYNTH_VOICES >= 6
+// Voice index 4 (Synth F — the melodic SoundFont (TSF) track).
+static char   g_curSong6Name[64] = "";
+static char   g_curSong6Arg[100] = "";
+static bool   g_song6Loop = false;
+static bool   g_song6WasPlaying = false;
+static float  g_song6Bpm = 120.0f;
+static uint8_t g_song6Bpb = 4;
+static double g_song6LoopBeats = 0.0;
+static bool   g_song6LaunchPending = false;
 #endif
 static bool          g_syncProbe = false;   // @SYNCPROBE: 1 Hz drift probe (PLAN §9)
 static elapsedMillis g_syncProbeClock;      // throttle for the probe print
@@ -4032,6 +4056,12 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
               tdsp::catdb::jsonStr(reply, external_psram_size ? "Missing /sf2 drum font" : "PSRAM required");
           }
 #endif
+#if TDSP_TSF_ENGINES >= 1
+          if (!g_htReady) {   // Synth F card: the SoundFont track has no font loaded
+              reply.printf("%s\"synthX%d\":", any ? "," : "", kDexedVoices + kOpllVoices + TDSP_PLAITS_ENGINES); any = true;
+              tdsp::catdb::jsonStr(reply, g_sdReady ? "Missing " TDSP_TSF_FONT_PATH : "SD card required");
+          }
+#endif
           (void)any;
           reply.print("}");
         }
@@ -4081,6 +4111,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #if TDSP_SYNTH_VOICES >= 5
         &g_songFollow5,
 #endif
+#if TDSP_SYNTH_VOICES >= 6
+        &g_songFollow6,
+#endif
     };
     tdsp::MidiFileEvent* const bufTbl[kSynthVoices] = { g_buf,
 #if TDSP_VOICE2
@@ -4095,6 +4128,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #if TDSP_SYNTH_VOICES >= 5
         g_buf5,
 #endif
+#if TDSP_SYNTH_VOICES >= 6
+        g_buf6,
+#endif
     };
     const int bufCapTbl[kSynthVoices] = { MAX_EVENTS,
 #if TDSP_VOICE2
@@ -4107,6 +4143,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
         MAX_EVENTS3,
 #endif
 #if TDSP_SYNTH_VOICES >= 5
+        MAX_EVENTS3,
+#endif
+#if TDSP_SYNTH_VOICES >= 6
         MAX_EVENTS3,
 #endif
     };
@@ -4123,6 +4162,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #if TDSP_SYNTH_VOICES >= 5
         g_curSong5Name,
 #endif
+#if TDSP_SYNTH_VOICES >= 6
+        g_curSong6Name,
+#endif
     };
     char* const argTbl[kSynthVoices] = { g_curSongArg,
 #if TDSP_VOICE2
@@ -4136,6 +4178,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #endif
 #if TDSP_SYNTH_VOICES >= 5
         g_curSong5Arg,
+#endif
+#if TDSP_SYNTH_VOICES >= 6
+        g_curSong6Arg,
 #endif
     };
     bool* const loopTbl[kSynthVoices] = { &g_loop,
@@ -4151,6 +4196,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #if TDSP_SYNTH_VOICES >= 5
         &g_song5Loop,
 #endif
+#if TDSP_SYNTH_VOICES >= 6
+        &g_song6Loop,
+#endif
     };
     bool* const wasTbl[kSynthVoices] = { &g_songWasPlaying,
 #if TDSP_VOICE2
@@ -4164,6 +4212,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #endif
 #if TDSP_SYNTH_VOICES >= 5
         &g_song5WasPlaying,
+#endif
+#if TDSP_SYNTH_VOICES >= 6
+        &g_song6WasPlaying,
 #endif
     };
     float* const bpmTbl[kSynthVoices] = { &g_songBpm,
@@ -4179,6 +4230,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #if TDSP_SYNTH_VOICES >= 5
         &g_song5Bpm,
 #endif
+#if TDSP_SYNTH_VOICES >= 6
+        &g_song6Bpm,
+#endif
     };
     uint8_t* const bpbTbl[kSynthVoices] = { &g_songBpb,
 #if TDSP_VOICE2
@@ -4192,6 +4246,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #endif
 #if TDSP_SYNTH_VOICES >= 5
         &g_song5Bpb,
+#endif
+#if TDSP_SYNTH_VOICES >= 6
+        &g_song6Bpb,
 #endif
     };
     double* const loopBeatsTbl[kSynthVoices] = { &g_songLoopBeats,
@@ -4207,6 +4264,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #if TDSP_SYNTH_VOICES >= 5
         &g_song5LoopBeats,
 #endif
+#if TDSP_SYNTH_VOICES >= 6
+        &g_song6LoopBeats,
+#endif
     };
     bool* const launchTbl[kSynthVoices] = { &g_songLaunchPending,
 #if TDSP_VOICE2
@@ -4220,6 +4280,9 @@ FLASHMEM static void bindTrackSongState(Track &t, int i) {
 #endif
 #if TDSP_SYNTH_VOICES >= 5
         &g_song5LaunchPending,
+#endif
+#if TDSP_SYNTH_VOICES >= 6
+        &g_song6LaunchPending,
 #endif
     };
     t.follow = followTbl[i]; t.buf = bufTbl[i]; t.bufCap = bufCapTbl[i];
@@ -4344,6 +4407,21 @@ FLASHMEM static void tracksInit() {
       bindTrackSongState(tp, pv);   // follow/buf/name/loop/tempo BY INDEX
       tp.liveSrcMask = 0; tp.srcChMask = 0;
     }
+#endif
+#if TDSP_TSF_ENGINES >= 1
+    // Melodic SoundFont (TSF) track — Synth F — right after the Plaits tracks (HeteroTsf.h).
+    static_assert((kDexedVoices + kOpllVoices + TDSP_PLAITS_ENGINES) < kSynthVoices,
+                  "HeteroTsf track index (DEXED+OPLL+PLAITS) must be < kSynthVoices");
+    { const int tv = kDexedVoices + kOpllVoices + TDSP_PLAITS_ENGINES;
+      Track &tt = g_tracks[tv];
+      tt.player = &g_playerV[tv]; tt.arp = &g_arpFilterV[tv]; tt.router = &g_routerV[tv];
+      tt.looper = trackLooper(tv); tt.sink = &g_htSink;
+      tt.chMask = tdsp::MidiFilePlayer::kMaskNoDrums;
+      tt.setLevel = heteroTsfSetVol;
+      tt.caps = { false, false, false, false, false, false, false, false, false, /*tempoSourceWhenIdle*/true };
+      tt.tag = "song6";
+      bindTrackSongState(tt, tv);   // follow/buf/name/loop/tempo BY INDEX
+      tt.liveSrcMask = 0; tt.srcChMask = 0; }
 #endif
 #endif
 
@@ -4559,6 +4637,9 @@ FLASHMEM void setup() {
 #if TDSP_SYNTH_VOICES >= 5
     trackWireSetup(g_tracks[4]);   // Synth E (2nd Plaits)
 #endif
+#if TDSP_SYNTH_VOICES >= 6
+    trackWireSetup(g_tracks[5]);   // Synth F (SoundFont)
+#endif
 #elif TDSP_HETERO
     trackWireSetup(g_tracks[kDexedVoices]);   // the melodic OPLL voice (own router/arp -> OPLL sink)
 #endif
@@ -4594,6 +4675,9 @@ FLASHMEM void setup() {
 #endif
 #if TDSP_HETERO_PLAITS
     for (int k = 0; k < TDSP_PLAITS_ENGINES; k++) heteroPlaitsBegin(k);   // bring up each Plaits track (D, E) + open its mix slot
+#if TDSP_TSF_ENGINES >= 1
+    heteroTsfBegin();   // Synth F: load the melodic SoundFont (handpan) into PSRAM; sums into the Plaits sub-mix
+#endif
 #endif
 #if TDSP_VOICE2
     g_voice2On = true;
@@ -4837,6 +4921,9 @@ void loop() {
 #if TDSP_SYNTH_VOICES >= 5
         if (*g_tracks[4].launchPending) { *g_tracks[4].launchPending = false; trackFire(g_tracks[4], /*anchorNow=*/true); }
 #endif
+#if TDSP_SYNTH_VOICES >= 6
+        if (*g_tracks[5].launchPending) { *g_tracks[5].launchPending = false; trackFire(g_tracks[5], /*anchorNow=*/true); }
+#endif
 #endif
         g_syncAnchorNow = false;   // defensive: a not-found launch never leaves it armed
         for (Track &t : g_tracks) t.player->tick();   // a just-launched player hits its downbeat now (already-running ones no-op)
@@ -4860,6 +4947,9 @@ void loop() {
     trackLoopTick(g_tracks[2]); trackLoopTick(g_tracks[3]);   // voices 3/4 loop re-arm
 #if TDSP_SYNTH_VOICES >= 5
     trackLoopTick(g_tracks[4]);   // Synth E loop re-arm
+#endif
+#if TDSP_SYNTH_VOICES >= 6
+    trackLoopTick(g_tracks[5]);   // Synth F loop re-arm
 #endif
 #endif
 

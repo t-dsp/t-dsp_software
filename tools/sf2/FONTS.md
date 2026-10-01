@@ -82,3 +82,15 @@ The bank-128 kit inside these fonts is the weak link for the live-groove feature
 dedicated drum-only SoundFont's kit onto any base here (melodic stays, drums upgrade, one file for
 the card, no reflash), see **`DRUM_FONTS.md`** and `merge_drum_sf2.py`. Merge first, then run
 `build_gu_fonts.py` on the result to re-fit the PSRAM budget.
+
+## Handpan (melodic SoundFont track, "Synth F")
+
+`tools/fetch_handpan.py` builds `tools/sf2/fonts/handpan.sf2` (~2.9 MB, git-ignored) from the FreePats
+**"Hang tuned in D minor"** bank (CC0 1.0): 9 pitches (A3 D4 E4 F4 G4 A4 Bb4 C5 D5), 2 round-robin takes
+per pitch spread over velocity, mono 32 kHz, 2.5 s takes. Two presets: `Hang Dm` (only the real pitches
+sound, as the recordists advise) and `Hang Dm chromatic` (gaps filled from the nearest take). Loaded by
+the kitchen-sink jay-mint env (`TDSP_TSF_ENGINES=1`, `TDSP_TSF_FONT_PATH=/sf2/handpan.sf2`) as the sixth
+melodic track; resident in PSRAM next to the 1.7 MB drum font. Push:
+`python tools/sync_assets.py --skip-manifest --soundfont --sf2-src tools/sf2/fonts/handpan.sf2 --sf2-dest /sf2/handpan.sf2`
+then reboot. Knobs: `--variants`, `--seconds`, `--rate`; `--sf2 other.sf2 --label "Name"` rebuilds any font compactly.
+
