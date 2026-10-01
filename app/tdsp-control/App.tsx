@@ -1259,10 +1259,23 @@ export default function App() {
   // @TRK<i>.INSTR and its browser shows @TRK<i>.INSTRS, never the Dexed /dexed cart library.
   const isPickerEngine = (eng?: string) => !!eng && eng !== 'dexed';
   // Fetch each non-Dexed track's patch list once its engine is known (from @STATE), for the browser.
+  // Also re-fetch when the device's instrument COUNT (@STATE tracks[].ninstr) disagrees with the list
+  // we hold: the list is live on the device (the SoundFont track grows/shrinks it on a font swap, a
+  // firmware update can lengthen it) and the app may have stayed connected through the ESP32 across a
+  // Teensy reflash, or missed the pushed refresh. One re-request per distinct count, so a device that
+  // reports a count the list can't match never loops.
+  const instrsReqRef = useRef<Record<number, number>>({});
   useEffect(() => {
-    if (!connected) return;
-    Object.keys(trkEng).forEach(k => { const i = +k; if (isPickerEngine(trkEng[i]) && !trkEngInstrs[i]) tp.trk(i, 'INSTRS'); });
-  }, [connected, trkEng]);   // eslint-disable-line react-hooks/exhaustive-deps
+    if (!connected) { instrsReqRef.current = {}; return; }   // a fresh link may fetch again
+    Object.keys(trkEng).forEach(k => {
+      const i = +k;
+      if (!isPickerEngine(trkEng[i])) return;
+      const have = trkEngInstrs[i];
+      const want = trkNinstr[i] | 0;
+      if (!have) { tp.trk(i, 'INSTRS'); return; }
+      if (want > 0 && have.length !== want && instrsReqRef.current[i] !== want) { instrsReqRef.current[i] = want; tp.trk(i, 'INSTRS'); }
+    });
+  }, [connected, trkEng, trkNinstr, trkEngInstrs]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   // Pick a voice for slot `target` (1 = main synth, 2 = the keyboard's Voices-2). Both share
   // the same browse state (cart/folder position) but have independent selection + device
