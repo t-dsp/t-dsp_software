@@ -781,6 +781,7 @@ tac5212::TAC5212 g_codec(Wire);
 // ESP32 control/flash — the reusable kit (EN=37, IO0=36, Serial7). Pins 28/29/36/37
 // don't overlap the audio pins, so it coexists with the audio graph.
 TDspProgrammingKit kit;
+#include "Esp32SdFlash.inc.h"   // @ESPUP: program the ESP32 from an SD image (needs `kit` + SD). Opt-in: TDSP_ESP32_SDFLASH.
 elapsedMillis hb;
 
 static void hardResetCodecPower() {
@@ -3210,6 +3211,10 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
 #ifdef TDSP_FLASHERX
     else if (strncmp(line, "@FXUP", 5) == 0)      fxRunUpdate(reply);    // OTA self-update on the arriving link (USB or ESP32/Serial7); blocks, reboots
 #endif
+#ifdef TDSP_ESP32_SDFLASH
+    else if (strncmp(line, "@ESPUP?", 7) == 0)    reply.printf("@ESPUP_LAST=%s\n", g_espupLast);   // result of the last ESP32 flash (client asks after the box comes back)
+    else if (strncmp(line, "@ESPUP=", 7) == 0)    espupCommand(line + 7, reply);   // flash an SD image into the ESP32; blocks, reboots the ESP32
+#endif
 #if defined(TDSP_HAS_REPLAYGAIN) && TDSP_DIAGNOSTICS
     else if (strncmp(line, "@GAIN=", 6) == 0)     runGainSweep(atoi(line + 6));   // resume sweep from index
 #endif
@@ -3283,8 +3288,16 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         if (us) { *us = 0; ext = us + 1; }
         streamDir(reply, buf, ext);
     }
-    else if (strncmp(line, "@WB=", 4) == 0) {                                    // host->SD file write; raw payload follows. USB CDC only.
-        if (&reply != &Serial) reply.println("@WERR=0\x1fusb only");
+    else if (strncmp(line, "@WB=", 4) == 0) {                                    // host->SD file write; raw payload follows.
+        // USB CDC lanes always. The ESP32 UART lane too when the SD flasher is built: the ESP32's
+        // '!tunnel' verb turns the WebSocket into a raw byte pipe to Serial7, which is how an ESP32
+        // image gets staged on the card over Wi-Fi before @ESPUP burns it (see Esp32SdFlash.inc.h).
+#ifdef TDSP_ESP32_SDFLASH
+        bool lane_ok = (&reply == &Serial) || (&reply == (Stream*)&kit.uart());
+#else
+        bool lane_ok = (&reply == &Serial);
+#endif
+        if (!lane_ok) reply.println("@WERR=0\x1fusb only");
         else { g_sdWrite.begin(line + 4, reply); g_sdWriteSrc = &reply; }
     }
     else if (strncmp(line, "@CRC=", 5) == 0) {                                   // checksum an SD file (round-trip verify for @WB)
@@ -4336,6 +4349,9 @@ FLASHMEM void setup() {
     // high. kit.begin() also sets up the LED (heartbeat).
     Serial.println("[setup] kit.begin() -> boot ESP32 into app (EN+IO0 held)..."); Serial.flush();
     kit.begin();
+#ifdef TDSP_ESP32_SDFLASH
+    espSdFlashBegin();   // 8 KB Serial7 RX ring: the ESP32 tunnel's @WB payload must survive SD write stalls
+#endif
     delay(300);
 
     Serial.println("[setup] i2c bus recover..."); Serial.flush();
@@ -4987,6 +5003,11 @@ void loop() {
     static char line[288];   // 288 fits a full 32-step @ARPSEQ line relayed from the BLE app
     static size_t n = 0;
     while (kit.uart().available()) {
+#ifdef TDSP_ESP32_SDFLASH
+        // An @WB started on THIS lane (ESP32 '!tunnel' staging an image to the SD card) streams its raw
+        // payload here — route it to the SD before the line assembler sees it (mirrors the USB lanes).
+        if (g_sdWrite.receiving() && g_sdWriteSrc == (Stream*)&kit.uart()) { g_sdWrite.pump(kit.uart(), kit.uart()); if (g_sdWrite.receiving()) break; else continue; }
+#endif
         char c = (char)kit.uart().read();
         if (c == '\n' || n >= sizeof(line) - 1) {
             line[n] = 0;

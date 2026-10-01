@@ -280,8 +280,10 @@ static void buildStatus(char *buf, size_t n) {
   bool connected = a2dp_sink.is_connected();
   const char *peer = connected ? a2dp_sink.get_peer_name() : "";
   if (!peer) peer = "";
-  snprintf(buf, n, "{\"conn\":%d,\"disc\":%d,\"vol\":%u,\"hpf\":%u,\"mpe\":%u,\"rg\":%u,\"peer\":\"%s\"}",
-           connected ? 1 : 0, g_discoverable ? 1 : 0, g_volume, g_hpf, g_midiMode, g_replayGain, peer);
+  // "fw" = this image's build stamp, so a client can confirm which ESP32 firmware is running
+  // (the over-Wi-Fi ESP32 update, tools/esp32_ota_wifi.py, checks it after the reboot).
+  snprintf(buf, n, "{\"conn\":%d,\"disc\":%d,\"vol\":%u,\"hpf\":%u,\"mpe\":%u,\"rg\":%u,\"peer\":\"%s\",\"fw\":\"%s %s\"}",
+           connected ? 1 : 0, g_discoverable ? 1 : 0, g_volume, g_hpf, g_midiMode, g_replayGain, peer, __DATE__, __TIME__);
 }
 
 // ---- Local A2DP pairing/connection primitives -----------------------------
@@ -496,7 +498,7 @@ static void setCatalog(BLECharacteristic *ch, const char *list) {
 // Refresh the status characteristic value and notify any subscribed client.
 static void blePushStatus() {
   if (!g_statChar) return;
-  char buf[96];
+  char buf[192];
   buildStatus(buf, sizeof(buf));
   g_statChar->setValue((uint8_t *)buf, strlen(buf));
   if (g_bleClientConnected) g_statChar->notify();
@@ -912,7 +914,7 @@ static void wsHandleText(uint8_t num, const char *msg) {
     else if (!strcmp(msg, "!reconnect"))  { Serial.println("[ws] cmd: RECONNECT");  ctrlReconnect(); }
     else if (!strcmp(msg, "!forget"))     { Serial.println("[ws] cmd: FORGET");     ctrlForget(); }
     else if (!strcmp(msg, "!disconnect")) { Serial.println("[ws] cmd: DISCONNECT"); ctrlDisconnect(); }
-    else if (!strcmp(msg, "!status"))     { char b[96]; buildStatus(b, sizeof(b)); wsSendLine(num, b); }
+    else if (!strcmp(msg, "!status"))     { char b[192]; buildStatus(b, sizeof(b)); wsSendLine(num, b); }
     else if (!strcmp(msg, "!fxflash")) {
       // Enter the FlasherX tunnel: hand this client raw UART0 access and put the
       // Teensy into @FXUP mode. From here, hex bytes arrive as WS BIN frames.
@@ -931,6 +933,15 @@ static void wsHandleText(uint8_t num, const char *msg) {
     else if (!strcmp(msg, "!fxend")) {
       g_fxBridge = false;
       wsSendLine(num, "!fxbridge=off");
+    }
+    else if (!strcmp(msg, "!tunnel")) {
+      // Generic raw tunnel: same WS<->UART0 byte pipe as !fxflash, but WITHOUT sending @FXUP. The
+      // client speaks to the Teensy directly through it -- used to stage an ESP32 image on the SD
+      // card with the Teensy's @WB file-write primitive (its payload is raw bytes, which the
+      // line-oriented relay can't carry), before @ESPUP has the Teensy burn it into this chip.
+      // Ends on "!fxend" or the idle timeout, like the flash bridge.
+      g_fxClient = num; g_fxBridge = true; g_fxLastByte = millis();
+      wsSendLine(num, "!tunnel=on");
     }
     else Serial.printf("[ws] unknown local cmd: %s\n", msg);
     return;
@@ -951,7 +962,7 @@ static void onWsEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t lengt
       // Sending them cost ~9.4 KB of unwanted traffic the instant a client connected,
       // which flooded lwIP and wedged the socket (EAGAIN) before the app's first @READ
       // even went out -- so the catalog load timed out. Hardware-verified.
-      char buf[96];
+      char buf[192];
       buildStatus(buf, sizeof(buf));
       wsSendLine(num, buf);
       break;
@@ -1321,7 +1332,7 @@ class WifiControlTransport : public ControlTransport {
   bool     mdnsUp   = false;
 
   void broadcastStatus() {
-    char buf[96];
+    char buf[192];
     buildStatus(buf, sizeof(buf));
     wsSendLine(-1, buf);
   }
@@ -1446,6 +1457,7 @@ void setup() {
   // stack; WiFi just joins the LAN + starts the WS server. Exactly one is compiled in.
   controlTransport().begin();
   requestCatalog();   // cache the Teensy's song/instrument lists early
+  Serial.printf("[fw] built %s %s\n", __DATE__, __TIME__);   // mirrored by the Teensy as "[esp] [fw] ..." -> visible on USB after an @ESPUP
   Serial.println("Ready: streaming audio + control transport both live.");
 }
 

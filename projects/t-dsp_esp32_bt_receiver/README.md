@@ -158,7 +158,9 @@ on port **81**. The app opens a WebSocket and exchanges **TEXT frames**:
 | `!reconnect` | **"Connect Bluetooth Audio"** — dial the last bonded phone. Required: nothing auto-reconnects (see *Explicit-only* below), so this is how audio gets started |
 | `!forget` | Clear the stored bond, then enter pairing mode |
 | `!disconnect` | Drop the current A2DP source |
-| `!status` | Reply with the status JSON to the requesting client |
+| `!status` | Reply with the status JSON to the requesting client (includes `"fw":"<build date time>"`) |
+| `!fxflash` / `!fxend` | FlasherX tunnel: raw WS<->UART0 byte pipe + `@FXUP` to the Teensy (Teensy self-update over Wi-Fi, `tools/fxflash_wifi.py`) |
+| `!tunnel` / `!fxend` | The same raw byte pipe WITHOUT `@FXUP`: the client talks to the Teensy directly, e.g. `@WB` to stage a file on the SD card (`tools/esp32_ota_wifi.py`) |
 | anything else | Ignored (logged) |
 
 **Outbound (ESP32 → app)**
@@ -178,6 +180,16 @@ on port **81**. The app opens a WebSocket and exchanges **TEXT frames**:
 > overruns the ESP32's lwIP TCP send buffer (~5.7 KB); `WiFiClient::write()` then fails
 > with `errno 11 EAGAIN` ("No more processes") and the connection **never writes again** —
 > inbound commands still reach the Teensy, but no reply ever comes back. See `wsSendLine()`.
+
+**Reflashing BOTH chips over Wi-Fi (no USB host).** Teensy: `tools/fxflash_wifi.py` streams an
+Intel-hex through `!fxflash` into FlasherX (`@FXUP`, Teensy built with `TDSP_FLASHERX`). ESP32:
+`tools/esp32_ota_wifi.py` stages the `.bin` on the Teensy's SD card through `!tunnel` + `@WB`,
+verifies it with `@CRC`, then `@ESPUP=<path><hexoffset>` has the Teensy reset this chip into
+its ROM bootloader and burn the file over the UART (Teensy built with `TDSP_ESP32_SDFLASH`, see
+`firmware/mix-kit/src/Esp32SdFlash.inc.h`). The WebSocket drops while the ESP32 is being
+written; the tool waits for the AP to come back and confirms via `!status`'s `fw` stamp and the
+Teensy's `@ESPUP?` result. Both paths run at the fixed 115200 UART: ~2.5 min per 1.7 MB stage
+and again to burn.
 
 **Liveness (both ends).** The server pings every client every 15 s and drops it after
 two unanswered pings (`enableHeartbeat(15000, 4000, 2)` in `WifiControlTransport::begin`);

@@ -108,12 +108,13 @@ class TDspProgrammingKit {
     }
   }
 
-  // Drive the ESP32 into ROM download (verify + retry) and enter USB<->ESP32 passthrough.
-  template <class UsbSerial>
-  void enterFlash(UsbSerial &host) {
-    host.println("[kit] FLASH MODE: ESP32 -> download; USB<->ESP32 passthrough. Run esptool "
-                 "--before no_reset --after no_reset --baud 115200. Send escape to exit.");
-    host.flush();
+  // Reset the ESP32 into ROM serial-download mode, VERIFYING the ROM answered (its boot banner
+  // arrives on the UART) and re-pulsing up to dlAttempts times. Does NOT enter passthrough and
+  // does not touch the audio hook — the caller decides what talks to the ROM next: the USB
+  // passthrough (enterFlash, for esptool on a PC) or the Teensy itself (an on-board flasher that
+  // streams an image from the SD card, see firmware/mix-kit Esp32SdFlash.inc.h). Returns true
+  // when the ROM responded. The banner bytes are consumed, so the UART is clean for SYNC.
+  bool resetIntoDownload(Print &log) {
     NVIC_SET_PRIORITY(cfg_.uartIrq, 64);          // UART ISR above audio DMA -> no FIFO drops
     HardwareSerial &u = *cfg_.esp.uart;
     bool inDl = false;
@@ -127,9 +128,19 @@ class TDspProgrammingKit {
       while ((uint32_t)(millis() - t0) < cfg_.dlWindowMs)
         while (u.available()) { u.read(); ++n; }  // ROM banner = reset landed
       esp_.setBootLow(false);                     // release IO0 (strap already latched)
-      host.printf("[kit] reset attempt %u: %d ROM bytes\n", a, n);
+      log.printf("[kit] reset attempt %u: %d ROM bytes\n", a, n);
       inDl = (n > 4);
     }
+    return inDl;
+  }
+
+  // Drive the ESP32 into ROM download (verify + retry) and enter USB<->ESP32 passthrough.
+  template <class UsbSerial>
+  void enterFlash(UsbSerial &host) {
+    host.println("[kit] FLASH MODE: ESP32 -> download; USB<->ESP32 passthrough. Run esptool "
+                 "--before no_reset --after no_reset --baud 115200. Send escape to exit.");
+    host.flush();
+    bool inDl = resetIntoDownload(host);
     host.println(inDl ? "[kit] ESP32 in DOWNLOAD -- passthrough ON."
                       : "[kit] WARN: no ROM response (check EN wiring) -- passthrough ON anyway.");
     if (onEnter_) onEnter_();                      // e.g. AudioNoInterrupts()
