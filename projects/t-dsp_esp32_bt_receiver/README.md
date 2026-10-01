@@ -191,6 +191,17 @@ written; the tool waits for the AP to come back and confirms via `!status`'s `fw
 Teensy's `@ESPUP?` result. Both paths run at the fixed 115200 UART: ~2.5 min per 1.7 MB stage
 and again to burn.
 
+**AP-first station policy (2026-10-01).** The access point is the connection that must not
+wobble; joining a LAN is a bonus. Because there is one radio, every station scan/attempt pulls
+the softAP off its channel, so `WifiNetManager` now: waits 45 s after boot before the first LAN
+round (lets the phone join first); never scans/joins while a phone is on the AP (HOLD); after 3
+failed rounds in a row pauses LAN attempts for 30 min (`"paused":true` in `/api/wifi`; "Connect
+now" / "Save" override); and after every failed round re-applies the AP config so the AP returns
+to `TDSP_AP_CHANNEL` (default 1) instead of staying parked on the LAN's channel. Measured on the
+jay-mint box with a WPA3-only router refusing association: AP ends on channel 1 (2412 MHz) after
+the rounds, 3 rounds then quiet. If you want the LAN to actually join, the router must offer
+WPA2 (WPA2/WPA3 mixed); the ESP32 advertises PMF-capable but this router rejects association.
+
 **Liveness (both ends).** The server pings every client every 15 s and drops it after
 two unanswered pings (`enableHeartbeat(15000, 4000, 2)` in `WifiControlTransport::begin`);
 browsers and React Native answer WS pings in the stack. The app, for its part, sends

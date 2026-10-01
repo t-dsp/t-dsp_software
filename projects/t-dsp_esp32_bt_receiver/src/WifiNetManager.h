@@ -24,11 +24,23 @@
 //         Joining a LAN on another channel would also drag the AP to that channel and knock the
 //         phone off. The UI's "Connect now" / "Save" override the hold explicitly.
 //       - A lost LAN link gets one quick retry (3 s) and then the same backoff + hold rules.
+//       - PAUSE: after 3 failed rounds in a row (router refusing us, wrong password, network gone)
+//         stop trying for 30 min. Every attempt drags the shared radio off the AP channel for up to
+//         15 s, and a phone joining T-DSP in that window fails or gets dropped — measured 2026-10-01
+//         with the LAN refusing association (WPA3-only router): attempts every 1-5 min made the
+//         AP path flaky. "Connect now" / "Save" clear the pause; so does a successful join.
+//       - CHANNEL: the AP lives on TDSP_AP_CHANNEL (default 1). A station attempt drags the single
+//         radio onto the LAN's channel and the AP stays there after a failure, so after every failed
+//         round (and a lost link) the AP config is re-applied and the channel restored.
+//       - GRACE: the first LAN round waits 45 s after boot so the phone can join the AP first.
 //
 // Threading: loop() runs on the Arduino task; the UI actions and JSON readers are called from the
 // AsyncTCP task (HTTP handlers). Every public method takes `mu_` (recursive: actions call each other).
 // The STA_DISCONNECTED event lambda runs on the WiFi event task and only bumps volatile counters.
 #pragma once
+#ifndef TDSP_AP_CHANNEL
+#define TDSP_AP_CHANNEL 1   // 2.4 GHz channel for the T-DSP access point (1/6/11); see startAp()
+#endif
 
 #include <Arduino.h>
 #include <Preferences.h>
@@ -73,7 +85,11 @@ class WifiNetManager {
     WiFi.mode(WIFI_AP_STA);
     startAp();
 
-    if (count_ > 0) { state_ = State::Waiting; nextAt_ = millis(); }   // scan right away (no phones yet)
+    // First LAN round only after a boot grace: the owner usually powers the box on and reaches for
+    // the app, and a phone joining T-DSP while a station attempt has the radio on the LAN's channel
+    // fails or gets dropped. 45 s lets that first join land; once a phone is on, HOLD keeps the LAN
+    // rounds off anyway. A LAN-first venue waits 45 s longer for tdsp.local -- acceptable.
+    if (count_ > 0) { state_ = State::Waiting; nextAt_ = millis() + kBootGraceMs; }
     else            { state_ = State::Idle; }
   }
 
@@ -104,6 +120,7 @@ class WifiNetManager {
         if (WiFi.status() == WL_CONNECTED) {
           state_ = State::Connected;
           backoffIdx_ = 0;
+          failStreak_ = 0;
           lastError_ = "";
           IPAddress ip = WiFi.localIP();
           Serial.printf("[wifi] joined \"%s\" %u.%u.%u.%u\n", curSsid_.c_str(), ip[0], ip[1], ip[2], ip[3]);
@@ -121,6 +138,7 @@ class WifiNetManager {
           lastError_ = "link lost";
           curSsid_ = "";
           backoffIdx_ = 0;
+          restoreApChannel();
           state_ = count_ ? State::Waiting : State::Idle;
           nextAt_ = now + kLostRetryMs;
         }
@@ -173,6 +191,7 @@ class WifiNetManager {
     if (count_ == 0 || state_ == State::Connecting) return;
     if (state_ == State::Connected) return;
     backoffIdx_ = 0;
+    failStreak_ = 0;
     force_ = true;
     state_ = State::Waiting;
     nextAt_ = millis();
@@ -226,6 +245,8 @@ class WifiNetManager {
     }
     bool held = state_ == State::Waiting && !scanning_ && !force_ && WiFi.softAPgetStationNum() > 0;
     o += ",\"held\":"; o += held ? "true" : "false";
+    bool paused = state_ == State::Waiting && !scanning_ && failStreak_ >= kPauseAfter;
+    o += ",\"paused\":"; o += paused ? "true" : "false";
     long wait = state_ == State::Waiting && !scanning_ ? ((long)nextAt_ - (long)now) / 1000 : 0;
     o += ",\"nextScanS\":" + String(wait < 0 ? 0 : wait);
     o += ",\"scans\":" + String(scans_) + ",\"attempts\":" + String(attempts_);
@@ -296,6 +317,10 @@ class WifiNetManager {
   State state_ = State::Idle;
   uint32_t nextAt_ = 0;
   uint8_t backoffIdx_ = 0;
+  uint8_t failStreak_ = 0;                 // failed scan/connect rounds in a row (see PAUSE)
+  static constexpr uint8_t  kPauseAfter = 3;
+  static constexpr uint32_t kBootGraceMs = 45000;
+  static constexpr uint32_t kPauseMs    = 30UL * 60UL * 1000UL;
   bool force_ = false;
   String curSsid_;
   String lastError_;
@@ -370,13 +395,38 @@ class WifiNetManager {
   }
 
   void startAp() {
-    apUp_ = WiFi.softAP(apSsid_.c_str(), apPass_.c_str());
+    // Own channel (TDSP_AP_CHANNEL, default 1), not the softAP default: the home router here sits on
+    // channel 6 and a neighbour on 11, and the AP had been dragged onto 6 by the LAN join attempts,
+    // so every phone<->T-DSP packet contended with the house Wi-Fi. A LAN join still moves the AP to
+    // the LAN's channel (one radio) -- that is the price of joining a LAN, and why the AP-first user
+    // keeps no saved LAN networks.
+    apUp_ = WiFi.softAP(apSsid_.c_str(), apPass_.c_str(), TDSP_AP_CHANNEL);
     if (!apUp_ && (apSsid_ != apSsidDefault_ || apPass_ != apPassDefault_)) {
       // Never leave the device unreachable: fall back to the build defaults.
       apSsid_ = apSsidDefault_; apPass_ = apPassDefault_;
-      apUp_ = WiFi.softAP(apSsid_.c_str(), apPass_.c_str());
+      apUp_ = WiFi.softAP(apSsid_.c_str(), apPass_.c_str(), TDSP_AP_CHANNEL);
     }
-    Serial.printf("[wifi] AP \"%s\" %s at %s\n", apSsid_.c_str(), apUp_ ? "up" : "FAILED", WiFi.softAPIP().toString().c_str());
+    Serial.printf("[wifi] AP \"%s\" %s at %s ch%d\n", apSsid_.c_str(), apUp_ ? "up" : "FAILED", WiFi.softAPIP().toString().c_str(), (int)TDSP_AP_CHANNEL);
+  }
+
+  // One radio: a station attempt (and a scan) drags the softAP onto the target's channel, and the
+  // AP STAYS there after the attempt fails -- so phones on T-DSP ended up sharing channel 6 with the
+  // house router for good. After every failed round (and a lost link) put the AP back on its own
+  // channel. Only called when no phone is on the AP (HOLD), except for a manual Connect now.
+  void restoreApChannel() {
+    // Unconditional: esp_wifi_get_channel() reported the AP's CONFIGURED channel (1) while the radio
+    // (and the beacons a phone sees) were still on the station's channel 6 after a failed join --
+    // hardware-observed 2026-10-01. Re-apply the AP config with its channel, which the driver honours
+    // once the station is disconnected, and set the primary channel as well.
+    uint8_t before = 0; wifi_second_chan_t sec = WIFI_SECOND_CHAN_NONE;
+    esp_wifi_get_channel(&before, &sec);
+    wifi_config_t cfg;
+    esp_err_t e1 = esp_wifi_get_config(WIFI_IF_AP, &cfg);
+    if (e1 == ESP_OK) { cfg.ap.channel = TDSP_AP_CHANNEL; e1 = esp_wifi_set_config(WIFI_IF_AP, &cfg); }
+    esp_err_t e2 = esp_wifi_set_channel(TDSP_AP_CHANNEL, WIFI_SECOND_CHAN_NONE);
+    uint8_t after = 0; esp_wifi_get_channel(&after, &sec);
+    Serial.printf("[wifi] AP channel -> ch%d (reported ch%u -> ch%u; cfg %d, set %d)\n",
+                  (int)TDSP_AP_CHANNEL, (unsigned)before, (unsigned)after, (int)e1, (int)e2);
   }
 
   bool startScan(bool manual) {
@@ -448,7 +498,17 @@ class WifiNetManager {
     }
     curSsid_ = "";
     state_ = count_ ? State::Waiting : State::Idle;
-    nextAt_ = millis() + backoffMs();
-    if (backoffIdx_ < 250) backoffIdx_++;
+    restoreApChannel();
+    if (failStreak_ < 250) failStreak_++;
+    if (failStreak_ >= kPauseAfter) {
+      // Give the AP a steady radio: stop hammering a LAN that keeps refusing us. Retried in 30 min,
+      // or at once from the UI (Connect now / Save).
+      nextAt_ = millis() + kPauseMs;
+      Serial.printf("[wifi] %u failed rounds in a row (%s): pausing LAN attempts for 30 min so the AP stays steady\n",
+                    (unsigned)failStreak_, lastError_.c_str());
+    } else {
+      nextAt_ = millis() + backoffMs();
+      if (backoffIdx_ < 250) backoffIdx_++;
+    }
   }
 };
