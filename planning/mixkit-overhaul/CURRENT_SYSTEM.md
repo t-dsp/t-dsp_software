@@ -329,6 +329,8 @@ voice-2: `@SONG2F=`, `@SONG2RESTART=`, `@SONG2=stop`, `@LOOP2=`.
 `@DXVOICE2=`, `@DXPICK2=`.
 **Tracks:** `@TRK<i>.{PLAY,SONGF,RESTART,STOP,VOL,LOOP,ARP*,SRC,SRCCH,INSTR,DXPICK,DXVOICE}`.
 **Panic:** `@PANIC` (every build — stops players/drums/MIDI loops, panics arps, sustain-up + bend 0 + all-notes-off on every sink; replies `@PANIC`).
+**Restart:** `@REBOOT` (every build — acks `@REBOOT` on every lane, stops a running recording, then the Teensy resets itself; its setup() ends with the late `kit.bootApp()` ESP32 reset, so the WHOLE box restarts and the Wi-Fi AP comes back ~15 s later; the app's quick reconnect picks it up). App: Settings › Connection › Restart T-DSP.
+**Drum sampler switch:** `@DRUMTSF=0|1` (TDSP_DRUM_TSF builds; `@STATE.drumfont.on`) — 0 stops the groove and UNLOADS the resident drum font (ch10 silent, its PSRAM freed so Synth F's list gains the larger melodic fonts); 1 reloads the remembered font (refused while a big melodic font occupies the room). Acks `@DRUMTSF=<state>`; Synth F re-pushes its voice list either way. App: Drums card › Drum sampler switch.
 **Clock/metro:** `@BPM=`, `@METROLOCK=`, `@QUANTIZE=`, `@METRO=`, `@METROMUTE=`,
 `@METROSIG=`, `@METROVOL=`.
 **Catalog/transport:** `@GETCAT`, `@REINDEX`, `@READ=`, `@LS=`, `@WB=`, `@CRC=`, `@FXUP`.

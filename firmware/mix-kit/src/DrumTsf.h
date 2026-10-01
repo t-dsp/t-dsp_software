@@ -44,6 +44,21 @@ bool g_drumFontIsKits = false;
 // drumTsfBegin() at boot and drumTsfReload() on a runtime swap.
 char g_drumFontPath[72]    = "";
 char g_drumFontDisplay[40] = "";
+bool g_drumTsfOff = false;     // the user switched the sampler OFF (@DRUMTSF=0): its font is unloaded, PSRAM freed
+
+// DRUM SAMPLER OFF (@DRUMTSF=0, app: Drums card switch): unload the resident drum font so its PSRAM
+// (1.7 MB for the Mars kit font) is free for a LARGER melodic font on the SoundFont track. Channel 10
+// goes silent (the sink is null-safe); the font path is remembered so @DRUMTSF=1 reloads it.
+static void drumTsfUnload() {
+    tsf *old = g_drumTsfHandle;
+    AudioNoInterrupts();
+    g_drumTsfHandle = nullptr;     // TsfSink / AudioSynthTsf both tolerate a null font (silence)
+    g_drumTsf.begin(nullptr);
+    AudioInterrupts();
+    if (old) tsf_close(old);
+    g_drumTsfOff = true;
+    Serial.printf("[drumtsf] sampler OFF -> %s unloaded, PSRAM freed\n", g_drumFontPath);
+}
 
 // Load the drum font, set channel 10 as GM drums, and open mix slot 2. Returns true if
 // the font loaded (samples resident in PSRAM). Call from setup() after the melodic

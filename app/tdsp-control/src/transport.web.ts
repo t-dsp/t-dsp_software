@@ -266,6 +266,7 @@ export class WebSerialTransport implements Transport {
   drumVol(pct: number) { this.send('@DRUMVOL=' + Math.max(0, Math.min(150, Math.round(pct)))); }
   requestFonts() { this.send('@FONTS'); }
   drumFont(path: string) { this.send('@DRUMFONT=' + path); }
+  drumTsf(on: boolean) { this.send('@DRUMTSF=' + (on ? 1 : 0)); }
   songPlay(arg: string) { this.send('@SONGF=' + arg); }
   songRestart(arg: string) { this.send('@SONGRESTART=' + arg); }
   stopSong() { this.send('@SONG=stop'); }
@@ -280,6 +281,7 @@ export class WebSerialTransport implements Transport {
   arec(cmd: string) { this.send('@AREC.' + cmd); }   // Audio Recorder
   launchQuantize(on: boolean) { this.send('@QUANTIZE=' + (on ? 1 : 0)); }
   panic() { this.send('@PANIC'); }
+  reboot() { this.send('@REBOOT'); }
   metronome(on: boolean) { this.send('@METRO=' + (on ? 1 : 0)); }
   metronomeMute(muted: boolean) { this.send('@METROMUTE=' + (muted ? 1 : 0)); }
   metronomeSig(bpb: number) { this.send('@METROSIG=' + Math.max(1, Math.min(16, Math.round(bpb)))); }

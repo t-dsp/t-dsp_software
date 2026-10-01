@@ -343,6 +343,7 @@ export class BleTransport implements Transport {
   drumVol(pct: number) { this.relay('@DRUMVOL=' + Math.max(0, Math.min(150, Math.round(pct)))); }
   requestFonts() { this.relay('@FONTS'); }
   drumFont(path: string) { this.relay('@DRUMFONT=' + path); }
+  drumTsf(on: boolean) { this.relay('@DRUMTSF=' + (on ? 1 : 0)); }
   songPlay(arg: string) { this.relay('@SONGF=' + arg); }
   songRestart(arg: string) { this.relay('@SONGRESTART=' + arg); }
   stopSong() { this.relay('@SONG=stop'); }
@@ -357,6 +358,7 @@ export class BleTransport implements Transport {
   arec(cmd: string) { this.relay('@AREC.' + cmd); }   // Audio Recorder
   launchQuantize(on: boolean) { this.relay('@QUANTIZE=' + (on ? 1 : 0)); }
   panic() { this.relay('@PANIC'); }
+  reboot() { this.relay('@REBOOT'); }
   metronome(on: boolean) { this.relay('@METRO=' + (on ? 1 : 0)); }
   metronomeMute(muted: boolean) { this.relay('@METROMUTE=' + (muted ? 1 : 0)); }
   metronomeSig(bpb: number) { this.relay('@METROSIG=' + Math.max(1, Math.min(16, Math.round(bpb)))); }

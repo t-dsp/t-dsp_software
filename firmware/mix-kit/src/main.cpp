@@ -3409,6 +3409,21 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
 #if defined(TDSP_DRUM_TSF)
     else if (strcmp(line, "@FONTS") == 0)          streamFonts(reply);           // list swappable drum SF2s from /sf2/fonts.tsv
     else if (strncmp(line, "@DRUMFONT=", 10) == 0) drumFontSwap(line + 10, reply);// swap the resident ch10 drum font (runtime SF2 reload)
+    // DRUM SAMPLER on/off (app: Drums card switch). OFF unloads the drum font (ch10 silent, its PSRAM
+    // freed so Synth F can take a larger melodic font); ON reloads the remembered font. Either way the
+    // SoundFont track re-pushes its voice list so the "Load font" / "Too big" split follows the new budget.
+    else if (strncmp(line, "@DRUMTSF=", 9) == 0) {
+        const bool want = atoi(line + 9) != 0;
+        if (!want && g_drumTsfHandle) { drumStop(); drumTsfUnload(); }
+        else if (want && g_drumTsfOff) {
+            if (drumTsfReload(g_drumFontPath)) g_drumTsfOff = false;
+            else Serial.println("[drumtsf] sampler ON failed: the drum font no longer fits (unload the melodic font first)");
+        }
+#if TDSP_TSF_ENGINES >= 1
+        g_htCatalogDirty = true;   // the melodic track's font budget changed -> re-tag + re-push its list
+#endif
+        reply.printf("@DRUMTSF=%d\n", g_drumTsfOff ? 0 : 1);
+    }
 #endif
     else if (strncmp(line, "@DRUMMAP=", 9) == 0) {   // ch10 note-map mode: 0=GmReduce (fold Roland 22/26->42/46), 1=Passthrough
         // Passthrough is ONLY correct on a font that has real regions at 22/26 (a V-Drums/TD-11
@@ -3453,6 +3468,22 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         reply.printf("@METRO=%d\n", g_conductor.running() ? 1 : 0);
 #endif
         reply.print("@PANIC\n");
+    }
+    // RESTART THE WHOLE BOX (app: Settings > Connection > Restart T-DSP). The Teensy resets itself; its
+    // setup() ends with the late kit.bootApp() ESP32 reset, so the ESP32 (Wi-Fi AP / BLE) restarts too and
+    // the app's quick reconnect picks the link back up ~15 s later. Acked on EVERY lane first so the
+    // requester sees it before the link drops; a running recording is closed so its WAV is complete.
+    else if (strcmp(line, "@REBOOT") == 0) {
+        panicAll();
+#if TDSP_AUDIOREC
+        if (g_arec.recording()) g_arec.stopRecording();
+#endif
+        ctrl.print("@REBOOT\n");
+        Serial.println("[sys] @REBOOT -> restarting the whole box"); Serial.flush();
+        kit.uart().flush();
+        delay(400);                      // let the ESP32 relay the ack to the phone
+        SCB_AIRCR = 0x05FA0004;          // Cortex-M system reset -> setup()
+        while (1) {}
     }
     else if (strncmp(line, "@HPF=", 5) == 0)      setDacHpfMode(atoi(line + 5));
     else if (strncmp(line, "@LOOP=", 6) == 0)   { g_loop = (atoi(line + 6) != 0);
@@ -4045,7 +4076,8 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
 #if defined(TDSP_DRUM_TSF)
         // Resident drum font (path + short label) so the app's @DRUMFONT picker highlights the current one.
         reply.print(",\"drumfont\":{\"path\":"); tdsp::catdb::jsonStr(reply, g_drumFontPath);
-        reply.print(",\"display\":"); tdsp::catdb::jsonStr(reply, g_drumFontDisplay); reply.print("}");
+        reply.print(",\"display\":"); tdsp::catdb::jsonStr(reply, g_drumFontDisplay);
+        reply.printf(",\"on\":%d}", g_drumTsfOff ? 0 : 1);   // sampler switch (@DRUMTSF=): 0 = font unloaded, ch10 silent
 #endif
         // Reasons for features that were BUILT (compiled in) but are currently UNAVAILABLE, so the app
         // can GREY the card (not hide it) and show WHY. A feature appears here only when its code is

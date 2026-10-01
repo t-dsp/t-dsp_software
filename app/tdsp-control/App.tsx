@@ -230,7 +230,8 @@ export default function App() {
   // resident font (path + display) from @STATE.drumfont. Selecting one sends @DRUMFONT= (a picker, not
   // a layer); the device acks with a "@DRUMFONT=" line, which triggers a catalog reload for the new kits.
   const [fonts, setFonts] = useState<DrumFont[]>([]);
-  const [drumFont, setDrumFont] = useState<{ path: string; display: string }>({ path: '', display: '' });
+  const [drumFont, setDrumFont] = useState<{ path: string; display: string; on?: boolean }>({ path: '', display: '' });
+  const [drumTsfBusy, setDrumTsfBusy] = useState(false);   // @DRUMTSF= in flight (a reload takes ~0.5 s)
   // USB Audio interface (build-flag gated, caps.usbaudio → TDSP_USB_AUDIO). The device is a
   // 24-bit/48k USB sound card: host audio in → mix bus, the mix out → host. `active` = the host
   // has the audio stream open (playing/recording); `gain` = the USB-in return level (0..150 %,
@@ -409,7 +410,7 @@ export default function App() {
     if (j.drums) setDrums(d => ({ ...d, kit: j.drums.kit | 0, playing: j.drums.playing ? (grooveDisp(d.sel) || d.playing || '—') : null, prog: j.drums.playing ? (j.drums.p != null ? j.drums.p / 1000 : (d.prog >= 0 ? d.prog : -1)) : 0 }));
     if (j.drums?.vol != null) setDrumVol(Math.max(0, Math.min(150, j.drums.vol | 0)));
     // Resident drum font (runtime swap builds only emit j.drumfont): path + short display label.
-    if (j.drumfont) setDrumFont({ path: j.drumfont.path || '', display: j.drumfont.display || '' });
+    if (j.drumfont) setDrumFont({ path: j.drumfont.path || '', display: j.drumfont.display || '', on: typeof j.drumfont.on === 'number' ? !!j.drumfont.on : undefined });
     if (j.voice) {
       if (j.voice.cart) {
         const rel = j.voice.cart;
@@ -601,6 +602,11 @@ export default function App() {
       // re-hydrate state. NO catalog reload / SD re-read: reading /tdsp/drumkits.ndjson on every swap
       // was the source of the "reload catalog" errors + laggy, unreliable kit changes.
       tp.trk(drumIdxRef.current, 'INSTRS');
+      tp.requestState();
+    } else if (line.startsWith('@DRUMTSF=')) {
+      // Drum sampler switch ack: 1 = font resident, 0 = unloaded (PSRAM freed for Synth F's fonts).
+      setDrumTsfBusy(false);
+      setDrumFont(d => ({ ...d, on: line.slice(9).trim() !== '0' }));
       tp.requestState();
     } else if (line.startsWith('@DRUMFONTERR=')) {
       // The swap failed (missing/too-big font); the device kept the previous font. Refresh the picker
@@ -995,6 +1001,17 @@ export default function App() {
   // Keep the screen on while connected (Settings › Connection, default on) so the phone never sleeps
   // out of its session in the first place. Released on disconnect or when the user turns it off.
   const [keepAwakeOn, setKeepAwakeOn] = useState(true);
+  // Restart T-DSP: a two-tap button (the second tap within 5 s sends @REBOOT) — no modal plumbing, and a
+  // stray tap can't restart the box. `rebooting` shows the "coming back" state until the link returns.
+  const [rebootArmed, setRebootArmed] = useState(false);
+  const [rebooting, setRebooting] = useState(false);
+  useEffect(() => { if (!rebootArmed) return; const t = setTimeout(() => setRebootArmed(false), 5000); return () => clearTimeout(t); }, [rebootArmed]);
+  useEffect(() => { if (connected && rebooting) setRebooting(false); }, [connected]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const restartBox = () => {
+    if (!rebootArmed) { setRebootArmed(true); return; }
+    setRebootArmed(false); setRebooting(true);
+    tp.reboot();   // the device acks @REBOOT on every lane, then resets; the link drops and quick-reconnect brings it back
+  };
   useEffect(() => { loadKeepAwakePref().then(setKeepAwakeOn).catch(() => {}); }, []);
   useEffect(() => { setKeepAwake(connected && keepAwakeOn); }, [connected, keepAwakeOn]);
   useEffect(() => () => setKeepAwake(false), []);
@@ -2171,7 +2188,20 @@ export default function App() {
   const drumKitBody = (
     <>
       <VolSlider label="Volume" value={drumVol} onChange={setDrumVol} onCommit={v => tp.drumVol(v)} disabled={!connected} />
-      {caps.drumfontsel && fonts.length > 0 && (
+      {drumFont.on !== undefined && (
+        // DRUM SAMPLER switch (sampled-drum TSF builds report drumfont.on). OFF unloads the drum font —
+        // channel 10 goes silent and its PSRAM (1.7 MB) is freed, so the SoundFont synth's font list
+        // gains the larger melodic fonts; ON reloads it (the melodic font may then have to shrink).
+        <Row><View style={{ flex: 1 }}>
+            <Text style={s.text}>Drum sampler</Text>
+            <Text style={s.muted}>{drumFont.on
+              ? 'On — the drum font is loaded. Turn it off to free its memory for larger SoundFonts on the SoundFont synth.'
+              : 'Off — drum font unloaded, drums are silent. Its memory is available to the SoundFont synth; turn on to reload (fails while a big melodic font is loaded).'}</Text>
+          </View>
+          {drumTsfBusy ? <ActivityIndicator color={C.accent} /> :
+            <Switch value={!!drumFont.on} disabled={!connected} onValueChange={v => { setDrumTsfBusy(true); tp.drumTsf(v); }} />}</Row>
+      )}
+      {caps.drumfontsel && fonts.length > 0 && drumFont.on !== false && (
         // Drum Font picker (runtime @DRUMFONT swap): switch which SF2 is resident. A picker, not a
         // layer — one font is loaded at a time. Highlight the resident one (@STATE.drumfont.path,
         // falling back to the list's current-flag). Selecting one swaps live; the kit list below
@@ -2591,6 +2621,15 @@ export default function App() {
           <Pressable style={[s.btn, s.btnWide]} onPress={reindex} disabled={!connected || busy}>
             {busy ? <ActivityIndicator color={C.text} /> : <Text style={s.btnText}>Rebuild catalog (@REINDEX)</Text>}
           </Pressable>
+          <Row><View style={{ flex: 1 }}>
+              <Text style={s.text}>Restart T-DSP</Text>
+              <Text style={s.muted}>{rebooting
+                ? 'Restarting… the Teensy resets, then its ESP32 (Wi-Fi). The link comes back by itself in about 15 s.'
+                : 'Reboots the whole box (Teensy + ESP32). Stops everything that is playing; a running recording is closed first.'}</Text>
+            </View>
+            <Pressable style={[s.btn, rebootArmed && { backgroundColor: '#b62324' }]} onPress={restartBox} disabled={!connected || rebooting}>
+              {rebooting ? <ActivityIndicator color={C.text} /> : <Text style={s.btnText}>{rebootArmed ? 'Tap again to restart' : 'Restart'}</Text>}
+            </Pressable></Row>
           <Row><View style={{ flex: 1 }}>
               <Text style={s.text}>Keep the screen on while connected</Text>
               <Text style={s.muted}>{keepAwakeSupported

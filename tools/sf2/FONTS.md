@@ -113,6 +113,10 @@ it into a scratch folder and rename, or it overwrites the GeneralUser variants):
 `python tools/sf2/build_gu_fonts.py tools/sf2/fonts/gm_tim.sf2 <scratch> 18000` → `gm_gu18.sf2` (4.5 MB,
 136 presets, 9 kHz bandwidth) → push as `/sf2/gm_tim18.sf2`. HW-verified: loads in 645 ms with 299 KB
 PSRAM to spare, plays, the handpan swaps back in 187 ms. 16 kHz = 4.1 MB if more headroom is needed.
+**Need a bigger melodic font?** Drums card › *Drum sampler* switch OFF (`@DRUMTSF=0`) unloads the 1.7 MB drum
+font; Synth F's list then re-tags the fonts that now fit (e.g. TimGM6mb 5.9 MB) as *Load font*. Switch it back
+on after returning to a small melodic font (the reload is refused while the room is taken). Not persisted: a
+reboot reloads the drum font.
 Other melodic sources: FreePats (CC0, SF2 downloads per instrument; `fetch_handpan.py --sf2` only
 rebuilds Hang-style one-take-per-pitch banks, a general compactor is not written yet). Push:
 `python tools/sync_assets.py --skip-manifest --soundfont --sf2-src tools/sf2/fonts/handpan.sf2 --sf2-dest /sf2/handpan.sf2`

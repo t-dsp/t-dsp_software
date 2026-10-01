@@ -124,6 +124,7 @@ export interface Transport {
   // acked with a "@DRUMFONT=<path>" line (the app reloads the catalog for the new font's kits). ----
   requestFonts(): void;                               // ask for the available drum fonts (@FONTS)
   drumFont(path: string): void;                       // swap the resident drum SF2 (@DRUMFONT=<path>)
+  drumTsf(on: boolean): void;                         // drum SAMPLER on/off (@DRUMTSF=1|0): off unloads its font so Synth F can take a larger melodic one
   songPlay(arg: string): void;                        // play by name/filename (@SONGF=) — mirrors playGrooveFile
   songRestart(arg: string): void;                     // hard restart from the top on a fresh downbeat (@SONGRESTART=): zeroes the clock, ignores launch-quantize
   stopSong(): void;
@@ -131,6 +132,7 @@ export interface Transport {
   songLoop(on: boolean): void;                        // loop the current song (@LOOP=)
   launchQuantize(on: boolean): void;                  // defer song/groove starts to the next bar (@QUANTIZE=)
   panic(): void;                                      // STUCK NOTES: stop everything + release every note on every synth (@PANIC)
+  reboot(): void;                                     // RESTART the whole box (@REBOOT: the Teensy resets, its boot then resets the ESP32); the link drops and comes back
   metronome(on: boolean): void;                       // MASTER TRANSPORT play/stop (the metronome is the clock) (@METRO=)
   metronomeMute(muted: boolean): void;                // is the click AUDIBLE? default muted; transport runs either way (@METROMUTE=)
   metronomeSig(bpb: number): void;                    // metronome/idle time signature = N beats/bar (@METROSIG=)
