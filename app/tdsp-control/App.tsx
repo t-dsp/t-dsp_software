@@ -335,7 +335,14 @@ export default function App() {
   // Long-press sheet on a take: Play / Favorite / Delete (favorites can't be deleted; delete asks first).
   const [arecMenu, setArecMenu] = useState<{ arg: string; name: string; isFav: boolean; toggleFav: () => void } | null>(null);
   const [arecConfirm, setArecConfirm] = useState(false);
-  const [arecRefresh, setArecRefresh] = useState(0);   // bumps the /recordings listing after a delete
+  const [arecRefresh, setArecRefresh] = useState(0);   // bumps the /recordings listing after a delete or a finished take
+  // A take just finished (rec true -> false): the firmware has closed the file by the time it pushes
+  // that status, so re-list the folder now and the new recording appears without leaving the page.
+  const arecWasRec = useRef(false);
+  useEffect(() => {
+    if (arecWasRec.current && !arec.rec) setArecRefresh(k => k + 1);
+    arecWasRec.current = arec.rec;
+  }, [arec.rec]);
   const applyArec = (j: any) => { if (j && typeof j === 'object') setArec(a => ({ ...a, ...j, play: { ...a.play, ...(j.play || {}) } })); };
   const [aloop, setAloop] = useState({ sel: 0, bars: 4, mono: false, follow: true, capS: 0, level: 100,
                                        st: [0, 0, 0], p: [0, 0, 0] });
