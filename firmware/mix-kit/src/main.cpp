@@ -862,7 +862,7 @@ static void setMasterVolumePct(int pct) {
 // ESP32 UART. mode 0 = off (all-pass), 1/2/3 = 1/12/96 Hz cutoff. Chip-global,
 // applied to the DAC output (the ADC path is disabled in this firmware). g_hpf keeps
 // the current mode so @STATE can hydrate the app's filter control on connect.
-static int g_hpf = 0;   // 0=off, 1=1Hz, 2=12Hz, 3=96Hz
+static int g_hpf = TDSP_DEFAULT_HPF_MODE;   // 0=off, 1=1Hz, 2=12Hz, 3=96Hz; boot default from tdsp_hw_config.h / the board header, applied in setupCodec()
 static void setDacHpfMode(int mode) {
     if (mode < 0 || mode > 3) mode = 0;
     tac5212::DacHpf hpf;

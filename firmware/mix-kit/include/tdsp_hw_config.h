@@ -218,7 +218,13 @@ static inline int tdspMuxAutoSelectCodec(uint8_t codecAddr) {
 #define TDSP_DEFAULT_BPM 120.0f           // master clock start tempo (40..240)
 #endif
 #ifndef TDSP_DEFAULT_HPF_MODE
-#define TDSP_DEFAULT_HPF_MODE 0           // 0=off,1=1Hz,2=12Hz,3=96Hz DAC highpass (not yet applied at boot)
+// TAC5212 DAC high-pass at boot: 0=off (all-pass), 1=~1 Hz, 2=12 Hz, 3=96 Hz (first-order IIR,
+// fs-relative: 0.00002/0.00025/0.002 x fs). Default 12 Hz: the FM chips (OPLL/OPL3) and Plaits put
+// DC offset and sub-sonic energy on the bus, which only heats speakers and eats headroom; 12 Hz is
+// inaudible on music (<0.5 dB at 30 Hz) yet settles in tens of ms after a DC step, where the 1 Hz
+// setting takes seconds to recover from a thump. 96 Hz would eat bass. Applied in setupCodec();
+// the app's Settings > TAC5212 control (@HPF=) changes it at runtime and @STATE reports it.
+#define TDSP_DEFAULT_HPF_MODE 2
 #endif
 #ifndef TDSP_DEFAULT_MPE
 #define TDSP_DEFAULT_MPE 0                // 0 = start in normal MIDI, 1 = start in MPE
