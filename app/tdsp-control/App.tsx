@@ -7,7 +7,7 @@
 // (title + live value + the same header controls); tapping a card opens that section's
 // own page. No nav library — just a `route` string ('home' | section id).
 import React, { useState, useRef, useEffect, useMemo } from 'react';
-import { View, Text, Pressable, ScrollView, FlatList, TextInput, Switch, ActivityIndicator, Platform, RefreshControl, useWindowDimensions, AppState as RNAppState } from 'react-native';
+import { View, Text, Pressable, ScrollView, FlatList, TextInput, Switch, ActivityIndicator, Platform, RefreshControl, useWindowDimensions, Modal, AppState as RNAppState } from 'react-native';
 import type { AppStateStatus } from 'react-native';
 import { createTransport } from './src/transportFactory';
 import { createDiscovery } from './src/discoveryFactory';
@@ -332,6 +332,10 @@ export default function App() {
   const [arec, setArec] = useState<{ ok: boolean; rec: boolean; file: string; sec: number; drop: number; play: ArecPlay }>(
     { ok: false, rec: false, file: '', sec: 0, drop: 0, play: { file: '', st: 'stop', pos: 0, len: 0 } });
   const [arecFiles, setArecFiles] = useState<{ arg: string; name: string }[]>([]);   // the browser's current list, for ⏮/⏭
+  // Long-press sheet on a take: Play / Favorite / Delete (favorites can't be deleted; delete asks first).
+  const [arecMenu, setArecMenu] = useState<{ arg: string; name: string; isFav: boolean; toggleFav: () => void } | null>(null);
+  const [arecConfirm, setArecConfirm] = useState(false);
+  const [arecRefresh, setArecRefresh] = useState(0);   // bumps the /recordings listing after a delete
   const applyArec = (j: any) => { if (j && typeof j === 'object') setArec(a => ({ ...a, ...j, play: { ...a.play, ...(j.play || {}) } })); };
   const [aloop, setAloop] = useState({ sel: 0, bars: 4, mono: false, follow: true, capS: 0, level: 100,
                                        st: [0, 0, 0], p: [0, 0, 0] });
@@ -2770,7 +2774,47 @@ export default function App() {
             selected={arec.play.file ? '/recordings/' + arec.play.file : undefined}
             playing={arec.play.st === 'play' ? '/recordings/' + arec.play.file : undefined}
             onSelectFile={full => tp.arec('PLAY=' + full)}
-            onFolderList={items => setArecFiles(items.map(it => ({ arg: it.arg, name: it.name })))} />
+            onFolderList={items => setArecFiles(items.map(it => ({ arg: it.arg, name: it.name })))}
+            onLongPressItem={(it, ctx) => { setArecConfirm(false); setArecMenu({ arg: it.arg, name: it.name, isFav: ctx.isFav, toggleFav: ctx.toggleFav }); }}
+            refreshKey={arecRefresh} />
+          {/* Long-press sheet: Play · Favorite/Unfavorite · Delete (asks first; favorites are protected) · Cancel */}
+          <Modal visible={!!arecMenu} transparent animationType="fade" onRequestClose={() => setArecMenu(null)}>
+            <Pressable style={{ flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'flex-end' }} onPress={() => setArecMenu(null)}>
+              <Pressable onPress={() => {}} style={{ backgroundColor: C.card, borderTopLeftRadius: 16, borderTopRightRadius: 16, padding: 16, paddingBottom: 36, gap: 10, borderWidth: 1, borderColor: C.border }}>
+                <Text style={[s.text, { fontSize: 16, fontWeight: '700' }]} numberOfLines={1}>{arecMenu?.name}</Text>
+                {!arecConfirm ? (
+                  <>
+                    <Pressable style={[s.btn, s.btnWide]} onPress={() => { if (arecMenu) tp.arec('PLAY=' + arecMenu.arg); setArecMenu(null); }}>
+                      <Text style={s.btnText}>▶  Play</Text>
+                    </Pressable>
+                    <Pressable style={[s.btn, s.btnWide, s.btnGhost]} onPress={() => { arecMenu?.toggleFav(); setArecMenu(null); }}>
+                      <Text style={s.btnText}>{arecMenu?.isFav ? '☆  Remove from favorites' : '★  Favorite'}</Text>
+                    </Pressable>
+                    <Pressable style={[s.btn, s.btnWide, s.btnGhost, arecMenu?.isFav && { opacity: 0.4 }]} disabled={!!arecMenu?.isFav} onPress={() => setArecConfirm(true)}>
+                      <Text style={s.btnText}>🗑  Delete…</Text>
+                    </Pressable>
+                    {arecMenu?.isFav && <Text style={s.muted}>Favorites can't be deleted. Remove it from favorites first.</Text>}
+                    <Pressable style={[s.btn, s.btnWide, s.btnGhost]} onPress={() => setArecMenu(null)}>
+                      <Text style={s.btnText}>Cancel</Text>
+                    </Pressable>
+                  </>
+                ) : (
+                  <>
+                    <Text style={s.muted}>Delete this recording from the card? This can't be undone.</Text>
+                    <Pressable style={[s.btn, s.btnWide, { backgroundColor: '#b62324' }]} onPress={() => {
+                      if (arecMenu) { tp.arec('DEL=' + arecMenu.arg); setTimeout(() => setArecRefresh(k => k + 1), 500); }
+                      setArecMenu(null); setArecConfirm(false);
+                    }}>
+                      <Text style={s.btnText}>Yes, delete {arecMenu?.name}</Text>
+                    </Pressable>
+                    <Pressable style={[s.btn, s.btnWide, s.btnGhost]} onPress={() => setArecConfirm(false)}>
+                      <Text style={s.btnText}>Cancel</Text>
+                    </Pressable>
+                  </>
+                )}
+              </Pressable>
+            </Pressable>
+          </Modal>
         </View>
       ),
     },

@@ -58,6 +58,7 @@ const WIDE_MIN = 620;   // px of pane width at/above which the two-column layout
 
 export function MediaBrowser({
   tp, root, ext, enabled, selected, playing, onSelectFile, injectFolders, onFolderList, scope, accent = C.accent, source,
+  onLongPressItem, refreshKey,
 }: {
   tp?: Transport; root?: string; ext?: string; enabled?: boolean;   // @LS mode (ignored when `source` is set)
   selected?: string; playing?: string;
@@ -65,6 +66,10 @@ export function MediaBrowser({
   injectFolders?: InjectFolder[];
   onFolderList?: (files: BrowserItem[]) => void;   // publish the in-view item list (header ‹/› steps through it)
   scope?: string;      // favorites/recents namespace; defaults to the root path
+  // Long-press on an item (both modes): the caller gets the item plus its favorite state/toggle, so
+  // it can show a context menu (e.g. the Audio Recorder's favorite / delete sheet).
+  onLongPressItem?: (it: BrowserItem, ctx: { isFav: boolean; toggleFav: () => void }) => void;
+  refreshKey?: number; // bump to re-list the current @LS folder (after a delete / a new file)
   accent?: string;     // section accent for the play indicator / active highlights
   source?: BrowserSource;   // SOURCE mode: caller supplies the data (voices)
 }) {
@@ -90,7 +95,7 @@ export function MediaBrowser({
       .then(r => { if (alive) setEntries(sortEntries(r.entries)); })
       .catch(e => { if (alive) { setEntries([]); setErr(String((e as any)?.message || e || 'browse failed')); } });
     return () => { alive = false; };
-  }, [path, ext, enabled, tp, source]);
+  }, [path, ext, enabled, tp, source, refreshKey]);
 
   const lsVirtuals = useMemo(() => {
     const out: { key: string; label: string; icon: string; leaves: BrowserItem[] }[] =
@@ -199,7 +204,8 @@ export function MediaBrowser({
     const fav = vm.fav?.isFav(it.arg);
     const onPress = it.onPress ?? (vm.onItem ? () => vm.onItem!(it) : undefined);
     return (
-      <Pressable key={it.arg} onPress={onPress} style={[s.brRow, isSel && s.brRowSel]}>
+      <Pressable key={it.arg} onPress={onPress} style={[s.brRow, isSel && s.brRowSel]}
+        onLongPress={onLongPressItem ? () => onLongPressItem(it, { isFav: !!fav, toggleFav: () => vm.fav?.toggle(it) }) : undefined} delayLongPress={350}>
         <Text style={[s.brRowIcon, { color: isPlaying ? accent : C.muted }]}>{isPlaying ? '▶' : isSel ? '•' : '♪'}</Text>
         <Text style={[s.brRowName, isPlaying && { color: accent, fontWeight: '700' }]} numberOfLines={1}>{it.name}</Text>
         {vm.fav && (
@@ -243,7 +249,7 @@ export function MediaBrowser({
 
   // The right-pane item list (with the device-search folder/cart rows floated on top while searching).
   const itemList = (
-    <ScrollView style={s.brScroll} nestedScrollEnabled>
+    <ScrollView style={s.brScroll} nestedScrollEnabled contentContainerStyle={{ paddingBottom: 36 }}>
       {vm.loading || (searchActive && vm.searching && !shownItems.length && !vm.resultFolders.length) ? (
         <View style={s.brLoad}><ActivityIndicator color={accent} /><Text style={[s.muted, { marginTop: 8 }]}>{vm.searching ? 'Searching…' : 'Loading…'}</Text></View>
       ) : (
@@ -268,7 +274,7 @@ export function MediaBrowser({
         <View style={s.brPanes}>
           <View style={[s.brPane, s.brLeft]}>
             <View style={s.brPaneHead}>{navBar}</View>
-            <ScrollView style={s.brScroll} nestedScrollEnabled>
+            <ScrollView style={s.brScroll} nestedScrollEnabled contentContainerStyle={{ paddingBottom: 36 }}>
               {vm.shortcuts.length > 0 && <><Text style={s.brSection}>SHORTCUTS</Text>{vm.shortcuts.map(folderRow)}</>}
               <Text style={s.brSection}>FOLDERS</Text>
               {vm.loading ? <View style={s.brLoad}><ActivityIndicator color={accent} /></View>
@@ -284,7 +290,7 @@ export function MediaBrowser({
       ) : (
         <View style={[s.brPane, { flex: 1 }]}>
           <View style={s.brPaneHead}>{!vm.singlePane && navBar}{searchBar}</View>
-          <ScrollView style={s.brScroll} nestedScrollEnabled>
+          <ScrollView style={s.brScroll} nestedScrollEnabled contentContainerStyle={{ paddingBottom: 36 }}>
             {!searchActive && !vm.singlePane && (!vm.drill || vm.atRoot) && vm.shortcuts.map(folderRow)}
             {!searchActive && !vm.singlePane && (!vm.drill || vm.atRoot) && vm.folders.map(folderRow)}
             {searchActive && vm.deviceSearch && vm.resultFolders.map(folderRow)}
