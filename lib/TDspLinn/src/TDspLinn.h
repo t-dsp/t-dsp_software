@@ -51,8 +51,8 @@ public:
     void query(int param)          { if (param >= 0 && param < 299) push(Op{OpQuery, (int16_t)param, 0, 0}); }
     void syncAll() {
         if (!isLinn()) return;
-        for (int p = 0;   p <= 66;  p++) enqueue(p);     // LEFT split
-        for (int p = 100; p <= 166; p++) enqueue(p);     // RIGHT split
+        for (int p = 0;   p <= 66;  p++) if (!isTrigger(p)) enqueue(p);     // LEFT split
+        for (int p = 100; p <= 166; p++) if (!isTrigger(p)) enqueue(p);     // RIGHT split
         for (int p = 200; p <= 270; p++) enqueue(p);     // globals
         syncTotal_ = pendCount_; syncDone_ = 0;
         pushSync();
@@ -126,11 +126,20 @@ public:
             probeAt_ = 0;
             if (resp_ != RespYes && probes_ < 2 && inflight_ < 2) { probes_++; sendBurst(Op{OpQuery, 234, 0, 0}, now); if (probes_ < 2) probeAt_ = now + 2500; }
         }
-        // reply timeout: the device went quiet with data in flight -> stop writing (see FLOW CONTROL)
-        if (inflight_ > 0 && (int32_t)(now - lastSendAt_) >= 1500) {
+        // reply timeout. The LinnStrument drops an incoming message now and then under load, so a lost
+        // read is simply re-sent (up to 2 retries); only a LONG silence (6 timeouts in a row, ~2.5 s) means
+        // the device has stopped consuming USB MIDI -> pause control (see FLOW CONTROL). The first-contact
+        // probes are the exception: no answer to them at all = not answering.
+        if (inflight_ > 0 && (int32_t)(now - lastSendAt_) >= (resp_ == RespYes ? 400 : 1500)) {
             inflight_ = 0;
-            if (resp_ != RespNo) { resp_ = RespNo; qHead_ = qTail_ = 0; pendCount_ = 0; memset(pend_, 0, sizeof(pend_)); paintTotal_ = 0;
-                                   Serial.println("[linn] LinnStrument is not answering USB MIDI (Power/MIDI set to the jacks? asleep?) -> control paused"); pushStatus(); }
+            quietTimeouts_++;
+            if (resp_ == RespYes && quietTimeouts_ < 6) {
+                if ((lastOp_.kind == OpQuery || lastOp_.kind == OpSet) && retries_ < 2) { retries_++; sendBurst(lastOp_, now); }
+                else retries_ = 0;
+            } else if (resp_ != RespNo) {
+                resp_ = RespNo; qHead_ = qTail_ = 0; pendCount_ = 0; memset(pend_, 0, sizeof(pend_)); paintTotal_ = 0;
+                Serial.println("[linn] LinnStrument is not answering USB MIDI (Power/MIDI set to the jacks? asleep?) -> control paused"); pushStatus();
+            }
         }
         if (resp_ != RespYes) return;   // nothing goes out until the device has answered once
 
@@ -140,7 +149,7 @@ public:
             if (b != lastTempoSent_ && b >= 1 && b <= 360) { lastTempoSent_ = b; lastTempoAt_ = now; set(238, b); }
         }
         // drain: queued ops first, then pad painting, then the sync's pending reads
-        if (inflight_ < 2 && (int32_t)(now - lastSendAt_) >= 3) {
+        if (inflight_ < 1 && (int32_t)(now - lastSendAt_) >= 6) {   // strictly one burst at a time (the device answers each)
             if (qHead_ != qTail_) { Op op = q_[qHead_]; qHead_ = (qHead_ + 1) % kQ; sendBurst(op, now); }
             else if (paintCursor_ < paintTotal_) { sendBurst(Op{OpPaint, 0, 0, 0}, now); }
             else if (pendCount_ > 0) {
@@ -197,9 +206,13 @@ private:
         nrpnRaw(299, readBack);
         dev_.send_now();
         inflight_++; lastSendAt_ = now;
+        if (!(op.kind == lastOp_.kind && op.a == lastOp_.a && op.b == lastOp_.b && op.c == lastOp_.c)) retries_ = 0;
+        lastOp_ = op;
     }
+    static bool isTrigger(int p) { const int q = p % 100; return p < 200 && (q == 62 || q == 63 || q == 64 || q == 66); }
     void onReply(int p, int v) {
         if (inflight_ > 0) inflight_--;
+        quietTimeouts_ = 0; retries_ = 0;
         const bool first = (resp_ != RespYes);
         resp_ = RespYes;
         if (p >= 0 && p < 299) {
@@ -222,6 +235,7 @@ private:
         for (auto &a : asm_) a = Asm();
         memset(pend_, 0, sizeof(pend_)); pendCount_ = 0; qHead_ = qTail_ = 0; inflight_ = 0;
         syncTotal_ = syncDone_ = 0; resp_ = RespUnknown; probeAt_ = 0; probes_ = 0; resyncAt_ = 0; paintTotal_ = paintCursor_ = 0;
+        quietTimeouts_ = 0; retries_ = 0; lastOp_ = Op{OpQuery, -1, 0, 0};
     }
 
     MIDIDevice &dev_;
@@ -235,7 +249,8 @@ private:
     uint8_t     pend_[(kMaxParam + 7) / 8];
     int         pendCount_ = 0, qCursor_ = 0;
     Op          q_[kQ];
-    int         qHead_ = 0, qTail_ = 0, inflight_ = 0, probes_ = 0;
+    int         qHead_ = 0, qTail_ = 0, inflight_ = 0, probes_ = 0, quietTimeouts_ = 0, retries_ = 0;
+    Op          lastOp_{OpQuery, -1, 0, 0};
     uint32_t    lastSendAt_ = 0, probeAt_ = 0, resyncAt_ = 0, lastTempoAt_ = 0;
     int         syncDone_ = 0, syncTotal_ = 0, lastTempoSent_ = -1;
     int         paintColour_ = 0, paintCursor_ = 0, paintTotal_ = 0;

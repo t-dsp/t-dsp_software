@@ -5,7 +5,19 @@ the Teensy's USB-host port and lets you read and change every LinnStrument setti
 the NRPN control surface the instrument exposes over MIDI. Nothing here changes how notes reach the
 synths; it adds a *control* path back to the instrument.
 
-Status: **plan only** (2026-10-01). Nothing built.
+Status (2026-10-01, same day): **phases 0–3 BUILT and verified on jay-mint** (commit 0349434 + follow-up).
+`lib/TDspLinn` + `@LINN` protocol in the firmware, `Settings › LinnStrument` (`src/ui/LinnPanel.tsx`,
+`src/linnParams.ts`) in the app, EAS-published. Facts learned on the device:
+- USB identity: product string **"LinnStrument MIDI"**, VID `0xF055`, PID `0x0069` (match on the string).
+- The device answers NRPN 299 reads for **197 of the 205** parameters polled (the write-only sequencer
+  triggers 62/63/64/66 (+100) never answer and are skipped); a full sync takes ~3 s one read at a time.
+- It occasionally drops an incoming message under load: a lost read is retried (≤ 2×) rather than treated
+  as "not answering".
+- **USBHost_t36's MIDI `write_packed()` spins forever** once both transmit buffers are in flight and the
+  device doesn't complete the transfers — the first build hung the whole box. Every burst now ends in a
+  read, one burst is in flight at a time, and six consecutive silent timeouts pause control.
+- Round trip verified: `@LINN.SET=19,12` → `@LINN.V=19,12` (device confirms), restored to 24.
+Phase 4 (remembered toggles via `@APP`) not done; the Follow/Tempo switches reset at boot.
 
 ---
 
