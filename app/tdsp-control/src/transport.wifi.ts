@@ -23,7 +23,7 @@ import { encodeSequence, encodeArpParams } from './arpSeq';
 import { rdFrames, base64ToBytes } from './loopXfer';
 import type { SeqStep, ArpWireParams } from './arpSeq';
 import type { BrowseEntry, BrowseResult } from './browse';
-import type { Transport, LineHandler, DirPage } from './transport';
+import type { Transport, LineHandler, DirPage, ConnectOptions } from './transport';
 
 // mDNS name the firmware advertises (TDSP_MDNS_HOST / TDSP_WS_PORT in main.cpp).
 // Callers can pass a bare host/IP instead — see the constructor.
@@ -53,6 +53,16 @@ export class WiFiTransport implements Transport {
   private url: string;
   private buf = '';
   private handlers = new Set<LineHandler>();
+  private dropHandlers = new Set<() => void>();
+  // Liveness. lastRx = when the last frame arrived on the live socket. The heartbeat below asks the
+  // ESP32 for its status ('!status' is answered locally, no Teensy round trip) whenever the link has
+  // been silent for a while, and declares the link dead if that goes unanswered — a half-open socket
+  // (phone back from sleep, device rebooted, AP restarted) otherwise sits at readyState OPEN forever,
+  // every send silently vanishing, with nothing to tell the UI.
+  private lastRx = 0;
+  private hbTimer: any = null;
+  private hbSentAt = 0;                 // when the pending liveness probe went out (0 = none pending)
+  private probeWaiters: ((alive: boolean) => void)[] = [];
   private file: FilePending | null = null;
   private dir: DirPending | null = null;
   private voices: VoicesPending | null = null;
@@ -65,15 +75,16 @@ export class WiFiTransport implements Transport {
 
   isConnected() { return !!this.ws && this.ws.readyState === 1 /* OPEN */; }
 
-  connect(): Promise<void> {
+  connect(opts?: ConnectOptions): Promise<void> {
     this.abandonOpening();
+    const timeoutMs = Math.max(500, opts?.timeoutMs ?? 8000);
     return new Promise((resolve, reject) => {
       let settled = false;
       const done = (fn: () => void) => { if (settled) return; settled = true; clearTimeout(deadline); fn(); };
       const mine = () => this.opening === ws;
       // Bound the whole connect: an unreachable host (wrong LAN, device asleep, .local not
       // resolving on Android) can otherwise leave the UI's Connect button wedged.
-      const deadline = setTimeout(() => done(() => { if (mine()) this.opening = null; try { ws.close(); } catch {} ; reject(new Error(`No T-DSP at ${this.url} (timed out)`)); }), 8000);
+      const deadline = setTimeout(() => done(() => { if (mine()) this.opening = null; try { ws.close(); } catch {} ; reject(new Error(`No T-DSP at ${this.url} (timed out)`)); }), timeoutMs);
 
       let ws: WebSocket;
       try { ws = new WebSocket(this.url); }
@@ -82,12 +93,12 @@ export class WiFiTransport implements Transport {
 
       ws.onopen = () => {
         if (!mine()) { try { ws.close(); } catch {} ; return; }   // abandoned while opening
-        this.opening = null; this.buf = ''; this.ws = ws; done(resolve);
+        this.opening = null; this.buf = ''; this.ws = ws; this.lastRx = Date.now(); this.startHeartbeat(); done(resolve);
       };
       // Fires for a failed connect AND for a mid-session drop; only the former rejects
       // (done() is a no-op once we've resolved).
       ws.onerror = () => done(() => { if (mine()) this.opening = null; reject(new Error(`WebSocket error connecting to ${this.url}`)); });
-      ws.onclose = () => { done(() => { if (mine()) this.opening = null; reject(new Error(`Connection to ${this.url} closed`)); }); if (this.ws === ws) this.teardown(); };
+      ws.onclose = () => { done(() => { if (mine()) this.opening = null; reject(new Error(`Connection to ${this.url} closed`)); }); if (this.ws === ws) this.teardown(true); };
       ws.onmessage = (ev: MessageEvent) => {
         if (this.ws !== ws) return;                // an abandoned socket's frames are not ours
         if (typeof ev.data !== 'string') return;   // firmware only sends TEXT frames
@@ -97,6 +108,7 @@ export class WiFiTransport implements Transport {
         // and permanently wedges the socket (hardware-verified: errno 11 EAGAIN, replies
         // stop forever). So '\n' is the only frame boundary we trust — never treat an
         // arriving frame as a complete line on its own.
+        this.lastRx = Date.now(); this.hbSentAt = 0; this.settleProbes(true);
         this.buf += ev.data;
         let i: number;
         while ((i = this.buf.indexOf('\n')) >= 0) { this.pump(this.buf.slice(0, i)); this.buf = this.buf.slice(i + 1); }
@@ -115,8 +127,69 @@ export class WiFiTransport implements Transport {
   async disconnect(): Promise<void> {
     this.abandonOpening();
     const ws = this.ws;
-    this.teardown();
+    this.teardown(false);
     try { ws?.close(); } catch {}
+  }
+
+  onDrop(cb: () => void): () => void { this.dropHandlers.add(cb); return () => this.dropHandlers.delete(cb); }
+
+  // Is the device still there? Sends a cheap local probe and waits for ANY frame back. Used when the
+  // app returns to the foreground, where a stale socket must be found out in ~1 s, not whenever the
+  // OS eventually notices. On silence the link is declared dead (teardown + onDrop) so the normal
+  // reconnect path runs.
+  probe(timeoutMs = 1500): Promise<boolean> {
+    if (!this.isConnected()) return Promise.resolve(false);
+    const ws = this.ws!;
+    return new Promise<boolean>(resolve => {
+      const sentAt = Date.now();
+      const t = setTimeout(() => {
+        if (this.ws !== ws) { this.settleProbes(false); return; }   // torn down meanwhile (waiters already settled)
+        // Nothing arrived since the probe went out -> dead. A frame would have settled us already.
+        if (this.lastRx < sentAt) this.declareDead(ws); else this.settleProbes(true);
+      }, timeoutMs);
+      this.probeWaiters.push(alive => { clearTimeout(t); resolve(alive); });
+      this.sendProbe();
+    });
+  }
+
+  private settleProbes(alive: boolean) {
+    if (!this.probeWaiters.length) return;
+    const w = this.probeWaiters; this.probeWaiters = [];
+    w.forEach(f => f(alive));
+  }
+
+  private sendProbe() {
+    if (!this.hbSentAt) this.hbSentAt = Date.now();
+    this.send('!status');   // answered by the ESP32 itself as a bare JSON line (the app's status handler already consumes it)
+  }
+
+  // Idle-triggered heartbeat: no frame for HB_IDLE_MS -> probe; probe unanswered for HB_WAIT_MS -> dead.
+  // The firmware pushes nothing unsolicited while idle, so without this a dead link is indistinguishable
+  // from a quiet one. Costs one ~100 B exchange every HB_IDLE_MS while idle; nothing while traffic flows.
+  private static readonly HB_TICK_MS = 2500;
+  private static readonly HB_IDLE_MS = 10000;
+  private static readonly HB_WAIT_MS = 5000;
+  private startHeartbeat() {
+    this.stopHeartbeat();
+    const ws = this.ws;
+    if (!ws) return;
+    this.hbTimer = setInterval(() => {
+      if (this.ws !== ws) { this.stopHeartbeat(); return; }
+      const now = Date.now();
+      if (this.hbSentAt) { if (now - this.hbSentAt > WiFiTransport.HB_WAIT_MS) this.declareDead(ws); return; }
+      if (now - this.lastRx > WiFiTransport.HB_IDLE_MS) this.sendProbe();
+    }, WiFiTransport.HB_TICK_MS);
+  }
+  private stopHeartbeat() { if (this.hbTimer) { clearInterval(this.hbTimer); this.hbTimer = null; } this.hbSentAt = 0; }
+
+  // Give up on a socket that will never speak again: tear down NOW (onDrop fires), then close it
+  // best-effort. We don't wait for onclose — on a half-open TCP connection it can take minutes.
+  private declareDead(ws: WebSocket) {
+    if (this.ws !== ws) return;
+    console.warn('[tdsp] wifi link silent, declaring it dead');
+    ws.onmessage = null; ws.onclose = null; ws.onerror = null;
+    this.teardown(true);
+    try { ws.close(); } catch {}
   }
 
   private abandonOpening() {
@@ -125,16 +198,21 @@ export class WiFiTransport implements Transport {
     if (o) { try { o.close(); } catch {} }
   }
 
-  private teardown() {
+  // dropped: the link went away on its own (OS close / heartbeat) rather than via disconnect().
+  private teardown(dropped: boolean) {
+    const hadLive = !!this.ws;
+    this.stopHeartbeat();
     // Don't leave reads "in progress" — the UI would spin forever.
     if (this.file) { clearTimeout(this.file.timer); this.file.reject('disconnected'); this.file = null; }
     if (this.dir) { clearTimeout(this.dir.timer); this.dir.reject('disconnected'); this.dir = null; }
     if (this.voices) { clearTimeout(this.voices.timer); this.voices.reject('disconnected'); this.voices = null; }
     if (this.ls) { clearTimeout(this.ls.timer); this.ls.reject('disconnected'); this.ls = null; }
     this.ws = null; this.buf = '';
+    this.settleProbes(false);
+    if (dropped && hadLive) this.dropHandlers.forEach(h => { try { h(); } catch (e) { console.warn('[tdsp] drop handler error:', e); } });
   }
 
-  private send(line: string) { if (this.isConnected()) this.ws!.send(line); }   // firmware's relayLine() adds the '\n'
+  private send(line: string) { if (this.isConnected()) { try { this.ws!.send(line); } catch { /* half-open socket: the heartbeat will declare it dead */ } } }   // firmware's relayLine() adds the '\n'
 
   onLine(cb: LineHandler): () => void { this.handlers.add(cb); return () => this.handlers.delete(cb); }
 

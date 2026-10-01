@@ -18,7 +18,7 @@ import type { Transport, DirPage, TransportKind } from './src/transport';
 // now live in ./src/ui/*. App composes them; see src/ui/{theme,styles,constants,primitives}.
 import { C, THEME } from './src/ui/theme';
 import { s } from './src/ui/styles';
-import { EMPTY_DIR, parseDexFind, DEX_NO_INDEX_MSG, DexHit, DexRow, catalogCache, grooveDisp, TP_LABEL, HPF_MODES, volDb, EndMode, END_MODES, REC_STATES, AppState, isEndMode, notify, ROW_H, VItem, InjectFolder, saveLastConn, loadLastConn } from './src/ui/constants';
+import { EMPTY_DIR, parseDexFind, DEX_NO_INDEX_MSG, DexHit, DexRow, catalogCache, grooveDisp, TP_LABEL, HPF_MODES, volDb, EndMode, END_MODES, REC_STATES, AppState, isEndMode, notify, ROW_H, VItem, InjectFolder, saveLastConn, loadLastConn, saveKeepAwakePref, loadKeepAwakePref } from './src/ui/constants';
 import { Subtitle, LoopStepGrid, Card, Flag, PageHeader, ProgressBus, LoadScreen, HdrBtn, KbdBtn, KbdGlyph, Row, ThrottledSlider, VolSlider, Stat, ListBtn, BodyTabs, SubMenu, FolderBrowser } from './src/ui/primitives';
 import { Header } from './src/ui/Header';
 import { SideNav } from './src/ui/SideNav';
@@ -42,6 +42,7 @@ import ConnectScreen, { ConnOption, ConnError } from './src/ui/ConnectScreen';
 import type { LastConn } from './src/ui/constants';
 import { deviceHttpBase } from './src/deviceWifi';
 import { loadDeviceNetworkCreds, openWifiSettings, canOpenWifiSettings } from './src/deviceNetwork';
+import { setKeepAwake, keepAwakeSupported } from './src/keepAwake';
 import type { DeviceNetworkCreds } from './src/deviceNetwork';
 import { wifiJoinSupported, joinWifi, releaseWifi, scanWifi, ensureWifiScanPermission } from './modules/tdsp-wifi';
 import type { WifiSeen } from './modules/tdsp-wifi';
@@ -87,6 +88,11 @@ export default function App() {
   const { width } = useWindowDimensions();
   const cols = width < 700 ? 1 : 2;   // homepage grid: single column in mobile layout (matches Header's width<700 breakpoint), two columns on wider screens
   const [connected, setConnected] = useState(false);
+  const connectedRef = useRef(false);                   // synchronous mirror for callbacks registered once per transport
+  connectedRef.current = connected;
+  // The live link dropped and a quick in-place reconnect is running (UI stays mounted; see onLinkDrop).
+  const [linkLost, setLinkLost] = useState(false);
+  const linkLostRef = useRef(false);
   const [connecting, setConnecting] = useState(false);
   const [userDisc, setUserDisc] = useState(false);      // user tapped Disconnect App → suppress auto-reconnect
   const userDiscRef = useRef(false);                    // synchronous mirror of userDisc so an in-flight connect() can see a cancel immediately
@@ -156,6 +162,8 @@ export default function App() {
   const appStateRef = useRef<AppState>({ end: 'stop' });
   const [cat, setCat] = useState<Catalog>(EMPTY_CATALOG);
   const [loaded, setLoaded] = useState(false);
+  const loadedRef = useRef(false);
+  loadedRef.current = loaded;
   const [route, setRoute] = useState<string>('home');   // 'home' or a section id
   // Browser-style navigation history for the top menu bar's ← / → buttons. `hist` is the visited
   // route stack, `histIdx` the current position within it. A fresh navigate() truncates any forward
@@ -747,13 +755,25 @@ export default function App() {
       // no password typing, phone keeps its normal internet). Any other target leaves that app-only network
       // so LAN addresses are reachable again.
       const creds = devNetRef.current;
+      let opened = false;
       if (apSsid && creds) {
-        await joinWifi(apSsid, creds.pass);   // every T-DSP shares the built-in password
-        if (!live()) return;
+        // Still on the T-DSP network from last time (the app never released it)? Open the socket
+        // straight away — a 2.5 s try. Re-joining means another system "Connect?" prompt and up to
+        // 45 s, so only do that when the quick open fails (phone really did leave the network).
+        if (lastConnRef.current?.ssid === apSsid) {
+          try { await t.connect({ timeoutMs: 2500 }); opened = true; } catch { /* not on it: join below */ }
+          if (!live()) { if (opened) await t.disconnect().catch(() => {}); return; }
+        }
+        if (!opened) {
+          await joinWifi(apSsid, creds.pass);   // every T-DSP shares the built-in password
+          if (!live()) return;
+        }
       } else if (wifiJoinSupported) {
         await releaseWifi();
       }
-      if (reconnectOnly) {
+      if (opened) {
+        // already open
+      } else if (reconnectOnly) {
         if (!(await t.reconnect?.())) return;   // nothing previously granted: stay on the connect screen
       } else {
         await t.connect();
@@ -787,7 +807,52 @@ export default function App() {
       if (live()) { connectingRef.current = false; setConnecting(false); setAttemptId(null); }
     }
   }
-  async function disconnect() { releaseWifi(); try { await tp.disconnect(); } catch {} setConnected(false); setConnecting(false); setLoaded(false); progBus.emit(null); resetNav(); }
+  async function disconnect() { linkLostRef.current = false; setLinkLost(false); releaseWifi(); try { await tp.disconnect(); } catch {} setConnected(false); setConnecting(false); setLoaded(false); progBus.emit(null); resetNav(); }
+
+  // ── Link dropped → reconnect IN PLACE ────────────────────────────────────────────────────────────
+  // Wi-Fi only. The phone slept, the AP restarted, the device rebooted: the socket is gone but nothing
+  // else changed. Instead of unmounting the whole UI and redoing the catalog load (the old flow, which
+  // is what made every drop a slow "reconnect"), keep the UI up, retry the SAME socket with short
+  // backoff, and once it's back just re-pull @STATE. Only if that fails for QUICK_RECONNECT_MS does the
+  // connect screen come back. While it runs the header reads "Reconnecting…" (linkLost).
+  const QUICK_RECONNECT_MS = 40000;
+  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+  function onLinkDrop() {
+    if (userDiscRef.current || connectingRef.current) return;   // a connect()/cancel owns the link right now
+    const t = tpRef.current;
+    if (t.name !== 'WIFI' || !connectedRef.current || !loadedRef.current) {
+      if (connectedRef.current) { setConnected(false); setLoaded(false); }
+      return;
+    }
+    if (linkLostRef.current) return;
+    linkLostRef.current = true; setLinkLost(true);
+    const gen = ++connGenRef.current;
+    connectingRef.current = true;   // the resume/boot handlers see an attempt in flight and stay out
+    void quickReconnect(t, gen);
+  }
+  async function quickReconnect(t: Transport, gen: number) {
+    const live = () => gen === connGenRef.current;
+    const apSsid = apJoinSsid(tkind, wifiHost, joinSsidRef.current);
+    const started = Date.now();
+    let ok = false;
+    for (let attempt = 0; live() && Date.now() - started < QUICK_RECONNECT_MS; attempt++) {
+      if (attempt) await sleep(Math.min(5000, 400 * 2 ** (attempt - 1)));   // 0, 400, 800, 1.6 s, 3.2 s, 5 s, 5 s…
+      if (!live()) break;
+      // Two misses on the T-DSP's own network: the phone probably dropped that network while asleep
+      // (Android releases app-requested networks), so ask for it again, then keep trying the socket.
+      if (apSsid && attempt === 2 && devNetRef.current) {
+        try { await joinWifi(apSsid, devNetRef.current.pass); } catch { /* out of range / declined: keep trying */ }
+        if (!live()) break;
+      }
+      try { await t.connect({ timeoutMs: attempt < 2 ? 3000 : 6000 }); ok = true; break; } catch { /* retry */ }
+    }
+    if (!live()) { if (ok) await t.disconnect().catch(() => {}); linkLostRef.current = false; setLinkLost(false); return; }   // superseded (user tapped Disconnect / another target)
+    linkLostRef.current = false; setLinkLost(false);
+    connectingRef.current = false;
+    if (ok) { t.requestState(); t.requestFonts(); return; }   // same catalog, fresh settings — no reload
+    // Gave up: the connect screen takes over, with its usual auto/tap reconnect.
+    setConnected(false); setLoaded(false); progBus.emit(null); resetNav();
+  }
 
   // Connect to a target from the UI, boot restore or app resume. Supersedes any attempt in flight. If
   // `tp` has to change (other transport or host) the connect runs once it is rebuilt (effect below).
@@ -847,7 +912,7 @@ export default function App() {
     bootRef.current = true;
     (async () => {
       const last = await loadLastConn();
-      setLastConn(last);
+      setLastConn(last); lastConnRef.current = last;   // ref too: connect() may run before the next render
       if (userDiscRef.current || connectingRef.current) return;   // the user already tapped something
       const dev = servedByDevice();
       if (!last && dev) { connectTo('wifi', dev, true); return; }
@@ -867,27 +932,50 @@ export default function App() {
     // claiming it's connected), so run it there regardless of platform.
     if (Platform.OS === 'web' && tkind !== 'wifi') return;
     let cancelled = false;
+    // The transport tells us the moment a live link goes (OS close, or its heartbeat found a half-open
+    // socket) → quick reconnect starts within milliseconds. The poll stays as a belt-and-braces fallback.
+    const offDrop = tp.onDrop?.(() => { if (!cancelled) onLinkDrop(); });
     const id = setInterval(() => {
       if (cancelled) return;
-      if (!tp.isConnected()) { setConnected(false); setLoaded(false); }   // no-op if already false
+      if (!tp.isConnected()) onLinkDrop();   // no-op unless the UI still believes it's connected
     }, 4000);
-    return () => { cancelled = true; clearInterval(id); };
+    return () => { cancelled = true; clearInterval(id); offDrop?.(); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tp, tkind]);
 
   // App resumed (native). Mobile OSes tear down the socket/BLE link in the background, so coming back
   // quietly reconnects to the last device. Only a connection the user actually made (never a speculative
   // Bluetooth scan on a fresh install), and never over an attempt or a deliberate disconnect/cancel.
+  // Coming back from sleep the socket usually LOOKS open (readyState OPEN) but is dead: a probe settles
+  // that in ~1.5 s — if the device doesn't answer, the transport declares the drop and the quick
+  // reconnect above takes over at once, instead of waiting for the OS to notice (which can take minutes).
+  function onResume() {
+    const t = tpRef.current;
+    if (t.isConnected()) { if (t.probe && !connectingRef.current) void t.probe(1500); return; }
+    const last = lastConnRef.current;
+    if (!last || last.auto === false || userDiscRef.current || connectingRef.current) return;
+    connectTo(last.kind, last.host, true, last.ssid);
+  }
   useEffect(() => {
-    if (Platform.OS === 'web') return;
-    const sub = RNAppState.addEventListener('change', (st: AppStateStatus) => {
-      if (st !== 'active') return;
-      const last = lastConnRef.current;
-      if (!last || last.auto === false || userDiscRef.current || connectingRef.current || tpRef.current.isConnected()) return;
-      connectTo(last.kind, last.host, true, last.ssid);
-    });
+    if (Platform.OS === 'web') {
+      // Browser tab / phone screen came back (device-hosted web UI on a phone sleeps too). Wi-Fi only:
+      // Web Serial has its own read-loop drop detection and a gesture-gated reconnect.
+      if (tkind !== 'wifi' || typeof document === 'undefined') return;
+      const h = () => { if (document.visibilityState === 'visible') onResume(); };
+      document.addEventListener('visibilitychange', h);
+      return () => document.removeEventListener('visibilitychange', h);
+    }
+    const sub = RNAppState.addEventListener('change', (st: AppStateStatus) => { if (st === 'active') onResume(); });
     return () => sub.remove();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [tp, tkind, wifiHost]);
+
+  // Keep the screen on while connected (Settings › Connection, default on) so the phone never sleeps
+  // out of its session in the first place. Released on disconnect or when the user turns it off.
+  const [keepAwakeOn, setKeepAwakeOn] = useState(true);
+  useEffect(() => { loadKeepAwakePref().then(setKeepAwakeOn).catch(() => {}); }, []);
+  useEffect(() => { setKeepAwake(connected && keepAwakeOn); }, [connected, keepAwakeOn]);
+  useEffect(() => () => setKeepAwake(false), []);
 
   // Connect-screen cards, most specific first; the remembered target gets a "last used" badge.
   const hasWebSerial = Platform.OS === 'web' && typeof navigator !== 'undefined' && 'serial' in (navigator as any);
@@ -1593,7 +1681,7 @@ export default function App() {
   // and releases every note / sustain / bend on every synth (on every build, not just metronome ones).
   const panic = () => { clearStageUi(); tp.panic(); };
 
-  const headerStatus = !connected ? 'Not connected' :
+  const headerStatus = !connected ? 'Not connected' : linkLost ? 'Reconnecting…' :
     [cat.engine || 'synth', cat.drumEngine ? cat.drumEngine + ' drums' : '', '♩ ' + Math.round(bpm) + ' BPM', TP_LABEL[tp.name], bt.conn ? 'BT:' + (bt.peer || 'on') : '', drums.playing ? '♪ ' + drums.playing : ''].filter(Boolean).join('  ·  ');
 
   // ===== the sections: one entry drives both its homepage card and its page. =====
@@ -2440,6 +2528,13 @@ export default function App() {
           <Pressable style={[s.btn, s.btnWide]} onPress={reindex} disabled={!connected || busy}>
             {busy ? <ActivityIndicator color={C.text} /> : <Text style={s.btnText}>Rebuild catalog (@REINDEX)</Text>}
           </Pressable>
+          <Row><View style={{ flex: 1 }}>
+              <Text style={s.text}>Keep the screen on while connected</Text>
+              <Text style={s.muted}>{keepAwakeSupported
+                ? 'A sleeping phone drops the Wi-Fi link and has to reconnect when it wakes. Uses more battery.'
+                : 'Not available here (this browser or build has no screen wake lock).'}</Text>
+            </View>
+            <Switch value={keepAwakeOn} disabled={!keepAwakeSupported} onValueChange={v => { setKeepAwakeOn(v); saveKeepAwakePref(v); }} /></Row>
         </>
       ),
     },

@@ -36,12 +36,24 @@ export interface DirPage {
 // imported from './transport' inside a platform file resolves back to that file, not
 // this one. Types below are erased at compile time, so importing them is safe.
 
+export interface ConnectOptions { timeoutMs?: number }
+
 export interface Transport {
   readonly name: 'USB' | 'BLE' | 'WIFI';
   isConnected(): boolean;
 
-  connect(): Promise<void>;
+  // opts.timeoutMs bounds a Wi-Fi connect (default 8 s); the other transports ignore it.
+  connect(opts?: ConnectOptions): Promise<void>;
   disconnect(): Promise<void>;
+  // Optional: fires once when a LIVE link is lost for any reason other than disconnect() — the OS
+  // closed the socket, or the transport's own liveness check (see probe) gave up on it. Lets the
+  // app react at once (quick reconnect) instead of polling isConnected(). Returns an unsubscribe fn.
+  onDrop?(cb: () => void): () => void;
+  // Optional: confirm a link that LOOKS open really is. A phone coming back from sleep often holds a
+  // half-open socket: readyState still says OPEN but nothing will ever arrive. Resolves true if the
+  // device answered within timeoutMs; otherwise the link is torn down (onDrop fires) and it resolves
+  // false. Resolves false immediately when not connected.
+  probe?(timeoutMs?: number): Promise<boolean>;
   // Optional GESTURE-FREE reconnect to a previously-granted resource, so a page refresh can restore
   // the link with no click and no port picker. Web Serial implements it (reopens a port from
   // navigator.serial.getPorts()); returns true if it reconnected, false if nothing was ever granted

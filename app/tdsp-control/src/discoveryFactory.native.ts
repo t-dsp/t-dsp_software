@@ -30,7 +30,9 @@ class ZeroconfDiscovery implements Discovery {
   start(onChange: (devices: TdspDevice[]) => void) {
     this.stop();
     this.cb = onChange;
-    this.found.clear();
+    // Deliberately NOT cleared: devices resolved during the last browse stay listed (and tappable) the
+    // instant the connect screen reappears, instead of a blank "searching…" until mDNS answers again.
+    // A fresh 'resolved' overwrites the entry; a stale address just fails its connect attempt.
     const zc = new Zeroconf();
     this.zc = zc;
     // 'resolved' is the only event with an address; 'found' fires earlier with just a name.
@@ -42,7 +44,7 @@ class ZeroconfDiscovery implements Discovery {
     zc.on('error', (e: any) => console.warn('[tdsp] zeroconf error:', e));
     try { zc.scan(TDSP_SERVICE, 'tcp', 'local.'); }
     catch (e) { console.warn('[tdsp] zeroconf scan failed:', e); }
-    this.emit();   // publish the (empty) initial list so the UI can show "scanning…"
+    this.emit();   // publish the initial list (last browse's devices, or empty -> "scanning…")
   }
 
   stop() {

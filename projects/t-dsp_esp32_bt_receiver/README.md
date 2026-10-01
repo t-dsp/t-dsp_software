@@ -179,6 +179,17 @@ on port **81**. The app opens a WebSocket and exchanges **TEXT frames**:
 > with `errno 11 EAGAIN` ("No more processes") and the connection **never writes again** —
 > inbound commands still reach the Teensy, but no reply ever comes back. See `wsSendLine()`.
 
+**Liveness (both ends).** The server pings every client every 15 s and drops it after
+two unanswered pings (`enableHeartbeat(15000, 4000, 2)` in `WifiControlTransport::begin`);
+browsers and React Native answer WS pings in the stack. The app, for its part, sends
+`!status` after ~10 s of silence and declares the link dead if nothing at all arrives
+within 5 s more, and probes the same way the moment it returns to the foreground
+(`app/tdsp-control/src/transport.wifi.ts`). Reason: a phone that slept or roamed left a
+**half-open** socket on both sides — the ESP32 kept the zombie in one of its 5 client slots
+(and wrote every broadcast to it), while the app saw `readyState OPEN` and silently lost
+every command until the OS eventually noticed. Now both notice within seconds, and the app
+reconnects in place (no catalog reload) instead of falling back to the connect screen.
+
 > In the WiFi build the app sends `@`-lines directly, so the ESP32 does not track
 > `vol`/`hpf`/`mpe`/`rg` — those status fields report firmware defaults and the app
 > owns that state. `conn`/`disc`/`peer` are always accurate.

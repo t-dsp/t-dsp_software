@@ -990,7 +990,7 @@ static void onWsEvent(uint8_t num, WStype_t type, uint8_t *payload, size_t lengt
       }
       break;
     default:
-      break;   // PING/PONG/FRAGMENT not used
+      break;   // PING/PONG are handled inside the library (heartbeat, see begin()); FRAGMENT not used
   }
 }
 
@@ -1281,6 +1281,14 @@ class WifiControlTransport : public ControlTransport {
 #endif
     g_ws.begin();
     g_ws.onEvent(onWsEvent);
+    // WebSocket ping/pong heartbeat: ping each client every 15 s, drop it after 2 unanswered pings
+    // (pong timeout 4 s). Browsers and React Native answer pings in the stack with no app code.
+    // Without this a phone that slept, roamed or was switched off left a half-open client behind
+    // forever: lwIP never reports a peer that silently vanished, so the zombie kept one of the 5
+    // client slots AND every broadcast was still written to it (wasted send time, and five such
+    // zombies meant new connections were refused). The app also probes from its side ('!status'
+    // when idle, see transport.wifi.ts) so a dead link is noticed within seconds on BOTH ends.
+    g_ws.enableHeartbeat(15000, 4000, 2);
     Serial.printf("[ws] server listening on port %u\n", (unsigned)TDSP_WS_PORT);
     uiHttpBegin();
     if (g_net.apUp()) startMdns();   // tdsp.local answers on the AP even with no LAN

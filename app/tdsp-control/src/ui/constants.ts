@@ -58,6 +58,14 @@ export const loadLastConn = async (): Promise<LastConn | null> => {
   try { const sv = await AsyncStorage.getItem(LASTCONN_KEY); return sv ? JSON.parse(sv) as LastConn : null; } catch { return null; }
 };
 
+// "Keep the screen on while connected" (Settings › Connection). Default ON: a phone that sleeps
+// mid-session drops the Wi-Fi link and has to reconnect when it wakes; see src/keepAwake.ts.
+const KEEPAWAKE_KEY = 'tdsp.keepawake.v1';
+export const saveKeepAwakePref = (on: boolean) => { AsyncStorage.setItem(KEEPAWAKE_KEY, on ? '1' : '0').catch(() => {}); };
+export const loadKeepAwakePref = async (): Promise<boolean> => {
+  try { const v = await AsyncStorage.getItem(KEEPAWAKE_KEY); return v === null ? true : v === '1'; } catch { return true; }
+};
+
 // Display name for a groove SD path (basename minus .mid) — the drum-track card's "value".
 export const grooveDisp = (p: string | null | undefined) => (p ? (p.split('/').pop() || '').replace(/\.mid$/i, '') : '');
 export const kb = (n: number) => (n / 1024).toFixed(1);   // bytes -> "12.3" KB, for the load progress readout
