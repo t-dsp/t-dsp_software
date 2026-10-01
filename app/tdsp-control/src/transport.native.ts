@@ -359,6 +359,7 @@ export class BleTransport implements Transport {
   launchQuantize(on: boolean) { this.relay('@QUANTIZE=' + (on ? 1 : 0)); }
   panic() { this.relay('@PANIC'); }
   reboot() { this.relay('@REBOOT'); }
+  linn(cmd: string) { this.relay('@LINN' + cmd); }
   metronome(on: boolean) { this.relay('@METRO=' + (on ? 1 : 0)); }
   metronomeMute(muted: boolean) { this.relay('@METROMUTE=' + (muted ? 1 : 0)); }
   metronomeSig(bpb: number) { this.relay('@METROSIG=' + Math.max(1, Math.min(16, Math.round(bpb)))); }

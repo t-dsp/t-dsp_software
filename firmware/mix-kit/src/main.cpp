@@ -260,6 +260,11 @@ tdsp::DrumNoteMapper   g_drumNoteMapper;     // ch10 note-map shim between g_dru
 #if TDSP_HAS_USB_MIDI_HOST
 USBHost                g_usbHost;
 MIDIDevice             g_usbMidi(g_usbHost);
+#include <TDspLinn.h>
+tdsp::LinnCtl          g_linn(g_usbMidi);          // LinnStrument detection + NRPN control (app: Settings > LinnStrument)
+#define TDSP_LINN_CAP "1"
+#else
+#define TDSP_LINN_CAP "0"
 #endif
 tdsp::MidiRouter      &g_router = g_routerV[0];   // alias: voice 0 live-MIDI router
 
@@ -2992,7 +2997,8 @@ static void dinPitch   (byte ch, int  bend)           { midihub::pitchBend(SrcDi
 #if TDSP_HAS_USB_MIDI_HOST
 static void usbHostNoteOn  (byte ch, byte note, byte vel) { midihub::noteOn (SrcUsbHost, ch, note, vel); }
 static void usbHostNoteOff (byte ch, byte note, byte vel) { midihub::noteOff(SrcUsbHost, ch, note, vel); }
-static void usbHostCC      (byte ch, byte cc,   byte val) { midihub::controlChange(SrcUsbHost, ch, cc, val); }
+static void usbHostCC      (byte ch, byte cc,   byte val) { if (g_linn.onHostCC(ch, cc, val)) return;   // a LinnStrument's NRPN reply (CC 99/98/6/38): settings, not performance
+                                                             midihub::controlChange(SrcUsbHost, ch, cc, val); }
 static void usbHostPitch   (byte ch, int  bend)           { midihub::pitchBend(SrcUsbHost, ch, bend); }
 static void usbHostPressure(byte ch, byte pressure)       { midihub::channelPressure(SrcUsbHost, ch, pressure); }
 #endif
@@ -3057,6 +3063,11 @@ static void applyMidiMode(bool mpe) {
         a.setMpeMode(mpe ? tdsp::ArpFilter::MpeExprFollow : tdsp::ArpFilter::MpeMono);
         a.setOutputChannel(mpe ? kMpeArpOutChannel : 1);
     }
+#if TDSP_HAS_USB_MIDI_HOST
+    // "Follow T-DSP MIDI mode" (app: Settings > LinnStrument): put the LinnStrument itself into the
+    // matching dialect so its bend range / expression types always agree with the routers above.
+    if (g_linn.followMode && g_linn.isLinn()) g_linn.applyMpe(mpe, (int)kMpeMemberBendRange);
+#endif
     Serial.printf("[mode] %s\n", mpe ? "MPE (per-note bend/pressure)" : "normal MIDI");
 }
 
@@ -3739,6 +3750,21 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     else if (strncmp(line, "@PROOF=", 7) == 0)     runAxisProof(atoi(line + 7));   // capture 1 note w/ axis at full (0=press 1=timbre 2=bend 3=neutral)
 #endif
     else if (strncmp(line, "@MIDIMODE=", 10) == 0) applyMidiMode(atoi(line + 10) != 0);
+#if TDSP_HAS_USB_MIDI_HOST
+    // LinnStrument control (app: Settings > LinnStrument). See lib/TDspLinn + planning/linnstrument-panel/PLAN.md.
+    else if (strcmp(line, "@LINN?") == 0)              { reply.print("@LINN="); g_linn.statusJson(reply, true); reply.print("\n"); }   // status + every known value
+    else if (strcmp(line, "@LINN.SYNC") == 0)          { g_linn.syncAll(); }                                   // re-read every setting (pushes @LINN.V= / @LINN.SYNC=)
+    else if (strncmp(line, "@LINN.GET=", 10) == 0)     { g_linn.query(atoi(line + 10)); }
+    else if (strncmp(line, "@LINN.SET=", 10) == 0)     { const char *c = strchr(line + 10, ','); if (c) g_linn.set(atoi(line + 10), atoi(c + 1)); }
+    else if (strncmp(line, "@LINN.PRESET=", 13) == 0)  { g_linn.preset(atoi(line + 13)); }
+    else if (strncmp(line, "@LINN.LIGHT=", 12) == 0)   { int c = 0, r = 0, k = 0; if (sscanf(line + 12, "%d,%d,%d", &c, &r, &k) == 3) g_linn.light(c, r, k); }
+    else if (strcmp(line, "@LINN.LIGHTS=clear") == 0)  { g_linn.clearLights(); }
+    else if (strncmp(line, "@LINN.PAINT=", 12) == 0)   { g_linn.paintAll(atoi(line + 12)); }               // every play pad one colour (0 = back to Note Lights)
+    else if (strncmp(line, "@LINN.COLS=", 11) == 0)    { g_linn.cols = atoi(line + 11) == 16 ? 16 : 25; g_linn.pushStatus(); }
+    else if (strncmp(line, "@LINN.FOLLOW=", 13) == 0)  { g_linn.followMode = atoi(line + 13) != 0; if (g_linn.followMode) g_linn.applyMpe(g_mpeMode, (int)kMpeMemberBendRange); g_linn.pushStatus(); }
+    else if (strncmp(line, "@LINN.TEMPO=", 12) == 0)   { g_linn.followTempo = atoi(line + 12) != 0; g_linn.pushStatus(); }
+    else if (strncmp(line, "@LINN.MPE=", 10) == 0)     { g_linn.applyMpe(atoi(line + 10) != 0, (int)kMpeMemberBendRange); }   // one-shot handshake
+#endif
     else if (strncmp(line, "@MPEMON=", 8) == 0) {                    // live MPE input/chain trace on/off (app: Settings > MPE Monitor)
         g_mpeMon    = (atoi(line + 8) != 0);
         g_mpeMonOut = g_mpeMon ? &reply : nullptr;                   // emit on whichever transport turned it on
@@ -4046,7 +4072,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         // compiled track count (2 synth voices + 1 drum, or 1+1 on a non-voice2 build).
         // caps.audioloop = the number of audio loops that ACTUALLY allocated (0 = the board
         // couldn't spare the RAM -> the app hides the card), not just the build flag.
-        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"tracks\":%d,\"audioloop\":%d,\"fx\":%d,\"usbaudio\":%d,\"drumkitsel\":%d,\"drumfontsel\":%d,\"arec\":%d}",
+        reply.printf(",\"caps\":{\"voice2\":%d,\"arp2\":%d,\"rec\":%d,\"recedit\":%d,\"tracks\":%d,\"audioloop\":%d,\"fx\":%d,\"usbaudio\":%d,\"drumkitsel\":%d,\"drumfontsel\":%d,\"arec\":%d,\"linn\":" TDSP_LINN_CAP "}",
                      TDSP_VOICE2 ? 1 : 0, (TDSP_VOICE2 && TDSP_ARP2) ? 1 : 0, TDSP_RECORDER ? 1 : 0,
                      TDSP_RECORDER_EDIT ? 1 : 0, kSynthVoices + 1,   // N synth voices + the drum track
 #if TDSP_AUDIOLOOP
@@ -4078,6 +4104,9 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
         reply.print(",\"drumfont\":{\"path\":"); tdsp::catdb::jsonStr(reply, g_drumFontPath);
         reply.print(",\"display\":"); tdsp::catdb::jsonStr(reply, g_drumFontDisplay);
         reply.printf(",\"on\":%d}", g_drumTsfOff ? 0 : 1);   // sampler switch (@DRUMTSF=): 0 = font unloaded, ch10 silent
+#endif
+#if TDSP_HAS_USB_MIDI_HOST
+        reply.print(",\"linn\":"); g_linn.statusJson(reply, false);   // USB-host controller: connected? a LinnStrument? (values come via @LINN?)
 #endif
         // Reasons for features that were BUILT (compiled in) but are currently UNAVAILABLE, so the app
         // can GREY the card (not hide it) and show WHY. A feature appears here only when its code is
@@ -4642,6 +4671,7 @@ FLASHMEM void setup() {
     g_usbMidi.setHandleControlChange(usbHostCC);
     g_usbMidi.setHandlePitchChange(usbHostPitch);
     g_usbMidi.setHandleAfterTouchChannel(usbHostPressure);   // channel pressure = MPE Z-axis
+    g_linn.begin(&ctrl);   // LinnStrument attach/detach + value pushes go to every lane
 #endif
 
     // Uniform per-track MIDI graph (trackWireSetup): each track's router + song player feed [arp] ->
@@ -4945,6 +4975,8 @@ void loop() {
 #if TDSP_HAS_USB_MIDI_HOST
     g_usbHost.Task();
     while (g_usbMidi.read()) { /* USB-host MIDI handlers fire per message */ }
+    g_linn.setTempo(g_conductor.bpm());
+    g_linn.service(millis());   // attach/detach edges, paced setting reads, tempo follow
 #endif
     for (Track &t : g_tracks) t.player->tick();   // advance every track's song player
     g_drumPlayer.tick();   // loops internally (setLooping), so no external re-arm needed

@@ -132,6 +132,7 @@ export interface Transport {
   songLoop(on: boolean): void;                        // loop the current song (@LOOP=)
   launchQuantize(on: boolean): void;                  // defer song/groove starts to the next bar (@QUANTIZE=)
   panic(): void;                                      // STUCK NOTES: stop everything + release every note on every synth (@PANIC)
+  linn(cmd: string): void;                            // LinnStrument control: '?' (status + values), '.SYNC', '.GET=<n>', '.SET=<n>,<v>', '.PRESET=<n>', '.FOLLOW=<0|1>', '.TEMPO=<0|1>', '.MPE=<0|1>', '.COLS=<16|25>', '.PAINT=<colour>', '.LIGHTS=clear'
   reboot(): void;                                     // RESTART the whole box (@REBOOT: the Teensy resets, its boot then resets the ESP32); the link drops and comes back
   metronome(on: boolean): void;                       // MASTER TRANSPORT play/stop (the metronome is the clock) (@METRO=)
   metronomeMute(muted: boolean): void;                // is the click AUDIBLE? default muted; transport runs either way (@METROMUTE=)

@@ -44,6 +44,7 @@ import type { LastConn } from './src/ui/constants';
 import { deviceHttpBase } from './src/deviceWifi';
 import { loadDeviceNetworkCreds, openWifiSettings, canOpenWifiSettings } from './src/deviceNetwork';
 import { setKeepAwake, keepAwakeSupported } from './src/keepAwake';
+import LinnPanel, { LinnState, EMPTY_LINN } from './src/ui/LinnPanel';
 import type { DeviceNetworkCreds } from './src/deviceNetwork';
 import { wifiJoinSupported, joinWifi, releaseWifi, scanWifi, ensureWifiScanPermission } from './modules/tdsp-wifi';
 import type { WifiSeen } from './modules/tdsp-wifi';
@@ -224,7 +225,17 @@ export default function App() {
   // selection + volume + arp state; the folder browser is shared (pickVoice takes a target).
   // caps.audioloop is a COUNT (how many audio loops the device actually allocated —
   // RAM/PSRAM dependent), not a bool: 0 hides the Audio Loop card entirely.
-  const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, recedit: false, audioloop: 0, fx: false, usbaudio: false, arec: false, drumkitsel: true, drumfontsel: false });
+  const [caps, setCaps] = useState({ voice2: false, arp2: false, rec: false, recedit: false, audioloop: 0, fx: false, usbaudio: false, arec: false, drumkitsel: true, drumfontsel: false, linn: false });
+  // LinnStrument on the box's USB-host port (Settings › LinnStrument): connection + the device's settings
+  // shadow (lib/TDspLinn). `@LINN=` carries the status JSON (with "v" = every known value on a `@LINN?`
+  // reply), `@LINN.V=<n>,<v>` one value, `@LINN.SYNC=<done>/<total>` the re-read progress.
+  const [linn, setLinn] = useState<LinnState>(EMPTY_LINN);
+  const applyLinn = (j: any) => setLinn(l => ({
+    ...l, connected: !!j.connected, isLinn: !!j.linn, resp: typeof j.resp === 'number' ? j.resp : -1, name: j.name || '', vid: j.vid | 0, pid: j.pid | 0,
+    cols: j.cols === 16 ? 16 : 25, follow: !!j.follow, tempo: !!j.tempo,
+    synced: Array.isArray(j.synced) ? [j.synced[0] | 0, j.synced[1] | 0] : l.synced,
+    values: j.v ? Object.fromEntries(Object.entries(j.v).map(([k, v]) => [+k, v as number])) : (j.connected ? l.values : {}),
+  }));
   // Runtime drum-font swap (build-flag gated, caps.drumfontsel → the sampled-drum TSF build with >1 SF2
   // on the card). `fonts` = the swappable list from the device's "@FONTS=" line; `drumFont` = the
   // resident font (path + display) from @STATE.drumfont. Selecting one sends @DRUMFONT= (a picker, not
@@ -411,6 +422,7 @@ export default function App() {
     if (j.drums?.vol != null) setDrumVol(Math.max(0, Math.min(150, j.drums.vol | 0)));
     // Resident drum font (runtime swap builds only emit j.drumfont): path + short display label.
     if (j.drumfont) setDrumFont({ path: j.drumfont.path || '', display: j.drumfont.display || '', on: typeof j.drumfont.on === 'number' ? !!j.drumfont.on : undefined });
+    if (j.linn) applyLinn(j.linn);
     if (j.voice) {
       if (j.voice.cart) {
         const rel = j.voice.cart;
@@ -428,6 +440,7 @@ export default function App() {
                           recedit: !!j.caps.recedit, audioloop: Math.max(0, j.caps.audioloop | 0), fx: !!j.caps.fx,
                           usbaudio: !!j.caps.usbaudio,
                           arec: !!j.caps.arec,   // Audio Recorder card (master-out WAV takes on the card)
+                          linn: !!j.caps.linn,   // USB-host port present -> Settings › LinnStrument page
                           // absent (older firmware) -> assume selectable; explicit 0 = a fixed drum voice (OPLL) with no GM kits
                           drumkitsel: j.caps.drumkitsel !== 0,
                           // runtime drum-font swap: only the sampled-drum TSF build with >1 SF2 on the card sets this
@@ -603,6 +616,14 @@ export default function App() {
       // was the source of the "reload catalog" errors + laggy, unreliable kit changes.
       tp.trk(drumIdxRef.current, 'INSTRS');
       tp.requestState();
+    } else if (line.startsWith('@LINN.V=')) {
+      const [n, v] = line.slice(8).split(',').map(x => +x);
+      if (Number.isFinite(n) && Number.isFinite(v)) setLinn(l => ({ ...l, values: { ...l.values, [n]: v } }));
+    } else if (line.startsWith('@LINN.SYNC=')) {
+      const [d, t] = line.slice(11).split('/').map(x => +x);
+      setLinn(l => ({ ...l, synced: [d | 0, t | 0] }));
+    } else if (line.startsWith('@LINN=')) {
+      try { applyLinn(JSON.parse(line.slice(6))); } catch {}
     } else if (line.startsWith('@DRUMTSF=')) {
       // Drum sampler switch ack: 1 = font resident, 0 = unloaded (PSRAM freed for Synth F's fonts).
       setDrumTsfBusy(false);
@@ -826,6 +847,7 @@ export default function App() {
                                 : "Connected, but the device's catalog didn't load. Tap to try again.");
       }
       t.requestState();   // pull the device's real current settings → hydrate every card (see @STATE handler)
+      t.linn('?');        // LinnStrument status + its settings shadow (Settings › LinnStrument)
       t.requestFonts();   // pull the swappable drum-font list (runtime @DRUMFONT builds) → the Drum Font picker
       const lc: LastConn = { kind, host: host.trim(), auto: true, ...(apSsid ? { ssid: apSsid } : {}) };
       saveLastConn(lc); setLastConn(lc);   // the "last used" card, and auto-reconnect on the next launch
@@ -2942,6 +2964,15 @@ export default function App() {
       accent: THEME.settings.accent, tint: THEME.settings.tint,
       value: 'Live MIDI · notes · drags · pressure',
       body: <MpeMonitor tp={tp} connected={connected} />,
+    },
+    // LINNSTRUMENT — the controller on the box's USB-host port: connection status + every one of its
+    // settings (NRPN control through lib/TDspLinn). A Settings sub-page; shown when the build has the host port.
+    {
+      id: 'linn', title: 'LinnStrument', show: false, parent: 'settings',
+      accent: THEME.settings.accent, tint: THEME.settings.tint,
+      value: !connected ? '—' : linn.connected && linn.isLinn ? (linn.resp === 0 ? 'Connected · not answering' : 'Connected') : linn.connected ? 'Other USB MIDI device' : 'Not connected',
+      status: linn.connected && linn.isLinn && linn.resp !== 0 ? 'on' : undefined,
+      body: <LinnPanel tp={tp} connected={connected} linn={linn} />,
     },
     // SETTINGS — a submenu grouping the system pages (Connection, TAC5212). Its page lists those
     // as cards; tapping one opens that child's own existing page (Back returns here, per parent).
