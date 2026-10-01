@@ -40,6 +40,10 @@ export type BrowserSource = {
   selectedArg?: string;                   // highlight the current pick
   playingArg?: string;
   singlePane?: boolean;                   // no folder hierarchy → single column (picker engines)
+  // Single-column (phone) layout only: at the root show JUST the folders; inside a folder show JUST
+  // its items (the two-pane layout always has the rail, so it is unaffected). Without this the
+  // narrow layout stacks folder rows above the open folder's items, which reads as one jumbled list.
+  drill?: boolean;
   emptyItems?: string;                    // message when the item pane is empty
   // Device-driven recursive search (Dexed @dxfind). Omit ⇒ the browser filters `items` locally.
   // `active` lets the source decide when results TAKE OVER (Dexed only searches at ≥2 chars, so a
@@ -145,6 +149,7 @@ export function MediaBrowser({
     isPlaying: (arg: string) => source.playingArg === arg,
     fav: undefined as undefined | { isFav: (a: string) => boolean; toggle: (it: BrowserItem) => void },
     singlePane: !!source.singlePane,
+    drill: !!source.drill,
     emptyItems: source.emptyItems ?? '',
     searching: !!source.search?.searching,
     searchError: source.search?.error,
@@ -164,6 +169,7 @@ export function MediaBrowser({
     isPlaying: (arg: string) => playing === arg,
     fav: { isFav, toggle: toggleFav },
     singlePane: false,
+    drill: false,
     emptyItems: virt ? '(empty)' : '(no items here)',
     searching: false,
     searchError: err,
@@ -279,12 +285,13 @@ export function MediaBrowser({
         <View style={[s.brPane, { flex: 1 }]}>
           <View style={s.brPaneHead}>{!vm.singlePane && navBar}{searchBar}</View>
           <ScrollView style={s.brScroll} nestedScrollEnabled>
-            {!searchActive && !vm.singlePane && vm.shortcuts.map(folderRow)}
-            {!searchActive && !vm.singlePane && vm.folders.map(folderRow)}
+            {!searchActive && !vm.singlePane && (!vm.drill || vm.atRoot) && vm.shortcuts.map(folderRow)}
+            {!searchActive && !vm.singlePane && (!vm.drill || vm.atRoot) && vm.folders.map(folderRow)}
             {searchActive && vm.deviceSearch && vm.resultFolders.map(folderRow)}
             {vm.loading || (searchActive && vm.searching && !shownItems.length) ? (
               <View style={s.brLoad}><ActivityIndicator color={accent} /><Text style={[s.muted, { marginTop: 8 }]}>{vm.searching ? 'Searching…' : 'Loading…'}</Text></View>
-            ) : shownItems.length ? shownItems.map(itemRow)
+            ) : (vm.drill && vm.atRoot && !searchActive) ? null   // drill root: folders only, tap one to enter
+              : shownItems.length ? shownItems.map(itemRow)
               : <Text style={[s.muted, { padding: 14 }]}>{searchActive ? 'No matches.' : vm.singlePane ? '' : vm.emptyItems}</Text>}
             {!!vm.searchError && !searchActive && <Text style={[s.muted, { padding: 12 }]}>⚠ {vm.searchError}</Text>}
           </ScrollView>

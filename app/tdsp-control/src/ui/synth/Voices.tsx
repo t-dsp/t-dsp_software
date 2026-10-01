@@ -74,29 +74,35 @@ function PickerVoiceBrowser({ engine, list, cur, onPick }: {
     for (const it of list) { const b = split(it)[0]; if (b && !out.includes(b)) out.push(b); }
     return out;
   }, [list]);
-  // Default to the folder holding the current pick; fall back to All.
+  // Navigation: null = the ROOT (the folder list; on a phone that is all you see), '' = the "All
+  // voices" folder, otherwise a bank name. Opens at the root so you pick a folder to enter it; the
+  // current voice's folder is marked active. Search (the browser's local filter) works on the open
+  // folder's items, or on everything at the root / in All.
   const curBank = split(list[cur] ?? '')[0];
   const [folder, setFolder] = useState<string | null>(null);
-  const open = folder === null ? (curBank || '') : folder;
   const multi = banks.length > 1;
+  const atRoot = !multi || folder === null;
   const folders: BrowserFolder[] = multi
-    ? [{ key: 'all', label: 'All voices (' + list.length + ')', icon: '★', active: open === '', onPress: () => setFolder('') },
-       ...banks.map(b => ({ key: 'b/' + b, label: b, icon: '📁', active: open === b, onPress: () => setFolder(b) }))]
+    ? [{ key: 'all', label: 'All voices (' + list.length + ')', icon: '★', active: folder === '', onPress: () => setFolder('') },
+       ...banks.map(b => ({ key: 'b/' + b, label: b + (b === curBank ? '  •' : ''), icon: '📁', active: folder === b, onPress: () => setFolder(b) }))]
     : [];
+  const showAll = !multi || folder === null || folder === '';
   const items = list
     .map((it, i) => ({ it, i }))
-    .filter(({ it }) => !multi || open === '' || split(it)[0] === open)
+    .filter(({ it }) => showAll || split(it)[0] === folder)
     .map(({ it, i }) => ({
       arg: 'e' + i,
-      name: (open === '' && multi) ? it : split(it)[1],   // in "All", keep the bank prefix for context
+      name: (showAll && multi) ? it : split(it)[1],   // across banks keep the "<Bank>: " prefix for context
       onPress: () => onPick(i),
     }));
   const source: BrowserSource = {
     loading: !list.length,
-    crumbs: [{ label: engine.toUpperCase() + ' voices', go: () => setFolder('') }, ...(multi && open ? [{ label: open, go: () => {} }] : [])],
-    atRoot: !multi || open === '', goUp: () => setFolder(''),
+    crumbs: [{ label: engine.toUpperCase() + ' voices', go: () => setFolder(null) },
+             ...(multi && folder !== null ? [{ label: folder === '' ? 'All voices' : folder, go: () => {} }] : [])],
+    atRoot, goUp: () => setFolder(null),
     folders,
     singlePane: !multi,
+    drill: true,
     selectedArg: 'e' + cur,
     items,
     emptyItems: 'No voices in this bank.',
