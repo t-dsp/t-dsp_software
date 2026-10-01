@@ -1081,6 +1081,17 @@ static void tsf_voice_envelope_nextsegment(struct tsf_voice_envelope* e, short a
 			}
 			/* fall through */
 		case TSF_SEGMENT_DECAY:
+			if (e->isAmpEnv && e->parameters.sustain <= 0.0001f)
+			{
+				// T-DSP: decayed to a silent sustain (sustainVolEnv >= 800 cB = -80 dB) -> the voice is
+				// DONE. A looped one-shot (handpan ring extension) would otherwise sit inaudible in the
+				// pool until a note-off that RING mode never delivers.
+				e->segment = TSF_SEGMENT_DONE;
+				e->segmentIsExponential = TSF_FALSE;
+				e->level = e->slope = 0.0f;
+				e->samplesUntilNextSegment = 0x7FFFFFF;
+				return;
+			}
 			e->segment = TSF_SEGMENT_SUSTAIN;
 			e->level = e->parameters.sustain;
 			e->slope = 0.0f;

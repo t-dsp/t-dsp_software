@@ -12,10 +12,17 @@ this tool rebuilds it compactly:
   * keep N takes per pitch (--variants, default 2) and spread them over velocity bands, so
     playing softer/harder still alternates takes (the SF2 way to get variation);
   * mono mixdown (L+R)/2, resampled to --rate (default 32000 Hz: a handpan's shimmer lives
-    well below 12 kHz), trimmed to --seconds (default 2.5 s) with a short fade;
-  * one preset "Hang D minor" that plays ONLY the real pitches (FreePats' advice: a shifted
-    note drags its sympathetic chord to a random scale), plus "Hang chromatic" that fills the
-    gaps from the nearest take for keyboard players who want every key to sound.
+    well below 12 kHz), whole takes kept (--seconds caps them, with a fade, if you need it smaller);
+  * preset 0 "Hang Dm": EVERY key 0..127 sounds, gaps filled from the nearest real pitch (what a
+    keyboard or LinnStrument player expects); preset 1 "Hang Dm (true)": only the 9 real pitches
+    (FreePats' advice: a shifted note drags its sympathetic chord to a random scale).
+  * RING EXTENSION (--ring, default 14 s = time to -100 dB, about -7 dB/s like the real thing): the recorded takes stop after 1.7-4.2 s, far shorter than a
+    handpan's real sustain. Each take's tail is turned into a seamless loop (its decay flattened, then
+    crossfaded) and the SF2 volume envelope takes over: HOLD until the loop starts, then an exponential
+    DECAY to silence over --ring seconds (sustain -100 dB, so the firmware's TSF frees the voice).
+    --ring 0 keeps the raw takes.
+  Let the notes RING: the firmware's SoundFont track ignores note-off for fonts named *hang*/*handpan*
+  (@TRK<i>.RING=1), so a struck note decays naturally like the real instrument.
 
 Output: tools/sf2/fonts/handpan.sf2 (that folder is git-ignored; nothing is committed).
 
@@ -23,6 +30,7 @@ USAGE
     pip install numpy py7zr            # once
     python tools/fetch_handpan.py                      # fetch + build (defaults ~3 MB)
     python tools/fetch_handpan.py --variants 3 --seconds 3 --rate 32000   # bigger/longer
+    python tools/fetch_handpan.py --ring 10                                 # longer sustain
     python tools/fetch_handpan.py --sf2 path/to/other.sf2 --label "My Handpan"   # any SF2 source
 
 PUSH TO THE CARD (then reboot the Teensy; the font loads at boot)
@@ -43,6 +51,10 @@ OUT_DIR = os.path.join(REPO, "tools", "sf2", "fonts")
 CACHE = os.path.join(OUT_DIR, "cache")
 
 GEN_KEYRANGE, GEN_VELRANGE, GEN_SAMPLEMODES, GEN_OVERRIDINGROOTKEY, GEN_PAN = 43, 44, 54, 58, 17
+GEN_HOLDVOLENV, GEN_DECAYVOLENV, GEN_SUSTAINVOLENV, GEN_RELEASEVOLENV = 35, 36, 37, 38
+import math
+def timecents(sec):
+    return max(-12000, min(8000, int(round(1200.0 * math.log2(max(sec, 0.001))))))
 NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 
@@ -130,7 +142,52 @@ def render_take(pcm, pair, src_rate, out_rate, seconds):
     return x
 
 
-def build(sf2_src, out_path, label, variants, seconds, rate):
+def ring_loop(x, rate, loop_sec=0.6, xfade_sec=0.15, loop_db=-15.0):
+    """Turn the take into a strike + seamless sustain loop.
+    The FreePats Hang takes are damped/trimmed after 1.7-4.2 s and are ~30 dB down already by 1.5 s, so
+    looping the *end* of a take only rings at a whisper. Instead the loop starts where the body has
+    settled to `loop_db` below the strike peak (still a full-bodied tone) and the rest of the take is
+    dropped; the SF2 volume envelope then decays that loop over --ring seconds like a real handpan.
+    Returns (sample, loop_start, loop_end): the loop region has its natural decay flattened (no pump)
+    and its end crossfaded into the material just before the loop start (click-free wrap)."""
+    import numpy as np
+    win = max(1, int(0.02 * rate))
+    env = np.sqrt(np.convolve(x.astype(np.float64) ** 2, np.ones(win) / win, mode="same")) + 1e-9
+    pk = int(np.argmax(env))
+    floor_idx = np.nonzero(env > env.max() * 10 ** (-54 / 20.0))[0]
+    last = int(floor_idx[-1]) if len(floor_idx) else len(x) - 1
+    L = int(loop_sec * rate)
+    cf = int(xfade_sec * rate)
+    min_start = max(pk + int(0.3 * rate), int(0.35 * rate) + cf)   # keep the strike + bloom untouched
+    below = np.nonzero(env[min_start:] < env.max() * 10 ** (loop_db / 20.0))[0]
+    ls = min_start + int(below[0]) if len(below) else min_start
+    le = ls + L
+    if le > last:                      # short take: pull the loop back / shorten it
+        ls = max(min_start, last - L)
+        le = min(last, ls + L)
+        L = le - ls
+        if L < int(0.2 * rate):
+            return x, 0, 0
+    cf = min(cf, L // 2)
+    y = x[:le].astype(np.float32).copy()
+    seg = y[ls:le]
+    head = max(1, min(int(0.1 * rate), L // 3))
+    r0 = float(np.sqrt(np.mean(seg[:head] ** 2))) + 1e-9
+    r1 = float(np.sqrt(np.mean(seg[-head:] ** 2))) + 1e-9
+    k = math.log(r1 / r0) / L                      # per-sample decay rate inside the loop (negative)
+    t = np.arange(L, dtype=np.float32)
+    seg *= np.exp(-k * t).astype(np.float32)       # flatten: the loop holds the loop-start level
+    w = np.linspace(0.0, 1.0, cf, dtype=np.float32)
+    pre = y[ls - cf:ls].copy()                   # what naturally precedes the loop start
+    # level-match the pre-loop material to the flattened loop (it is slightly louder, being earlier)
+    rp = float(np.sqrt(np.mean(pre ** 2))) + 1e-9
+    pre = pre * (r0 / rp)
+    seg[L - cf:] = seg[L - cf:] * (1.0 - w) + pre * w   # loop end -> blends into (loop start - cf .. loop start)
+    y[ls:le] = seg
+    return y, ls, le
+
+
+def build(sf2_src, out_path, label, variants, seconds, rate, ring=0.0):
     import numpy as np
     f = M.parse(sf2_src)
     notes, takes = collect_takes(f)
@@ -140,11 +197,18 @@ def build(sf2_src, out_path, label, variants, seconds, rate):
 
     # render chosen takes
     rendered = {}   # (note, k) -> float array
+    loops = {}      # (note, k) -> (loop_start, loop_end) sample offsets within the take (0,0 = no loop)
     for n in sorted(notes):
         names = notes[n][:variants]
         for k, nm in enumerate(names):
-            rendered[(n, k)] = render_take(pcm, takes[nm], src_rate, rate, seconds)
-            print("  %-4s take %d %-10s %.2fs" % (note_name(n), k + 1, nm, len(rendered[(n, k)]) / rate))
+            a = render_take(pcm, takes[nm], src_rate, rate, seconds)
+            ls = le = 0
+            if ring > 0:
+                a, ls, le = ring_loop(a, rate)
+            rendered[(n, k)] = a
+            loops[(n, k)] = (ls, le)
+            print("  %-4s take %d %-10s %.2fs%s" % (note_name(n), k + 1, nm, len(a) / rate,
+                  ("  loop %.2f-%.2fs" % (ls / rate, le / rate)) if le else ""))
     peak = max(float(np.max(np.abs(a))) for a in rendered.values()) or 1.0
     gain = 32767.0 * 0.89 / peak    # -1 dBFS
 
@@ -153,7 +217,9 @@ def build(sf2_src, out_path, label, variants, seconds, rate):
     for (n, k), a in sorted(rendered.items()):
         q = np.clip(np.round(a * gain), -32768, 32767).astype("<i2")
         st, en = cursor, cursor + int(q.size)
-        shdr.append(dict(name=("%s_%d" % (note_name(n), k + 1)).encode()[:20], start=st, end=en, sloop=st, eloop=en,
+        ls, le = loops[(n, k)]
+        shdr.append(dict(name=("%s_%d" % (note_name(n), k + 1)).encode()[:20], start=st, end=en,
+                         sloop=st + ls if le else st, eloop=st + le if le else en,
                          rate=rate, opitch=n, pcorr=0, link=0, stype=1))
         smpl_parts.append(q.tobytes()); smpl_parts.append(b"\x00\x00" * M.GUARD)
         cursor = en + M.GUARD
@@ -161,11 +227,19 @@ def build(sf2_src, out_path, label, variants, seconds, rate):
 
     inst, ibag, igen = [], [], []
     imod = [b"\x00" * M.IMOD_SZ]
-    def add_zone(lo, hi, vlo, vhi, root, sid):
+    def add_zone(lo, hi, vlo, vhi, root, key_):
+        sid = sid_of[key_]
+        ls, le = loops[key_]
         ibag.append(dict(gen=len(igen), mod=0))
         igen.append([GEN_KEYRANGE, struct.pack("<BB", lo, hi)])
         igen.append([GEN_VELRANGE, struct.pack("<BB", vlo, vhi)])
-        igen.append([GEN_SAMPLEMODES, struct.pack("<H", 0)])
+        if le:   # ring extension: loop the flattened tail; HOLD the level until the loop starts, then
+                 # decay exponentially to silence over `ring` seconds (SF2 decay = time to -100 dB)
+            igen.append([GEN_HOLDVOLENV, struct.pack("<h", timecents(max(0.05, ls / rate - 0.2)))])
+            igen.append([GEN_DECAYVOLENV, struct.pack("<h", timecents(ring))])
+            igen.append([GEN_SUSTAINVOLENV, struct.pack("<h", 1000)])
+        igen.append([GEN_RELEASEVOLENV, struct.pack("<h", timecents(0.6))])   # when RING is off: a soft release, no click
+        igen.append([GEN_SAMPLEMODES, struct.pack("<H", 1 if le else 0)])
         igen.append([GEN_OVERRIDINGROOTKEY, struct.pack("<h", root)])
         igen.append([M.GEN_SAMPLEID, struct.pack("<H", sid)])
     pitches = sorted(notes)
@@ -173,20 +247,21 @@ def build(sf2_src, out_path, label, variants, seconds, rate):
         edges = [round(i * 128 / count) for i in range(count + 1)]
         return [(edges[i], edges[i + 1] - 1) for i in range(count)]
 
-    # instrument 0: real pitches only
+    # instrument 0 (the default): chromatic -- EVERY key 0..127 sounds, gaps filled from the nearest
+    # real pitch (pitch-shifted; a few semitones near the Hang's range, octaves further out).
     inst.append(dict(name=label.encode()[:20], ibag=len(ibag)))
-    for n in pitches:
-        ks = [k for (nn, k) in rendered if nn == n]
-        for k, (vlo, vhi) in zip(sorted(ks), vel_bands(len(ks))):
-            add_zone(n, n, vlo, vhi, n, sid_of[(n, k)])
-    # instrument 1: chromatic fill from the nearest real pitch
-    inst.append(dict(name=(label + " chromatic").encode()[:20], ibag=len(ibag)))
-    lo_key, hi_key = pitches[0] - 7, pitches[-1] + 7
-    for key in range(lo_key, hi_key + 1):
+    for key in range(0, 128):
         n = min(pitches, key=lambda p: (abs(p - key), p))
         ks = [k for (nn, k) in rendered if nn == n]
         for k, (vlo, vhi) in zip(sorted(ks), vel_bands(len(ks))):
-            add_zone(key, key, vlo, vhi, n, sid_of[(n, k)])
+            add_zone(key, key, vlo, vhi, n, (n, k))
+    # instrument 1: the real pitches only (FreePats' advice: a shifted note drags its sympathetic
+    # chord to a random scale) -- the purist preset.
+    inst.append(dict(name=(label + " (true)").encode()[:20], ibag=len(ibag)))
+    for n in pitches:
+        ks = [k for (nn, k) in rendered if nn == n]
+        for k, (vlo, vhi) in zip(sorted(ks), vel_bands(len(ks))):
+            add_zone(n, n, vlo, vhi, n, (n, k))
     inst.append(dict(name=b"EOI", ibag=len(ibag))); ibag.append(dict(gen=len(igen), mod=0)); igen.append([0, b"\x00\x00"])
     shdr.append(dict(name=b"EOS", start=0, end=0, sloop=0, eloop=0, rate=0, opitch=0, pcorr=0, link=0, stype=0))
     smpl = b"".join(smpl_parts)
@@ -195,7 +270,7 @@ def build(sf2_src, out_path, label, variants, seconds, rate):
 
     phdr, pbag, pgen = [], [], []
     pmod = [b"\x00" * M.PMOD_SZ]
-    for i, nm in enumerate((label, label + " chromatic")):
+    for i, nm in enumerate((label, label + " (true)")):
         phdr.append(dict(name=nm.encode()[:20], preset=i, bank=0, pbag=len(pbag), lib=0, genre=0, morph=0))
         pbag.append(dict(gen=len(pgen), mod=0))
         pgen.append([M.GEN_INSTRUMENT, struct.pack("<H", i)])
@@ -212,7 +287,7 @@ def build(sf2_src, out_path, label, variants, seconds, rate):
         c.write("handpan.sf2 is built from the FreePats 'Hang tuned in D minor' sound bank (CC0 1.0 public domain).\n"
                 "Recorded 2017 at Medialab-Prado (Madrid) by Gonzalo and Roberto for FreePats; Hang played by Mar.\n"
                 "https://freepats.zenvoid.org/ChromaticPercussion/hang.html\n"
-                "Rebuilt compactly by tools/fetch_handpan.py: %d take(s)/pitch, %.1f s, %d Hz mono.\n" % (variants, seconds, rate))
+                "Rebuilt compactly by tools/fetch_handpan.py: %d take(s)/pitch, %.1f s, %d Hz mono, ring extension %.1f s.\n" % (variants, seconds, rate, ring))
 
 
 def main():
@@ -221,11 +296,12 @@ def main():
     ap.add_argument("--out", default=os.path.join(OUT_DIR, "handpan.sf2"))
     ap.add_argument("--label", default="Hang Dm", help="preset/instrument name; SF2 caps names at 20 chars incl. the ' chromatic' suffix")
     ap.add_argument("--variants", type=int, default=2, help="round-robin takes kept per pitch (spread over velocity)")
-    ap.add_argument("--seconds", type=float, default=2.5, help="max take length (fade-out at the end)")
+    ap.add_argument("--seconds", type=float, default=6.0, help="max take length; the Hang takes are 1.7-4.2 s, so the default keeps them whole (fade only when cut)")
     ap.add_argument("--rate", type=int, default=32000, help="output sample rate")
+    ap.add_argument("--ring", type=float, default=14.0, help="ring extension: loop each take's tail and decay to silence over this many seconds (0 = raw takes)")
     a = ap.parse_args()
     src = a.sf2 or fetch_source()
-    build(src, a.out, a.label[:20], a.variants, a.seconds, a.rate)
+    build(src, a.out, a.label[:20], a.variants, a.seconds, a.rate, a.ring)
     print("push: python tools/sync_assets.py --skip-manifest --soundfont --sf2-src %s --sf2-dest /sf2/handpan.sf2" % os.path.relpath(a.out, REPO))
     return 0
 

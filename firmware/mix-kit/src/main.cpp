@@ -2284,7 +2284,7 @@ static void transportStop() {
 static void panicSilenceSink(tdsp::MidiSink *s) {
     if (!s) return;
     for (uint8_t ch = 1; ch <= 16; ++ch) { s->onSustain(ch, false); s->onPitchBend(ch, 0.0f); }
-    s->onAllNotesOff(0);
+    s->onPanic();   // hard silence — also for sinks that let notes ring through all-notes-off (RING mode)
 }
 static void panicAll() {
     g_drumLaunchPending = false;
@@ -3208,6 +3208,9 @@ static void handleTrkCmd(const char* s, Stream& reply) {
     else if (voiceIsPlaits(i) && strncmp(cmd, "TIMBRE=", 7) == 0)   { const int k = i - (kDexedVoices + kOpllVoices); heteroPlaitsSetTimbre(k, atoi(arg)); reply.printf("@TRK%d.TIMBRE=%d\n", i, g_hpTimbre[k]); }
     else if (voiceIsPlaits(i) && strncmp(cmd, "MORPH=", 6) == 0)    { const int k = i - (kDexedVoices + kOpllVoices); heteroPlaitsSetMorph(k, atoi(arg));  reply.printf("@TRK%d.MORPH=%d\n", i, g_hpMorph[k]); }
     else if (voiceIsPlaits(i) && strncmp(cmd, "LPGDECAY=", 9) == 0) { const int k = i - (kDexedVoices + kOpllVoices); heteroPlaitsSetDecay(k, atoi(arg));  reply.printf("@TRK%d.LPGDECAY=%d\n", i, g_hpDecay[k]); }
+#if TDSP_TSF_ENGINES >= 1
+    else if (voiceIsTsf(i) && strncmp(cmd, "RING=", 5) == 0)     { heteroTsfSetRing(atoi(arg) != 0); reply.printf("@TRK%d.RING=%d\n", i, g_htRing ? 1 : 0); }   // let notes ring (ignore note-off)
+#endif
     else if (voiceIsPlaits(i) && strncmp(cmd, "LPGCOLOR=", 9) == 0) { const int k = i - (kDexedVoices + kOpllVoices); heteroPlaitsSetColor(k, atoi(arg));  reply.printf("@TRK%d.LPGCOLOR=%d\n", i, g_hpColor[k]); }
 #endif
 #if defined(TDSP_SYNTH_PLAITS)
@@ -3972,6 +3975,12 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
                              g_hpHarm[k], g_hpTimbre[k], g_hpMorph[k], g_hpDecay[k], g_hpColor[k]);
             }
 #endif
+#if TDSP_TSF_ENGINES >= 1
+            if (voiceIsTsf(v)) {   // SoundFont track: which font is resident + ring mode
+                reply.print(",\"font\":"); tdsp::catdb::jsonStr(reply, g_htFontDisp);
+                reply.printf(",\"ring\":%d", g_htRing ? 1 : 0);
+            }
+#endif
 #if defined(TDSP_SYNTH_PLAITS)
             // Solo (primary) Plaits: track 0 carries the same macros (rehydrate the editor panel).
             if (v == 0)
@@ -4676,6 +4685,7 @@ FLASHMEM void setup() {
 #if TDSP_HETERO_PLAITS
     for (int k = 0; k < TDSP_PLAITS_ENGINES; k++) heteroPlaitsBegin(k);   // bring up each Plaits track (D, E) + open its mix slot
 #if TDSP_TSF_ENGINES >= 1
+    g_htPush = &ctrl;   // the SoundFont track pushes its refreshed voice list on every lane after a font swap
     heteroTsfBegin();   // Synth F: load the melodic SoundFont (handpan) into PSRAM; sums into the Plaits sub-mix
 #endif
 #endif
@@ -5052,6 +5062,9 @@ void loop() {
     g_sdWrite.tick(*g_sdWriteSrc, millis());   // abort a stalled @WB transfer (watchdog), on its own lane
 #if TDSP_AUDIOREC
     arecService();   // drain the take to the card (one 16 KB write per pass), end-of-playback, 1 s status push
+#endif
+#if TDSP_TSF_ENGINES >= 1
+    heteroTsfService();   // after a font swap: push the refreshed voice list on every lane
 #endif
 
     // USB CDC input serves two roles: '@'-prefixed control LINES (the same protocol

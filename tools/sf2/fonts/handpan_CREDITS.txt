@@ -1,0 +1,4 @@
+handpan.sf2 is built from the FreePats 'Hang tuned in D minor' sound bank (CC0 1.0 public domain).
+Recorded 2017 at Medialab-Prado (Madrid) by Gonzalo and Roberto for FreePats; Hang played by Mar.
+https://freepats.zenvoid.org/ChromaticPercussion/hang.html
+Rebuilt compactly by tools/fetch_handpan.py: 2 take(s)/pitch, 6.0 s, 32000 Hz mono, ring extension 14.0 s.

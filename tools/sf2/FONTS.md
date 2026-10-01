@@ -85,12 +85,22 @@ the card, no reflash), see **`DRUM_FONTS.md`** and `merge_drum_sf2.py`. Merge fi
 
 ## Handpan (melodic SoundFont track, "Synth F")
 
-`tools/fetch_handpan.py` builds `tools/sf2/fonts/handpan.sf2` (~2.9 MB, git-ignored) from the FreePats
+`tools/fetch_handpan.py` builds `tools/sf2/fonts/handpan.sf2` (~1.4 MB, git-ignored) from the FreePats
 **"Hang tuned in D minor"** bank (CC0 1.0): 9 pitches (A3 D4 E4 F4 G4 A4 Bb4 C5 D5), 2 round-robin takes
-per pitch spread over velocity, mono 32 kHz, 2.5 s takes. Two presets: `Hang Dm` (only the real pitches
-sound, as the recordists advise) and `Hang Dm chromatic` (gaps filled from the nearest take). Loaded by
-the kitchen-sink jay-mint env (`TDSP_TSF_ENGINES=1`, `TDSP_TSF_FONT_PATH=/sf2/handpan.sf2`) as the sixth
-melodic track; resident in PSRAM next to the 1.7 MB drum font. Push:
+per pitch spread over velocity, mono 32 kHz. Two presets: `Hang Dm` (preset 0, the default: EVERY key
+0..127 sounds, gaps filled from the nearest take) and `Hang Dm (true)` (only the 9 real pitches, as the
+recordists advise). **Ring extension** (`--ring`, default 14 s): the recorded takes are damped after
+1.7-4.2 s and ~30 dB down by 1.5 s, nothing like a handpan's sustain, so each take is cut where its body
+sits 15 dB under the strike, that 0.6 s is flattened + crossfaded into a seamless loop, and the SF2
+volume envelope (hold to the loop, then exponential decay to -100 dB over `--ring` s, ~-7 dB/s) rings it
+out; measured on the box: a chord audible for ~8 s after the strike. The firmware's TSF ends a voice
+whose envelope has decayed to a silent sustain (`tsf.h`, T-DSP patch) so looped one-shots free their
+voice. Loaded by the kitchen-sink jay-mint env (`TDSP_TSF_ENGINES=1`, `TDSP_TSF_FONT_PATH=/sf2/handpan.sf2`)
+as the sixth melodic track (Synth F); fonts named *hang*/*handpan* boot in RING mode (`@TRK<i>.RING=1`:
+note-off, song end and transport stop let notes decay; only PANIC cuts them). Synth F's voice list also
+offers every `/sf2/*.sf2` on the card as `Fonts: <name>` (`(loaded)` / `(too big)` tags); picking one
+swaps the resident font in ~0.3 s and the list is re-pushed. Push:
 `python tools/sync_assets.py --skip-manifest --soundfont --sf2-src tools/sf2/fonts/handpan.sf2 --sf2-dest /sf2/handpan.sf2`
-then reboot. Knobs: `--variants`, `--seconds`, `--rate`; `--sf2 other.sf2 --label "Name"` rebuilds any font compactly.
+(no reboot needed: pick another font and back to reload). Knobs: `--variants`, `--seconds`, `--rate`,
+`--ring`; `--sf2 other.sf2 --label "Name"` rebuilds any font compactly.
 

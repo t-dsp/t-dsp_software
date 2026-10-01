@@ -1,2 +1,4 @@
 # Generated / large font binaries — regenerate with build_gu_fonts.py
 *.sf2
+# downloaded source archives (fetch_handpan.py etc.)
+cache/

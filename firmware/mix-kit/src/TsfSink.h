@@ -22,6 +22,10 @@ public:
     // lowpass cutoff); in normal GM playback CC74 is a file controller we must NOT let
     // slam the filter shut. Driven from applyMidiMode()/synthSetMpeMode() in main.cpp.
     void setMpe(bool m) { _mpe = m; }
+    // RING mode: ignore note-off, so a struck note decays to the end of its sample like the real
+    // instrument (handpan, hang, bells). Without it the SoundFont release envelope chokes the ring.
+    void setRing(bool r) { _ring = r; }
+    bool ring() const { return _ring; }
 
     // Tier-2 ReplayGain: a 128-entry per-GM-program linear-gain table applied per-channel
     // (via tsf_channel_set_volume, which files never touch — CC7/CC11 aren't routed here)
@@ -34,6 +38,7 @@ public:
     }
     void onNoteOff(uint8_t ch, uint8_t note, uint8_t) override {
         tsf *t = *_t; if (!t) return;
+        if (_ring) return;   // RING: let it decay naturally (one-shot behaviour for the whole font)
         // GM percussion (ch10) is ONE-SHOT: a struck drum should ring its natural sample
         // decay. Exported drum MIDI authors a note-off right after every hit — meaningless
         // for a one-shot, but it triggers TSF's volume-envelope RELEASE and chops the tail,
@@ -97,11 +102,19 @@ public:
         if (!_mpe) return;
         AudioNoInterrupts(); tsf_channel_midi_control(t, ch - 1, 74, to7(v)); AudioInterrupts();
     }
+    // PANIC (@PANIC button): hard-silence even in RING mode.
+    void onPanic() override {
+        tsf *t = *_t; if (!t) return;
+        AudioNoInterrupts(); tsf_note_off_all(t); AudioInterrupts();
+        const bool r = _ring; _ring = false; onAllNotesOff(0); _ring = r;   // + recenter every channel
+    }
     void onAllNotesOff(uint8_t ch) override {
         tsf *t = *_t; if (!t) return;
         AudioNoInterrupts();
         if (ch == 0) {
-            tsf_note_off_all(t);                      // panic all notes
+            // RING: a song ending / transport stop / CC123 lets the struck notes decay naturally
+            // (they end themselves when the sample or its volume envelope runs out). PANIC -> onPanic().
+            if (!_ring) tsf_note_off_all(t);          // panic all notes
             // Recenter per-channel MPE expression too. Pressure maps to channel VOLUME
             // (tsf_channel_set_volume); without this, a note that released at low pressure
             // leaves its channel quiet/silent, and the next song/instrument on that channel
@@ -113,7 +126,7 @@ public:
                 // ^ cutoffCents is sticky (only zeroed at channel creation), so a part that
                 //   closed its filter mid-song would otherwise stay silent across a restart.
             }
-        } else {
+        } else if (!_ring) {
             tsf_channel_note_off_all(t, ch - 1);
         }
         AudioInterrupts();
@@ -122,6 +135,7 @@ public:
 private:
     tsf **_t;
     bool  _mpe = false;   // false = normal GM playback (ignore file CC74); true = MPE timbre axis
+    bool  _ring = false;  // see setRing()
     const float *_gmTrim = nullptr;   // Tier-2 per-GM-program trim table (128), null = off
     static uint8_t to7(float v) { return (uint8_t)((v < 0 ? 0 : v > 1 ? 1 : v) * 127.0f + 0.5f); }
 };

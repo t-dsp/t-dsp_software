@@ -56,6 +56,10 @@ public:
     // means "panic" — release everything regardless of channel.
     virtual void onAllNotesOff(uint8_t channel) { (void)channel; }
 
+    // PANIC: silence everything NOW, no exceptions. Defaults to a channel-0 all-notes-off; sinks
+    // that let notes ring through all-notes-off (a handpan font in RING mode) must still obey this.
+    virtual void onPanic() { onAllNotesOff(0); }
+
     // SysEx passthrough. For Dexed VMEM bank loads and similar. `last`
     // is true on the final chunk of a multi-packet SysEx. Sinks that
     // don't need SysEx leave the default no-op.
