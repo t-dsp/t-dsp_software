@@ -120,8 +120,13 @@ export default function ConnectScreen({
               </Pressable>
               {renderError(o.id)}
               {o.help === 'deviceNetwork' && deviceNetwork && (!showNet ? (
-                <Pressable onPress={() => setShowNet(true)} style={st.linkRow} accessibilityRole="button">
-                  <Text style={st.link}>Show the Wi-Fi password</Text>
+                <Pressable onPress={() => setShowNet(true)} style={({ pressed }) => [st.card, st.cardQuiet, pressed && st.cardPressed]} accessibilityRole="button">
+                  <Text style={st.icon}>🔑</Text>
+                  <View style={st.cardText}>
+                    <Text style={st.title}>Show the Wi-Fi password</Text>
+                    <Text style={st.subtitle} numberOfLines={2}>The T-DSP network name and password, copy, QR for another phone</Text>
+                  </View>
+                  <Text style={st.chev}>❯</Text>
                 </Pressable>
               ) : (
                 <View style={st.netPanel}>
@@ -190,9 +195,12 @@ export default function ConnectScreen({
         {manualId && !options.some(o => o.id === manualId) ? renderError(manualId) : null}
 
         {searching && (
-          <View style={st.searchRow}>
-            <ActivityIndicator color={C.muted} size="small" />
-            <Text style={st.hint}>Looking for T-DSP devices on this Wi-Fi…</Text>
+          <View style={[st.card, st.cardQuiet]} accessibilityRole="progressbar">
+            <View style={st.iconBox}><ActivityIndicator color={C.muted} size="small" /></View>
+            <View style={st.cardText}>
+              <Text style={st.title}>Looking for T-DSP devices on this Wi-Fi…</Text>
+              <Text style={st.subtitle} numberOfLines={2}>Each T-DSP found on this network appears above as its own card. Nothing yet.</Text>
+            </View>
           </View>
         )}
         {!!footer && <Text style={[st.hint, st.footer]}>{footer}</Text>}
@@ -259,6 +267,7 @@ const st = StyleSheet.create({
   searchRow: { flexDirection: 'row', alignItems: 'center', gap: 8, marginTop: 6 },
   hint: { color: C.muted, fontSize: 13 },
   footer: { marginTop: 16, lineHeight: 19 },
+  iconBox: { width: 30, alignItems: 'center', justifyContent: 'center' },
   updBox: { marginTop: 28, paddingTop: 14, borderTopWidth: StyleSheet.hairlineWidth, borderTopColor: C.border, gap: 6 },
   updTitle: { color: C.text, fontSize: 14, fontWeight: '700' },
   updRow: { flexDirection: 'row', gap: 10, marginTop: 6, flexWrap: 'wrap' },
