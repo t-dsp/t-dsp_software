@@ -17,7 +17,17 @@ Status (2026-10-01, same day): **phases 0–3 BUILT and verified on jay-mint** (
   device doesn't complete the transfers — the first build hung the whole box. Every burst now ends in a
   read, one burst is in flight at a time, and six consecutive silent timeouts pause control.
 - Round trip verified: `@LINN.SET=19,12` → `@LINN.V=19,12` (device confirms), restored to 24.
-Phase 4 (remembered toggles via `@APP`) not done; the Follow/Tempo switches reset at boot.
+Phase 4 done differently: the Follow/Tempo switches are remembered by the APP (AsyncStorage) and re-sent once per
+connection as soon as the device answers (the box's RAM copy still resets at boot).
+
+### Added: two synths on one surface (split routing)
+`@TRK<i>.SRC=usbL|usbR` — a synth follows one half of the LinnStrument. The hub derives that split's channel set
+from the device's own settings (one channel → {main}; channel per note → {main} + enabled per-note channels;
+channel per row → lowest..+7), filters on it, and remaps the channels so the synth always sees a standard lower
+zone (main → 1, per-note → 2..). Exclusive per side; choosing a right-split synth switches the device's Split on.
+`@LINN.ZONES` arranges the device for two zones (L = 1 + 2–8, R = 16 + 9–15, or 1 / 2 in one-channel mode).
+App: each synth's MIDI Input picker gains "Linn L" / "Linn R"; Settings › LinnStrument has Left/Right synth pickers,
+the live channel sets, an overlap warning and the Arrange button.
 
 ---
 

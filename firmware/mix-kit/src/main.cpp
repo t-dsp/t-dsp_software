@@ -2908,6 +2908,12 @@ namespace midihub {
     }
     static inline bool subscribed(const Track &t, MidiSourceId s) { return (t.liveSrcMask & srcBit(s)) != 0; }
     static inline bool chOk(const Track &t, uint8_t ch) { return t.srcChMask == 0 || (ch >= 1 && ch <= 16 && (t.srcChMask & (uint16_t)(1u << (ch - 1)))); }
+    // Channel as the track's router should see it: a LinnStrument-split follower gets the split's main
+    // channel as 1 and its per-note channels as 2.. (Track::linnMap); everyone else the wire channel.
+    static inline uint8_t mapCh(const Track &t, MidiSourceId s, uint8_t ch) {
+        if (!t.linnSplit || s != SrcUsbHost || ch < 1 || ch > 16) return ch;
+        const uint8_t m = t.linnMap[ch]; return m ? m : ch;
+    }
 
     // Live finger-drumming: when the drum track subscribes to a source, a controller's notes play the
     // GM kit on ch10 REGARDLESS of the controller's own channel (a keyboard sends ch1). The drum track
@@ -2925,26 +2931,26 @@ namespace midihub {
         mpeMonEmit(mpeMonSrcChar(s), vel ? 'n' : 'x', ch, note, vel);   // INPUT tap (before any gating)
         maybeSynchroStart(vel);
         if (vel) heldAdd(s, ch, note); else heldRemove(s, ch, note);
-        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch) && voiceLive((int)(&t - g_tracks))) t.router->handleNoteOn(ch, note, vel);
+        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch) && voiceLive((int)(&t - g_tracks))) t.router->handleNoteOn(mapCh(t, s, ch), note, vel);
         drumLive(s, ch, note, vel);   // live finger-drumming: a subscribed drum track plays the kit on ch10
     }
     static void noteOff(MidiSourceId s, uint8_t ch, uint8_t note, uint8_t vel) {
         mpeMonEmit(mpeMonSrcChar(s), 'x', ch, note, vel);   // INPUT tap
         heldRemove(s, ch, note);
-        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handleNoteOff(ch, note, vel);
+        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handleNoteOff(mapCh(t, s, ch), note, vel);
         drumLive(s, ch, note, 0);   // note-off -> ch10 (drum sink chokes open-hat, ignores the rest)
     }
     static void controlChange(MidiSourceId s, uint8_t ch, uint8_t cc, uint8_t val) {
         mpeMonEmit(mpeMonSrcChar(s), 'c', ch, cc, val);   // INPUT tap
-        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handleControlChange(ch, cc, val);
+        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handleControlChange(mapCh(t, s, ch), cc, val);
     }
     static void pitchBend(MidiSourceId s, uint8_t ch, int bend) {
         mpeMonEmit(mpeMonSrcChar(s), 'b', ch, bend, 0);   // INPUT tap (raw -8192..8191)
-        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handlePitchBend(ch, (int16_t)bend);
+        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handlePitchBend(mapCh(t, s, ch), (int16_t)bend);
     }
     static void channelPressure(MidiSourceId s, uint8_t ch, uint8_t pressure) {
         mpeMonEmit(mpeMonSrcChar(s), 'p', ch, pressure, 0);   // INPUT tap (0..127)
-        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handleChannelPressure(ch, pressure);
+        for (Track &t : g_tracks) if (t.router && subscribed(t, s) && chOk(t, ch)) t.router->handleChannelPressure(mapCh(t, s, ch), pressure);
     }
 
     // Change a track's live subscription. Releases notes still held on the sources it's DROPPING
@@ -2955,10 +2961,35 @@ namespace midihub {
         if (t.router) {
             uint8_t removed = (uint8_t)(t.liveSrcMask & ~newMask);
             for (uint8_t s = SrcDin; s < SrcCount; ++s) if (removed & (uint8_t)(1u << s))
-                for (uint8_t i = 0; i < s_heldN[s]; ++i) t.router->handleNoteOff(s_held[s][i].ch, s_held[s][i].note, 0);
+                for (uint8_t i = 0; i < s_heldN[s]; ++i) t.router->handleNoteOff(mapCh(t, (MidiSourceId)s, s_held[s][i].ch), s_held[s][i].note, 0);
         }
         t.liveSrcMask = newMask;
     }
+#if TDSP_HAS_USB_MIDI_HOST
+    // LinnStrument split follow: (re)compute a split-following track's channel set + remap from the
+    // device's current settings. Called when the track claims a split and whenever those settings move.
+    static void linnApplySplit(Track &t) {
+        if (!t.linnSplit) return;
+        const int side = t.linnSplit - 1;
+        const uint16_t chans = g_linn.splitChannels(side);
+        const int main = g_linn.splitMain(side);
+        t.srcChMask = chans;
+        memset(t.linnMap, 0, sizeof(t.linnMap));
+        uint8_t next = 2;
+        t.linnMap[main] = 1;
+        for (int c = 1; c <= 16; c++) if (c != main && (chans & (uint16_t)(1u << (c - 1)))) t.linnMap[c] = next < 16 ? next++ : 16;
+    }
+    static void linnApplySplits() { for (Track &t : g_tracks) linnApplySplit(t); }
+    // @TRK<i>.SRC=usbL|usbR: follow one half of the LinnStrument. Exclusive per side (the other synth
+    // that followed this side is released); claiming the RIGHT split switches the device's split on.
+    static void setLinnSplit(Track &t, uint8_t side /*1 L, 2 R*/) {
+        for (Track &o : g_tracks) if (&o != &t && o.linnSplit == side) { o.linnSplit = 0; o.srcChMask = 0; setSources(o, (uint8_t)(o.liveSrcMask & ~srcBit(SrcUsbHost))); }
+        t.linnSplit = side;
+        setSources(t, srcBit(SrcUsbHost));
+        linnApplySplit(t);
+        if (side == 2 && g_linn.isLinn() && g_linn.value(200) == 0) g_linn.set(200, 1);
+    }
+#endif
     // Wire<->mask helpers for @TRK<i>.SRC= and @STATE. The app picks a single device (or none/all).
     static uint8_t parseSrcMask(const char *a) {
         if (!strcmp(a, "none"))   return 0;
@@ -2968,6 +2999,11 @@ namespace midihub {
         if (!strcmp(a, "bt"))     return srcBit(SrcBtMidi);
         if (!strcmp(a, "serial")) return srcBit(SrcSerial);
         return 0;
+    }
+    static const char *srcName(uint8_t mask);
+    static const char *trackSrcName(const Track &t) {   // like srcName, but a split follower reads back usbL / usbR
+        if (t.linnSplit && t.liveSrcMask == (1u << SrcUsbHost)) return t.linnSplit == 1 ? "usbL" : "usbR";
+        return srcName(t.liveSrcMask);
     }
     static const char *srcName(uint8_t mask) {
         switch (mask) {
@@ -3260,7 +3296,15 @@ static void handleTrkCmd(const char* s, Stream& reply) {
     else if (strncmp(cmd, "ARP", 3) == 0)      { if (t->arp) handleArpLine(cmd, reply, *t->arp, "ARP"); }
     // Live-MIDI input subscription (Thread C): which physical device feeds this synth + channel
     // filter. Pure field writes the hub reads per event — no audio-graph repatch, zero switch latency.
-    else if (strncmp(cmd, "SRC=", 4) == 0)     { midihub::setSources(*t, midihub::parseSrcMask(arg)); reply.printf("@TRK%d.SRC=%s\n", i, midihub::srcName(t->liveSrcMask)); }
+    else if (strncmp(cmd, "SRC=", 4) == 0)     {
+#if TDSP_HAS_USB_MIDI_HOST
+        if (!strcmp(arg, "usbL") || !strcmp(arg, "usbR")) midihub::setLinnSplit(*t, arg[3] == 'L' ? 1 : 2);   // follow one LinnStrument split
+        else { if (t->linnSplit) { t->linnSplit = 0; t->srcChMask = 0; }   // leaving a split: its channel filter goes with it
+               midihub::setSources(*t, midihub::parseSrcMask(arg)); }
+#else
+        midihub::setSources(*t, midihub::parseSrcMask(arg));
+#endif
+        reply.printf("@TRK%d.SRC=%s\n", i, midihub::trackSrcName(*t)); }
     else if (strncmp(cmd, "SRCCH=", 6) == 0)   { int n = atoi(arg); t->srcChMask = (n <= 0 || n > 16) ? 0 : (uint16_t)(1u << (n - 1)); reply.printf("@TRK%d.SRCCH=%d\n", i, midihub::chNum(t->srcChMask)); }
 #if TDSP_HETERO
     // Engine-agnostic instrument select (Slot abstraction, Thread D): on a HETERO build a track may
@@ -3764,6 +3808,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     else if (strncmp(line, "@LINN.FOLLOW=", 13) == 0)  { g_linn.followMode = atoi(line + 13) != 0; if (g_linn.followMode) g_linn.applyMpe(g_mpeMode, (int)kMpeMemberBendRange); g_linn.pushStatus(); }
     else if (strncmp(line, "@LINN.TEMPO=", 12) == 0)   { g_linn.followTempo = atoi(line + 12) != 0; g_linn.pushStatus(); }
     else if (strncmp(line, "@LINN.MPE=", 10) == 0)     { g_linn.applyMpe(atoi(line + 10) != 0, (int)kMpeMemberBendRange); }   // one-shot handshake
+    else if (strcmp(line, "@LINN.ZONES") == 0)         { g_linn.arrangeZones(); }                                            // split on, L = 1 + 2..8, R = 16 + 9..15
 #endif
     else if (strncmp(line, "@MPEMON=", 8) == 0) {                    // live MPE input/chain trace on/off (app: Settings > MPE Monitor)
         g_mpeMon    = (atoi(line + 8) != 0);
@@ -3999,7 +4044,7 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
 #endif
             reply.printf("%s{\"i\":%d,\"kind\":\"synth\",\"playing\":%d,\"on\":%d,\"arp\":%d,\"src\":\"%s\",\"srcch\":%d",
                          v ? "," : "", v, t.player->isPlaying() ? 1 : 0, on, arp,
-                         midihub::srcName(t.liveSrcMask), midihub::chNum(t.srcChMask));
+                         midihub::trackSrcName(t), midihub::chNum(t.srcChMask));
             const char *eng = g_trackEngine[v]->engTag();
             if (eng[0]) { reply.print(",\"eng\":"); tdsp::catdb::jsonStr(reply, eng); }
             // ninstr = this engine's instrument count, so the app can step ‹/› with wrap and knows to
@@ -4107,6 +4152,12 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
 #endif
 #if TDSP_HAS_USB_MIDI_HOST
         reply.print(",\"linn\":"); g_linn.statusJson(reply, false);   // USB-host controller: connected? a LinnStrument? (values come via @LINN?)
+        {   // which tracks follow which split, and whether the two splits' channel sets collide
+            int l = -1, r = -1;
+            for (int v = 0; v < (int)kSynthVoices; ++v) { if (g_tracks[v].linnSplit == 1) l = v; if (g_tracks[v].linnSplit == 2) r = v; }
+            reply.printf(",\"linnsplit\":{\"l\":%d,\"r\":%d,\"overlap\":%d,\"chl\":%u,\"chr\":%u}", l, r, g_linn.splitsOverlap() ? 1 : 0,
+                         (unsigned)g_linn.splitChannels(0), (unsigned)g_linn.splitChannels(1));
+        }
 #endif
         // Reasons for features that were BUILT (compiled in) but are currently UNAVAILABLE, so the app
         // can GREY the card (not hide it) and show WHY. A feature appears here only when its code is
@@ -4672,6 +4723,7 @@ FLASHMEM void setup() {
     g_usbMidi.setHandlePitchChange(usbHostPitch);
     g_usbMidi.setHandleAfterTouchChannel(usbHostPressure);   // channel pressure = MPE Z-axis
     g_linn.begin(&ctrl);   // LinnStrument attach/detach + value pushes go to every lane
+    g_linn.onSplitChange = midihub::linnApplySplits;   // a split's MIDI mode / channels moved -> re-derive the followers' filters
 #endif
 
     // Uniform per-track MIDI graph (trackWireSetup): each track's router + song player feed [arp] ->

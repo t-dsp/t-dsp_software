@@ -44,7 +44,8 @@ import type { LastConn } from './src/ui/constants';
 import { deviceHttpBase } from './src/deviceWifi';
 import { loadDeviceNetworkCreds, openWifiSettings, canOpenWifiSettings } from './src/deviceNetwork';
 import { setKeepAwake, keepAwakeSupported } from './src/keepAwake';
-import LinnPanel, { LinnState, EMPTY_LINN } from './src/ui/LinnPanel';
+import LinnPanel, { LinnState, EMPTY_LINN, LinnSplitState, EMPTY_LINN_SPLIT } from './src/ui/LinnPanel';
+import { saveLinnPrefs, loadLinnPrefs, LinnPrefs } from './src/ui/constants';
 import type { DeviceNetworkCreds } from './src/deviceNetwork';
 import { wifiJoinSupported, joinWifi, releaseWifi, scanWifi, ensureWifiScanPermission } from './modules/tdsp-wifi';
 import type { WifiSeen } from './modules/tdsp-wifi';
@@ -230,6 +231,15 @@ export default function App() {
   // shadow (lib/TDspLinn). `@LINN=` carries the status JSON (with "v" = every known value on a `@LINN?`
   // reply), `@LINN.V=<n>,<v>` one value, `@LINN.SYNC=<done>/<total>` the re-read progress.
   const [linn, setLinn] = useState<LinnState>(EMPTY_LINN);
+  const [linnSplit, setLinnSplit] = useState<LinnSplitState>(EMPTY_LINN_SPLIT);   // @STATE.linnsplit: which synth follows each half
+  // Persisted "follow" preferences: re-applied once per connection as soon as the device answers.
+  const linnPrefsRef = useRef<LinnPrefs>({ follow: false, tempo: false });
+  const linnPrefsAppliedRef = useRef(false);
+  useEffect(() => { loadLinnPrefs().then(p => { linnPrefsRef.current = p; }).catch(() => {}); }, []);
+  const setLinnPref = (k: keyof LinnPrefs, on: boolean) => {
+    linnPrefsRef.current = { ...linnPrefsRef.current, [k]: on }; saveLinnPrefs(linnPrefsRef.current);
+    tp.linn((k === 'follow' ? '.FOLLOW=' : '.TEMPO=') + (on ? 1 : 0));
+  };
   const applyLinn = (j: any) => setLinn(l => ({
     ...l, connected: !!j.connected, isLinn: !!j.linn, resp: typeof j.resp === 'number' ? j.resp : -1, name: j.name || '', vid: j.vid | 0, pid: j.pid | 0,
     cols: j.cols === 16 ? 16 : 25, follow: !!j.follow, tempo: !!j.tempo,
@@ -423,6 +433,7 @@ export default function App() {
     // Resident drum font (runtime swap builds only emit j.drumfont): path + short display label.
     if (j.drumfont) setDrumFont({ path: j.drumfont.path || '', display: j.drumfont.display || '', on: typeof j.drumfont.on === 'number' ? !!j.drumfont.on : undefined });
     if (j.linn) applyLinn(j.linn);
+    if (j.linnsplit) setLinnSplit({ l: j.linnsplit.l ?? -1, r: j.linnsplit.r ?? -1, overlap: !!j.linnsplit.overlap, chl: j.linnsplit.chl | 0, chr: j.linnsplit.chr | 0 });
     if (j.voice) {
       if (j.voice.cart) {
         const rel = j.voice.cart;
@@ -1029,6 +1040,15 @@ export default function App() {
   const [rebooting, setRebooting] = useState(false);
   useEffect(() => { if (!rebootArmed) return; const t = setTimeout(() => setRebootArmed(false), 5000); return () => clearTimeout(t); }, [rebootArmed]);
   useEffect(() => { if (connected && rebooting) setRebooting(false); }, [connected]);   // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    if (!connected) { linnPrefsAppliedRef.current = false; return; }
+    if (linn.connected && linn.isLinn && linn.resp === 1 && !linnPrefsAppliedRef.current) {
+      linnPrefsAppliedRef.current = true;
+      const p = linnPrefsRef.current;
+      if (p.follow !== linn.follow) tp.linn('.FOLLOW=' + (p.follow ? 1 : 0));
+      if (p.tempo !== linn.tempo) tp.linn('.TEMPO=' + (p.tempo ? 1 : 0));
+    }
+  }, [connected, linn.connected, linn.isLinn, linn.resp]);   // eslint-disable-line react-hooks/exhaustive-deps
   const restartBox = () => {
     if (!rebootArmed) { setRebootArmed(true); return; }
     setRebootArmed(false); setRebooting(true);
@@ -1894,7 +1914,7 @@ export default function App() {
   // trkSubs the per-synth MIDI-Input selector uses (@TRK<i>.SRC), so the glyph and that selector stay
   // in sync. Replaces the old @VOICE2 split toggle here: the pool split is permanent now, so USB
   // routing is the real per-voice control (and it now works for Synth B/C/D, not just A).
-  const srcHasUsb = (src: string) => src === 'usb' || src === 'multi' || src === 'all';
+  const srcHasUsb = (src: string) => src === 'usb' || src === 'multi' || src === 'all' || src === 'usbL' || src === 'usbR';
   const usbOwner = (i: number) => srcHasUsb(trkSubs[i]?.src ?? 'none');
   const cmdForSrc = (src: string) => (src === 'multi' ? 'all' : src);   // readback 'multi' -> command 'all'
   const claimUsb = (i: number) => {
@@ -2028,7 +2048,8 @@ export default function App() {
   const midiInputBody = (i: number) => {
     const sub = trkSubs[i] || { src: 'none', srcch: 0 };
     const active = sub.src === 'multi' ? 'all' : sub.src;   // both-local reports as "multi"
-    const devs = [{ k: 'none', l: 'Off' }, { k: 'din', l: 'DIN' }, { k: 'usb', l: 'USB' }, { k: 'all', l: 'Both' }];
+    const devs = [{ k: 'none', l: 'Off' }, { k: 'din', l: 'DIN' }, { k: 'usb', l: 'USB' }, { k: 'all', l: 'Both' },
+                  ...(linn.isLinn ? [{ k: 'usbL', l: 'Linn L' }, { k: 'usbR', l: 'Linn R' }] : [])];   // the LinnStrument's two halves (Settings › LinnStrument › split)
     const setSrc = (k: string) => { setTrkSubs(m => ({ ...m, [i]: { src: k, srcch: (m[i]?.srcch ?? 0) } })); tp.trk(i, 'SRC=' + k); };
     const setCh  = (c: number) => { setTrkSubs(m => ({ ...m, [i]: { src: (m[i]?.src ?? 'none'), srcch: c } })); tp.trk(i, 'SRCCH=' + c); };
     return (
@@ -2972,7 +2993,17 @@ export default function App() {
       accent: THEME.settings.accent, tint: THEME.settings.tint,
       value: !connected ? '—' : linn.connected && linn.isLinn ? (linn.resp === 0 ? 'Connected · not answering' : 'Connected') : linn.connected ? 'Other USB MIDI device' : 'Not connected',
       status: linn.connected && linn.isLinn && linn.resp !== 0 ? 'on' : undefined,
-      body: <LinnPanel tp={tp} connected={connected} linn={linn} />,
+      body: <LinnPanel tp={tp} connected={connected} linn={linn} split={linnSplit}
+              synthNames={Array.from({ length: synthCount }, (_, i) => 'Synth ' + String.fromCharCode(65 + i))}
+              onAssignSplit={(side, track) => {
+                // release whoever follows this side, then (optionally) assign; the device's @STATE confirms
+                const prev = side === 'L' ? linnSplit.l : linnSplit.r;
+                if (track < 0) { if (prev >= 0) { tp.trk(prev, 'SRC=none'); setTrkSubs(m => ({ ...m, [prev]: { src: 'none', srcch: 0 } })); } }
+                else { tp.trk(track, 'SRC=usb' + side); setTrkSubs(m => ({ ...m, [track]: { src: 'usb' + side, srcch: 0 } })); }
+                setLinnSplit(sp => ({ ...sp, [side === 'L' ? 'l' : 'r']: track }));
+                setTimeout(() => tp.requestState(), 300);
+              }}
+              onFollow={on => setLinnPref('follow', on)} onTempo={on => setLinnPref('tempo', on)} />,
     },
     // SETTINGS — a submenu grouping the system pages (Connection, TAC5212). Its page lists those
     // as cards; tapping one opens that child's own existing page (Back returns here, per parent).

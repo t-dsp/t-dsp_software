@@ -79,6 +79,37 @@ public:
     }
     void setTempo(float bpm) { tempo_ = bpm; }
 
+    // ---- splits (the two halves of the surface, each with its own MIDI mode / channels) -------------
+    // Channel set a split transmits on, from the device's own settings (0-based side: 0 left, 1 right).
+    // One channel -> {main}; channel per note (MPE) -> {main} + every enabled per-note channel; channel
+    // per row -> lowest..lowest+7. Unknown (not synced yet) -> the factory layout: L main 1 + 2..8,
+    // R main 16 + 9..15.
+    uint16_t splitChannels(int side) const {
+        const int b = side ? 100 : 0;
+        const int mode = vals_[b + 0], main = vals_[b + 1];
+        uint16_t m = 0;
+        if (mode < 0 || main < 1 || main > 16) return side ? (uint16_t)0xFF00 /*9..16*/ : (uint16_t)0x00FF /*1..8*/;
+        m |= (uint16_t)(1u << (main - 1));
+        if (mode == 1) { for (int c = 1; c <= 16; c++) if (vals_[b + 1 + c] == 1) m |= (uint16_t)(1u << (c - 1)); }
+        else if (mode == 2) { int lo = vals_[b + 18]; if (lo < 1) lo = 1; for (int c = lo; c <= 16 && c < lo + 8; c++) m |= (uint16_t)(1u << (c - 1)); }
+        return m;
+    }
+    int splitMain(int side) const { const int v = vals_[(side ? 100 : 0) + 1]; return (v >= 1 && v <= 16) ? v : (side ? 16 : 1); }
+    bool splitKnown() const { return vals_[0] >= 0 && vals_[100] >= 0; }
+    bool splitsOverlap() const { return (splitChannels(0) & splitChannels(1)) != 0; }
+    // Set the device up for TWO independent zones (app "Arrange channels for two splits"): split on,
+    // left = main 1 + per-note 2..8, right = main 16 + per-note 9..15 (the MPE lower/upper zone layout) in
+    // channel-per-note mode; in one-channel mode left 1 / right 2.
+    void arrangeZones() {
+        if (!isLinn()) return;
+        const bool mpeL = vals_[0] == 1, mpeR = vals_[100] == 1;
+        set(200, 1);
+        set(1, 1); set(101, mpeR || mpeL ? 16 : 2);
+        for (int c = 1; c <= 16; c++) { set(2 + c - 1, (c >= 2 && c <= 8) ? 1 : 0); set(102 + c - 1, (c >= 9 && c <= 15) ? 1 : 0); }
+    }
+    // Called (from the reply path) whenever a value that defines a split's channel set changes.
+    void (*onSplitChange)() = nullptr;
+
     // ---- host CC stream: assemble NRPN replies; returns true when the CC was consumed --------------
     bool onHostCC(uint8_t ch, uint8_t cc, uint8_t val) {
         if (!isLinn_ || ch < 1 || ch > 16) return false;
@@ -216,8 +247,10 @@ private:
         const bool first = (resp_ != RespYes);
         resp_ = RespYes;
         if (p >= 0 && p < 299) {
+            const int old = vals_[p];
             vals_[p] = (int16_t)v;
             if (push_) push_->printf("@LINN.V=%d,%d\n", p, v);
+            if (old != v && onSplitChange && ((p % 100) <= 18 && p < 200)) onSplitChange();   // MIDI mode / channels of a split moved
             if (syncTotal_ && syncDone_ < syncTotal_) { syncDone_++; if (syncDone_ == syncTotal_ || (syncDone_ % 20) == 0) pushSync(); }
         }
         if (first) { Serial.println("[linn] LinnStrument answers -> reading every setting"); pushStatus(); syncAll(); }

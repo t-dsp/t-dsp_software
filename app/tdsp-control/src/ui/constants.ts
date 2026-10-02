@@ -65,6 +65,15 @@ export const saveKeepAwakePref = (on: boolean) => { AsyncStorage.setItem(KEEPAWA
 export const loadKeepAwakePref = async (): Promise<boolean> => {
   try { const v = await AsyncStorage.getItem(KEEPAWAKE_KEY); return v === null ? true : v === '1'; } catch { return true; }
 };
+// Settings › LinnStrument: the "follow T-DSP MIDI mode" / "follow tempo" switches live in the box's RAM
+// and reset at boot, so the app remembers them and re-applies them whenever the device answers.
+const LINN_PREFS_KEY = 'tdsp.linn.prefs';
+export interface LinnPrefs { follow: boolean; tempo: boolean }
+export const saveLinnPrefs = (p: LinnPrefs) => { AsyncStorage.setItem(LINN_PREFS_KEY, JSON.stringify(p)).catch(() => {}); };
+export const loadLinnPrefs = async (): Promise<LinnPrefs> => {
+  try { const v = await AsyncStorage.getItem(LINN_PREFS_KEY); return v ? { follow: false, tempo: false, ...JSON.parse(v) } : { follow: false, tempo: false }; }
+  catch { return { follow: false, tempo: false }; }
+};
 
 // Display name for a groove SD path (basename minus .mid) — the drum-track card's "value".
 export const grooveDisp = (p: string | null | undefined) => (p ? (p.split('/').pop() || '').replace(/\.mid$/i, '') : '');

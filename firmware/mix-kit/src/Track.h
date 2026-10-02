@@ -94,5 +94,12 @@ struct Track {
     // filters channels: 0 = all 16, else a one-hot 1<<(ch-1). The player's own feed is unaffected —
     // the synth always hears {its song} + {subscribed live input}. See main.cpp `midihub`.
     uint8_t  liveSrcMask;   // bits: (1<<SrcDin)|(1<<SrcUsbHost)|… ; 0 = none
-    uint16_t srcChMask;     // 0 = all channels; else 1<<(ch-1)
+    uint16_t srcChMask;     // 0 = all channels; else 1<<(ch-1)   (or a multi-channel set: a LinnStrument split's channels)
+    // LinnStrument SPLIT follow (@TRK<i>.SRC=usbL|usbR): 0 = none, 1 = left split, 2 = right split. The
+    // hub keeps srcChMask equal to that split's channel set (read from the device's settings, so it tracks
+    // what the player configures) and REMAPS those channels so the synth always sees a standard lower
+    // zone — the split's main channel arrives as 1 and its per-note channels as 2.. — because the MPE
+    // sinks treat channel 1 as the master. linnMap[ch] = delivered channel (0 = drop).
+    uint8_t  linnSplit = 0;
+    uint8_t  linnMap[17] = {0};
 };

@@ -38,7 +38,17 @@ const Label = ({ p }: { p: LinnParam }) => (
   </View>
 );
 
-export default function LinnPanel({ tp, connected, linn }: { tp: Transport; connected: boolean; linn: LinnState }) {
+export interface LinnSplitState { l: number; r: number; overlap: boolean; chl: number; chr: number }   // which synth follows each split (-1 none) + the splits' channel sets
+export const EMPTY_LINN_SPLIT: LinnSplitState = { l: -1, r: -1, overlap: false, chl: 0, chr: 0 };
+const chList = (mask: number) => { const out: number[] = []; for (let c = 1; c <= 16; c++) if (mask & (1 << (c - 1))) out.push(c); return out.join(' '); };
+
+export default function LinnPanel({ tp, connected, linn, split, synthNames, onAssignSplit, onFollow, onTempo }: {
+  tp: Transport; connected: boolean; linn: LinnState;
+  split?: LinnSplitState; synthNames?: string[];                       // synth tracks (index = track) for the split pickers
+  onAssignSplit?: (side: 'L' | 'R', track: number) => void;            // track -1 = release
+  onFollow?: (on: boolean) => void; onTempo?: (on: boolean) => void;   // persisted preferences (default: just send)
+}) {
+  const sp = split ?? EMPTY_LINN_SPLIT;
   const live = connected && linn.connected && linn.isLinn && linn.resp !== 0;
   const syncing = linn.synced[1] > 0 && linn.synced[0] < linn.synced[1];
   const v = (id: number): number | undefined => { const x = linn.values[id]; return typeof x === 'number' && x >= 0 ? x : undefined; };
@@ -179,12 +189,12 @@ export default function LinnPanel({ tp, connected, linn }: { tp: Transport; conn
             <Text style={s.text}>Follow T-DSP's MIDI mode</Text>
             <Text style={s.muted}>When the box switches MPE on or off, both splits are set to match: channel per note from channel 1, the box's bend range, Z = channel pressure, Y = CC 74 (or one channel / bend 2 for GM).</Text>
           </View>
-          <Switch value={linn.follow} disabled={!live} onValueChange={on => tp.linn('.FOLLOW=' + (on ? 1 : 0))} /></Row>
+          <Switch value={linn.follow} disabled={!live} onValueChange={on => (onFollow ? onFollow(on) : tp.linn('.FOLLOW=' + (on ? 1 : 0)))} /></Row>
         <Row><View style={{ flex: 1 }}>
             <Text style={s.text}>Follow the master tempo</Text>
             <Text style={s.muted}>Pushes the box's BPM to the LinnStrument's clock (its arpeggiator and sequencer).</Text>
           </View>
-          <Switch value={linn.tempo} disabled={!live} onValueChange={on => tp.linn('.TEMPO=' + (on ? 1 : 0))} /></Row>
+          <Switch value={linn.tempo} disabled={!live} onValueChange={on => (onTempo ? onTempo(on) : tp.linn('.TEMPO=' + (on ? 1 : 0)))} /></Row>
         <Row><View style={{ flex: 1 }}><Text style={s.text}>Set the MPE dialect now</Text><Text style={s.muted}>One-shot version of the above.</Text></View>
           <SmallBtn label="MPE" disabled={!live} onPress={() => tp.linn('.MPE=1')} />
           <SmallBtn label="GM" disabled={!live} onPress={() => tp.linn('.MPE=0')} /></Row>
@@ -192,6 +202,34 @@ export default function LinnPanel({ tp, connected, linn }: { tp: Transport; conn
           <Chip label="LinnStrument (25)" on={linn.cols === 25} onPress={() => tp.linn('.COLS=25')} />
           <Chip label="128 (16)" on={linn.cols === 16} onPress={() => tp.linn('.COLS=16')} /></Row>
       </Group>
+
+      {!!synthNames && (
+        <Group title="Two synths on one surface (split)">
+          <Text style={s.muted}>Put one synth on the LEFT half of the LinnStrument and another on the RIGHT. Each half keeps its own
+            MIDI channels (the device's split settings); the box routes those channels to the chosen synth and presents them to it
+            as a normal MPE zone. Choosing a right-split synth switches the device's Split on.</Text>
+          {(['L', 'R'] as const).map(side => {
+            const cur = side === 'L' ? sp.l : sp.r;
+            return (
+              <View key={side} style={{ marginTop: 6 }}>
+                <Text style={s.text}>{side === 'L' ? 'Left split' : 'Right split'} <Text style={s.muted}>· channels {chList(side === 'L' ? sp.chl : sp.chr) || '—'}</Text></Text>
+                <View style={[s.row, { marginTop: 4 }]}>
+                  <Chip label="None" on={cur < 0} disabled={!connected} onPress={() => onAssignSplit?.(side, -1)} />
+                  {synthNames.map((n, i) => <Chip key={i} label={n} on={cur === i} disabled={!connected} onPress={() => onAssignSplit?.(side, i)} />)}
+                </View>
+              </View>
+            );
+          })}
+          {sp.overlap && sp.l >= 0 && sp.r >= 0 && (
+            <Text style={[s.muted, { marginTop: 6, color: '#d29922' }]}>Both splits transmit on some of the same channels, so both synths would sound. Arrange the channels below.</Text>
+          )}
+          <Row>
+            <View style={{ flex: 1 }}><Text style={s.text}>Arrange channels for two splits</Text>
+              <Text style={s.muted}>On the device: Split on, left = channel 1 + per-note 2–8, right = channel 16 + per-note 9–15 (one-channel mode: left 1, right 2).</Text></View>
+            <SmallBtn label="Arrange" disabled={!live} onPress={() => tp.linn('.ZONES')} />
+          </Row>
+        </Group>
+      )}
 
       <View style={{ marginTop: 10 }}>
         <BodyTabs tabs={tabs} />
