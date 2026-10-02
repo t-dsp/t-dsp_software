@@ -193,6 +193,12 @@ TSFDEF int tsf_active_voice_count(tsf* f);
 //   samples: number of samples to render
 //   flag_mixing: if 0 clear the buffer first, otherwise mix into existing data
 TSFDEF void tsf_render_short(tsf* f, short* buffer, int samples, int flag_mixing CPP_DEFAULT0);
+
+// T-DSP: detach every sounding voice on a channel from that channel (they keep ringing with the pitch/
+// volume they have now, and later channel pitch-wheel / volume / CC / note-off no longer reach them).
+// Used by RING mode: a struck handpan note rings on while the MPE member channel is reused for the next
+// finger, whose bend and pressure must not warp the old note. Only tsf_note_off_all() still ends them.
+TSFDEF void tsf_channel_park_voices(tsf* f, int channel);
 TSFDEF void tsf_render_float(tsf* f, float* buffer, int samples, int flag_mixing CPP_DEFAULT0);
 
 // Higher level channel based functions, set up channel parameters
@@ -1730,6 +1736,13 @@ TSFDEF int tsf_active_voice_count(tsf* f)
 	struct tsf_voice *v = f->voices, *vEnd = v + f->voiceNum;
 	for (; v != vEnd; v++) if (v->playingPreset != -1) count++;
 	return count;
+}
+
+TSFDEF void tsf_channel_park_voices(tsf* f, int channel)
+{
+	struct tsf_voice *v = f->voices, *vEnd = v + f->voiceNum;
+	for (; v != vEnd; v++)
+		if (v->playingPreset != -1 && v->playingChannel == channel) { v->playingChannel = 99; v->heldSustain = 0; }
 }
 
 TSFDEF void tsf_render_short(tsf* f, short* buffer, int samples, int flag_mixing)

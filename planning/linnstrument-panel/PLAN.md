@@ -20,6 +20,18 @@ Status (2026-10-01, same day): **phases 0–3 BUILT and verified on jay-mint** (
 Phase 4 done differently: the Follow/Tempo switches are remembered by the APP (AsyncStorage) and re-sent once per
 connection as soon as the device answers (the box's RAM copy still resets at boot).
 
+### Added: presets, factory defaults, link recovery
+App-saved presets (named snapshots of the whole shadow, AsyncStorage `tdsp.linn.presets`) and a **Factory defaults**
+button (the device firmware's `initialize*Settings()` values, table in `linnParams.ts` `factoryDefaults()`; the
+clock BPM and USB byte interval are left alone) both write through `@LINN.APPLY=` in ≤1200-char chunks. The six
+device memories stay as "Memory 1–6". "Not answering" is no longer final: a note from the device triggers one probe
+read (every 3 s at most), the page has a Retry button (`@LINN.RETRY`), and a re-answer resumes without a re-sync.
+
+### Added: RING-mode fixes for the handpan on an MPE surface (TsfSink)
+Pressure is ignored in RING mode (MPE pressure → channel volume was silencing the ring the moment a finger lifted),
+and `tsf_channel_park_voices()` (T-DSP tsf.h addition) detaches the notes still ringing on a member channel when
+the next finger reuses it, so the new note's bend/pressure/release leave them alone.
+
 ### Added: two synths on one surface (split routing)
 `@TRK<i>.SRC=usbL|usbR` — a synth follows one half of the LinnStrument. The hub derives that split's channel set
 from the device's own settings (one channel → {main}; channel per note → {main} + enabled per-note channels;

@@ -34,7 +34,12 @@ public:
 
     void onNoteOn(uint8_t ch, uint8_t note, uint8_t vel) override {
         tsf *t = *_t; if (!t) return;
-        AudioNoInterrupts(); tsf_channel_note_on(t, ch - 1, note, vel / 127.0f); AudioInterrupts();
+        AudioNoInterrupts();
+        // RING: the channel is about to carry a NEW finger (MPE reuses member channels); detach the notes
+        // still ringing on it first, so the new finger's bend / pressure / release don't warp them.
+        if (_ring) tsf_channel_park_voices(t, ch - 1);
+        tsf_channel_note_on(t, ch - 1, note, vel / 127.0f);
+        AudioInterrupts();
     }
     void onNoteOff(uint8_t ch, uint8_t note, uint8_t) override {
         tsf *t = *_t; if (!t) return;
@@ -90,6 +95,9 @@ public:
         // must NOT drive volume: a low aftertouch value turns the whole channel down to
         // near-silence and the part wobbles up/down with the curve. Only honor it in MPE.
         if (!_mpe) return;
+        // RING: a struck instrument's loudness is its strike velocity; mapping finger pressure to channel
+        // volume would drop the ringing note to silence the moment the finger lifts (pressure -> 0).
+        if (_ring) return;
         AudioNoInterrupts(); tsf_channel_set_volume(t, ch - 1, v); AudioInterrupts();
     }
     void onTimbre(uint8_t ch, float v) override {

@@ -4,7 +4,8 @@
 // `@LINN.SET=<n>,<v>` for every change. The device re-reads each written value, so what you see is
 // what it accepted. Layout mirrors the hardware panel: LEFT / RIGHT split tabs + a Global tab.
 import React, { useMemo, useState } from 'react';
-import { View, Text, Pressable, Switch, ActivityIndicator } from 'react-native';
+import { View, Text, Pressable, Switch, ActivityIndicator, TextInput } from 'react-native';
+import type { LinnPreset } from './constants';
 import type { Transport } from '../transport';
 import { C } from './theme';
 import { s } from './styles';
@@ -42,12 +43,18 @@ export interface LinnSplitState { l: number; r: number; overlap: boolean; chl: n
 export const EMPTY_LINN_SPLIT: LinnSplitState = { l: -1, r: -1, overlap: false, chl: 0, chr: 0 };
 const chList = (mask: number) => { const out: number[] = []; for (let c = 1; c <= 16; c++) if (mask & (1 << (c - 1))) out.push(c); return out.join(' '); };
 
-export default function LinnPanel({ tp, connected, linn, split, synthNames, onAssignSplit, onFollow, onTempo }: {
+export default function LinnPanel({ tp, connected, linn, split, synthNames, onAssignSplit, onFollow, onTempo, presets, onSavePreset, onApplyPreset, onDeletePreset, onFactoryDefaults }: {
   tp: Transport; connected: boolean; linn: LinnState;
   split?: LinnSplitState; synthNames?: string[];                       // synth tracks (index = track) for the split pickers
   onAssignSplit?: (side: 'L' | 'R', track: number) => void;            // track -1 = release
   onFollow?: (on: boolean) => void; onTempo?: (on: boolean) => void;   // persisted preferences (default: just send)
+  presets?: LinnPreset[];                                              // saved snapshots (App owns storage)
+  onSavePreset?: (name: string) => void; onApplyPreset?: (p: LinnPreset) => void; onDeletePreset?: (p: LinnPreset) => void;
+  onFactoryDefaults?: () => void;
 }) {
+  const [presetName, setPresetName] = useState('');
+  const [factoryArmed, setFactoryArmed] = useState(false);
+  const [deleteArmed, setDeleteArmed] = useState<string | null>(null);
   const sp = split ?? EMPTY_LINN_SPLIT;
   const live = connected && linn.connected && linn.isLinn && linn.resp !== 0;
   const syncing = linn.synced[1] > 0 && linn.synced[0] < linn.synced[1];
@@ -136,10 +143,36 @@ export default function LinnPanel({ tp, connected, linn, split, synthNames, onAs
           {g === 'Note lights' && <><NoteLights base={NOTE_LIGHTS_MAIN} title="Main notes lit" /><NoteLights base={NOTE_LIGHTS_ACCENT} title="Accent notes lit" /></>}
         </Group>
       ))}
-      <Group title="Settings presets">
-        <Text style={s.muted}>Load one of the LinnStrument's six all-settings memories (saved on the device's Preset screen).</Text>
+      <Group title="Presets (saved in this app)">
+        <Text style={s.muted}>A preset is a snapshot of every LinnStrument setting read above. Applying one writes them all back (a couple of seconds; the device confirms each value).</Text>
+        <Row>
+          <TextInput value={presetName} onChangeText={setPresetName} placeholder="Preset name" placeholderTextColor={C.muted}
+            style={{ flex: 1, color: C.text, borderWidth: 1, borderColor: C.border, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, backgroundColor: C.chip }} />
+          <SmallBtn label="Save current" disabled={!live || syncing || !presetName.trim()} onPress={() => { onSavePreset?.(presetName.trim()); setPresetName(''); }} />
+        </Row>
+        {(presets ?? []).length === 0 && <Text style={[s.muted, { marginTop: 4 }]}>No presets saved yet.</Text>}
+        {(presets ?? []).map(p => (
+          <Row key={p.name}>
+            <View style={{ flex: 1 }}><Text style={s.text}>{p.name}</Text><Text style={s.muted}>{Object.keys(p.values).length} settings · {new Date(p.saved).toLocaleDateString()}</Text></View>
+            <SmallBtn label="Apply" disabled={!live || syncing} onPress={() => onApplyPreset?.(p)} />
+            <Pressable onPress={() => { if (deleteArmed === p.name) { onDeletePreset?.(p); setDeleteArmed(null); } else { setDeleteArmed(p.name); setTimeout(() => setDeleteArmed(d => (d === p.name ? null : d)), 4000); } }}
+              style={[s.menuBtn, deleteArmed === p.name && { backgroundColor: '#b62324' }]}>
+              <Text style={s.text}>{deleteArmed === p.name ? 'Sure?' : '✕'}</Text></Pressable>
+          </Row>
+        ))}
+      </Group>
+      <Group title="Device memories">
+        <Text style={s.muted}>Load one of the LinnStrument's six all-settings memories (saved on the device's own Preset screen).</Text>
         <View style={[s.row, { marginTop: 6 }]}>
-          {[0, 1, 2, 3, 4, 5].map(i => <SmallBtn key={i} label={'Preset ' + (i + 1)} disabled={!live || syncing} onPress={() => tp.linn('.PRESET=' + i)} />)}
+          {[0, 1, 2, 3, 4, 5].map(i => <SmallBtn key={i} label={'Memory ' + (i + 1)} disabled={!live || syncing} onPress={() => tp.linn('.PRESET=' + i)} />)}
+        </View>
+      </Group>
+      <Group title="Factory defaults">
+        <Text style={s.muted}>Writes the LinnStrument's factory values for every setting on this page (what its own RESET action gives: one channel per split, bend 2, C-major lights, row offset +5, medium velocity and pressure…). The device's clock BPM is left alone. Save a preset first if you want to come back.</Text>
+        <View style={[s.row, { marginTop: 6 }]}>
+          <Pressable onPress={() => { if (factoryArmed) { onFactoryDefaults?.(); setFactoryArmed(false); } else { setFactoryArmed(true); setTimeout(() => setFactoryArmed(false), 5000); } }}
+            disabled={!live || syncing} style={[s.btn, factoryArmed && { backgroundColor: '#b62324' }, (!live || syncing) && { opacity: 0.45 }]}>
+            <Text style={s.btnText}>{factoryArmed ? 'Tap again to reset' : 'Factory defaults'}</Text></Pressable>
         </View>
       </Group>
       <Group title="Pad lights">
@@ -180,6 +213,7 @@ export default function LinnPanel({ tp, connected, linn, split, synthNames, onAs
           {live && (syncing
             ? <View style={{ alignItems: 'center' }}><ActivityIndicator color={C.accent} /><Text style={s.muted}>{linn.synced[0]}/{linn.synced[1]}</Text></View>
             : <SmallBtn label="Sync" onPress={() => tp.linn('.SYNC')} />)}
+          {connected && linn.connected && linn.isLinn && linn.resp === 0 && <SmallBtn label="Retry" onPress={() => tp.linn('.RETRY')} />}
         </Row>
         {linn.connected && <Pressable onPress={() => setShowIds(x => !x)}><Text style={[s.muted, { fontSize: 11, marginTop: 4 }]}>{showIds ? 'hide ids' : 'show usb ids'}</Text></Pressable>}
       </View>

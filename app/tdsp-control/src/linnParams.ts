@@ -123,3 +123,54 @@ export const NOTE_LIGHTS_MAIN = 203;    // +0..11 = C..B
 export const NOTE_LIGHTS_ACCENT = 215;
 
 export const groupsOf = (list: LinnParam[]) => { const out: string[] = []; for (const p of list) if (!out.includes(p.group)) out.push(p.group); return out; };
+
+// ---- FACTORY DEFAULTS --------------------------------------------------------------------------
+// From the device firmware's initializePresetSettings() / initializeMidiSettings() (ls_settings.ino):
+// what a LinnStrument has after its own RESET action. Applied through the box (@LINN.APPLY=), so the
+// device confirms every value. Not included: the clock BPM (238) and the USB byte interval (252).
+// The CC-fader numbers (40-47) are the usual 1..8 — the firmware's table wasn't quoted.
+export function factoryDefaults(): Record<number, number> {
+  const v: Record<number, number> = {};
+  for (const side of [0, 100]) {
+    const right = side === 100;
+    v[side + 0] = 0;                       // MIDI mode: one channel
+    v[side + 1] = right ? 16 : 1;          // main channel
+    for (let c = 1; c <= 16; c++) v[side + 1 + c] = (right ? (c >= 9 && c <= 15) : (c >= 2 && c <= 8)) ? 1 : 0;   // per-note channels
+    v[side + 18] = right ? 9 : 1;          // per-row lowest channel
+    v[side + 19] = 2;                      // bend range
+    v[side + 20] = 1; v[side + 21] = 1; v[side + 22] = 1; v[side + 23] = 0;   // X: send, quantize, hold medium, no reset on release
+    v[side + 24] = 1; v[side + 39] = 2; v[side + 25] = 74; v[side + 26] = 0; v[side + 59] = 64; v[side + 54] = 0; v[side + 55] = 127;   // Y: CC74
+    v[side + 27] = 1; v[side + 28] = 0; v[side + 29] = 11; v[side + 58] = 0; v[side + 56] = 0; v[side + 57] = 127;   // Z: poly pressure
+    v[side + 30] = right ? 5 : 3; v[side + 31] = 4; v[side + 32] = right ? 6 : 1; v[side + 33] = 2;   // colours
+    v[side + 34] = 0; v[side + 48] = 0; v[side + 49] = 1; v[side + 50] = 0; v[side + 51] = 16; v[side + 52] = 17; v[side + 53] = 18;   // low row
+    v[side + 35] = 0;                      // special: normal
+    for (let i = 0; i < 8; i++) v[side + 40 + i] = 1 + i;   // CC faders
+    v[side + 36] = 5; v[side + 37] = 7; v[side + 38] = 7;     // octave 0, transpose 0, lights 0
+    v[side + 60] = 0; v[side + 61] = 0;    // row order normal, touch animation default
+  }
+  v[200] = 0; v[201] = 0; v[202] = 12;     // split off, left selected, split point 12
+  const major = [0, 2, 4, 5, 7, 9, 11];
+  for (let n = 0; n < 12; n++) { v[203 + n] = major.includes(n) ? 1 : 0; v[215 + n] = n === 0 ? 1 : 0; }   // note lights: C major, accent C
+  v[227] = 5; v[253] = 12 + 17;            // row offset +5, custom offset 12
+  v[228] = 2; v[229] = 4; v[230] = 4; v[231] = 2;   // switch 1 sustain, switch 2 arp, foot L arp, foot R sustain
+  v[239] = v[240] = v[241] = v[242] = 0;
+  v[248] = 65; v[255] = v[256] = v[257] = v[258] = 65; v[259] = v[260] = v[261] = v[262] = 64;
+  v[232] = 1; v[249] = 1; v[250] = 127; v[251] = 96;   // velocity medium
+  v[233] = 1; v[244] = 0;                  // pressure medium, no aftertouch
+  v[235] = 4; v[236] = 4; v[237] = 0;      // arp: replay all, 1/16 swing, no octaves
+  v[234] = 1; v[254] = 0;                  // MIDI I/O USB, through off
+  v[245] = 0; v[246] = 0; v[247] = 0;
+  [30, 35, 40, 45, 50, 55, 59, 64].forEach((n, i) => { v[263 + i] = n; });   // guitar tuning
+  return v;
+}
+// Serialize a value map for @LINN.APPLY= (chunked so a line stays well under the lanes' limits).
+export function applyChunks(values: Record<number, number>, maxLen = 1200): string[] {
+  const out: string[] = []; let cur = '';
+  for (const k of Object.keys(values).map(Number).sort((a, b) => a - b)) {
+    const pair = k + ':' + values[k];
+    if (cur.length + pair.length + 1 > maxLen) { out.push(cur); cur = ''; }
+    cur += (cur ? ',' : '') + pair;
+  }
+  if (cur) out.push(cur);
+  return out;
+}

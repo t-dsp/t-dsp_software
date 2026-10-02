@@ -3031,7 +3031,7 @@ static void dinCC      (byte ch, byte cc,   byte val) { midihub::controlChange(S
 static void dinPitch   (byte ch, int  bend)           { midihub::pitchBend(SrcDin, ch, bend); }
 #endif
 #if TDSP_HAS_USB_MIDI_HOST
-static void usbHostNoteOn  (byte ch, byte note, byte vel) { midihub::noteOn (SrcUsbHost, ch, note, vel); }
+static void usbHostNoteOn  (byte ch, byte note, byte vel) { g_linn.noteActivity(millis()); midihub::noteOn (SrcUsbHost, ch, note, vel); }
 static void usbHostNoteOff (byte ch, byte note, byte vel) { midihub::noteOff(SrcUsbHost, ch, note, vel); }
 static void usbHostCC      (byte ch, byte cc,   byte val) { if (g_linn.onHostCC(ch, cc, val)) return;   // a LinnStrument's NRPN reply (CC 99/98/6/38): settings, not performance
                                                              midihub::controlChange(SrcUsbHost, ch, cc, val); }
@@ -3809,6 +3809,8 @@ FLASHMEM static bool handleControlLine(const char* line, Stream& reply) {
     else if (strncmp(line, "@LINN.TEMPO=", 12) == 0)   { g_linn.followTempo = atoi(line + 12) != 0; g_linn.pushStatus(); }
     else if (strncmp(line, "@LINN.MPE=", 10) == 0)     { g_linn.applyMpe(atoi(line + 10) != 0, (int)kMpeMemberBendRange); }   // one-shot handshake
     else if (strcmp(line, "@LINN.ZONES") == 0)         { g_linn.arrangeZones(); }                                            // split on, L = 1 + 2..8, R = 16 + 9..15
+    else if (strcmp(line, "@LINN.RETRY") == 0)         { g_linn.retry(); }                                                   // one probe read after "not answering"
+    else if (strncmp(line, "@LINN.APPLY=", 12) == 0)   { const int n = g_linn.applyList(line + 12); reply.printf("@LINN.APPLY=%d\n", n); }   // bulk "n:v,n:v,…" (preset / factory defaults)
 #endif
     else if (strncmp(line, "@MPEMON=", 8) == 0) {                    // live MPE input/chain trace on/off (app: Settings > MPE Monitor)
         g_mpeMon    = (atoi(line + 8) != 0);

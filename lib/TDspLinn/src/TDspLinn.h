@@ -78,6 +78,24 @@ public:
         }
     }
     void setTempo(float bpm) { tempo_ = bpm; }
+    // The device just SENT us something (a note): proof its USB MIDI is alive. If we had given up on it
+    // ("not answering"), try one probe read again — at most every 3 s, one burst, nothing queued behind it.
+    void noteActivity(uint32_t now) {
+        if (isLinn() && resp_ == RespNo && inflight_ == 0 && (int32_t)(now - lastProbeAt_) >= 3000) { lastProbeAt_ = now; sendBurst(Op{OpQuery, 234, 0, 0}, now); }
+    }
+    // App "Retry": the same single probe, user-initiated.
+    void retry() { if (isLinn() && inflight_ == 0) { lastProbeAt_ = millis(); sendBurst(Op{OpQuery, 234, 0, 0}, millis()); } }
+    // Bulk apply "n:v,n:v,…" (an app preset or the factory table) — each pair becomes a queued SET.
+    int applyList(const char *list) {
+        int n = 0;
+        for (const char *c = list; c && *c; ) {
+            char *e; long p = strtol(c, &e, 10); if (e == c || *e != ':') break;
+            long v = strtol(e + 1, &e, 10);
+            set((int)p, (int)v); n++;
+            if (*e == ',') c = e + 1; else break;
+        }
+        return n;
+    }
 
     // ---- splits (the two halves of the surface, each with its own MIDI mode / channels) -------------
     // Channel set a split transmits on, from the device's own settings (0-based side: 0 left, 1 right).
@@ -215,7 +233,7 @@ private:
     enum OpKind : uint8_t { OpQuery, OpSet, OpLight, OpClear, OpPaint };
     struct Op  { OpKind kind; int16_t a, b, c; };
     struct Asm { int8_t pMsb = -1, pLsb = -1, vMsb = -1; };
-    static constexpr int kQ = 96;
+    static constexpr int kQ = 256;   // a whole-settings apply (preset / factory) is ~190 ops
 
     void cc(uint8_t c, uint8_t v) { dev_.sendControlChange(c, v, 1); }
     void nrpnRaw(int p, int v) { cc(99, (p >> 7) & 0x7f); cc(98, p & 0x7f); cc(6, (v >> 7) & 0x7f); cc(38, v & 0x7f); }
@@ -253,7 +271,12 @@ private:
             if (old != v && onSplitChange && ((p % 100) <= 18 && p < 200)) onSplitChange();   // MIDI mode / channels of a split moved
             if (syncTotal_ && syncDone_ < syncTotal_) { syncDone_++; if (syncDone_ == syncTotal_ || (syncDone_ % 20) == 0) pushSync(); }
         }
-        if (first) { Serial.println("[linn] LinnStrument answers -> reading every setting"); pushStatus(); syncAll(); }
+        if (first) {
+            const bool knew = syncTotal_ > 0;   // we had synced before and only lost contact for a while
+            Serial.println(knew ? "[linn] LinnStrument answers again" : "[linn] LinnStrument answers -> reading every setting");
+            pushStatus();
+            if (!knew) syncAll();
+        }
     }
     void push(const Op &op) {
         if (!isLinn() || resp_ == RespNo) return;
@@ -284,7 +307,7 @@ private:
     Op          q_[kQ];
     int         qHead_ = 0, qTail_ = 0, inflight_ = 0, probes_ = 0, quietTimeouts_ = 0, retries_ = 0;
     Op          lastOp_{OpQuery, -1, 0, 0};
-    uint32_t    lastSendAt_ = 0, probeAt_ = 0, resyncAt_ = 0, lastTempoAt_ = 0;
+    uint32_t    lastSendAt_ = 0, probeAt_ = 0, resyncAt_ = 0, lastTempoAt_ = 0, lastProbeAt_ = 0;
     int         syncDone_ = 0, syncTotal_ = 0, lastTempoSent_ = -1;
     int         paintColour_ = 0, paintCursor_ = 0, paintTotal_ = 0;
     float       tempo_ = 0;

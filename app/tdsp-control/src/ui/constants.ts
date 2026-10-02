@@ -70,6 +70,13 @@ export const loadKeepAwakePref = async (): Promise<boolean> => {
 const LINN_PREFS_KEY = 'tdsp.linn.prefs';
 export interface LinnPrefs { follow: boolean; tempo: boolean }
 export const saveLinnPrefs = (p: LinnPrefs) => { AsyncStorage.setItem(LINN_PREFS_KEY, JSON.stringify(p)).catch(() => {}); };
+// Saved LinnStrument presets: named snapshots of the device's whole settings shadow (applied via @LINN.APPLY=).
+const LINN_PRESETS_KEY = 'tdsp.linn.presets';
+export interface LinnPreset { name: string; values: Record<number, number>; saved: number }
+export const saveLinnPresets = (p: LinnPreset[]) => { AsyncStorage.setItem(LINN_PRESETS_KEY, JSON.stringify(p)).catch(() => {}); };
+export const loadLinnPresets = async (): Promise<LinnPreset[]> => {
+  try { const v = await AsyncStorage.getItem(LINN_PRESETS_KEY); return v ? JSON.parse(v) : []; } catch { return []; }
+};
 export const loadLinnPrefs = async (): Promise<LinnPrefs> => {
   try { const v = await AsyncStorage.getItem(LINN_PREFS_KEY); return v ? { follow: false, tempo: false, ...JSON.parse(v) } : { follow: false, tempo: false }; }
   catch { return { follow: false, tempo: false }; }

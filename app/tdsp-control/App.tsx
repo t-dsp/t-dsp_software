@@ -45,7 +45,8 @@ import { deviceHttpBase } from './src/deviceWifi';
 import { loadDeviceNetworkCreds, openWifiSettings, canOpenWifiSettings } from './src/deviceNetwork';
 import { setKeepAwake, keepAwakeSupported } from './src/keepAwake';
 import LinnPanel, { LinnState, EMPTY_LINN, LinnSplitState, EMPTY_LINN_SPLIT } from './src/ui/LinnPanel';
-import { saveLinnPrefs, loadLinnPrefs, LinnPrefs } from './src/ui/constants';
+import { saveLinnPrefs, loadLinnPrefs, LinnPrefs, saveLinnPresets, loadLinnPresets, LinnPreset } from './src/ui/constants';
+import { factoryDefaults, applyChunks } from './src/linnParams';
 import type { DeviceNetworkCreds } from './src/deviceNetwork';
 import { wifiJoinSupported, joinWifi, releaseWifi, scanWifi, ensureWifiScanPermission } from './modules/tdsp-wifi';
 import type { WifiSeen } from './modules/tdsp-wifi';
@@ -235,6 +236,10 @@ export default function App() {
   // Persisted "follow" preferences: re-applied once per connection as soon as the device answers.
   const linnPrefsRef = useRef<LinnPrefs>({ follow: false, tempo: false });
   const linnPrefsAppliedRef = useRef(false);
+  const [linnPresets, setLinnPresets] = useState<LinnPreset[]>([]);
+  useEffect(() => { loadLinnPresets().then(setLinnPresets).catch(() => {}); }, []);
+  // Write a whole value map to the device: chunked @LINN.APPLY= lines (each pair becomes a confirmed SET).
+  const linnApplyValues = (values: Record<number, number>) => { for (const c of applyChunks(values)) tp.linn('.APPLY=' + c); };
   useEffect(() => { loadLinnPrefs().then(p => { linnPrefsRef.current = p; }).catch(() => {}); }, []);
   const setLinnPref = (k: keyof LinnPrefs, on: boolean) => {
     linnPrefsRef.current = { ...linnPrefsRef.current, [k]: on }; saveLinnPrefs(linnPrefsRef.current);
@@ -3003,7 +3008,12 @@ export default function App() {
                 setLinnSplit(sp => ({ ...sp, [side === 'L' ? 'l' : 'r']: track }));
                 setTimeout(() => tp.requestState(), 300);
               }}
-              onFollow={on => setLinnPref('follow', on)} onTempo={on => setLinnPref('tempo', on)} />,
+              onFollow={on => setLinnPref('follow', on)} onTempo={on => setLinnPref('tempo', on)}
+              presets={linnPresets}
+              onSavePreset={name => { const next = [...linnPresets.filter(p => p.name !== name), { name, values: { ...linn.values }, saved: Date.now() }]; setLinnPresets(next); saveLinnPresets(next); }}
+              onApplyPreset={p => linnApplyValues(p.values)}
+              onDeletePreset={p => { const next = linnPresets.filter(x => x.name !== p.name); setLinnPresets(next); saveLinnPresets(next); }}
+              onFactoryDefaults={() => linnApplyValues(factoryDefaults())} />,
     },
     // SETTINGS — a submenu grouping the system pages (Connection, TAC5212). Its page lists those
     // as cards; tapping one opens that child's own existing page (Back returns here, per parent).
